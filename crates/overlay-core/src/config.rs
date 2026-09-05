@@ -503,4 +503,23 @@ log:
 
         assert!(err.to_string().contains("keepalive_sm"), "{err}");
     }
+
+    #[test]
+    fn removed_keys_are_rejected_with_their_names() {
+        for (doc, key) in [
+            ("overlay: { auth: pinned }", "auth"),
+            (
+                "overlay: { fanout: { relay_selection: rtt } }",
+                "relay_selection",
+            ),
+            (
+                "bn: { publish_rate_limit_per_s: 20000 }",
+                "publish_rate_limit_per_s",
+            ),
+        ] {
+            let err = Config::from_yaml(doc).unwrap_err();
+
+            assert!(err.to_string().contains(key), "{doc}: {err}");
+        }
+    }
 }
