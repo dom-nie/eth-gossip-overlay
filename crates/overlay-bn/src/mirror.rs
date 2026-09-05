@@ -236,4 +236,19 @@ mod tests {
         assert_eq!(actions.len(), 2);
         assert_eq!(mirror.sets(), &sets(&[ATTESTATION_3]));
     }
+
+    #[test]
+    fn unparsable_topic_is_still_mirrored() {
+        let mut mirror = Mirror::new(*BN);
+        let raw = "/eth2/00000000/beacon_attestation_/ssz_snappy";
+
+        let actions = mirror.on_bn_event(&subscribed(raw));
+
+        assert_eq!(actions, vec![MirrorAction::Subscribe(raw.to_owned())]);
+        assert_eq!(mirror.sets(), &sets(&[]));
+        assert_eq!(
+            mirror.on_bn_event(&BnEvent::Disconnected),
+            vec![MirrorAction::Unsubscribe(raw.to_owned())]
+        );
+    }
 }
