@@ -87,6 +87,9 @@ fn decompress(compressed: &[u8], max_decompressed: usize) -> Result<Vec<u8>, Bra
         Ok(_) => snap::raw::Decoder::new()
             .decompress_vec(compressed)
             .map_err(|_| Branch::Invalid),
+        // snap refuses a declared length past u32::MAX before it can be compared with the
+        // limit, and any such length is above every limit a caller passes.
+        Err(snap::Error::TooBig { .. }) => Err(Branch::TooLarge),
         Err(_) => Err(Branch::Invalid),
     }
 }
