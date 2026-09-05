@@ -473,18 +473,23 @@ fn build_swarm(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use overlay_core::lanes::{ClassLanes, LaneStats, SMALL_LANE_CAPACITY};
-    use overlay_core::topic::Class;
+    use overlay_core::msgid;
+    use overlay_core::topic::{Class, TopicKind};
     use prometheus_client::registry::Registry;
+    use proptest::prelude::*;
+    use proptest::strategy::ValueTree;
+    use proptest::test_runner::TestRunner;
     use serde_json::json;
     use wiremock::{MockServer, ResponseTemplate};
 
     use super::*;
     use crate::bn_http::BnClient;
-    use crate::gossip::BnLinkConfig;
+    use crate::gossip::{BnLinkConfig, wire};
     use crate::node_key::NodeKey;
     use crate::spec::spec_watch;
     use crate::testutil::{FakeBn, FakeBnEvent, ok_json};
@@ -946,5 +951,148 @@ mod tests {
         assert_eq!(block.id, block_id);
         assert_eq!(harness.stats.small.load(Ordering::Relaxed), 100);
         assert_eq!(harness.stats.large.load(Ordering::Relaxed), 0);
+    }
+
+    /// Every T-005 kind under one fork digest, plus a name the sidecar does not know.
+    fn any_topic() -> impl Strategy<Value = String> {
+        prop_oneof![
+            Just(TopicKind::BeaconBlock),
+            Just(TopicKind::BeaconAggregateAndProof),
+            (0..64u8).prop_map(TopicKind::Attestation),
+            (0..4u8).prop_map(TopicKind::SyncCommittee),
+            Just(TopicKind::SyncContributionAndProof),
+            Just(TopicKind::VoluntaryExit),
+            Just(TopicKind::ProposerSlashing),
+            Just(TopicKind::AttesterSlashing),
+            Just(TopicKind::BlsToExecutionChange),
+            (0..128u8).prop_map(TopicKind::DataColumnSidecar),
+            (0..9u8).prop_map(TopicKind::BlobSidecar),
+            Just(TopicKind::Other("execution_payload".to_owned())),
+        ]
+        .prop_map(|kind| format!("/eth2/6a95a1a9/{kind}/ssz_snappy"))
+    }
+
+    /// CL-N2 conformance item 6: the id the fake computes with Lighthouse's own id closure
+    /// over the decompressed payload equals T-006's id over the compressed bytes, for random
+    /// topics and payloads. Cases are drawn inside the async test rather than under
+    /// `proptest!`, which would need a runtime per case; a failure prints the case.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn published_message_id_matches_fake_bn_for_random_payloads() {
+        let mut bn = FakeBn::start().await;
+        let mut received = bn.received();
+        let mut harness = spawn(link_config(&bn), &bn);
+        wait_for(&mut harness.control, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+        let mut runner = TestRunner::default();
+        let case = (any_topic(), proptest::collection::vec(any::<u8>(), 8..2048));
+        let mut subscribed = HashSet::new();
+
+        for _ in 0..32 {
+            let (topic, payload) = case.new_tree(&mut runner).unwrap().current();
+            if subscribed.insert(topic.clone()) {
+                bn.subscribe(&topic).await;
+                wait_for(
+                    &mut harness.control,
+                    |e| matches!(e, BnEvent::Subscribed { topic: t, .. } if *t == topic),
+                )
+                .await;
+            }
+            let compressed = snap::raw::Encoder::new().compress_vec(&payload).unwrap();
+            let expected = msgid::compute(&topic, &compressed, wire::MAX_PAYLOAD_SIZE as usize);
+
+            let sidecar_id = publish(&harness.commands, &topic, &compressed)
+                .await
+                .unwrap();
+            let (bn_topic, bn_data, bn_id) = tokio::time::timeout(WAIT, received.recv())
+                .await
+                .unwrap_or_else(|_| panic!("{topic}: the fake never received the publish"))
+                .unwrap();
+
+            assert_eq!(bn_topic, topic);
+            assert_eq!(bn_data, payload, "{topic}");
+            assert_eq!(expected.branch, msgid::Branch::Valid, "{topic}");
+            assert_eq!(bn_id.0, expected.id.0, "{topic} payload {payload:02x?}");
+            assert_eq!(sidecar_id, bn_id, "{topic}");
+        }
+    }
+
+    #[test]
+    fn lane_for_takes_known_large_names_by_prefix_and_others_by_size() {
+        let topic = |name: &str| format!("/eth2/6a95a1a9/{name}/ssz_snappy");
+        let threshold = overlay_core::topic::UNKNOWN_LARGE_THRESHOLD_BYTES;
+
+        for name in ["beacon_block", "data_column_sidecar_127", "blob_sidecar_3"] {
+            assert_eq!(lane_for(&topic(name), 1), Class::Large, "{name}");
+        }
+        for name in [
+            "beacon_attestation_63",
+            "beacon_aggregate_and_proof",
+            "sync_committee_contribution_and_proof",
+            "execution_payload",
+        ] {
+            assert_eq!(
+                lane_for(&topic(name), threshold - 1),
+                Class::Small,
+                "{name}"
+            );
+            assert_eq!(lane_for(&topic(name), threshold), Class::Large, "{name}");
+        }
+        assert_eq!(lane_for("not a topic", 1), Class::Small);
+        assert_eq!(lane_for("not a topic", threshold), Class::Large);
+    }
+
+    #[test]
+    fn link_config_from_bn_parses_the_address_and_uses_the_5_3_backoff() {
+        let cfg = LinkConfig::from_config(&Bn::default()).unwrap();
+
+        assert_eq!(cfg.libp2p_addr.to_string(), "/ip4/127.0.0.1/tcp/9000");
+        assert_eq!(cfg.backoff_min, Duration::from_millis(500));
+        assert_eq!(cfg.backoff_max, Duration::from_secs(30));
+        assert!(cfg.gossip.idontwant_on_publish);
+        assert!(
+            LinkConfig::from_config(&Bn {
+                libp2p_addr: "127.0.0.1:9000".to_owned(),
+                ..Bn::default()
+            })
+            .is_err()
+        );
+    }
+
+    /// A control channel of one slot holds Connected; the BnInfo behind it is dropped and
+    /// counted as a control drop.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn full_control_channel_drops_the_event_and_counts_control() {
+        let bn = FakeBn::start().await;
+        let (control_tx, mut control) = mpsc::channel(1);
+        let (commands, commands_rx) = mpsc::channel(64);
+        let (spec_tx, _spec) = spec_watch();
+        let stats = Arc::new(Counts::default());
+        let lanes = ClassLanes::new(stats.clone());
+        let _link = BnLink::spawn(
+            link_config(&bn),
+            &node_key(&tempfile::tempdir().unwrap()),
+            BnClient::new(bn.http_addr(), Duration::from_secs(2)),
+            &mut Registry::default(),
+            control_tx,
+            lanes.pusher(),
+            spec_tx,
+            commands_rx,
+        );
+
+        tokio::time::timeout(WAIT, async {
+            while stats.control.load(Ordering::Relaxed) == 0 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("no control drop was counted");
+
+        assert!(matches!(
+            next_event(&mut control).await,
+            BnEvent::Connected { .. }
+        ));
+        drop(commands);
     }
 }
