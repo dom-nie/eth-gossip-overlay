@@ -21,3 +21,43 @@ pub const fn max_transmit_size_for(max_payload_size: u64) -> u64 {
         1024 * 1024
     }
 }
+
+#[cfg(test)]
+mod drift {
+    use libp2p::core::UpgradeInfo;
+    use libp2p::swarm::{ConnectionHandler, ConnectionId, NetworkBehaviour};
+    use libp2p::{Multiaddr, PeerId};
+    use prometheus_client::registry::Registry;
+
+    use super::*;
+    use crate::gossip::{BnLinkConfig, build_behaviour};
+
+    /// `Config` has no getter for the ids, so this reads what a fresh connection's handler
+    /// offers to negotiate, which is the list the beacon node sees.
+    #[test]
+    fn protocol_ids_equal_lighthouse() {
+        let cfg = BnLinkConfig {
+            idontwant_on_publish: true,
+        };
+        let mut behaviour = build_behaviour(&cfg, &mut Registry::default());
+        let addr: Multiaddr = "/memory/1".parse().unwrap();
+
+        let handler = behaviour
+            .handle_established_inbound_connection(
+                ConnectionId::new_unchecked(0),
+                PeerId::random(),
+                &addr,
+                &addr,
+            )
+            .unwrap();
+        let advertised: Vec<String> = handler
+            .listen_protocol()
+            .upgrade()
+            .protocol_info()
+            .into_iter()
+            .map(|id| AsRef::<str>::as_ref(&id).to_owned())
+            .collect();
+
+        assert_eq!(advertised, PROTOCOL_IDS);
+    }
+}
