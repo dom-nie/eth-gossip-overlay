@@ -368,4 +368,17 @@ mod tests {
         assert_eq!(h.stats.count("duplicate", Class::Small), 1);
         assert_eq!(h.stats.total(), 1);
     }
+
+    /// What the fanout task reads must already be in the cache, or a copy arriving from the
+    /// overlay in between would be published back into the beacon node.
+    #[tokio::test]
+    async fn id_is_in_the_seen_cache_by_the_time_the_outbound_is_readable() {
+        let mut h = Harness::new();
+        h.push(Class::Small, message(ATTESTATION_3, b"an attestation"));
+        h.start();
+
+        let out = h.out.recv().await;
+
+        assert!(h.seen.contains(&out.id));
+    }
 }
