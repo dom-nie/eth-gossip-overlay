@@ -2,6 +2,68 @@
 //! running beacon node against that on every connect (D09, CL-N5).
 
 use std::fmt;
+use std::ops::RangeInclusive;
+
+/// The Lighthouse release the workspace is built against: the tag the root `Cargo.toml` pins
+/// for `lighthouse_network` and `types`, whose own `Cargo.toml` names the `sigp/rust-libp2p`
+/// rev in the `[patch]` table. The three move together; the drift test below holds this one
+/// to the tag.
+pub const PINNED: Version = Version {
+    major: 8,
+    minor: 2,
+    patch: 2,
+};
+
+/// Exactly the versions the compatibility matrix has passed, so the range grows only with a
+/// matrix run, never by reasoning that a release "should" still work. [`LAST_VERIFIED`] is
+/// the date of that run and is updated with the range.
+pub const SUPPORTED: RangeInclusive<Version> = PINNED..=PINNED;
+
+/// When the matrix last passed on every version in [`SUPPORTED`].
+pub const LAST_VERIFIED: &str = "2026-09-06";
+
+/// The `state` label values of `overlay_bn_compat`. T-012 named `size_mismatch` without a
+/// constant; these are the shared definitions the gauge, the watch and T-041 use.
+pub const STATE_SUPPORTED: &str = "supported";
+/// The beacon node is newer than any version in [`SUPPORTED`].
+pub const STATE_UNTESTED: &str = "untested";
+/// The beacon node is older than the oldest version in [`SUPPORTED`].
+pub const STATE_UNSUPPORTED: &str = "unsupported";
+/// The beacon node's `MAX_PAYLOAD_SIZE` gives a transmit size other than the compiled one.
+pub const STATE_SIZE_MISMATCH: &str = "size_mismatch";
+
+/// Where a beacon node's version stands against [`SUPPORTED`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Compat {
+    /// In the range.
+    Supported,
+    /// Above the range: nothing is known to be wrong, nothing has been checked.
+    Untested,
+    /// Below the range.
+    Unsupported,
+}
+
+impl Compat {
+    /// The `overlay_bn_compat{state}` label for this outcome.
+    pub const fn state(self) -> &'static str {
+        match self {
+            Self::Supported => STATE_SUPPORTED,
+            Self::Untested => STATE_UNTESTED,
+            Self::Unsupported => STATE_UNSUPPORTED,
+        }
+    }
+}
+
+/// Classifies `version` against [`SUPPORTED`].
+pub fn check(version: Version) -> Compat {
+    if SUPPORTED.contains(&version) {
+        Compat::Supported
+    } else if version > *SUPPORTED.end() {
+        Compat::Untested
+    } else {
+        Compat::Unsupported
+    }
+}
 
 /// A Lighthouse release number. Only this part of the version string decides compatibility;
 /// a pre-release compares as its numbers.
@@ -175,7 +237,10 @@ mod tests {
         assert_eq!(check(start), Compat::Supported);
         assert_eq!(check(end), Compat::Supported);
         assert_eq!(check(PINNED), Compat::Supported);
-        assert_eq!(check(v(end.major, end.minor, end.patch + 1)), Compat::Untested);
+        assert_eq!(
+            check(v(end.major, end.minor, end.patch + 1)),
+            Compat::Untested
+        );
         assert_eq!(check(v(end.major + 1, 0, 0)), Compat::Untested);
         assert_eq!(check(v(start.major, start.minor, 0)), Compat::Unsupported);
         assert_eq!(check(v(0, 0, 0)), Compat::Unsupported);
