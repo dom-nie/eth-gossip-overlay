@@ -93,4 +93,16 @@ mod tests {
 
         assert_eq!(first, second);
     }
+    #[test]
+    fn malformed_node_key_is_an_error_and_file_is_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.key");
+        let malformed = format!("{}c\n", "ab".repeat(31));
+        std::fs::write(&path, &malformed).unwrap();
+
+        let message = NodeKey::load_or_create(&path).unwrap_err().to_string();
+
+        assert!(message.contains(&path.display().to_string()), "{message}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), malformed);
+    }
 }
