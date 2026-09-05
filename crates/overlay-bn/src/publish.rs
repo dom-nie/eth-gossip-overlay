@@ -262,16 +262,25 @@ mod tests {
 
     use libp2p::gossipsub::{self, PublishError};
     use overlay_core::config::PublishRateLimit;
-    use overlay_core::msgid::MessageId;
+    use overlay_core::lanes::ClassLanes;
+    use overlay_core::msgid::{self, MessageId};
     use overlay_core::pubqueue::PublishItem;
     use overlay_core::ratelimit::PublishLimits;
     use overlay_core::time::FakeClock;
     use overlay_core::topic::{Class, Topic};
+    use prometheus_client::registry::Registry;
     use tokio::sync::mpsc;
     use tokio::task::JoinHandle;
 
     use super::*;
-    use crate::link::BnCommand;
+    use crate::bn_http::BnClient;
+    use crate::gossip::wire;
+    use crate::link::{BnCommand, BnEvent, BnLink};
+    use crate::spec::spec_watch;
+    use crate::testutil::{FakeBn, FakeBnEvent, link_config, node_key};
+
+    /// Long enough for a dial and a gossipsub exchange on a loaded CI box.
+    const WAIT: Duration = Duration::from_secs(3);
 
     const ATTESTATION_3: &str = "/eth2/00000000/beacon_attestation_3/ssz_snappy";
     const BLOCK: &str = "/eth2/00000000/beacon_block/ssz_snappy";
@@ -636,5 +645,70 @@ mod tests {
             assert_eq!(h.stats.count(&format!("error:{reason}"), Class::Large), 1);
         }
         assert_eq!(h.stats.total(), 3);
+    }
+
+    /// The whole path: an item enqueued on the handle reaches the fake beacon node through a
+    /// real link. The fake's snappy transform decompresses it, so the bytes are compared
+    /// after decompression and the id against T-012's function over the compressed form.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_reaches_fake_bn_with_identical_bytes() {
+        let mut bn = FakeBn::start().await;
+        let (commands, commands_rx) = mpsc::channel(64);
+        let (spec, _) = spec_watch();
+        let lanes = ClassLanes::new(Arc::new(()));
+        let mut link = BnLink::spawn(
+            link_config(&bn),
+            &node_key(&tempfile::tempdir().unwrap()),
+            BnClient::new(bn.http_addr(), Duration::from_secs(2)),
+            &mut Registry::default(),
+            lanes.pusher(),
+            spec,
+            commands_rx,
+        );
+        let mut received = bn.received();
+        bn.subscribe(BLOCK).await;
+        tokio::time::timeout(WAIT, async {
+            loop {
+                match link.events.recv().await {
+                    Some(BnEvent::Subscribed { topic, .. }) if topic == BLOCK => break,
+                    Some(_) => {}
+                    None => panic!("the link ended"),
+                }
+            }
+        })
+        .await
+        .expect("the link never saw the fake subscribe");
+        commands
+            .send(BnCommand::Subscribe(BLOCK.to_owned()))
+            .await
+            .unwrap();
+        bn.wait_for(|e| matches!(e, FakeBnEvent::Subscribed { topic, .. } if topic == BLOCK))
+            .await;
+        let clock = FakeClock::new();
+        let (handle, _task) = Publisher::spawn(
+            commands,
+            Arc::new(AtomicBool::new(true)),
+            PublishLimits::new(&PublishRateLimit::default(), clock.now()),
+            Arc::new(()),
+            Arc::new(clock),
+        );
+        let compressed = snap::raw::Encoder::new().compress_vec(b"a block").unwrap();
+        let id = msgid::compute(BLOCK, &compressed, wire::MAX_PAYLOAD_SIZE as usize).id;
+
+        let outcome = handle.enqueue(PublishItem {
+            topic: Topic::parse(BLOCK).unwrap(),
+            id,
+            payload: compressed.into(),
+            class: Class::Large,
+        });
+
+        assert_eq!(outcome, EnqueueOutcome::Enqueued);
+        let (topic, data, bn_id) = tokio::time::timeout(WAIT, received.recv())
+            .await
+            .expect("the fake never received the publish")
+            .unwrap();
+        assert_eq!(topic, BLOCK);
+        assert_eq!(data, b"a block");
+        assert_eq!(bn_id.0[..], id.0[..]);
     }
 }
