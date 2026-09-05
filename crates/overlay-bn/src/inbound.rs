@@ -163,7 +163,7 @@ mod tests {
     use overlay_core::msgid::{self, MessageId};
     use overlay_core::seen::{SeenCache, SharedSeenCache};
     use overlay_core::time::FakeClock;
-    use overlay_core::topic::{Class, Topic};
+    use overlay_core::topic::{Class, Topic, UNKNOWN_LARGE_THRESHOLD_BYTES};
     use tokio::sync::mpsc;
 
     use super::*;
@@ -171,6 +171,8 @@ mod tests {
     use crate::link::{BnCommand, BnMessage};
 
     const ATTESTATION_3: &str = "/eth2/00000000/beacon_attestation_3/ssz_snappy";
+    /// A name the sidecar does not know, as a future fork might add one.
+    const NEW_THING: &str = "/eth2/00000000/new_thing_topic/ssz_snappy";
 
     static BN: LazyLock<PeerId> =
         LazyLock::new(|| Keypair::generate_ed25519().public().to_peer_id());
@@ -398,5 +400,27 @@ mod tests {
             .decompress_vec(&out.payload)
             .unwrap();
         assert_eq!(decompressed, b"an attestation");
+    }
+
+    #[tokio::test]
+    async fn unknown_kind_class_follows_payload_length_at_16_kib() {
+        let mut h = Harness::new();
+        let at_threshold = vec![1u8; UNKNOWN_LARGE_THRESHOLD_BYTES];
+        let below = vec![2u8; UNKNOWN_LARGE_THRESHOLD_BYTES - 1];
+        h.push(Class::Large, message(NEW_THING, &at_threshold));
+        h.push(Class::Small, message(NEW_THING, &below));
+        h.start();
+
+        let large = h.out.recv_from(Class::Large).await;
+        let small = h.out.recv_from(Class::Small).await;
+
+        assert_eq!(
+            (large.class, large.payload.len()),
+            (Class::Large, at_threshold.len())
+        );
+        assert_eq!(
+            (small.class, small.payload.len()),
+            (Class::Small, below.len())
+        );
     }
 }
