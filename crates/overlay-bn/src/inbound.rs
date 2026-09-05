@@ -120,7 +120,11 @@ impl Inbound {
             Ok(topic) => topic,
             Err(err) => {
                 if self.warned.insert(msg.topic.clone()) {
-                    tracing::warn!(topic = msg.topic, %err, "dropping messages on a topic the sidecar cannot parse");
+                    tracing::warn!(
+                        topic = msg.topic,
+                        %err,
+                        "dropping messages on a topic the sidecar cannot parse"
+                    );
                 }
                 return;
             }
