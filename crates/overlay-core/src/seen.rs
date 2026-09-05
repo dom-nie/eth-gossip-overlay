@@ -16,6 +16,17 @@ use std::time::{Duration, Instant};
 use crate::msgid::MessageId;
 use crate::time::Clock;
 
+/// Where capacity evictions are counted, so `overlay-core` stays free of the metrics crate.
+/// T-041 implements it on `seen_cache_evicted_total{reason="capacity"}`.
+///
+/// The call runs inside [`SharedSeenCache`]'s lock on the insert path, so an implementation
+/// must be a counter increment and nothing slower.
+pub trait SeenStats: Send + Sync {
+    /// An insert evicted `count` unexpired entries to stay within capacity. Never called for
+    /// expiry: that is the TTL doing its job, this is the bound doing the TTL's job.
+    fn evicted_for_capacity(&self, count: usize);
+}
+
 /// A bounded FIFO of message ids with a TTL. Bounded by count as well as time, so a burst
 /// cannot exhaust memory: at capacity the oldest entry goes even if it is unexpired.
 ///
@@ -26,6 +37,7 @@ pub struct SeenCache {
     ttl: Duration,
     capacity: usize,
     clock: Arc<dyn Clock>,
+    stats: Option<Arc<dyn SeenStats>>,
     seen: HashSet<MessageId>,
     order: VecDeque<(Instant, MessageId)>,
 }
@@ -39,26 +51,38 @@ impl SeenCache {
             ttl,
             capacity,
             clock,
+            stats: None,
             seen: HashSet::with_capacity(capacity),
             order: VecDeque::with_capacity(capacity),
         }
+    }
+
+    /// Reports capacity evictions to `stats`. Without this nothing is called, so tests and
+    /// callers that do not care pass nothing.
+    pub fn with_stats(mut self, stats: Arc<dyn SeenStats>) -> Self {
+        self.stats = Some(stats);
+        self
     }
 
     /// Records `id` and reports whether it was new: `true` unless `id` was inserted less than
     /// `ttl` ago. A repeat does not refresh the TTL, so the deque stays in insertion order and
     /// expiry only ever looks at its front. O(1) amortised: expired entries come off the front,
     /// at capacity the oldest entry goes, and both containers are updated once.
+    ///
+    /// A capacity eviction is reported to the [`SeenStats`] hook, if any, after both containers
+    /// are consistent again. Expiry is never reported.
     pub fn insert(&mut self, id: MessageId) -> bool {
         let now = self.clock.now();
         self.expire(now);
         if self.seen.contains(&id) {
             return false;
         }
-        if self.order.len() >= self.capacity {
-            self.pop_oldest();
-        }
+        let evicted = self.order.len() >= self.capacity && self.pop_oldest();
         self.order.push_back((now, id));
         self.seen.insert(id);
+        if evicted && let Some(stats) = &self.stats {
+            stats.evicted_for_capacity(1);
+        }
         true
     }
 
@@ -92,9 +116,10 @@ impl SeenCache {
         }
     }
 
-    fn pop_oldest(&mut self) {
-        if let Some((_, id)) = self.order.pop_front() {
-            self.seen.remove(&id);
+    fn pop_oldest(&mut self) -> bool {
+        match self.order.pop_front() {
+            Some((_, id)) => self.seen.remove(&id),
+            None => false,
         }
     }
 }
