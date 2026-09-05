@@ -4,7 +4,7 @@
 //! at startup instead of silently taking a default.
 
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::{Deserialize, Deserializer};
@@ -381,6 +381,14 @@ fn url(literal: &str) -> Url {
 /// Why a configuration could not be loaded.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    /// The file could not be read.
+    #[error("{}: {source}", .path.display())]
+    Io {
+        /// The file that was asked for.
+        path: PathBuf,
+        /// What the filesystem said.
+        source: std::io::Error,
+    },
     /// The text is not valid YAML or does not fit the schema.
     #[error("{source}")]
     Parse {
@@ -398,6 +406,15 @@ pub enum ConfigError {
 }
 
 impl Config {
+    /// Reads and parses the file at `path`.
+    pub fn load(path: &Path) -> Result<Self, ConfigError> {
+        let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+        Self::from_yaml(&text)
+    }
+
     /// Parses a complete `config.yaml` document.
     pub fn from_yaml(text: &str) -> Result<Self, ConfigError> {
         // Not yaml::from_str: on any error it retries through a Value tree to resolve merge
