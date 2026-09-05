@@ -437,4 +437,15 @@ hosts:
         assert_eq!(me.region, region("us"));
         assert_eq!(me.site.as_deref(), Some("nyc1"));
     }
+
+    #[test]
+    fn resolve_self_falls_back_to_gethostname() {
+        let roster = Roster::from_yaml(APPENDIX_A).unwrap();
+
+        let me = resolve_self(&roster, &env(&[]), &gethostname).unwrap();
+
+        assert_eq!(me.hostname, host("bn-ams1-07"));
+        assert_eq!(me.region, region("eu"));
+        assert_eq!(me.site.as_deref(), Some("ams1"));
+    }
 }
