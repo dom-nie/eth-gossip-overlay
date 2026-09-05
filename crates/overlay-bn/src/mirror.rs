@@ -53,6 +53,10 @@ impl Mirror {
     /// Applies `ev` and returns what the shell has to do about it, in order.
     pub fn on_bn_event(&mut self, ev: &BnEvent) -> Vec<MirrorAction> {
         match ev {
+            BnEvent::Connected { peer_id } => {
+                self.bn = *peer_id;
+                Vec::new()
+            }
             BnEvent::Subscribed { peer, topic } if *peer == self.bn => self.subscribe(topic),
             BnEvent::Unsubscribed { peer, topic } if *peer == self.bn => self.unsubscribe(topic),
             BnEvent::Disconnected => self.disconnected(),
