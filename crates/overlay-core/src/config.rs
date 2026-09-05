@@ -435,6 +435,20 @@ impl Config {
                 ),
             ));
         }
+        let (window, stale) = (
+            self.classes.small.batch_window,
+            self.classes.small.stale_after,
+        );
+        if stale < window {
+            return Err(invalid(
+                "classes.small.stale_after_ms",
+                format!(
+                    "{} ms is shorter than batch_window_ms ({} ms)",
+                    stale.as_millis(),
+                    window.as_millis()
+                ),
+            ));
+        }
         Ok(())
     }
 }
