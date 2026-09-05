@@ -71,6 +71,16 @@ impl Mirror {
         &self.sets
     }
 
+    /// Takes the spec the beacon node reported. Only a moved column count does anything,
+    /// because the watch delivers a snapshot on every connect.
+    pub fn on_spec(&mut self, spec: &SpecSnapshot) -> Vec<MirrorAction> {
+        if spec.number_of_columns == self.columns {
+            return Vec::new();
+        }
+        self.columns = spec.number_of_columns;
+        self.rederive()
+    }
+
     /// Applies `ev` and returns what the shell has to do about it, in order.
     pub fn on_bn_event(&mut self, ev: &BnEvent) -> Vec<MirrorAction> {
         match ev {
