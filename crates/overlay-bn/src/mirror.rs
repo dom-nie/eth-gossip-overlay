@@ -216,12 +216,13 @@ mod tests {
     use libp2p::identity::Keypair;
     use overlay_core::lanes::ClassLanes;
     use prometheus_client::registry::Registry;
+    use serde_json::json;
 
     use super::*;
     use crate::bn_http::BnClient;
     use crate::link::BnLink;
     use crate::spec::{SpecSnapshot, spec_watch};
-    use crate::testutil::{FakeBn, FakeBnEvent, link_config, node_key};
+    use crate::testutil::{FakeBn, FakeBnEvent, link_config, node_key, ok_json};
 
     /// Long enough for a dial and a gossipsub exchange on a loaded CI box.
     const WAIT: Duration = Duration::from_secs(3);
@@ -710,6 +711,29 @@ mod tests {
         .expect("the subscription was not mirrored within a second");
         shown.unwrap();
         assert!(matches!(seen, FakeBnEvent::Subscribed { .. }));
+    }
+
+    /// The extras follow the column count the beacon node reports, whichever of the
+    /// subscription and the spec answer the link delivers first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fake_bn_spec_column_count_sizes_the_extras() {
+        let mut bn = FakeBn::start().await;
+        bn.set_spec_response(ok_json(json!({"data": {"NUMBER_OF_COLUMNS": "64"}})))
+            .await;
+        let mut watch = mirrored_link(&bn);
+        wait_connected(&mut bn).await;
+
+        bn.subscribe(ATTESTATION_3).await;
+
+        let mut expected = sets_of(&[]);
+        expected
+            .advertised
+            .insert(Topic::parse(ATTESTATION_3).unwrap());
+        expected.local = expected.advertised.clone();
+        expected
+            .local
+            .extend((0..64).map(|i| Topic::data_column([0; 4], i)));
+        wait_sets(&mut watch, |s| s == &expected).await;
     }
 
     /// The link's Disconnected has to empty the sets before the replacement fake, under a
