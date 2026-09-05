@@ -165,4 +165,10 @@ mod tests {
             )
         );
     }
+
+    #[test]
+    fn max_decompressed_is_inclusive() {
+        assert_eq!(compute(TOPIC, HELLO_SNAPPY, 5).branch, Branch::Valid);
+        assert_eq!(compute(TOPIC, HELLO_SNAPPY, 4).branch, Branch::TooLarge);
+    }
 }
