@@ -68,6 +68,31 @@ fn resolve_seed_path(credentials_dir: Option<&Path>, configured: &Path) -> PathB
         .unwrap_or_else(|| configured.to_owned())
 }
 
+/// The seeds a sibling's key may derive from: the current one always, and the outgoing one
+/// while a rotation is in progress. Only `current` ever derives this host's own key; the pin
+/// table (T-021) accepts keys from both.
+#[derive(Debug)]
+pub struct Seeds {
+    /// The seed in force.
+    pub current: FleetSeed,
+    /// The seed being rotated out, from `overlay.fleet_seed_previous_file`.
+    pub previous: Option<FleetSeed>,
+}
+
+impl Seeds {
+    /// `current` through [`FleetSeed::load`], `previous` straight from `previous_file` when
+    /// one is configured: a rotation pushes the old seed next to the new one, never through
+    /// a systemd credential.
+    pub fn load(seed_file: &Path, previous_file: Option<&Path>) -> Result<Self, SecretFileError> {
+        Ok(Self {
+            current: FleetSeed::load(seed_file)?,
+            previous: previous_file
+                .map(|path| read_secret_file(path).map(FleetSeed))
+                .transpose()?,
+        })
+    }
+}
+
 /// Why a seed or node key file could not be read or written.
 #[derive(Debug, thiserror::Error)]
 pub enum SecretFileError {
