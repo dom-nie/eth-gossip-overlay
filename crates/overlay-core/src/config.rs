@@ -684,4 +684,26 @@ log:
                 .is_ok()
         );
     }
+
+    #[test]
+    fn publish_rate_limit_fields_must_be_positive() {
+        for (doc, field) in [
+            (
+                "bn: { publish_rate_limit: { small_per_s: 0 } }",
+                "bn.publish_rate_limit.small_per_s",
+            ),
+            (
+                "bn: { publish_rate_limit: { large_per_s: 0 } }",
+                "bn.publish_rate_limit.large_per_s",
+            ),
+            (
+                "bn: { publish_rate_limit: { bytes_per_s: 0 } }",
+                "bn.publish_rate_limit.bytes_per_s",
+            ),
+        ] {
+            let err = Config::from_yaml(doc).unwrap_err();
+
+            assert!(err.to_string().contains(field), "{doc}: {err}");
+        }
+    }
 }
