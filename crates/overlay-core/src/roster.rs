@@ -172,6 +172,20 @@ impl Roster {
     pub fn get(&self, hostname: &Hostname) -> Option<&HostEntry> {
         self.hosts.iter().find(|host| &host.hostname == hostname)
     }
+
+    /// Every host in `region`, sorted by hostname with the plain byte-wise `Ord` on the
+    /// string, whatever order the file had. Striping (T-072) hands chunk `i` to the `i`th host
+    /// of this list rotated by the message id, and two origins only make the same assignment
+    /// because they sort the same way, so this is the one place the order is defined.
+    pub fn in_region(&self, region: &Region) -> Vec<&HostEntry> {
+        let mut hosts: Vec<_> = self
+            .hosts
+            .iter()
+            .filter(|host| &host.region == region)
+            .collect();
+        hosts.sort_by(|a, b| a.hostname.cmp(&b.hostname));
+        hosts
+    }
 }
 
 #[cfg(test)]
