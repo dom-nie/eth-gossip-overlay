@@ -4,6 +4,7 @@
 pub mod backoff;
 pub mod config;
 pub mod time;
+pub mod topic;
 
 #[cfg(test)]
 mod tests {
