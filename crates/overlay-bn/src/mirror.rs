@@ -220,6 +220,8 @@ mod tests {
         LazyLock::new(|| Keypair::generate_ed25519().public().to_peer_id());
     const ATTESTATION_3: &str = "/eth2/00000000/beacon_attestation_3/ssz_snappy";
     const BLOCK: &str = "/eth2/00000000/beacon_block/ssz_snappy";
+    /// The block topic under the next fork's digest, as a transition window announces it.
+    const NEXT_BLOCK: &str = "/eth2/6a95a1a9/beacon_block/ssz_snappy";
 
     fn subscribed(topic: &str) -> BnEvent {
         BnEvent::Subscribed {
@@ -262,6 +264,16 @@ mod tests {
             .iter()
             .filter_map(|a| match a {
                 MirrorAction::Subscribe(topic) => Some(topic.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn unsubscribes(actions: &[MirrorAction]) -> BTreeSet<String> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                MirrorAction::Unsubscribe(topic) => Some(topic.clone()),
                 _ => None,
             })
             .collect()
@@ -556,6 +568,20 @@ mod tests {
             .map(Topic::to_string)
             .collect();
         assert_eq!(extras, columns("00000000", 0..128));
+    }
+
+    #[test]
+    fn second_digest_adds_a_second_set_without_touching_the_first() {
+        let mut mirror = connected();
+        mirror.on_bn_event(&subscribed(ATTESTATION_3));
+
+        let actions = mirror.on_bn_event(&subscribed(NEXT_BLOCK));
+
+        let mut expected = columns("6a95a1a9", 0..128);
+        expected.insert(NEXT_BLOCK.to_owned());
+        assert_eq!(subscribes(&actions), expected);
+        assert_eq!(unsubscribes(&actions), BTreeSet::new());
+        assert_eq!(mirror.sets(), &sets_of(&[ATTESTATION_3, NEXT_BLOCK]));
     }
 
     /// The fake's subscription has to show in the watch and come back to the fake as the
