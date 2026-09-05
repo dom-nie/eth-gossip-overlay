@@ -261,4 +261,20 @@ mod tests {
             "{err:?}"
         );
     }
+
+    #[tokio::test]
+    async fn connection_refused_is_connect_error() {
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+
+        let err = client_at(&format!("http://127.0.0.1:{port}/eth/v1/node/identity"))
+            .peer_id()
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, BnHttpError::Connect { .. }), "{err:?}");
+        assert!(err.to_string().contains("/eth/v1/node/identity"), "{err}");
+    }
 }
