@@ -72,4 +72,14 @@ mod tests {
 
         assert_eq!(clock.now() - start, Duration::from_millis(1500));
     }
+
+    #[test]
+    fn fake_clock_clones_share_state() {
+        let held_by_test = FakeClock::new();
+        let held_by_unit_under_test = held_by_test.clone();
+
+        held_by_test.advance(Duration::from_secs(7));
+
+        assert_eq!(held_by_unit_under_test.now(), held_by_test.now());
+    }
 }
