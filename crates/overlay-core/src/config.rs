@@ -3,6 +3,270 @@
 //! pushed to every host by configuration management, so an unknown or removed key fails loudly
 //! at startup instead of silently taking a default.
 
+use std::net::SocketAddr;
+use std::path::PathBuf;
+use std::time::Duration;
+
+use serde::{Deserialize, Deserializer};
+use serde_yaml_bw as yaml;
+use url::Url;
+
+/// The whole `config.yaml`, one field per key.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Config {
+    /// `overlay`: the QUIC mesh between sidecars.
+    pub overlay: Overlay,
+    /// `bn`: the link to the local beacon node.
+    pub bn: Bn,
+    /// `classes`: tunables for the small and large traffic classes.
+    pub classes: Classes,
+    /// `inject`: whether the sidecar publishes what it receives into the beacon node. `false`
+    /// is the kill switch: the sidecar keeps observing and reporting but changes nothing.
+    pub inject: bool,
+    /// `admin_socket`: the Unix socket `fleet-overlayctl` connects to.
+    pub admin_socket: PathBuf,
+    /// `metrics_listen`: where the Prometheus scrape endpoint binds.
+    pub metrics_listen: SocketAddr,
+    /// `log`: level and format of the single log stream.
+    pub log: Log,
+}
+
+/// `overlay`: the QUIC mesh between sidecars.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Overlay {
+    /// `listen`: the address the QUIC endpoint binds. `[::]` listens dual-stack.
+    pub listen: SocketAddr,
+    /// `roster_file`: the fleet roster, re-read on SIGHUP and whenever the file changes.
+    pub roster_file: PathBuf,
+    /// `fleet_seed_file`: the shared secret every overlay TLS key derives from.
+    pub fleet_seed_file: PathBuf,
+    /// `fleet_seed_previous_file`: the outgoing seed while a rotation is in progress, so peers
+    /// still on it keep pairing. Absent or `null` otherwise.
+    pub fleet_seed_previous_file: Option<PathBuf>,
+    /// `keepalive_ms`: the QUIC keepalive interval. Shorter than `idle_timeout_ms`, or every
+    /// quiet connection would drop.
+    #[serde(rename = "keepalive_ms", deserialize_with = "millis")]
+    pub keepalive: Duration,
+    /// `idle_timeout_ms`: how long a silent connection lives before QUIC closes it.
+    #[serde(rename = "idle_timeout_ms", deserialize_with = "millis")]
+    pub idle_timeout: Duration,
+    /// `initial_window_bytes`: the initial congestion window. A connection that carries one
+    /// block every 12 s never leaves slow start with the RFC default.
+    pub initial_window_bytes: u64,
+    /// `fanout`: how each traffic class reaches its own region and the others.
+    pub fanout: Fanout,
+    /// `io_thread`: latency tuning for the overlay I/O thread. Linux only, off by default.
+    pub io_thread: IoThread,
+}
+
+/// `overlay.fanout`: routing per traffic class.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Fanout {
+    /// `large`: blocks and data columns.
+    pub large: LargeFanout,
+    /// `small`: attestations and the rest of the per-slot chatter.
+    pub small: SmallFanout,
+}
+
+/// `overlay.fanout.large`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct LargeFanout {
+    /// `in_region`: how a large message reaches the origin's own region.
+    pub in_region: InRegion,
+    /// `cross_region`: how it reaches each other region.
+    pub cross_region: CrossRegion,
+    /// `stripe_min_recipients`: with fewer subscribed recipients than this the message goes out
+    /// whole; a stripe over a handful of hosts saves nothing.
+    pub stripe_min_recipients: usize,
+}
+
+/// `overlay.fanout.small`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct SmallFanout {
+    /// `in_region`: how a batch reaches the origin's own region.
+    pub in_region: InRegion,
+    /// `cross_region`: how it reaches each other region.
+    pub cross_region: CrossRegion,
+    /// `relays_per_remote_region`: how many hosts in a remote region receive a batch and re-fan
+    /// it locally.
+    pub relays_per_remote_region: usize,
+    /// `relay_min_remote_hosts`: a remote region with fewer live subscribed hosts than this is
+    /// sent to directly; relaying would not save enough WAN traffic to pay for the extra hop.
+    pub relay_min_remote_hosts: usize,
+}
+
+/// How a message reaches hosts in the origin's own region.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InRegion {
+    /// Chunk `i` to host `i`, each host forwarding its chunk to the rest.
+    Stripe,
+    /// Whole messages to every subscribed host.
+    Direct,
+}
+
+/// How a message reaches hosts in another region.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CrossRegion {
+    /// An independent stripe over the remote region's subscribed hosts.
+    Stripe,
+    /// Whole messages to every subscribed host over the WAN.
+    Direct,
+    /// A few hosts in the remote region receive the batch and re-fan it in-region.
+    Relays,
+}
+
+/// `overlay.io_thread`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct IoThread {
+    /// `pin_cpu`: a reserved core to pin the overlay I/O thread to. `null` leaves it unpinned.
+    pub pin_cpu: Option<u32>,
+    /// `prefer_busy_poll`: spin on the socket instead of waiting for interrupts.
+    pub prefer_busy_poll: bool,
+    /// `busy_poll_usecs`: how long each busy-poll spin lasts.
+    pub busy_poll_usecs: u32,
+    /// `steering`: how the overlay's packets are steered to the pinned core's NIC queue.
+    pub steering: Steering,
+}
+
+/// `overlay.io_thread.steering`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Steering {
+    /// An ntuple flow rule if the NIC supports it, else RFS.
+    Auto,
+    /// An ntuple flow rule only.
+    Ntuple,
+    /// Receive flow steering in the kernel.
+    Rfs,
+    /// No steering.
+    Off,
+}
+
+/// `bn`: the link to the local beacon node.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Bn {
+    /// `identity_url`: the beacon API endpoint that reports the node's peer id.
+    pub identity_url: Url,
+    /// `events_url`: the beacon API event stream.
+    pub events_url: Url,
+    /// `libp2p_addr`: the multiaddr the sidecar dials to join the beacon node's gossipsub.
+    pub libp2p_addr: String,
+    /// `node_key_file`: the sidecar's own libp2p identity, per host, created on first start.
+    pub node_key_file: PathBuf,
+    /// `publish_rate_limit`: ceilings on what the sidecar injects into the beacon node.
+    pub publish_rate_limit: PublishRateLimit,
+    /// `idontwant_on_publish`: tell the beacon node IDONTWANT for a message as it is published.
+    pub idontwant_on_publish: bool,
+}
+
+/// `bn.publish_rate_limit`: class-aware ceilings on the publish path. A bug guard, not a normal
+/// control; the defaults sit well above any legitimate rate.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct PublishRateLimit {
+    /// `small_per_s`: small-class messages per second.
+    pub small_per_s: u32,
+    /// `large_per_s`: large-class messages per second.
+    pub large_per_s: u32,
+    /// `bytes_per_s`: payload bytes per second across both classes.
+    pub bytes_per_s: u64,
+}
+
+/// `classes`: tunables per traffic class.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Classes {
+    /// `small`: batched small messages over datagrams.
+    pub small: SmallClass,
+    /// `large`: striped large messages over streams.
+    pub large: LargeClass,
+}
+
+/// `classes.small`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct SmallClass {
+    /// `batch_window_ms`: how long a batch collects entries before it is flushed.
+    #[serde(rename = "batch_window_ms", deserialize_with = "millis")]
+    pub batch_window: Duration,
+    /// `stale_after_ms`: a batch older than this is dropped rather than delivered late.
+    #[serde(rename = "stale_after_ms", deserialize_with = "millis")]
+    pub stale_after: Duration,
+}
+
+/// `classes.large`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct LargeClass {
+    /// `chunk_bytes`: the fixed chunk size. A multiple of 64, which the Reed-Solomon shards
+    /// require.
+    pub chunk_bytes: usize,
+    /// `parity_ratio`: parity chunks as a fraction of data chunks.
+    pub parity_ratio: f64,
+    /// `repair_deadline_ms`: how long after the first chunk a receiver waits before asking peers
+    /// for the missing ones.
+    #[serde(rename = "repair_deadline_ms", deserialize_with = "millis")]
+    pub repair_deadline: Duration,
+}
+
+/// `log`.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct Log {
+    /// `level`: the least severe level that is emitted. `RUST_LOG` overrides it.
+    pub level: LogLevel,
+    /// `format`: how the log stream is rendered.
+    pub format: LogFormat,
+}
+
+/// `log.level`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogLevel {
+    /// Everything.
+    Trace,
+    /// Diagnostics for someone reading the code.
+    Debug,
+    /// Normal operation.
+    Info,
+    /// Something an operator should look at.
+    Warn,
+    /// Something is broken.
+    Error,
+}
+
+/// `log.format`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    /// JSON when stdout is not a TTY, text otherwise.
+    Auto,
+    /// One JSON object per line.
+    Json,
+    /// Human-readable lines.
+    Text,
+}
+
+/// Why a configuration could not be loaded.
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    /// The text is not valid YAML or does not fit the schema.
+    #[error("{source}")]
+    Parse {
+        /// The parser's own error, which names the offending key and its position.
+        source: yaml::Error,
+    },
+}
+
+impl Config {
+    /// Parses a complete `config.yaml` document.
+    pub fn from_yaml(text: &str) -> Result<Self, ConfigError> {
+        yaml::from_str(text).map_err(|source| ConfigError::Parse { source })
+    }
+}
+
+/// Reads an integer `_ms` key as a [`Duration`], so nothing downstream multiplies by 1000.
+fn millis<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+    u64::deserialize(deserializer).map(Duration::from_millis)
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
