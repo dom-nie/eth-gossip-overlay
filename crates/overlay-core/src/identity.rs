@@ -218,4 +218,13 @@ mod tests {
             "{message}"
         );
     }
+    #[test]
+    fn expected_tls_public_key_matches_keypair_public_key() {
+        let seed = seed(0x11);
+
+        let expected = expected_tls_public_key(&seed, &host("bn-1"));
+
+        let keypair = derive_tls_keypair(&seed, &host("bn-1"));
+        assert_eq!(expected, keypair.verifying_key().to_bytes());
+    }
 }
