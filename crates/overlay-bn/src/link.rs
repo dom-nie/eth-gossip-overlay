@@ -206,18 +206,19 @@ impl Link {
             Ok(peer_id) => peer_id,
             Err(err) => {
                 tracing::warn!(%err, "beacon node identity unavailable");
-                return;
+                return self.retry_later();
             }
         };
         let addr = match self.cfg.libp2p_addr.clone().with_p2p(peer_id) {
             Ok(addr) => addr,
             Err(addr) => {
                 tracing::error!(%addr, %peer_id, "bn.libp2p_addr names another peer id");
-                return;
+                return self.retry_later();
             }
         };
         if let Err(err) = self.swarm.dial(addr) {
             tracing::warn!(%err, "dial refused");
+            self.retry_later();
         }
     }
 
@@ -234,6 +235,10 @@ impl Link {
                 cause,
                 ..
             } => self.on_closed(peer_id, cause),
+            SwarmEvent::OutgoingConnectionError { error, .. } => {
+                tracing::warn!(%error, "dial to the beacon node failed");
+                self.retry_later();
+            }
             SwarmEvent::Behaviour(gossipsub::Event::Subscribed { peer_id, topic, .. }) => {
                 self.emit(BnEvent::Subscribed {
                     peer: peer_id,
