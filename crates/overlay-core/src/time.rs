@@ -11,6 +11,16 @@ pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
 }
 
+/// The real monotonic clock, for production wiring.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+}
+
 /// A clock that only moves when a test tells it to. Clones share one instant, so a test can
 /// keep a handle while the unit under test owns another.
 #[derive(Clone)]
