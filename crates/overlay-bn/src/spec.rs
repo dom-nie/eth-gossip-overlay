@@ -3,6 +3,7 @@
 //! replaces the value on every connect.
 
 use serde::Deserialize;
+use tokio::sync::watch;
 
 /// The six `/eth/v1/config/spec` values the sidecar reads. Lighthouse serialises every number
 /// as a quoted decimal string, so each field parses one; a key the BN does not send, an older
@@ -53,6 +54,12 @@ impl Default for SpecSnapshot {
     fn default() -> Self {
         Self::MAINNET
     }
+}
+
+/// The channel consumers read the snapshot from, seeded with mainnet so a value is there
+/// before the beacon node has answered. The BN link keeps the sender.
+pub fn spec_watch() -> (watch::Sender<SpecSnapshot>, watch::Receiver<SpecSnapshot>) {
+    watch::channel(SpecSnapshot::MAINNET)
 }
 
 /// A number the BN sends as `"12"`, never as `12`.
