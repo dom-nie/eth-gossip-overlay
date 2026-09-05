@@ -55,6 +55,7 @@ impl Mirror {
         match ev {
             BnEvent::Subscribed { peer, topic } if *peer == self.bn => self.subscribe(topic),
             BnEvent::Unsubscribed { peer, topic } if *peer == self.bn => self.unsubscribe(topic),
+            BnEvent::Disconnected => self.disconnected(),
             _ => Vec::new(),
         }
     }
@@ -73,6 +74,19 @@ impl Mirror {
             return Vec::new();
         }
         vec![MirrorAction::Unsubscribe(topic.to_owned()), self.changed()]
+    }
+
+    /// Nothing survives a disconnect: the beacon node re-announces everything on reconnect.
+    fn disconnected(&mut self) -> Vec<MirrorAction> {
+        if self.topics.is_empty() {
+            return Vec::new();
+        }
+        let mut actions: Vec<_> = std::mem::take(&mut self.topics)
+            .into_keys()
+            .map(MirrorAction::Unsubscribe)
+            .collect();
+        actions.push(self.changed());
+        actions
     }
 
     /// Rebuilds the sets from the parsed topics and reports them.
