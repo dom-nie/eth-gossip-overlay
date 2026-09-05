@@ -556,4 +556,20 @@ mod tests {
         assert_eq!(small, Some(PublishOutcome::RateLimited));
         assert_eq!(h.stats.count("rate_limited", Class::Small), 1);
     }
+
+    #[tokio::test]
+    async fn successful_publish_sends_publish_command_and_counts_bn_out() {
+        let mut h = Harness::new();
+        h.spawn();
+        let block = item(Class::Large, 7);
+
+        h.handle.enqueue(block.clone());
+
+        let (topic, data) = answer(&mut h.commands, Ok(accepted())).await;
+        assert_eq!(topic, BLOCK);
+        assert_eq!(data, block.payload);
+        until(|| h.stats.count("published", Class::Large) == 1).await;
+        assert_eq!(h.stats.total(), 1);
+        assert_eq!(h.queued(), 0);
+    }
 }
