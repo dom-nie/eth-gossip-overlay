@@ -235,4 +235,16 @@ mod tests {
         let keypair = derive_tls_keypair(&seed, &host("bn-1"));
         assert_eq!(expected, keypair.verifying_key().to_bytes());
     }
+    #[test]
+    fn seed_load_prefers_credentials_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join("credentials");
+        std::fs::create_dir(&credentials).unwrap();
+        seed_file(&credentials, "seed", &"11".repeat(32));
+        let configured = seed_file(dir.path(), "seed", &"22".repeat(32));
+
+        let loaded = FleetSeed::load_from(Some(&credentials), &configured).unwrap();
+
+        assert_eq!(loaded.0, seed(0x11).0);
+    }
 }
