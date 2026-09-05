@@ -179,19 +179,31 @@ impl Mirror {
     }
 }
 
-/// Drives a [`Mirror`] from the link's `events` until they close or the link stops taking
-/// commands: subscriptions become [`BnCommand`]s, and every change lands on `sets`, whose
-/// receivers only ever want the latest value. This shell may wait on the command channel;
-/// the swarm loop is on the other end of it, and it is the one that never waits.
+/// Drives a [`Mirror`] from the link's `events` and its `spec` watch until either closes
+/// or the link stops taking commands: subscriptions become [`BnCommand`]s, and every change
+/// lands on `sets`, whose receivers only ever want the latest value. This shell may wait on
+/// the command channel; the swarm loop is on the other end of it, and it is the one that
+/// never waits.
 pub fn run(
     mut events: mpsc::Receiver<BnEvent>,
     commands: mpsc::Sender<BnCommand>,
     sets: watch::Sender<SubscriptionSets>,
+    mut spec: watch::Receiver<SpecSnapshot>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut mirror = Mirror::new(&SpecSnapshot::MAINNET);
-        while let Some(event) = events.recv().await {
-            for action in mirror.on_bn_event(&event) {
+        let mut mirror = Mirror::new(&spec.borrow_and_update());
+        loop {
+            let actions = tokio::select! {
+                event = events.recv() => match event {
+                    Some(event) => mirror.on_bn_event(&event),
+                    None => return,
+                },
+                changed = spec.changed() => match changed {
+                    Ok(()) => mirror.on_spec(&spec.borrow_and_update()),
+                    Err(_) => return,
+                },
+            };
+            for action in actions {
                 let command = match action {
                     MirrorAction::Subscribe(topic) => BnCommand::Subscribe(topic),
                     MirrorAction::Unsubscribe(topic) => BnCommand::Unsubscribe(topic),
@@ -326,7 +338,7 @@ mod tests {
     /// Neither task is kept: the runtime drops them with the test.
     fn mirrored_link(bn: &FakeBn) -> watch::Receiver<SubscriptionSets> {
         let (commands, commands_rx) = mpsc::channel(64);
-        let (spec, _) = spec_watch();
+        let (spec, spec_rx) = spec_watch();
         let lanes = ClassLanes::new(Arc::new(()));
         let link = BnLink::spawn(
             link_config(bn),
@@ -338,7 +350,7 @@ mod tests {
             commands_rx,
         );
         let (sets, watch) = watch::channel(SubscriptionSets::default());
-        run(link.events, commands, sets);
+        run(link.events, commands, sets, spec_rx);
         watch
     }
 
