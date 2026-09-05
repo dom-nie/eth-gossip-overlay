@@ -274,6 +274,25 @@ mod tests {
         assert_eq!(*stats.0.lock().unwrap(), [1]);
     }
 
+    #[test]
+    fn shared_cache_clones_see_the_same_entries() {
+        let clock = FakeClock::new();
+        let held_by_ingress = SharedSeenCache::new(cache(Duration::from_secs(60), 100, &clock));
+        let held_by_reader = held_by_ingress.clone();
+
+        assert!(held_by_ingress.insert(id(1)));
+        assert!(!held_by_reader.insert(id(1)));
+
+        assert!(held_by_reader.contains(&id(1)));
+        assert_eq!(held_by_reader.len(), 1);
+        assert!(!held_by_reader.is_empty());
+
+        clock.advance(Duration::from_secs(60));
+        held_by_reader.evict_expired();
+
+        assert!(held_by_ingress.is_empty());
+    }
+
     /// Run by hand with `--ignored --nocapture` to put the number in a PR. Counts the deque
     /// slots and the set's buckets (one key plus one hashbrown control byte each) as allocated,
     /// which is what the process actually holds. hashbrown reports 7/8 of a power of two of
