@@ -162,7 +162,46 @@ fn parse_triple(s: &str) -> Option<Version> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::*;
+
+    /// The gauges as T-041 will keep them, modelled so the trait's promises are what the
+    /// tests assert: one compat series at 1, one info series, trusted absent when `None`.
+    #[derive(Clone, Debug, Default, PartialEq, Eq)]
+    struct Gauges {
+        compat: Option<&'static str>,
+        info: Option<String>,
+        trusted: Option<bool>,
+    }
+
+    #[derive(Default)]
+    struct Recording(Mutex<Gauges>);
+
+    impl Recording {
+        fn gauges(&self) -> Gauges {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    impl CompatStats for Recording {
+        fn set_compat(&self, state: &'static str) {
+            self.0.lock().unwrap().compat = Some(state);
+        }
+
+        fn set_info(&self, version: &str) {
+            self.0.lock().unwrap().info = Some(version.to_owned());
+        }
+
+        fn set_trusted(&self, trusted: Option<bool>) {
+            self.0.lock().unwrap().trusted = trusted;
+        }
+    }
+
+    fn watch() -> (Watch, Arc<Recording>) {
+        let stats = Arc::new(Recording::default());
+        (Watch::new(stats.clone()), stats)
+    }
 
     fn v(major: u64, minor: u64, patch: u64) -> Version {
         Version {
@@ -247,6 +286,29 @@ mod tests {
         assert_eq!(Compat::Supported.state(), STATE_SUPPORTED);
         assert_eq!(Compat::Untested.state(), STATE_UNTESTED);
         assert_eq!(Compat::Unsupported.state(), STATE_UNSUPPORTED);
+    }
+
+    /// A beacon node upgraded under a running sidecar: the second connect's version replaces
+    /// the first in `overlay_bn_info` and moves the one compat series.
+    #[test]
+    fn bn_info_sets_exactly_one_compat_state_and_relabels_info_version() {
+        let (mut watch, stats) = watch();
+        let pinned = format!("Lighthouse/v{PINNED}-e423a66/x86_64-linux");
+        let newer = "Lighthouse/v99.0.0-abcdef0/x86_64-linux";
+
+        watch.on_bn_info(Some(pinned.clone()), Some(true));
+        let first = stats.gauges();
+        watch.on_bn_info(Some(newer.to_owned()), Some(true));
+        let second = stats.gauges();
+
+        assert_eq!(
+            (first.compat, first.info),
+            (Some(STATE_SUPPORTED), Some(pinned))
+        );
+        assert_eq!(
+            (second.compat, second.info),
+            (Some(STATE_UNTESTED), Some(newer.to_owned()))
+        );
     }
 }
 
