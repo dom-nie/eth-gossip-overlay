@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        if: runner.os == 'Linux'
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        if: runner.os == 'Linux'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --workspace
+
+      - name: Test
+        if: runner.os == 'Linux'
+        run: cargo test --workspace
+
+      - name: overlay-bn ships without Lighthouse's own crates
+        if: runner.os == 'Linux'
+        run: |
+          if cargo tree -p overlay-bn -e normal | grep -E '(^|[[:space:]])(lighthouse_network|types) v[0-9]'; then
+            echo "lighthouse_network or types is a production dependency of overlay-bn; they are dev-dependencies only until the v3 features land"
+            exit 1
+          fi
