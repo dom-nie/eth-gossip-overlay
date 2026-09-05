@@ -37,15 +37,35 @@ impl fmt::Debug for FleetSeed {
     }
 }
 
+/// The environment variable systemd sets to the directory `LoadCredential=` populates.
+const CREDENTIALS_DIR_ENV: &str = "CREDENTIALS_DIRECTORY";
+
 impl FleetSeed {
-    /// Reads the seed file at `configured`. `credentials_dir` is where systemd's
-    /// `LoadCredential=` puts the unit's credentials.
+    /// Reads the seed the process was given: `$CREDENTIALS_DIRECTORY/seed` when systemd
+    /// passed one, else `configured`. The error names whichever file was actually tried.
+    pub fn load(configured: &Path) -> Result<Self, SecretFileError> {
+        let credentials_dir = std::env::var_os(CREDENTIALS_DIR_ENV).map(PathBuf::from);
+        Self::load_from(credentials_dir.as_deref(), configured)
+    }
+
+    /// [`FleetSeed::load`] with the credentials directory passed in, so a test can stage any
+    /// combination without touching the process environment.
     pub fn load_from(
-        _credentials_dir: Option<&Path>,
+        credentials_dir: Option<&Path>,
         configured: &Path,
     ) -> Result<Self, SecretFileError> {
-        read_secret_file(configured).map(Self)
+        read_secret_file(&resolve_seed_path(credentials_dir, configured)).map(Self)
     }
+}
+
+/// `<credentials_dir>/seed` when that file exists, else `configured`. A unit without
+/// `LoadCredential=seed:...` still has `CREDENTIALS_DIRECTORY` set if it loads any other
+/// credential, which is why the file's presence decides and not the variable's.
+fn resolve_seed_path(credentials_dir: Option<&Path>, configured: &Path) -> PathBuf {
+    credentials_dir
+        .map(|dir| dir.join("seed"))
+        .filter(|seed| seed.is_file())
+        .unwrap_or_else(|| configured.to_owned())
 }
 
 /// Why a seed or node key file could not be read or written.
