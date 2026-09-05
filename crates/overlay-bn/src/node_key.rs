@@ -77,4 +77,14 @@ mod tests {
             assert_eq!(mode, 0o600, "{mode:04o}");
         }
     }
+    #[test]
+    fn node_key_second_load_returns_same_peer_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("node.key");
+
+        let first = NodeKey::load_or_create(&path).unwrap().peer_id();
+        let second = NodeKey::load_or_create(&path).unwrap().peer_id();
+
+        assert_eq!(first, second);
+    }
 }
