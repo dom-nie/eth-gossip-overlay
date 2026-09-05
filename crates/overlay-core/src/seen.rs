@@ -124,4 +124,15 @@ mod tests {
 
         assert!(cache.insert(id(1)));
     }
+
+    #[test]
+    fn entry_alive_just_before_ttl() {
+        let clock = FakeClock::new();
+        let mut cache = cache(Duration::from_secs(60), 100, &clock);
+        cache.insert(id(1));
+
+        clock.advance(Duration::from_secs(60) - Duration::from_millis(1));
+
+        assert!(!cache.insert(id(1)));
+    }
 }
