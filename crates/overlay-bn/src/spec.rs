@@ -11,12 +11,13 @@ use tokio::sync::watch;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "UPPERCASE")]
 pub struct SpecSnapshot {
-    /// `DATA_COLUMN_SIDECAR_SUBNET_COUNT`: how many `data_column_sidecar_*` topics a fork
-    /// digest has. The sidecar subscribes to all of them.
+    /// `DATA_COLUMN_SIDECAR_SUBNET_COUNT`: how many column subnets there are. Equal to
+    /// `NUMBER_OF_COLUMNS` on every known network, which T-083 asserts.
     #[serde(deserialize_with = "quoted")]
     pub data_column_sidecar_subnet_count: u64,
-    /// `NUMBER_OF_COLUMNS`: how many columns a block's blobs are extended into; half of it is
-    /// the repair threshold.
+    /// `NUMBER_OF_COLUMNS`: how many columns a block's blobs are extended into. It sizes the
+    /// mirror's extra column subscriptions (T-015) and, halved, is the repair threshold
+    /// (T-083).
     #[serde(deserialize_with = "quoted")]
     pub number_of_columns: u64,
     /// `NUMBER_OF_CUSTODY_GROUPS`: how many groups the columns are assigned to for custody.
