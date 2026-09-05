@@ -218,10 +218,12 @@ pub struct SelfIdentity {
 }
 
 const HOSTNAME_ENV: &str = "FLEET_OVERLAY_HOSTNAME";
+const REGION_ENV: &str = "FLEET_OVERLAY_REGION";
 
 /// Works out who this process is: `FLEET_OVERLAY_HOSTNAME` if set, else `gethostname`, looked
-/// up in `roster`. Both sources are passed in so this crate never reads the real environment
-/// and a test can stage any combination.
+/// up in `roster`. `FLEET_OVERLAY_REGION` overrides the entry's region. Both sources are
+/// passed in so this crate never reads the real environment and a test can stage any
+/// combination.
 pub fn resolve_self(
     roster: &Roster,
     env: &dyn Fn(&str) -> Option<String>,
@@ -233,9 +235,12 @@ pub fn resolve_self(
         .ok_or_else(|| RosterError::UnknownHost {
             hostname: hostname.clone(),
         })?;
+    let region = env(REGION_ENV)
+        .map(Region)
+        .unwrap_or_else(|| entry.region.clone());
     Ok(SelfIdentity {
         hostname,
-        region: entry.region.clone(),
+        region,
         site: entry.site.clone(),
     })
 }
