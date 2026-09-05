@@ -514,4 +514,23 @@ mod tests {
         let refilled = h.step_accepted(item(Class::Small, 8001)).await;
         assert_eq!(refilled, Some(PublishOutcome::Published));
     }
+
+    #[tokio::test]
+    async fn large_beyond_300_per_s_is_rate_limited_and_counted() {
+        let mut h = Harness::new();
+        for n in 0..300 {
+            let outcome = h.step_accepted(item(Class::Large, n)).await;
+            assert_eq!(outcome, Some(PublishOutcome::Published), "item {n}");
+        }
+
+        let outcome = h.step_accepted(item(Class::Large, 300)).await;
+
+        assert_eq!(outcome, Some(PublishOutcome::RateLimited));
+        assert_eq!(h.stats.count("rate_limited", Class::Large), 1);
+        assert_eq!(h.stats.count("published", Class::Large), 300);
+        assert!(h.commands.try_recv().is_err());
+        // The small bucket is untouched.
+        let small = h.step_accepted(item(Class::Small, 301)).await;
+        assert_eq!(small, Some(PublishOutcome::Published));
+    }
 }
