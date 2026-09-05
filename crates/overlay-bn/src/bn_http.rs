@@ -357,4 +357,40 @@ mod tests {
 
         assert_eq!(got, "Lighthouse/v8.2.2-e423a66/x86_64-linux");
     }
+
+    fn peer_row(id: &PeerId, is_trusted: bool) -> serde_json::Value {
+        json!({
+            "peer_id": id.to_string(),
+            "peer_info": {
+                "score": {"score": 0.0},
+                "client": {"kind": "Lighthouse", "version": "v8.2.2"},
+                "connection_status": {"status": "connected", "connections_in": 1},
+                "is_trusted": is_trusted,
+                "sync_status": "Synced"
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn peer_info_finds_own_peer_id_and_reads_is_trusted() {
+        let (own, other) = (peer_id(1), peer_id(2));
+        for trusted in [true, false] {
+            let server = MockServer::start().await;
+            serve(
+                &server,
+                "/lighthouse/peers",
+                json!([peer_row(&other, !trusted), peer_row(&own, trusted)]),
+            )
+            .await;
+
+            let got = client(&server).peer_info(&own).await.unwrap();
+
+            assert_eq!(
+                got,
+                Some(PeerInfo {
+                    is_trusted: trusted
+                })
+            );
+        }
+    }
 }
