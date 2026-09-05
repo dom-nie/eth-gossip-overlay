@@ -74,6 +74,9 @@ pub enum BnEvent {
         /// The beacon node's peer id for this connection.
         peer_id: PeerId,
     },
+    /// The connection went away. Follows a `Connected`; a dial that never succeeded emits
+    /// nothing.
+    Disconnected,
     /// The beacon node subscribed to `topic`.
     Subscribed {
         /// The beacon node.
@@ -444,5 +447,32 @@ mod tests {
         assert_eq!(topic, BLOCK_TOPIC);
         assert_eq!(data, b"hello");
         assert_eq!(bn_id, id);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn link_reconnects_after_fake_bn_restart_with_new_peer_id() {
+        let bn = FakeBn::start().await;
+        let mut harness = spawn(link_config(&bn), &bn);
+        let old_id = bn.peer_id();
+        assert_eq!(
+            next_event(&mut harness.control).await,
+            BnEvent::Connected { peer_id: old_id }
+        );
+
+        let port = bn.port();
+        let http = bn.shutdown().await;
+        assert_eq!(
+            next_event(&mut harness.control).await,
+            BnEvent::Disconnected
+        );
+        let bn = FakeBn::start_on(port, http).await;
+
+        assert_ne!(bn.peer_id(), old_id);
+        assert_eq!(
+            next_event(&mut harness.control).await,
+            BnEvent::Connected {
+                peer_id: bn.peer_id()
+            }
+        );
     }
 }

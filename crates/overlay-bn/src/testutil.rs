@@ -33,6 +33,7 @@ use lighthouse_network::types::SnappyTransform;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 use types::ChainSpec;
 use url::Url;
 use wiremock::matchers::{method, path};
@@ -50,6 +51,7 @@ const WAIT: Duration = Duration::from_secs(5);
 /// way `--trusted-peers` does it on the real node, and every message received is reported
 /// `Accept` so gossipsub behaves as the beacon node's does.
 pub struct FakeBn {
+    task: JoinHandle<()>,
     peer_id: PeerId,
     port: u16,
     http: MockServer,
@@ -93,8 +95,9 @@ impl FakeBn {
         let peer_id = *swarm.local_peer_id();
         let (commands, command_rx) = mpsc::channel(64);
         let (received_tx, received) = mpsc::channel(8192);
-        tokio::spawn(drive(swarm, command_rx, received_tx));
+        let task = tokio::spawn(drive(swarm, command_rx, received_tx));
         let bn = Self {
+            task,
             peer_id,
             port,
             http,
@@ -108,6 +111,11 @@ impl FakeBn {
     /// The identity the mock serves and the swarm runs under.
     pub fn peer_id(&self) -> PeerId {
         self.peer_id
+    }
+
+    /// The loopback port the swarm listens on.
+    pub fn port(&self) -> u16 {
+        self.port
     }
 
     /// What `bn.libp2p_addr` would say: the listen address without a peer id.
@@ -131,6 +139,14 @@ impl FakeBn {
     /// Everything the fake receives, in order. Taken once per fake.
     pub fn received(&mut self) -> mpsc::Receiver<Received> {
         self.received.take().expect("received() is taken once")
+    }
+
+    /// Drops the swarm, which closes its connections and frees the port, and hands back the
+    /// mock server so a replacement can be started behind the same HTTP endpoint.
+    pub async fn shutdown(self) -> MockServer {
+        self.task.abort();
+        let _ = self.task.await;
+        self.http
     }
 
     async fn remount(&self) {
