@@ -90,6 +90,13 @@ mod tests {
         }
     }
 
+    fn unsubscribed(topic: &str) -> BnEvent {
+        BnEvent::Unsubscribed {
+            peer: *BN,
+            topic: topic.to_owned(),
+        }
+    }
+
     /// The sets a plain mirror of `topics` has.
     fn sets(topics: &[&str]) -> SubscriptionSets {
         SubscriptionSets::mirrored(topics.iter().map(|t| Topic::parse(t).unwrap()).collect())
@@ -109,5 +116,22 @@ mod tests {
             ]
         );
         assert_eq!(mirror.sets(), &sets(&[ATTESTATION_3]));
+    }
+
+    #[test]
+    fn unsubscribe_event_produces_unsubscribe_and_changed_sets() {
+        let mut mirror = Mirror::new(*BN);
+        mirror.on_bn_event(&subscribed(ATTESTATION_3));
+
+        let actions = mirror.on_bn_event(&unsubscribed(ATTESTATION_3));
+
+        assert_eq!(
+            actions,
+            vec![
+                MirrorAction::Unsubscribe(ATTESTATION_3.to_owned()),
+                MirrorAction::Changed(sets(&[])),
+            ]
+        );
+        assert_eq!(mirror.sets(), &sets(&[]));
     }
 }
