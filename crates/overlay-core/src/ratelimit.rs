@@ -58,6 +58,8 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::*;
+    use crate::config::PublishRateLimit;
+    use crate::topic::Class;
 
     #[test]
     fn token_bucket_allows_burst_then_refills_at_rate() {
@@ -95,5 +97,44 @@ mod tests {
         assert!(!bucket.try_take(4, later));
         assert!(bucket.try_take(3, later));
         assert!(!bucket.try_take(1, later));
+    }
+
+    fn limits() -> PublishRateLimit {
+        PublishRateLimit {
+            small_per_s: 2,
+            large_per_s: 1,
+            bytes_per_s: 10,
+        }
+    }
+
+    #[test]
+    fn publish_limits_burst_is_one_second_of_each_rate() {
+        let start = Instant::now();
+        let mut limits = PublishLimits::new(&limits(), start);
+
+        assert!(limits.admit(Class::Small, 0, start));
+        assert!(limits.admit(Class::Small, 0, start));
+        assert!(!limits.admit(Class::Small, 0, start));
+        assert!(limits.admit(Class::Large, 10, start));
+        assert!(!limits.admit(Class::Large, 0, start));
+
+        let later = start + Duration::from_secs(1);
+        assert!(limits.admit(Class::Large, 10, later));
+        assert!(!limits.admit(Class::Small, 1, later));
+    }
+
+    #[test]
+    fn publish_limits_refused_item_takes_no_tokens() {
+        let start = Instant::now();
+        let mut limits = PublishLimits::new(&limits(), start);
+
+        // The large bucket has its token but the bytes bucket cannot cover the payload.
+        assert!(!limits.admit(Class::Large, 11, start));
+        // Nothing was charged: the token is still there for a payload that fits.
+        assert!(limits.admit(Class::Large, 4, start));
+        // The large bucket is empty; the refusal leaves the six bytes for the small class.
+        assert!(!limits.admit(Class::Large, 1, start));
+        assert!(limits.admit(Class::Small, 6, start));
+        assert!(!limits.admit(Class::Small, 1, start));
     }
 }
