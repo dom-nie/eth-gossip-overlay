@@ -32,7 +32,9 @@ mod tests {
     use std::convert::Infallible;
     use std::time::Duration;
 
-    use rand::TryRng;
+    use proptest::prelude::*;
+    use rand::rngs::StdRng;
+    use rand::{SeedableRng, TryRng};
 
     use super::*;
 
@@ -66,5 +68,29 @@ mod tests {
             delays,
             [100, 200, 400, 800, 1000, 1000].map(Duration::from_millis)
         );
+    }
+
+    proptest! {
+        #[test]
+        fn backoff_jitter_stays_within_documented_bounds(
+            min_ms in 1u64..=60_000,
+            max_ms in 1u64..=600_000,
+            seed: u64,
+        ) {
+            let min = Duration::from_millis(min_ms);
+            let max = Duration::from_millis(max_ms.max(min_ms));
+            let mut jittered = Backoff::new(min, max);
+            let mut plain = Backoff::new(min, max);
+            let mut rng = StdRng::seed_from_u64(seed);
+
+            let mut moved = false;
+            for _ in 0..8 {
+                let full = plain.next_delay(&mut NoJitter);
+                let delay = jittered.next_delay(&mut rng);
+                prop_assert!(full / 2 <= delay && delay <= full, "{delay:?} outside [{:?}, {full:?}]", full / 2);
+                moved |= delay != full;
+            }
+            prop_assert!(moved, "eight seeded draws never moved the delay off the un-jittered value");
+        }
     }
 }
