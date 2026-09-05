@@ -235,6 +235,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    use libp2p::gossipsub::{self, PublishError};
     use overlay_core::msgid::MessageId;
     use overlay_core::pubqueue::PublishItem;
     use overlay_core::time::FakeClock;
@@ -388,6 +389,54 @@ mod tests {
         assert_eq!(outcome, Some(PublishOutcome::SuppressedInjectOff));
         assert_eq!(h.stats.count("suppressed_inject_off", Class::Small), 1);
         assert_eq!(h.stats.total(), 1);
+        assert!(h.commands.try_recv().is_err());
+    }
+
+    /// The next command, which has to be a `Publish`, answered with `result`; returns the
+    /// topic and payload it carried.
+    async fn answer(
+        commands: &mut mpsc::Receiver<BnCommand>,
+        result: Result<gossipsub::MessageId, PublishError>,
+    ) -> (String, Vec<u8>) {
+        match commands.recv().await.unwrap() {
+            BnCommand::Publish { topic, data, reply } => {
+                reply.send(result).unwrap();
+                (topic, data)
+            }
+            other => panic!("expected Publish, got {other:?}"),
+        }
+    }
+
+    /// Yields to the drain task until `done` holds. No sleep: on the test runtime a yield is
+    /// enough for the task to take its turn.
+    async fn until(mut done: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !done() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the drain task never got there");
+    }
+
+    #[tokio::test]
+    async fn flipping_inject_on_at_runtime_resumes_publishing() {
+        let mut h = Harness::new();
+        h.inject.store(false, Ordering::Relaxed);
+        h.spawn();
+        h.handle.enqueue(item(Class::Small, 0));
+        until(|| h.stats.count("suppressed_inject_off", Class::Small) == 1).await;
+
+        h.inject.store(true, Ordering::Relaxed);
+        h.handle.enqueue(item(Class::Small, 1));
+
+        let (_, data) = answer(
+            &mut h.commands,
+            Ok(gossipsub::MessageId::from(&[0u8; 20][..])),
+        )
+        .await;
+        assert_eq!(data, item(Class::Small, 1).payload);
+        assert_eq!(h.stats.count("suppressed_inject_off", Class::Small), 1);
         assert!(h.commands.try_recv().is_err());
     }
 }
