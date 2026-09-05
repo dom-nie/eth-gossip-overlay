@@ -797,4 +797,26 @@ log:
             "{err}"
         );
     }
+
+    #[test]
+    fn load_names_file_and_field_on_invalid_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        for (doc, field) in [
+            (
+                "classes: { large: { chunk_bytes: 2000 } }",
+                "classes.large.chunk_bytes",
+            ),
+            ("log: { format: logfmt }", "log.format"),
+        ] {
+            std::fs::write(&path, doc).unwrap();
+
+            let message = Config::load(&path).unwrap_err().to_string();
+
+            assert!(
+                message.contains(&path.display().to_string()) && message.contains(field),
+                "{doc}: {message}"
+            );
+        }
+    }
 }
