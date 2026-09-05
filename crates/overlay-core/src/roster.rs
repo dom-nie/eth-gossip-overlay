@@ -149,4 +149,18 @@ hosts:
         let nyc = roster.get(&host("bn-nyc1-01")).unwrap();
         assert_eq!(nyc.addr, addr("[2001:db8:1::120]:7788"));
     }
+
+    #[test]
+    fn duplicate_hostname_is_rejected() {
+        let doc = r#"hosts:
+  - { hostname: bn-1, region: eu, addr: "192.0.2.1:7788" }
+  - { hostname: bn-2, region: eu, addr: "192.0.2.2:7788" }
+  - { hostname: bn-1, region: us, addr: "192.0.2.3:7788" }
+"#;
+
+        let err = Roster::from_yaml(doc).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("bn-1") && message.contains("duplicate"), "{message}");
+    }
 }
