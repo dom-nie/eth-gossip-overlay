@@ -27,12 +27,13 @@ use overlay_core::backoff::Backoff;
 use overlay_core::config::Bn;
 use prometheus_client::registry::Registry;
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
-use crate::bn_http::{BnClient, BnHttpError};
+use crate::bn_http::{BnClient, BnHttpError, PeerInfo};
 use crate::gossip::{BnLinkConfig, GossipBehaviour, build_behaviour};
 use crate::node_key::NodeKey;
+use crate::spec::SpecSnapshot;
 
 /// The first delay before redialling a beacon node that went away; §5.3 uses the same
 /// numbers for overlay reconnects.
@@ -76,6 +77,15 @@ pub enum BnEvent {
     Connected {
         /// The beacon node's peer id for this connection.
         peer_id: PeerId,
+    },
+    /// What the HTTP probe found after a `Connected`. A field is `None` when its request
+    /// failed; the connection stays up regardless.
+    BnInfo {
+        /// The beacon node's raw version string. T-018 parses it.
+        version: Option<String>,
+        /// Whether `/lighthouse/peers` lists the sidecar as trusted; `None` when the endpoint
+        /// failed or the sidecar is not listed.
+        trusted: Option<bool>,
     },
     /// The connection went away. Follows a `Connected`; a dial that never succeeded emits
     /// nothing.
@@ -132,26 +142,30 @@ pub struct BnLink {
 
 impl BnLink {
     /// Builds the swarm under the node key and starts the task. The first dial happens at
-    /// once; every later one waits for the backoff.
+    /// once; every later one waits for the backoff. `registry` receives gossipsub's metrics.
     pub fn spawn(
         cfg: LinkConfig,
         node_key: &NodeKey,
         bn_client: BnClient,
         registry: &mut Registry,
         control: mpsc::Sender<BnEvent>,
+        spec: watch::Sender<SpecSnapshot>,
         commands: mpsc::Receiver<BnCommand>,
     ) -> Self {
         let connected = Arc::new(AtomicBool::new(false));
         let link = Link {
             swarm: build_swarm(&cfg.gossip, node_key, registry),
             backoff: Backoff::new(cfg.backoff_min, cfg.backoff_max),
+            own_peer_id: node_key.peer_id(),
             cfg,
             bn_client,
             control,
+            spec,
             commands,
             connected: connected.clone(),
             bn_peer: None,
             reconnect: None,
+            probe: None,
         };
         Self {
             task: tokio::spawn(link.run()),
@@ -163,17 +177,27 @@ impl BnLink {
 /// A future the loop polls only while it is armed.
 type Pending<T> = Option<Pin<Box<dyn Future<Output = T> + Send>>>;
 
+/// The three answers of the connect probe, in the order they are requested.
+type Probe = (
+    Result<String, BnHttpError>,
+    Result<SpecSnapshot, BnHttpError>,
+    Result<Option<PeerInfo>, BnHttpError>,
+);
+
 struct Link {
     swarm: Swarm<GossipBehaviour>,
     cfg: LinkConfig,
     bn_client: BnClient,
+    own_peer_id: PeerId,
     control: mpsc::Sender<BnEvent>,
+    spec: watch::Sender<SpecSnapshot>,
     commands: mpsc::Receiver<BnCommand>,
     connected: Arc<AtomicBool>,
     backoff: Backoff,
     /// The beacon node this link is connected to, while it is.
     bn_peer: Option<PeerId>,
     reconnect: Pending<Result<PeerId, BnHttpError>>,
+    probe: Pending<Probe>,
 }
 
 impl Link {
@@ -189,6 +213,10 @@ impl Link {
                 identity = armed(&mut self.reconnect) => {
                     self.reconnect = None;
                     self.on_identity(identity);
+                }
+                probe = armed(&mut self.probe) => {
+                    self.probe = None;
+                    self.on_probe(probe);
                 }
             }
         }
@@ -233,13 +261,7 @@ impl Link {
 
     fn on_swarm_event(&mut self, event: SwarmEvent<gossipsub::Event>) {
         match event {
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                self.swarm.behaviour_mut().add_explicit_peer(&peer_id);
-                self.bn_peer = Some(peer_id);
-                self.connected.store(true, Ordering::Relaxed);
-                self.backoff.reset();
-                self.emit(BnEvent::Connected { peer_id });
-            }
+            SwarmEvent::ConnectionEstablished { peer_id, .. } => self.on_connected(peer_id),
             SwarmEvent::ConnectionClosed {
                 peer_id,
                 num_established: 0,
@@ -266,16 +288,55 @@ impl Link {
         }
     }
 
+    /// Makes the beacon node the explicit peer, reports it, and starts the HTTP probe, which
+    /// runs beside the swarm rather than in front of it.
+    fn on_connected(&mut self, peer_id: PeerId) {
+        self.swarm.behaviour_mut().add_explicit_peer(&peer_id);
+        self.bn_peer = Some(peer_id);
+        self.connected.store(true, Ordering::Relaxed);
+        self.backoff.reset();
+        self.emit(BnEvent::Connected { peer_id });
+        let client = self.bn_client.clone();
+        let own = self.own_peer_id;
+        self.probe = Some(Box::pin(async move {
+            tokio::join!(client.version(), client.spec(), client.peer_info(&own))
+        }));
+    }
+
     /// The explicit peer is removed before the redial so gossipsub does not dial it too, with
-    /// no address, on its own schedule.
+    /// no address, on its own schedule. A probe still running is for a connection that is
+    /// gone; the next connect starts another.
     fn on_closed(&mut self, peer_id: PeerId, cause: Option<ConnectionError>) {
         tracing::warn!(%peer_id, ?cause, "connection to the beacon node closed");
         self.swarm.behaviour_mut().remove_explicit_peer(&peer_id);
         if self.bn_peer.take().is_some() {
             self.connected.store(false, Ordering::Relaxed);
+            self.probe = None;
             self.emit(BnEvent::Disconnected);
         }
         self.retry_later();
+    }
+
+    /// A failed request is a `None` field and a warning, never a disconnect: a slow HTTP port
+    /// is no reason to drop gossip.
+    fn on_probe(&mut self, (version, spec, peer_info): Probe) {
+        for err in [
+            version.as_ref().err(),
+            spec.as_ref().err(),
+            peer_info.as_ref().err(),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            tracing::warn!(%err, "connect probe failed");
+        }
+        if let Ok(snapshot) = spec {
+            self.spec.send_replace(snapshot);
+        }
+        self.emit(BnEvent::BnInfo {
+            version: version.ok(),
+            trusted: peer_info.ok().flatten().map(|peer| peer.is_trusted),
+        });
     }
 
     fn on_command(&mut self, command: BnCommand) {
@@ -354,7 +415,7 @@ mod tests {
 
     use prometheus_client::registry::Registry;
     use serde_json::json;
-    use wiremock::{MockServer, ResponseTemplate};
+    use wiremock::MockServer;
 
     use super::*;
     use crate::bn_http::BnClient;
