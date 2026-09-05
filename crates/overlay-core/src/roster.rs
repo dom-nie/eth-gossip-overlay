@@ -335,4 +335,13 @@ hosts:
 
         assert_eq!(names(&eu), ["bn-10", "bn-9", "bn-B", "bn-a"]);
     }
+
+    #[test]
+    fn regions_lists_each_region_once() {
+        let roster = Roster::from_yaml(APPENDIX_A).unwrap();
+
+        let regions: Vec<_> = roster.regions().into_iter().collect();
+
+        assert_eq!(regions, [region("eu"), region("us")]);
+    }
 }
