@@ -7,6 +7,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use overlay_bn::node_key::NodeKey;
 use overlay_core::config::Config;
+use overlay_core::identity::create_secret_file;
 
 #[derive(Parser)]
 #[command(
@@ -31,6 +32,15 @@ enum Command {
         #[arg(long, default_value = "/etc/fleet-overlay/config.yaml")]
         config: PathBuf,
     },
+    /// Create a new fleet seed from the OS random number generator.
+    ///
+    /// Run once per fleet and copy the file to every host over a secure channel. Refuses to
+    /// overwrite an existing file.
+    GenSeed {
+        /// Where to write the seed, mode 0600.
+        #[arg(long, default_value = "/etc/fleet-overlay/seed")]
+        out: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -49,6 +59,9 @@ fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             let config = Config::load(&config)?;
             let key = NodeKey::load_or_create(&config.bn.node_key_file)?;
             println!("{}", key.peer_id());
+        }
+        Command::GenSeed { out } => {
+            create_secret_file(&out)?;
         }
     }
     Ok(())
