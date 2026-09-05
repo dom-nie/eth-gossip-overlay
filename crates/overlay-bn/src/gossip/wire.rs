@@ -73,3 +73,26 @@ mod drift {
         assert_eq!(advertised, PROTOCOL_IDS);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn max_payload_size_mismatch_is_reported() {
+        assert_eq!(
+            check_max_payload_size(SpecSnapshot::MAINNET.max_payload_size),
+            Ok(())
+        );
+
+        let bn = SpecSnapshot::MAINNET.max_payload_size + 1;
+
+        assert_eq!(
+            check_max_payload_size(bn),
+            Err(SizeMismatch {
+                compiled: MAX_TRANSMIT_SIZE,
+                bn: max_transmit_size_for(bn),
+            })
+        );
+    }
+}
