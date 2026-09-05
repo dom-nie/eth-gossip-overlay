@@ -171,4 +171,12 @@ mod tests {
         assert_eq!(compute(TOPIC, HELLO_SNAPPY, 5).branch, Branch::Valid);
         assert_eq!(compute(TOPIC, HELLO_SNAPPY, 4).branch, Branch::TooLarge);
     }
+
+    #[test]
+    fn message_id_display_is_40_hex_chars() {
+        let text = MessageId(std::array::from_fn(|i| i as u8)).to_string();
+
+        assert_eq!(text.len(), 40);
+        assert_eq!(text, "000102030405060708090a0b0c0d0e0f10111213");
+    }
 }
