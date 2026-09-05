@@ -94,8 +94,9 @@ pub enum RosterError {
         /// The parser's own error, which names the offending key and its position.
         source: yaml::Error,
     },
-    /// The hostname this process resolved to has no roster entry.
-    #[error("{hostname} is not in the roster")]
+    /// The hostname this process resolved to has no roster entry and nothing in the
+    /// environment says which region it should fan out in.
+    #[error("{hostname} is not in the roster and {REGION_ENV} is not set")]
     UnknownHost {
         /// The hostname that was looked up.
         hostname: Hostname,
