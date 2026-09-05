@@ -542,4 +542,37 @@ mod tests {
         assert!(matches!(err, BnHttpError::Body { .. }), "{err:?}");
         assert!(err.to_string().contains("twelve"), "{err}");
     }
+
+    #[tokio::test]
+    async fn all_endpoints_use_the_identity_urls_origin() {
+        let server = MockServer::start().await;
+        let own = peer_id(1);
+        for (at, body) in [
+            (
+                "/eth/v1/node/identity",
+                json!({"data": {"peer_id": own.to_string()}}),
+            ),
+            (
+                "/eth/v1/node/version",
+                json!({"data": {"version": "Lighthouse/v8.2.2"}}),
+            ),
+            ("/lighthouse/peers", json!([peer_row(&own, true)])),
+            ("/eth/v1/config/spec", json!({"data": spec_data()})),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(at))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let client = client_at(&format!("{}/eth/v1/node/identity", server.uri()));
+
+        client.peer_id().await.unwrap();
+        client.version().await.unwrap();
+        client.peer_info(&own).await.unwrap();
+        client.spec().await.unwrap();
+
+        server.verify().await;
+    }
 }
