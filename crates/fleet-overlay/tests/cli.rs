@@ -1,31 +1,32 @@
 //! The `fleet-overlay` subcommands, driven through the built binary.
 
+use std::io;
 use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin;
 use overlay_bn::node_key::PeerId;
 
 /// A config whose node key lives in `dir`; every other key keeps its default. No seed, no
 /// roster.
-fn config_in(dir: &Path) -> PathBuf {
+fn config_in(dir: &Path) -> io::Result<PathBuf> {
     let path = dir.join("config.yaml");
     let node_key = dir.join("node.key");
     std::fs::write(
         &path,
         format!("bn: {{ node_key_file: {} }}\n", node_key.display()),
-    )
-    .unwrap();
-    path
+    )?;
+    Ok(path)
 }
 
 fn fleet_overlay() -> Command {
-    Command::cargo_bin("fleet-overlay").unwrap()
+    Command::new(cargo_bin("fleet-overlay"))
 }
 
 #[test]
 fn peer_id_subcommand_prints_base58_and_exits_zero_without_seed_or_roster() {
     let dir = tempfile::tempdir().unwrap();
-    let config = config_in(dir.path());
+    let config = config_in(dir.path()).unwrap();
 
     let output = fleet_overlay()
         .args(["peer-id", "--config"])
