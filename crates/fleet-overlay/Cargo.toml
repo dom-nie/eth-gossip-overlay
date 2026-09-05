@@ -1,0 +1,16 @@
+[package]
+name = "fleet-overlay"
+description = "Sidecar binary for a private gossip overlay between Lighthouse beacon nodes."
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "fleet-overlay"
+path = "src/bin/fleet-overlay.rs"
+
+[[bin]]
+name = "fleet-overlayctl"
+path = "src/bin/fleet-overlayctl.rs"
+
+[lints]
+workspace = true

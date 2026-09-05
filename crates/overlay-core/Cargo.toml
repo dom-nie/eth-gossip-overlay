@@ -1,0 +1,8 @@
+[package]
+name = "overlay-core"
+description = "Pure overlay logic: routing, batching, striping, codecs. No sockets, no channels."
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true

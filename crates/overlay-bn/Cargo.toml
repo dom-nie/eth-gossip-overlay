@@ -1,0 +1,8 @@
+[package]
+name = "overlay-bn"
+description = "The link to the local Lighthouse beacon node: gossipsub, req/resp, HTTP API."
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true

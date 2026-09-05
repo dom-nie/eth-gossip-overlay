@@ -1,0 +1,8 @@
+[package]
+name = "overlay-transport"
+description = "QUIC transport between sidecars: pinned-key TLS, endpoint, connection manager."
+version.workspace = true
+edition.workspace = true
+
+[lints]
+workspace = true
