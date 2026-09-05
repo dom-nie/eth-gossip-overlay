@@ -220,6 +220,11 @@ impl Publisher {
                 self.stats.published(class);
                 PublishOutcome::Published
             }
+            Err(PublishError::Duplicate) => {
+                tracing::debug!(id = %item.id, topic = %item.topic, "gossipsub already had it");
+                self.stats.error(class, "duplicate");
+                PublishOutcome::Duplicate
+            }
             Err(err) => {
                 let reason = reason(&err);
                 tracing::warn!(%err, id = %item.id, topic = %item.topic, "publish refused");
