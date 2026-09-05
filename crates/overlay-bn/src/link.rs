@@ -686,9 +686,9 @@ mod tests {
     }
 
     /// The sidecar never subscribes here, so it has no mesh for the topic, and the publish
-    /// still reaches the fake. That it is explicit-peer forwarding rather than gossipsub's
-    /// fanout fill (a subscribed peer is a fanout candidate either way) is only observable
-    /// against a real beacon node: T-018 conformance item 4.
+    /// still reaches the fake. Whether that is explicit-peer forwarding or gossipsub's fanout
+    /// fill cannot be separated while the beacon node is the sidecar's only peer: a
+    /// subscribed peer is a fanout candidate either way, against any BN.
     #[tokio::test(flavor = "multi_thread")]
     async fn publish_without_sidecar_subscription_reaches_the_bn() {
         let mut bn = FakeBn::start().await;
