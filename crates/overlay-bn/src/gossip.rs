@@ -125,6 +125,14 @@ mod tests {
     }
 
     #[test]
+    fn validation_mode_is_anonymous() {
+        assert!(
+            matches!(config(&cfg()).validation_mode(), ValidationMode::Anonymous),
+            "eth2 gossip carries no signature, sequence number or author; anything else is rejected"
+        );
+    }
+
+    #[test]
     fn max_transmit_size_equals_lighthouse() {
         let lighthouse = types::ChainSpec::mainnet().max_message_size() as u64;
 
