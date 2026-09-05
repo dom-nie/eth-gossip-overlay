@@ -96,4 +96,15 @@ mod tests {
         assert!(cache.insert(id(1)));
         assert!(!cache.insert(id(1)));
     }
+
+    #[test]
+    fn contains_reflects_insert() {
+        let mut cache = cache(Duration::from_secs(60), 100, &FakeClock::new());
+
+        assert!(!cache.contains(&id(1)));
+        cache.insert(id(1));
+
+        assert!(cache.contains(&id(1)));
+        assert!(!cache.contains(&id(2)));
+    }
 }
