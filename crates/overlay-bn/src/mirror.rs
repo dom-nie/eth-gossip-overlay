@@ -27,11 +27,12 @@ pub enum MirrorAction {
     Changed(SubscriptionSets),
 }
 
-/// The beacon node's subscriptions as the link reports them. Events from any other peer are
-/// ignored: the sidecar has one peer, but the event carries an id, so it is checked.
-#[derive(Debug)]
+/// The beacon node's subscriptions as the link reports them. Ignores subscription events
+/// until a `Connected` names the beacon node, and after that any from another peer: the
+/// sidecar has one peer, but the event carries an id, so it is checked.
+#[derive(Debug, Default)]
 pub struct Mirror {
-    bn: PeerId,
+    bn: Option<PeerId>,
     /// Every topic string the beacon node is subscribed to, with its parse. One that does not
     /// parse is still mirrored to gossipsub; it only stays out of the sets.
     topics: BTreeMap<String, Option<Topic>>,
@@ -42,14 +43,9 @@ pub struct Mirror {
 }
 
 impl Mirror {
-    /// A mirror of nothing yet, filtering on `bn` until a `Connected` names the real id.
-    pub fn new(bn: PeerId) -> Self {
-        Self {
-            bn,
-            topics: BTreeMap::new(),
-            sets: SubscriptionSets::default(),
-            warned: BTreeSet::new(),
-        }
+    /// A mirror of nothing yet, with no beacon node to mirror until the link connects.
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// The current sets.
@@ -61,11 +57,13 @@ impl Mirror {
     pub fn on_bn_event(&mut self, ev: &BnEvent) -> Vec<MirrorAction> {
         match ev {
             BnEvent::Connected { peer_id } => {
-                self.bn = *peer_id;
+                self.bn = Some(*peer_id);
                 Vec::new()
             }
-            BnEvent::Subscribed { peer, topic } if *peer == self.bn => self.subscribe(topic),
-            BnEvent::Unsubscribed { peer, topic } if *peer == self.bn => self.unsubscribe(topic),
+            BnEvent::Subscribed { peer, topic } if Some(*peer) == self.bn => self.subscribe(topic),
+            BnEvent::Unsubscribed { peer, topic } if Some(*peer) == self.bn => {
+                self.unsubscribe(topic)
+            }
             BnEvent::Disconnected => self.disconnected(),
             _ => Vec::new(),
         }
@@ -124,17 +122,15 @@ impl Mirror {
 
 /// Drives a [`Mirror`] from the link's `events` until they close or the link stops taking
 /// commands: subscriptions become [`BnCommand`]s, and every change lands on `sets`, whose
-/// receivers only ever want the latest value. `bn` is the peer id to filter on until the
-/// first `Connected` names the real one. This shell may wait on the command channel; the
-/// swarm loop is on the other end of it, and it is the one that never waits.
+/// receivers only ever want the latest value. This shell may wait on the command channel;
+/// the swarm loop is on the other end of it, and it is the one that never waits.
 pub fn run(
     mut events: mpsc::Receiver<BnEvent>,
     commands: mpsc::Sender<BnCommand>,
     sets: watch::Sender<SubscriptionSets>,
-    bn: PeerId,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut mirror = Mirror::new(bn);
+        let mut mirror = Mirror::new();
         while let Some(event) = events.recv().await {
             for action in mirror.on_bn_event(&event) {
                 let command = match action {
@@ -190,6 +186,13 @@ mod tests {
         }
     }
 
+    /// A mirror whose link has connected to `BN`.
+    fn connected() -> Mirror {
+        let mut mirror = Mirror::new();
+        mirror.on_bn_event(&BnEvent::Connected { peer_id: *BN });
+        mirror
+    }
+
     /// The sets a plain mirror of `topics` has.
     fn mirrored(topics: &[&str]) -> SubscriptionSets {
         SubscriptionSets::mirrored(topics.iter().map(|t| Topic::parse(t).unwrap()).collect())
@@ -211,7 +214,7 @@ mod tests {
             commands_rx,
         );
         let (sets, watch) = watch::channel(SubscriptionSets::default());
-        run(link.events, commands, sets, bn.peer_id());
+        run(link.events, commands, sets);
         watch
     }
 
@@ -236,7 +239,7 @@ mod tests {
 
     #[test]
     fn subscribe_event_produces_subscribe_action_and_changed_sets() {
-        let mut mirror = Mirror::new(*BN);
+        let mut mirror = connected();
 
         let actions = mirror.on_bn_event(&subscribed(ATTESTATION_3));
 
@@ -252,7 +255,7 @@ mod tests {
 
     #[test]
     fn unsubscribe_event_produces_unsubscribe_and_changed_sets() {
-        let mut mirror = Mirror::new(*BN);
+        let mut mirror = connected();
         mirror.on_bn_event(&subscribed(ATTESTATION_3));
 
         let actions = mirror.on_bn_event(&unsubscribed(ATTESTATION_3));
@@ -269,7 +272,7 @@ mod tests {
 
     #[test]
     fn duplicate_subscribe_is_idempotent_no_actions() {
-        let mut mirror = Mirror::new(*BN);
+        let mut mirror = connected();
         mirror.on_bn_event(&subscribed(ATTESTATION_3));
 
         let actions = mirror.on_bn_event(&subscribed(ATTESTATION_3));
@@ -280,7 +283,7 @@ mod tests {
 
     #[test]
     fn unsubscribe_of_unknown_topic_produces_no_actions() {
-        let mut mirror = Mirror::new(*BN);
+        let mut mirror = connected();
 
         let actions = mirror.on_bn_event(&unsubscribed(ATTESTATION_3));
 
@@ -290,7 +293,7 @@ mod tests {
 
     #[test]
     fn disconnected_clears_both_sets_and_emits_unsubscribe_for_each_topic() {
-        let mut mirror = Mirror::new(*BN);
+        let mut mirror = connected();
         mirror.on_bn_event(&subscribed(ATTESTATION_3));
         mirror.on_bn_event(&subscribed(BLOCK));
 
@@ -310,7 +313,7 @@ mod tests {
     /// Before the link has named the beacon node there is nobody to mirror.
     #[test]
     fn subscription_events_before_connected_are_ignored() {
-        let mut mirror = Mirror::new(*BN);
+        let mut mirror = Mirror::new();
 
         let actions = mirror.on_bn_event(&subscribed(ATTESTATION_3));
 
@@ -320,7 +323,7 @@ mod tests {
 
     #[test]
     fn events_from_a_peer_other_than_the_bn_are_ignored() {
-        let mut mirror = Mirror::new(*BN);
+        let mut mirror = connected();
         let other = Keypair::generate_ed25519().public().to_peer_id();
 
         let actions = mirror.on_bn_event(&BnEvent::Subscribed {
@@ -335,7 +338,7 @@ mod tests {
     /// A restarted beacon node has a new peer id; its subscriptions must not be ignored.
     #[test]
     fn connected_moves_the_peer_filter_to_the_new_bn() {
-        let mut mirror = Mirror::new(*BN);
+        let mut mirror = connected();
         let restarted = Keypair::generate_ed25519().public().to_peer_id();
         mirror.on_bn_event(&BnEvent::Connected { peer_id: restarted });
 
@@ -350,7 +353,7 @@ mod tests {
 
     #[test]
     fn unparsable_topic_is_still_mirrored() {
-        let mut mirror = Mirror::new(*BN);
+        let mut mirror = connected();
         let raw = "/eth2/00000000/beacon_attestation_/ssz_snappy";
 
         let actions = mirror.on_bn_event(&subscribed(raw));
@@ -365,7 +368,7 @@ mod tests {
 
     #[test]
     fn changed_carries_advertised_and_local_and_they_are_equal_without_extras() {
-        let mut mirror = Mirror::new(*BN);
+        let mut mirror = connected();
         mirror.on_bn_event(&subscribed(ATTESTATION_3));
 
         let actions = mirror.on_bn_event(&subscribed(BLOCK));
