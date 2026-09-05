@@ -58,6 +58,39 @@ pub struct FakeBn {
     commands: mpsc::Sender<Cmd>,
     received: Option<mpsc::Receiver<Received>>,
     events: mpsc::Receiver<FakeBnEvent>,
+    responses: Responses,
+}
+
+/// What the mock answers on the three endpoints the connect probe reads. The identity
+/// endpoint always serves the fake's own peer id.
+struct Responses {
+    version: ResponseTemplate,
+    spec: ResponseTemplate,
+    peers: ResponseTemplate,
+}
+
+impl Default for Responses {
+    fn default() -> Self {
+        Self {
+            version: ok_json(
+                json!({"data": {"version": "Lighthouse/v8.2.2-e423a66/x86_64-linux"}}),
+            ),
+            spec: ok_json(json!({"data": {
+                "DATA_COLUMN_SIDECAR_SUBNET_COUNT": "128",
+                "NUMBER_OF_COLUMNS": "128",
+                "NUMBER_OF_CUSTODY_GROUPS": "128",
+                "MAX_PAYLOAD_SIZE": "10485760",
+                "SECONDS_PER_SLOT": "12",
+                "SLOTS_PER_EPOCH": "32"
+            }})),
+            peers: ok_json(json!([])),
+        }
+    }
+}
+
+/// A 200 with `body` as JSON, the shape every beacon API answer has.
+pub fn ok_json(body: serde_json::Value) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(body)
 }
 
 /// A message the fake received: the topic, the payload as its snappy transform decompressed
@@ -115,6 +148,7 @@ impl FakeBn {
             commands,
             received: Some(received),
             events,
+            responses: Responses::default(),
         };
         bn.remount().await;
         bn
@@ -180,31 +214,36 @@ impl FakeBn {
         self.http
     }
 
+    /// Replaces what `/eth/v1/node/version` answers.
+    pub async fn set_version_response(&mut self, response: ResponseTemplate) {
+        self.responses.version = response;
+        self.remount().await;
+    }
+
+    /// Replaces what `/eth/v1/config/spec` answers.
+    pub async fn set_spec_response(&mut self, response: ResponseTemplate) {
+        self.responses.spec = response;
+        self.remount().await;
+    }
+
+    /// Replaces what `/lighthouse/peers` answers.
+    pub async fn set_peers_response(&mut self, response: ResponseTemplate) {
+        self.responses.peers = response;
+        self.remount().await;
+    }
+
     async fn remount(&self) {
         self.http.reset().await;
-        let spec = json!({"data": {
-            "DATA_COLUMN_SIDECAR_SUBNET_COUNT": "128",
-            "NUMBER_OF_COLUMNS": "128",
-            "NUMBER_OF_CUSTODY_GROUPS": "128",
-            "MAX_PAYLOAD_SIZE": "10485760",
-            "SECONDS_PER_SLOT": "12",
-            "SLOTS_PER_EPOCH": "32"
-        }});
+        let identity = ok_json(json!({"data": {"peer_id": self.peer_id.to_string()}}));
         for (at, response) in [
-            (
-                "/eth/v1/node/identity",
-                json!({"data": {"peer_id": self.peer_id.to_string()}}),
-            ),
-            (
-                "/eth/v1/node/version",
-                json!({"data": {"version": "Lighthouse/v8.2.2-e423a66/x86_64-linux"}}),
-            ),
-            ("/eth/v1/config/spec", spec),
-            ("/lighthouse/peers", json!([])),
+            ("/eth/v1/node/identity", identity),
+            ("/eth/v1/node/version", self.responses.version.clone()),
+            ("/eth/v1/config/spec", self.responses.spec.clone()),
+            ("/lighthouse/peers", self.responses.peers.clone()),
         ] {
             Mock::given(method("GET"))
                 .and(path(at))
-                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .respond_with(response)
                 .mount(&self.http)
                 .await;
         }

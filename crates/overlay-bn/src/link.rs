@@ -353,13 +353,15 @@ mod tests {
     use std::time::Duration;
 
     use prometheus_client::registry::Registry;
-    use wiremock::MockServer;
+    use serde_json::json;
+    use wiremock::{MockServer, ResponseTemplate};
 
     use super::*;
     use crate::bn_http::BnClient;
     use crate::gossip::BnLinkConfig;
     use crate::node_key::NodeKey;
-    use crate::testutil::{FakeBn, FakeBnEvent};
+    use crate::spec::spec_watch;
+    use crate::testutil::{FakeBn, FakeBnEvent, ok_json};
 
     /// Long enough for a dial, a noise handshake and a gossipsub exchange on a loaded CI box,
     /// short enough that a test which waits in vain still ends inside its 5 s budget.
@@ -384,6 +386,7 @@ mod tests {
         link: BnLink,
         control: mpsc::Receiver<BnEvent>,
         commands: mpsc::Sender<BnCommand>,
+        spec: watch::Receiver<SpecSnapshot>,
     }
 
     /// A loopback port nothing listens on.
@@ -415,18 +418,21 @@ mod tests {
     fn spawn_with_key(cfg: LinkConfig, bn: &FakeBn, node_key: &NodeKey) -> Harness {
         let (control_tx, control) = mpsc::channel(64);
         let (commands, commands_rx) = mpsc::channel(64);
+        let (spec_tx, spec) = spec_watch();
         let link = BnLink::spawn(
             cfg,
             node_key,
             BnClient::new(bn.http_addr(), Duration::from_secs(2)),
             &mut Registry::default(),
             control_tx,
+            spec_tx,
             commands_rx,
         );
         Harness {
             link,
             control,
             commands,
+            spec,
         }
     }
 
@@ -641,5 +647,37 @@ mod tests {
         let other = node_key(&tempfile::tempdir().unwrap()).peer_id();
         assert_ne!(other, expected);
         drop(harness);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connect_probe_emits_bn_info_and_updates_the_spec_watch() {
+        let mut bn = FakeBn::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let key = node_key(&dir);
+        bn.set_version_response(ok_json(json!({"data": {"version": "Lighthouse/v8.2.2"}})))
+            .await;
+        bn.set_spec_response(ok_json(json!({"data": {"NUMBER_OF_COLUMNS": "64"}})))
+            .await;
+        bn.set_peers_response(ok_json(json!([{
+            "peer_id": key.peer_id().to_string(),
+            "peer_info": {"is_trusted": true}
+        }])))
+        .await;
+        let mut harness = spawn_with_key(link_config(&bn), &bn, &key);
+
+        wait_for(&mut harness.control, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+        let info = next_event(&mut harness.control).await;
+
+        assert_eq!(
+            info,
+            BnEvent::BnInfo {
+                version: Some("Lighthouse/v8.2.2".to_owned()),
+                trusted: Some(true),
+            }
+        );
+        assert_eq!(harness.spec.borrow().number_of_columns, 64);
     }
 }
