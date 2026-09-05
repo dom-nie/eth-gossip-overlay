@@ -534,4 +534,19 @@ log:
         assert_eq!(absent.overlay.io_thread.pin_cpu, None);
         assert_eq!(pinned.overlay.io_thread.pin_cpu, Some(30));
     }
+
+    #[test]
+    fn previous_seed_file_is_none_unless_set() {
+        let absent = Config::from_yaml("{}").unwrap();
+        let set = Config::from_yaml(
+            "overlay: { fleet_seed_previous_file: /etc/fleet-overlay/seed.previous }",
+        )
+        .unwrap();
+
+        assert_eq!(absent.overlay.fleet_seed_previous_file, None);
+        assert_eq!(
+            set.overlay.fleet_seed_previous_file,
+            Some(PathBuf::from("/etc/fleet-overlay/seed.previous"))
+        );
+    }
 }
