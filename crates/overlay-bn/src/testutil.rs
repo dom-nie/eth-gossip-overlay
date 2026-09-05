@@ -32,8 +32,6 @@ use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, noise, yamux};
 use lighthouse_network::types::SnappyTransform;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use types::ChainSpec;
 use url::Url;
 use wiremock::matchers::{method, path};
@@ -51,7 +49,6 @@ const WAIT: Duration = Duration::from_secs(5);
 /// way `--trusted-peers` does it on the real node, and every message received is reported
 /// `Accept` so gossipsub behaves as the beacon node's does.
 pub struct FakeBn {
-    task: JoinHandle<()>,
     peer_id: PeerId,
     port: u16,
     http: MockServer,
@@ -75,8 +72,7 @@ impl FakeBn {
             .unwrap();
         let port = tokio::time::timeout(WAIT, async {
             loop {
-                if let SwarmEvent::NewListenAddr { address, .. } = swarm.select_next_some().await
-                {
+                if let SwarmEvent::NewListenAddr { address, .. } = swarm.select_next_some().await {
                     break tcp_port(&address);
                 }
             }
@@ -84,9 +80,8 @@ impl FakeBn {
         .await
         .expect("the fake beacon node never reported its listen address");
         let peer_id = *swarm.local_peer_id();
-        let task = tokio::spawn(drive(swarm));
+        tokio::spawn(drive(swarm));
         let bn = Self {
-            task,
             peer_id,
             port,
             http,
@@ -98,11 +93,6 @@ impl FakeBn {
     /// The identity the mock serves and the swarm runs under.
     pub fn peer_id(&self) -> PeerId {
         self.peer_id
-    }
-
-    /// The loopback port the swarm listens on.
-    pub fn port(&self) -> u16 {
-        self.port
     }
 
     /// What `bn.libp2p_addr` would say: the listen address without a peer id.
