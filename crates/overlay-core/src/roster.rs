@@ -550,4 +550,25 @@ hosts:
             ["bn-1", "bn-2", "bn-3"]
         );
     }
+
+    #[test]
+    fn five_regions_are_listed_in_sorted_order() {
+        let doc = r#"hosts:
+  - { hostname: bn-1, region: us-west, addr: "192.0.2.1:7788" }
+  - { hostname: bn-2, region: ap, addr: "192.0.2.2:7788" }
+  - { hostname: bn-3, region: eu, addr: "192.0.2.3:7788" }
+  - { hostname: bn-4, region: us-east, addr: "192.0.2.4:7788" }
+  - { hostname: bn-5, region: ap, addr: "192.0.2.5:7788" }
+  - { hostname: bn-6, region: sa, addr: "192.0.2.6:7788" }
+"#;
+        let roster = Roster::from_yaml(doc).unwrap();
+
+        let regions: Vec<_> = roster
+            .regions()
+            .into_iter()
+            .map(|r| r.to_string())
+            .collect();
+
+        assert_eq!(regions, ["ap", "eu", "sa", "us-east", "us-west"]);
+    }
 }
