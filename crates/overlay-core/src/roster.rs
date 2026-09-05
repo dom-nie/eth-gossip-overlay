@@ -274,4 +274,22 @@ hosts:
             );
         }
     }
+
+    #[test]
+    fn load_names_file_and_host_on_bad_addr() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("roster.yaml");
+        std::fs::write(
+            &path,
+            "hosts:\n  - { hostname: bn-1, region: eu, addr: \"192.0.2.1\" }\n",
+        )
+        .unwrap();
+
+        let message = Roster::load(&path).unwrap_err().to_string();
+
+        assert!(
+            message.contains(&path.display().to_string()) && message.contains("bn-1"),
+            "{message}"
+        );
+    }
 }
