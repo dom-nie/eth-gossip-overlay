@@ -7,6 +7,7 @@ pub mod fanout;
 pub mod identity;
 pub mod lanes;
 pub mod msgid;
+pub mod ratelimit;
 pub mod roster;
 pub mod seen;
 pub mod time;
