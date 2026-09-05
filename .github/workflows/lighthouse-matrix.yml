@@ -1,0 +1,40 @@
+name: Lighthouse matrix
+
+# Every version in overlay_bn::compat::SUPPORTED against a real beacon node: nightly, on
+# release tags, and by hand. A test in overlay-bn holds the version list below to SUPPORTED.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ten_minutes:
+        description: Also run the ten-minute sync assertion (needs T-019)
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+  MATRIX_TEN_MINUTES: ${{ inputs.ten_minutes && '1' || '0' }}
+
+jobs:
+  matrix:
+    name: Lighthouse ${{ matrix.version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["v8.2.2"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run the matrix against Lighthouse ${{ matrix.version }}
+        run: scripts/lighthouse-matrix.sh ${{ matrix.version }}
