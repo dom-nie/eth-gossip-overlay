@@ -25,14 +25,14 @@ use libp2p::core::upgrade::Version;
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub::{
     self, AllowAllSubscriptionFilter, IdentTopic, Message, MessageAcceptance, MessageAuthenticity,
-    MessageId, ValidationMode,
+    MessageId, PublishError, ValidationMode,
 };
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, noise, yamux};
 use lighthouse_network::types::SnappyTransform;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use types::ChainSpec;
 use url::Url;
@@ -104,12 +104,24 @@ pub enum FakeBnEvent {
     Connected(PeerId),
     /// The last connection to a peer closed.
     Disconnected(PeerId),
+    /// A peer subscribed to `topic`; a publish on it from the fake reaches that peer now.
+    Subscribed {
+        /// The peer.
+        peer: PeerId,
+        /// The full topic string.
+        topic: String,
+    },
 }
 
 type LighthouseBehaviour = gossipsub::Behaviour<SnappyTransform, AllowAllSubscriptionFilter>;
 
 enum Cmd {
     Subscribe(String),
+    Publish {
+        topic: String,
+        data: Vec<u8>,
+        reply: oneshot::Sender<Result<MessageId, PublishError>>,
+    },
 }
 
 impl FakeBn {
@@ -185,6 +197,22 @@ impl FakeBn {
             .send(Cmd::Subscribe(topic.to_owned()))
             .await
             .unwrap();
+    }
+
+    /// Publishes `payload` on `topic` the way the beacon node would: uncompressed here, snappy
+    /// on the wire. Gossipsub refuses it until a subscriber for the topic is connected, so
+    /// wait for [`FakeBnEvent::Subscribed`] first.
+    pub async fn publish(&self, topic: &str, payload: &[u8]) -> Result<MessageId, PublishError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Cmd::Publish {
+                topic: topic.to_owned(),
+                data: payload.to_vec(),
+                reply,
+            })
+            .await
+            .unwrap();
+        answer.await.unwrap()
     }
 
     /// Everything the fake receives, in order. Taken once per fake.
@@ -277,6 +305,12 @@ async fn drive(
                 SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
                     let _ = events.try_send(FakeBnEvent::Disconnected(peer_id));
                 }
+                SwarmEvent::Behaviour(gossipsub::Event::Subscribed { peer_id, topic, .. }) => {
+                    let _ = events.try_send(FakeBnEvent::Subscribed {
+                        peer: peer_id,
+                        topic: topic.into_string(),
+                    });
+                }
                 SwarmEvent::Behaviour(gossipsub::Event::Message {
                     propagation_source,
                     message_id,
@@ -294,6 +328,9 @@ async fn drive(
             command = commands.recv() => match command {
                 Some(Cmd::Subscribe(topic)) => {
                     swarm.behaviour_mut().subscribe(&IdentTopic::new(topic)).unwrap();
+                }
+                Some(Cmd::Publish { topic, data, reply }) => {
+                    let _ = reply.send(swarm.behaviour_mut().publish(IdentTopic::new(topic), data));
                 }
                 None => return,
             },

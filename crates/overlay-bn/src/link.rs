@@ -410,9 +410,11 @@ fn build_swarm(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use overlay_core::lanes::{ClassLanes, LaneStats};
+    use overlay_core::topic::Class;
     use prometheus_client::registry::Registry;
     use serde_json::json;
     use wiremock::{MockServer, ResponseTemplate};
@@ -428,6 +430,7 @@ mod tests {
     /// short enough that a test which waits in vain still ends inside its 5 s budget.
     const WAIT: Duration = Duration::from_secs(3);
     const BLOCK_TOPIC: &str = "/eth2/6a95a1a9/beacon_block/ssz_snappy";
+    const ATTESTATION_TOPIC: &str = "/eth2/6a95a1a9/beacon_attestation_7/ssz_snappy";
     /// `hello`, snappy-compressed: T-006's spec vector input.
     const HELLO_SNAPPY: &[u8] = &[0x05, 0x10, 0x68, 0x65, 0x6c, 0x6c, 0x6f];
 
@@ -448,6 +451,29 @@ mod tests {
         control: mpsc::Receiver<BnEvent>,
         commands: mpsc::Sender<BnCommand>,
         spec: watch::Receiver<SpecSnapshot>,
+        lanes: ClassLanes<BnMessage>,
+        stats: Arc<Counts>,
+    }
+
+    #[derive(Default)]
+    struct Counts {
+        small: AtomicUsize,
+        large: AtomicUsize,
+        control: AtomicUsize,
+    }
+
+    impl LaneStats for Counts {
+        fn dropped(&self, class: Class) {
+            match class {
+                Class::Small => &self.small,
+                Class::Large => &self.large,
+            }
+            .fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn control_dropped(&self) {
+            self.control.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// A loopback port nothing listens on.
@@ -480,12 +506,15 @@ mod tests {
         let (control_tx, control) = mpsc::channel(64);
         let (commands, commands_rx) = mpsc::channel(64);
         let (spec_tx, spec) = spec_watch();
+        let stats = Arc::new(Counts::default());
+        let lanes = ClassLanes::new(stats.clone());
         let link = BnLink::spawn(
             cfg,
             node_key,
             BnClient::new(bn.http_addr(), Duration::from_secs(2)),
             &mut Registry::default(),
             control_tx,
+            lanes.pusher(),
             spec_tx,
             commands_rx,
         );
@@ -494,6 +523,8 @@ mod tests {
             control,
             commands,
             spec,
+            lanes,
+            stats,
         }
     }
 
@@ -519,6 +550,30 @@ mod tests {
         })
         .await
         .expect("the awaited control event never arrived")
+    }
+
+    /// Subscribes the link to `topics` and waits until the fake has seen each subscription,
+    /// so a publish from the fake right after reaches the link.
+    async fn subscribe_link(harness: &Harness, bn: &mut FakeBn, topics: &[&str]) {
+        for topic in topics {
+            harness
+                .commands
+                .send(BnCommand::Subscribe((*topic).to_owned()))
+                .await
+                .unwrap();
+            bn.wait_for(|e| matches!(e, FakeBnEvent::Subscribed { topic: t, .. } if t == topic))
+                .await;
+        }
+    }
+
+    async fn recv_from(lanes: &mut ClassLanes<BnMessage>, class: Class) -> BnMessage {
+        tokio::time::timeout(WAIT, lanes.recv_from(class))
+            .await
+            .unwrap_or_else(|_| panic!("nothing arrived on the {class:?} lane in time"))
+    }
+
+    fn decompress(data: &[u8]) -> Vec<u8> {
+        snap::raw::Decoder::new().decompress_vec(data).unwrap()
     }
 
     async fn publish(
@@ -767,5 +822,40 @@ mod tests {
         assert_eq!(*harness.spec.borrow(), SpecSnapshot::MAINNET);
         assert!(later.is_err(), "unexpected event after BnInfo: {later:?}");
         assert!(harness.link.connected.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn block_lands_in_the_large_lane_and_attestation_in_the_small_lane() {
+        let mut bn = FakeBn::start().await;
+        let mut harness = spawn(link_config(&bn), &bn);
+        wait_for(&mut harness.control, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+        subscribe_link(&harness, &mut bn, &[BLOCK_TOPIC, ATTESTATION_TOPIC]).await;
+
+        let block_id = bn.publish(BLOCK_TOPIC, b"a block").await.unwrap();
+        let attestation_id = bn
+            .publish(ATTESTATION_TOPIC, b"an attestation")
+            .await
+            .unwrap();
+        let block = recv_from(&mut harness.lanes, Class::Large).await;
+        let attestation = recv_from(&mut harness.lanes, Class::Small).await;
+
+        assert_eq!(
+            (block.topic.as_str(), block.id, block.source),
+            (BLOCK_TOPIC, block_id, bn.peer_id())
+        );
+        assert_eq!(decompress(&block.data), b"a block");
+        assert_eq!(
+            (
+                attestation.topic.as_str(),
+                attestation.id,
+                attestation.source
+            ),
+            (ATTESTATION_TOPIC, attestation_id, bn.peer_id())
+        );
+        assert_eq!(decompress(&attestation.data), b"an attestation");
+        assert_eq!(harness.stats.small.load(Ordering::Relaxed), 0);
     }
 }
