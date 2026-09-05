@@ -3,7 +3,7 @@
 //! pushed to every host by configuration management, so an unknown or removed key fails loudly
 //! at startup instead of silently taking a default.
 
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -13,6 +13,7 @@ use url::Url;
 
 /// The whole `config.yaml`, one field per key.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct Config {
     /// `overlay`: the QUIC mesh between sidecars.
     pub overlay: Overlay,
@@ -33,6 +34,7 @@ pub struct Config {
 
 /// `overlay`: the QUIC mesh between sidecars.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct Overlay {
     /// `listen`: the address the QUIC endpoint binds. `[::]` listens dual-stack.
     pub listen: SocketAddr,
@@ -60,7 +62,8 @@ pub struct Overlay {
 }
 
 /// `overlay.fanout`: routing per traffic class.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct Fanout {
     /// `large`: blocks and data columns.
     pub large: LargeFanout,
@@ -70,6 +73,7 @@ pub struct Fanout {
 
 /// `overlay.fanout.large`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct LargeFanout {
     /// `in_region`: how a large message reaches the origin's own region.
     pub in_region: InRegion,
@@ -82,6 +86,7 @@ pub struct LargeFanout {
 
 /// `overlay.fanout.small`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct SmallFanout {
     /// `in_region`: how a batch reaches the origin's own region.
     pub in_region: InRegion,
@@ -119,6 +124,7 @@ pub enum CrossRegion {
 
 /// `overlay.io_thread`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct IoThread {
     /// `pin_cpu`: a reserved core to pin the overlay I/O thread to. `null` leaves it unpinned.
     pub pin_cpu: Option<u32>,
@@ -146,6 +152,7 @@ pub enum Steering {
 
 /// `bn`: the link to the local beacon node.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct Bn {
     /// `identity_url`: the beacon API endpoint that reports the node's peer id.
     pub identity_url: Url,
@@ -164,6 +171,7 @@ pub struct Bn {
 /// `bn.publish_rate_limit`: class-aware ceilings on the publish path. A bug guard, not a normal
 /// control; the defaults sit well above any legitimate rate.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct PublishRateLimit {
     /// `small_per_s`: small-class messages per second.
     pub small_per_s: u32,
@@ -174,7 +182,8 @@ pub struct PublishRateLimit {
 }
 
 /// `classes`: tunables per traffic class.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct Classes {
     /// `small`: batched small messages over datagrams.
     pub small: SmallClass,
@@ -184,6 +193,7 @@ pub struct Classes {
 
 /// `classes.small`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct SmallClass {
     /// `batch_window_ms`: how long a batch collects entries before it is flushed.
     #[serde(rename = "batch_window_ms", deserialize_with = "millis")]
@@ -195,6 +205,7 @@ pub struct SmallClass {
 
 /// `classes.large`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct LargeClass {
     /// `chunk_bytes`: the fixed chunk size. A multiple of 64, which the Reed-Solomon shards
     /// require.
@@ -209,6 +220,7 @@ pub struct LargeClass {
 
 /// `log`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(default)]
 pub struct Log {
     /// `level`: the least severe level that is emitted. `RUST_LOG` overrides it.
     pub level: LogLevel,
@@ -242,6 +254,128 @@ pub enum LogFormat {
     Json,
     /// Human-readable lines.
     Text,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            overlay: Overlay::default(),
+            bn: Bn::default(),
+            classes: Classes::default(),
+            inject: true,
+            admin_socket: PathBuf::from("/run/fleet-overlay/admin.sock"),
+            metrics_listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 7789)),
+            log: Log::default(),
+        }
+    }
+}
+
+impl Default for Overlay {
+    fn default() -> Self {
+        Self {
+            listen: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 7788)),
+            roster_file: PathBuf::from("/etc/fleet-overlay/roster.yaml"),
+            fleet_seed_file: PathBuf::from("/etc/fleet-overlay/seed"),
+            fleet_seed_previous_file: None,
+            keepalive: Duration::from_millis(1000),
+            idle_timeout: Duration::from_millis(5000),
+            initial_window_bytes: 4_000_000,
+            fanout: Fanout::default(),
+            io_thread: IoThread::default(),
+        }
+    }
+}
+
+impl Default for LargeFanout {
+    fn default() -> Self {
+        Self {
+            in_region: InRegion::Stripe,
+            cross_region: CrossRegion::Stripe,
+            stripe_min_recipients: 16,
+        }
+    }
+}
+
+impl Default for SmallFanout {
+    fn default() -> Self {
+        Self {
+            in_region: InRegion::Direct,
+            cross_region: CrossRegion::Relays,
+            relays_per_remote_region: 3,
+            relay_min_remote_hosts: 12,
+        }
+    }
+}
+
+impl Default for IoThread {
+    fn default() -> Self {
+        Self {
+            pin_cpu: None,
+            prefer_busy_poll: false,
+            busy_poll_usecs: 100,
+            steering: Steering::Off,
+        }
+    }
+}
+
+impl Default for Bn {
+    fn default() -> Self {
+        Self {
+            identity_url: url("http://127.0.0.1:5052/eth/v1/node/identity"),
+            events_url: url("http://127.0.0.1:5052/eth/v1/events?topics=block"),
+            libp2p_addr: "/ip4/127.0.0.1/tcp/9000".to_owned(),
+            node_key_file: PathBuf::from("/var/lib/fleet-overlay/node.key"),
+            publish_rate_limit: PublishRateLimit::default(),
+            idontwant_on_publish: true,
+        }
+    }
+}
+
+impl Default for PublishRateLimit {
+    fn default() -> Self {
+        Self {
+            small_per_s: 8000,
+            large_per_s: 300,
+            bytes_per_s: 32 * 1024 * 1024,
+        }
+    }
+}
+
+impl Default for SmallClass {
+    fn default() -> Self {
+        Self {
+            batch_window: Duration::from_millis(10),
+            stale_after: Duration::from_millis(1000),
+        }
+    }
+}
+
+impl Default for LargeClass {
+    fn default() -> Self {
+        Self {
+            chunk_bytes: 2048,
+            parity_ratio: 0.10,
+            repair_deadline: Duration::from_millis(250),
+        }
+    }
+}
+
+impl Default for Log {
+    fn default() -> Self {
+        Self {
+            level: LogLevel::Info,
+            format: LogFormat::Auto,
+        }
+    }
+}
+
+/// Parses one of the URL literals in the defaults above.
+#[expect(
+    clippy::expect_used,
+    reason = "only called on the Appendix A literals, which are valid URLs"
+)]
+fn url(literal: &str) -> Url {
+    Url::parse(literal).expect("Appendix A URL literal")
 }
 
 /// Why a configuration could not be loaded.
