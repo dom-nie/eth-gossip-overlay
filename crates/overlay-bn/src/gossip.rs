@@ -42,6 +42,7 @@ pub fn config(cfg: &BnLinkConfig) -> Config {
     ConfigBuilder::default()
         .max_transmit_size(wire::MAX_TRANSMIT_SIZE as usize)
         .validation_mode(ValidationMode::Anonymous)
+        .validate_messages()
         .message_id_fn(message_id_fn)
         .idontwant_on_publish(cfg.idontwant_on_publish)
         .build()
