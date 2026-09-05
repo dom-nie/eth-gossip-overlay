@@ -506,7 +506,7 @@ impl Config {
 }
 
 /// The `path: ` prefix for an error from a file, or nothing for text parsed from memory.
-fn in_file(path: Option<&Path>) -> String {
+pub(crate) fn in_file(path: Option<&Path>) -> String {
     path.map(|path| format!("{}: ", path.display()))
         .unwrap_or_default()
 }

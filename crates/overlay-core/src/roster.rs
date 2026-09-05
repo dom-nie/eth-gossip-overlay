@@ -1,3 +1,108 @@
+//! The fleet roster: every host the sidecar may pair with, keyed by hostname. Configuration
+//! management renders it from the inventory, so a key nobody expects or a host that cannot be
+//! dialled is an inventory bug and fails the load with the host named.
+
+use std::fmt;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+
+use serde::Deserialize;
+use serde_yaml_bw as yaml;
+
+use crate::config::in_file;
+
+/// A host's name as the operator wrote it in the roster. It is the only identity in the
+/// system: roster key, key-derivation input, connection tie-break, stripe order and relay
+/// spreading. Any non-empty string will do; hostnames never reach a certificate or a DNS
+/// query, so there is no alphabet to enforce.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(transparent)]
+pub struct Hostname(pub String);
+
+impl fmt::Display for Hostname {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// The fanout domain a host belongs to: hosts in one region are a metro RTT apart and fan out
+/// to each other directly. An arbitrary label; a fleet may have one region or five.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Deserialize)]
+#[serde(transparent)]
+pub struct Region(pub String);
+
+impl fmt::Display for Region {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// One line of the roster.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostEntry {
+    /// The host's identity.
+    pub hostname: Hostname,
+    /// The region the host fans out in.
+    pub region: Region,
+    /// A label for metrics and failure-domain reporting. Routing never reads it.
+    pub site: Option<String>,
+    /// The public address other sidecars dial.
+    pub addr: SocketAddr,
+}
+
+/// The whole `roster.yaml`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Roster {
+    /// Every host, in file order.
+    pub hosts: Vec<HostEntry>,
+}
+
+/// Why a roster could not be loaded.
+#[derive(Debug, thiserror::Error)]
+pub enum RosterError {
+    /// The file could not be read.
+    #[error("{}: {source}", .path.display())]
+    Io {
+        /// The file that was asked for.
+        path: PathBuf,
+        /// What the filesystem said.
+        source: std::io::Error,
+    },
+    /// The text is not valid YAML or does not fit the schema.
+    #[error("{}{source}", in_file(.path.as_deref()))]
+    Parse {
+        /// The file the text came from, if it came from one.
+        path: Option<PathBuf>,
+        /// The parser's own error, which names the offending key and its position.
+        source: yaml::Error,
+    },
+}
+
+impl Roster {
+    /// Parses a complete `roster.yaml` document.
+    pub fn from_yaml(text: &str) -> Result<Self, RosterError> {
+        Self::parse(text, None)
+    }
+
+    fn parse(text: &str, path: Option<&Path>) -> Result<Self, RosterError> {
+        // The direct deserializer, not yaml::from_str, for the reason config.rs gives: the
+        // retry through a Value tree loses the key path and the line.
+        Self::deserialize(yaml::Deserializer::from_str(text)).map_err(|source| {
+            RosterError::Parse {
+                path: path.map(Path::to_owned),
+                source,
+            }
+        })
+    }
+
+    /// The entry for `hostname`, if the roster has one.
+    pub fn get(&self, hostname: &Hostname) -> Option<&HostEntry> {
+        self.hosts.iter().find(|host| &host.hostname == hostname)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
