@@ -593,4 +593,22 @@ mod tests {
         assert_eq!(h.stats.count("error:duplicate", Class::Small), 1);
         assert_eq!(h.stats.total(), 1);
     }
+
+    /// The `SUBS` race: a sibling routed on a subscription the beacon node has dropped. The
+    /// log level is not asserted, for the reason given on the duplicate test.
+    #[tokio::test]
+    async fn no_subscribers_error_is_counted_under_reason_no_subscribers_and_logged_at_debug() {
+        let mut h = Harness::new();
+
+        let outcome = h
+            .step_answered(
+                item(Class::Small, 0),
+                Err(PublishError::NoPeersSubscribedToTopic),
+            )
+            .await;
+
+        assert_eq!(outcome, Some(PublishOutcome::NoSubscribers));
+        assert_eq!(h.stats.count("error:no_subscribers", Class::Small), 1);
+        assert_eq!(h.stats.total(), 1);
+    }
 }
