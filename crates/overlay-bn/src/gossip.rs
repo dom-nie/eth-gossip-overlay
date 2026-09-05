@@ -133,6 +133,14 @@ mod tests {
     }
 
     #[test]
+    fn messages_wait_for_application_validation() {
+        assert!(
+            config(&cfg()).validate_messages(),
+            "Lighthouse forwards nothing until the application reports on it, and neither may the sidecar"
+        );
+    }
+
+    #[test]
     fn max_transmit_size_equals_lighthouse() {
         let lighthouse = types::ChainSpec::mainnet().max_message_size() as u64;
 
