@@ -5,13 +5,16 @@
 //! change needs no sidecar release (§3 principle 6).
 //!
 //! [`Mirror`] is pure: it takes the link's events and returns the actions they call for.
+//! [`run`] is the shell that applies them to the link and to a `watch` of the sets.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use libp2p::PeerId;
 use overlay_core::topic::{SubscriptionSets, Topic};
+use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 
-use crate::link::BnEvent;
+use crate::link::{BnCommand, BnEvent};
 
 /// What a beacon node event asks the shell to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,6 +120,37 @@ impl Mirror {
     }
 }
 
+/// Drives a [`Mirror`] from the link's `events` until they close or the link stops taking
+/// commands: subscriptions become [`BnCommand`]s, and every change lands on `sets`, whose
+/// receivers only ever want the latest value. `bn` is the peer id to filter on until the
+/// first `Connected` names the real one. This shell may wait on the command channel; the
+/// swarm loop is on the other end of it, and it is the one that never waits.
+pub fn run(
+    mut events: mpsc::Receiver<BnEvent>,
+    commands: mpsc::Sender<BnCommand>,
+    sets: watch::Sender<SubscriptionSets>,
+    bn: PeerId,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut mirror = Mirror::new(bn);
+        while let Some(event) = events.recv().await {
+            for action in mirror.on_bn_event(&event) {
+                let command = match action {
+                    MirrorAction::Subscribe(topic) => BnCommand::Subscribe(topic),
+                    MirrorAction::Unsubscribe(topic) => BnCommand::Unsubscribe(topic),
+                    MirrorAction::Changed(new) => {
+                        sets.send_replace(new);
+                        continue;
+                    }
+                };
+                if commands.send(command).await.is_err() {
+                    return;
+                }
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, LazyLock};
@@ -186,17 +220,6 @@ mod tests {
         )
         .await
         .expect("the link never connected to the fake");
-    }
-
-    async fn wait_sets(
-        watch: &mut watch::Receiver<SubscriptionSets>,
-        within: Duration,
-        wanted: impl FnMut(&SubscriptionSets) -> bool,
-    ) {
-        tokio::time::timeout(within, watch.wait_for(wanted))
-            .await
-            .expect("the sets never reached the awaited value")
-            .unwrap();
     }
 
     #[test]
