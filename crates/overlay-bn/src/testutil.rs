@@ -57,11 +57,21 @@ pub struct FakeBn {
     http: MockServer,
     commands: mpsc::Sender<Cmd>,
     received: Option<mpsc::Receiver<Received>>,
+    events: mpsc::Receiver<FakeBnEvent>,
 }
 
 /// A message the fake received: the topic, the payload as its snappy transform decompressed
 /// it, and the id its copy of Lighthouse's id function gave it.
 pub type Received = (String, Vec<u8>, MessageId);
+
+/// What the fake's swarm saw, for tests that watch the beacon node's side.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FakeBnEvent {
+    /// A peer connected and was made explicit.
+    Connected(PeerId),
+    /// The last connection to a peer closed.
+    Disconnected(PeerId),
+}
 
 type LighthouseBehaviour = gossipsub::Behaviour<SnappyTransform, AllowAllSubscriptionFilter>;
 
@@ -95,7 +105,8 @@ impl FakeBn {
         let peer_id = *swarm.local_peer_id();
         let (commands, command_rx) = mpsc::channel(64);
         let (received_tx, received) = mpsc::channel(8192);
-        let task = tokio::spawn(drive(swarm, command_rx, received_tx));
+        let (events_tx, events) = mpsc::channel(64);
+        let task = tokio::spawn(drive(swarm, command_rx, received_tx, events_tx));
         let bn = Self {
             task,
             peer_id,
@@ -103,6 +114,7 @@ impl FakeBn {
             http,
             commands,
             received: Some(received),
+            events,
         };
         bn.remount().await;
         bn
@@ -144,6 +156,20 @@ impl FakeBn {
     /// Everything the fake receives, in order. Taken once per fake.
     pub fn received(&mut self) -> mpsc::Receiver<Received> {
         self.received.take().expect("received() is taken once")
+    }
+
+    /// Skips the fake's events until one satisfies `wanted`.
+    pub async fn wait_for(&mut self, mut wanted: impl FnMut(&FakeBnEvent) -> bool) -> FakeBnEvent {
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let event = self.events.recv().await.expect("the fake's task ended");
+                if wanted(&event) {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("the fake beacon node never saw the awaited event")
     }
 
     /// Drops the swarm, which closes its connections and frees the port, and hands back the
@@ -200,12 +226,17 @@ async fn drive(
     mut swarm: Swarm<LighthouseBehaviour>,
     mut commands: mpsc::Receiver<Cmd>,
     received: mpsc::Sender<Received>,
+    events: mpsc::Sender<FakeBnEvent>,
 ) {
     loop {
         tokio::select! {
             event = swarm.select_next_some() => match event {
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                     swarm.behaviour_mut().add_explicit_peer(&peer_id);
+                    let _ = events.try_send(FakeBnEvent::Connected(peer_id));
+                }
+                SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
+                    let _ = events.try_send(FakeBnEvent::Disconnected(peer_id));
                 }
                 SwarmEvent::Behaviour(gossipsub::Event::Message {
                     propagation_source,

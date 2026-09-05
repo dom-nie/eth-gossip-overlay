@@ -359,7 +359,7 @@ mod tests {
     use crate::bn_http::BnClient;
     use crate::gossip::BnLinkConfig;
     use crate::node_key::NodeKey;
-    use crate::testutil::FakeBn;
+    use crate::testutil::{FakeBn, FakeBnEvent};
 
     /// Long enough for a dial, a noise handshake and a gossipsub exchange on a loaded CI box,
     /// short enough that a test which waits in vain still ends inside its 5 s budget.
@@ -384,7 +384,6 @@ mod tests {
         link: BnLink,
         control: mpsc::Receiver<BnEvent>,
         commands: mpsc::Sender<BnCommand>,
-        _dir: tempfile::TempDir,
     }
 
     /// A loopback port nothing listens on.
@@ -408,13 +407,17 @@ mod tests {
         NodeKey::load_or_create(&dir.path().join("node.key")).unwrap()
     }
 
+    /// A link under a fresh node key. The key file is read at spawn and not needed after.
     fn spawn(cfg: LinkConfig, bn: &FakeBn) -> Harness {
-        let dir = tempfile::tempdir().unwrap();
+        spawn_with_key(cfg, bn, &node_key(&tempfile::tempdir().unwrap()))
+    }
+
+    fn spawn_with_key(cfg: LinkConfig, bn: &FakeBn, node_key: &NodeKey) -> Harness {
         let (control_tx, control) = mpsc::channel(64);
         let (commands, commands_rx) = mpsc::channel(64);
         let link = BnLink::spawn(
             cfg,
-            &node_key(&dir),
+            node_key,
             BnClient::new(bn.http_addr(), Duration::from_secs(2)),
             &mut Registry::default(),
             control_tx,
@@ -424,7 +427,6 @@ mod tests {
             link,
             control,
             commands,
-            _dir: dir,
         }
     }
 
@@ -610,5 +612,34 @@ mod tests {
             after > before,
             "no redial within 40 ms of the second outage"
         );
+    }
+
+    /// Two links from the same key file show the beacon node the same peer id, which is the
+    /// id the node key reports; a key made elsewhere gives another, because nothing but the
+    /// random file decides it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_id_comes_from_the_node_key_and_is_stable_across_link_restarts() {
+        let mut bn = FakeBn::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let expected = node_key(&dir).peer_id();
+
+        let harness = spawn_with_key(link_config(&bn), &bn, &node_key(&dir));
+        let first = bn
+            .wait_for(|e| matches!(e, FakeBnEvent::Connected(_)))
+            .await;
+        drop(harness.commands);
+        harness.link.task.await.unwrap();
+        bn.wait_for(|e| matches!(e, FakeBnEvent::Disconnected(_)))
+            .await;
+        let harness = spawn_with_key(link_config(&bn), &bn, &node_key(&dir));
+        let second = bn
+            .wait_for(|e| matches!(e, FakeBnEvent::Connected(_)))
+            .await;
+
+        assert_eq!(first, FakeBnEvent::Connected(expected));
+        assert_eq!(second, FakeBnEvent::Connected(expected));
+        let other = node_key(&tempfile::tempdir().unwrap()).peer_id();
+        assert_ne!(other, expected);
+        drop(harness);
     }
 }
