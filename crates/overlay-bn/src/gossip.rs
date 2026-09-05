@@ -107,6 +107,23 @@ mod tests {
         assert_eq!(id.0, expected.id.0);
     }
 
+    /// T-006's known-answer vectors: `hello` compressed, and the same bytes cut short so they
+    /// take the spec's invalid-snappy branch.
+    #[test]
+    fn message_id_matches_spec_vectors_through_the_config() {
+        let config = config(&cfg());
+        let hex = |id: MessageId| id.0.iter().map(|b| format!("{b:02x}")).collect::<String>();
+
+        assert_eq!(
+            hex(config.message_id(&message(HELLO_SNAPPY))),
+            "d1346976629ef3d2c04a2a53ccacb9499c3db63a"
+        );
+        assert_eq!(
+            hex(config.message_id(&message(&HELLO_SNAPPY[..3]))),
+            "0c900438f873351253246db4766f6035ababcbb0"
+        );
+    }
+
     #[test]
     fn max_transmit_size_equals_lighthouse() {
         let lighthouse = types::ChainSpec::mainnet().max_message_size() as u64;
