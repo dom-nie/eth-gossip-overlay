@@ -237,6 +237,7 @@ impl Link {
                 self.swarm.behaviour_mut().add_explicit_peer(&peer_id);
                 self.bn_peer = Some(peer_id);
                 self.connected.store(true, Ordering::Relaxed);
+                self.backoff.reset();
                 self.emit(BnEvent::Connected { peer_id });
             }
             SwarmEvent::ConnectionClosed {
