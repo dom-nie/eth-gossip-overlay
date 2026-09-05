@@ -277,4 +277,29 @@ mod tests {
         assert!(matches!(err, BnHttpError::Connect { .. }), "{err:?}");
         assert!(err.to_string().contains("/eth/v1/node/identity"), "{err}");
     }
+
+    #[tokio::test]
+    async fn slow_server_times_out() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/eth/v1/node/identity"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(5)))
+            .mount(&server)
+            .await;
+        let identity_url = format!("{}/eth/v1/node/identity", server.uri());
+        let client = BnClient::new(
+            Url::parse(&identity_url).unwrap(),
+            Duration::from_millis(100),
+        );
+        let started = std::time::Instant::now();
+
+        let err = client.peer_id().await.unwrap_err();
+
+        assert!(matches!(err, BnHttpError::Timeout { .. }), "{err:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+    }
 }
