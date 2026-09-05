@@ -8,9 +8,9 @@
 //!
 //! The transport is what Lighthouse v8.2.2 accepts on its libp2p port, copied from
 //! `build_transport` in `beacon_node/lighthouse_network/src/service/utils.rs`: TCP with
-//! `nodelay`, noise, yamux, a 10 s upgrade timeout. No DNS layer, because the sidecar dials a
-//! literal address, and no identify behaviour: Lighthouse ignores identify errors, so the
-//! only cost is that the beacon node lists the sidecar's client as unknown.
+//! `nodelay`, noise, yamux, 10 s for the dial and upgrade together. No DNS layer, because the
+//! sidecar dials a literal address, and no identify behaviour: Lighthouse ignores identify
+//! errors, so the only cost is that the beacon node lists the sidecar's client as unknown.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -42,8 +42,10 @@ use crate::spec::SpecSnapshot;
 pub const BACKOFF_MIN: Duration = Duration::from_millis(500);
 /// The delay the backoff doubles up to.
 pub const BACKOFF_MAX: Duration = Duration::from_secs(30);
-/// Lighthouse's own bound on the noise and yamux upgrade (`build_transport`).
-const UPGRADE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Lighthouse's own bound on the dial and upgrade together (`build_transport`'s
+/// `.timeout(..)`, a `TransportTimeout` around the whole dial future): the TCP connect, the
+/// noise handshake and the yamux negotiation share it.
+const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Slots in the control channel. On connect Lighthouse sends its whole subscription set in
 /// one RPC, up to `max_topics_at_any_fork * 2` topics (`service/mod.rs:336-338`, hundreds
@@ -469,7 +471,7 @@ fn build_swarm(
                 .upgrade(Version::V1)
                 .authenticate(noise::Config::new(keypair).expect("an Ed25519 keypair can sign"))
                 .multiplex(yamux::Config::default())
-                .timeout(UPGRADE_TIMEOUT)
+                .timeout(DIAL_TIMEOUT)
         });
     let Ok(builder) = builder.with_behaviour(|_| build_behaviour(cfg, registry));
     builder
