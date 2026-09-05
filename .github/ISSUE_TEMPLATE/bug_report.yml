@@ -1,0 +1,53 @@
+name: Bug report
+description: The sidecar does something wrong
+labels: [bug]
+body:
+  - type: input
+    id: sidecar-version
+    attributes:
+      label: Sidecar version
+      description: Output of `fleet-overlay --version`
+    validations:
+      required: true
+  - type: input
+    id: lighthouse-version
+    attributes:
+      label: Lighthouse version
+      description: Output of `lighthouse --version`
+    validations:
+      required: true
+  - type: input
+    id: kernel
+    attributes:
+      label: Kernel
+      description: Output of `uname -r`
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Configuration with secrets removed
+      description: Your `config.yaml`. Never paste the seed or the node key. Replace roster addresses and hostnames if you consider them internal; the roster is your fleet's topology.
+      render: yaml
+    validations:
+      required: false
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: With the same secrets removed.
+      render: text
+    validations:
+      required: false
