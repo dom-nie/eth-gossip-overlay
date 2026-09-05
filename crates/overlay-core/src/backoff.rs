@@ -1,6 +1,32 @@
 //! Reconnect delays that double from a floor to a ceiling, with jitter so peers that lost the
 //! same connection at the same moment do not all retry in lockstep.
 
+use std::time::Duration;
+
+use rand::Rng;
+
+/// Reconnect delays that start at `min` and double on every call until they reach `max`.
+/// `min` must not exceed `max`.
+#[derive(Clone, Debug)]
+pub struct Backoff {
+    max: Duration,
+    next: Duration,
+}
+
+impl Backoff {
+    /// A backoff whose first delay is `min`.
+    pub fn new(min: Duration, max: Duration) -> Self {
+        Self { max, next: min }
+    }
+
+    /// The delay to wait before the next attempt.
+    pub fn next_delay(&mut self, _rng: &mut impl Rng) -> Duration {
+        let delay = self.next;
+        self.next = self.next.saturating_mul(2).min(self.max);
+        delay
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
@@ -36,6 +62,9 @@ mod tests {
 
         let delays: Vec<Duration> = (0..6).map(|_| backoff.next_delay(&mut NoJitter)).collect();
 
-        assert_eq!(delays, [100, 200, 400, 800, 1000, 1000].map(Duration::from_millis));
+        assert_eq!(
+            delays,
+            [100, 200, 400, 800, 1000, 1000].map(Duration::from_millis)
+        );
     }
 }
