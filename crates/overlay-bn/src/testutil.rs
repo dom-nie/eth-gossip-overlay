@@ -20,6 +20,7 @@
 //! [`next_message`]) join two of the sidecar's own behaviours over the memory transport, for
 //! tests that need the protocol code and no beacon node at all.
 
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use libp2p::core::transport::MemoryTransport;
@@ -408,12 +409,16 @@ fn lighthouse_gossipsub_config(spec: &ChainSpec) -> gossipsub::Config {
         .unwrap()
 }
 
+/// `MESSAGE_DOMAIN_VALID_SNAPPY` as mainnet's `ChainSpec` carries it, read once.
+static MESSAGE_DOMAIN_VALID_SNAPPY: LazyLock<[u8; 4]> =
+    LazyLock::new(|| ChainSpec::mainnet().message_domain_valid_snappy);
+
 /// The `prefix` and `gossip_message_id` closures of `gossipsub_config`
 /// (`config.rs:459-491`), verbatim on their altair branch: every live fork has altair enabled,
 /// so the pre-altair branch and the fork-context lookup that selects it are left out.
 /// `message.data` is what the snappy transform already decompressed.
 fn lighthouse_message_id(message: &gossipsub::Message) -> MessageId {
-    let prefix = ChainSpec::mainnet().message_domain_valid_snappy;
+    let prefix = *MESSAGE_DOMAIN_VALID_SNAPPY;
     let topic_bytes = message.topic.as_str().as_bytes();
     let topic_len_bytes = topic_bytes.len().to_le_bytes();
     let mut vec = Vec::with_capacity(
