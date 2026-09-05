@@ -619,6 +619,29 @@ mod tests {
         );
     }
 
+    /// The sidecar is subscribed to the column either way, so the move is a change of sets
+    /// with no gossipsub action, in both directions.
+    #[test]
+    fn bn_subscribing_to_a_column_later_moves_it_from_extra_to_advertised() {
+        let mut mirror = connected();
+        let column_5 = column("00000000", 5);
+        mirror.on_bn_event(&subscribed(ATTESTATION_3));
+        let with_column_5 = sets_of(&[ATTESTATION_3, &column_5]);
+
+        assert_eq!(
+            mirror.on_bn_event(&subscribed(&column_5)),
+            vec![MirrorAction::Changed(with_column_5.clone())]
+        );
+        assert_eq!(
+            mirror.on_bn_event(&unsubscribed(&column_5)),
+            vec![MirrorAction::Changed(sets_of(&[ATTESTATION_3]))]
+        );
+        assert_eq!(
+            mirror.on_bn_event(&subscribed(&column_5)),
+            vec![MirrorAction::Changed(with_column_5)]
+        );
+    }
+
     /// The fake's subscription has to show in the watch and come back to the fake as the
     /// sidecar's own subscription, both inside one second of the fake sending it.
     #[tokio::test(flavor = "multi_thread")]
