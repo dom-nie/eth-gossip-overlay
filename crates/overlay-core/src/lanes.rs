@@ -62,7 +62,10 @@ impl<T> LanePusher<T> {
         };
         match lane.try_send(item) {
             Ok(()) => Ok(()),
-            Err(TrySendError::Full(item) | TrySendError::Closed(item)) => Err(Dropped(item)),
+            Err(TrySendError::Full(item) | TrySendError::Closed(item)) => {
+                self.stats.dropped(class);
+                Err(Dropped(item))
+            }
         }
     }
 }
