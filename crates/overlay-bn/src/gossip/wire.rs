@@ -68,7 +68,8 @@ pub struct SizeMismatch {
 }
 
 /// Derives the transmit size the beacon node runs with from the `MAX_PAYLOAD_SIZE` it reports
-/// and compares it with the compiled constant. The BN link calls this on every connect.
+/// and compares it with the compiled constant. T-018's consumer of the spec watch calls this
+/// whenever the snapshot changes.
 pub fn check_max_payload_size(spec_max_payload_size: u64) -> Result<(), SizeMismatch> {
     let bn = max_transmit_size_for(spec_max_payload_size);
     if bn == MAX_TRANSMIT_SIZE {
