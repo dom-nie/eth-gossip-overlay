@@ -4,5 +4,12 @@ description = "The link to the local Lighthouse beacon node: gossipsub, req/resp
 version.workspace = true
 edition.workspace = true
 
+[dependencies]
+libp2p.workspace = true
+
+[dev-dependencies]
+lighthouse_network.workspace = true
+types.workspace = true
+
 [lints]
 workspace = true

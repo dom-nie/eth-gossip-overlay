@@ -11,6 +11,12 @@ overlay-core = { path = "crates/overlay-core" }
 overlay-transport = { path = "crates/overlay-transport" }
 overlay-bn = { path = "crates/overlay-bn" }
 
+# Lighthouse v8.2.2. Bumping Lighthouse means changing this tag, the sigp/rust-libp2p rev in the
+# patch table at the bottom, and rerunning T-018's compatibility matrix.
+lighthouse_network = { git = "https://github.com/sigp/lighthouse.git", tag = "v8.2.2" }
+types = { git = "https://github.com/sigp/lighthouse.git", tag = "v8.2.2", features = ["saturating-arith"] }
+libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", default-features = false, features = ["tcp", "noise", "yamux", "identify", "gossipsub", "gossipsub-partial-messages", "request-response", "metrics", "tokio", "macros"] }
+
 tokio = "1"
 quinn = "0.11"
 rustls = "0.23"
@@ -51,3 +57,10 @@ expect_used = "warn"
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# Copied verbatim from Lighthouse v8.2.2's root Cargo.toml so libp2p resolves to the fork revision
+# the beacon node itself compiles. Patches only take effect in the workspace root.
+[patch."https://github.com/libp2p/rust-libp2p.git"]
+libp2p = { git = "https://github.com/sigp/rust-libp2p.git", rev = "c774d4e71357d7cd2f792c4767d616d2dd369ee3" }
+libp2p-mplex = { git = "https://github.com/sigp/rust-libp2p.git", rev = "c774d4e71357d7cd2f792c4767d616d2dd369ee3" }
+libp2p-quic = { git = "https://github.com/sigp/rust-libp2p.git", rev = "c774d4e71357d7cd2f792c4767d616d2dd369ee3" }
