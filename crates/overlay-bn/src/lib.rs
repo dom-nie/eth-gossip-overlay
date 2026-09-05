@@ -6,6 +6,7 @@ pub mod inbound;
 pub mod link;
 pub mod mirror;
 pub mod node_key;
+pub mod publish;
 pub mod spec;
 #[cfg(test)]
 mod testutil;
