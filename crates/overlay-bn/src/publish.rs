@@ -533,4 +533,27 @@ mod tests {
         let small = h.step_accepted(item(Class::Small, 301)).await;
         assert_eq!(small, Some(PublishOutcome::Published));
     }
+
+    const MIB: usize = 1024 * 1024;
+
+    #[tokio::test]
+    async fn bytes_bucket_limits_regardless_of_class() {
+        let mut h = Harness::new();
+        for n in 0..32 {
+            let outcome = h.step_accepted(sized_item(Class::Large, n, MIB)).await;
+            assert_eq!(outcome, Some(PublishOutcome::Published), "block {n}");
+        }
+
+        let outcome = h.step_accepted(sized_item(Class::Large, 32, MIB)).await;
+
+        assert_eq!(outcome, Some(PublishOutcome::RateLimited));
+        assert_eq!(h.stats.count("rate_limited", Class::Large), 1);
+        // The large bucket still has tokens: a payload that costs no bytes goes through, and
+        // the small class shares the empty bytes bucket.
+        let free = h.step_accepted(sized_item(Class::Large, 33, 0)).await;
+        assert_eq!(free, Some(PublishOutcome::Published));
+        let small = h.step_accepted(sized_item(Class::Small, 34, 1)).await;
+        assert_eq!(small, Some(PublishOutcome::RateLimited));
+        assert_eq!(h.stats.count("rate_limited", Class::Small), 1);
+    }
 }
