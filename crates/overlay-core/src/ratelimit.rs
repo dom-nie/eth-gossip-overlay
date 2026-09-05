@@ -4,7 +4,14 @@
 
 use std::time::Instant;
 
+use crate::config::PublishRateLimit;
+use crate::topic::Class;
+
 const NANOS_PER_SEC: u128 = 1_000_000_000;
+
+fn nanos(tokens: u64) -> u128 {
+    u128::from(tokens) * NANOS_PER_SEC
+}
 
 /// Tokens that refill at a fixed rate up to a burst. The level is kept in token-nanoseconds
 /// so a refill by elapsed time is exact integer arithmetic: no float drift can push the level
@@ -21,7 +28,7 @@ impl TokenBucket {
     /// A full bucket at `now` that refills `rate_per_s` tokens per second and holds at most
     /// `burst`.
     pub fn new(rate_per_s: u64, burst: u64, now: Instant) -> Self {
-        let burst_nanos = u128::from(burst) * NANOS_PER_SEC;
+        let burst_nanos = nanos(burst);
         Self {
             rate_per_s,
             burst_nanos,
@@ -33,13 +40,20 @@ impl TokenBucket {
     /// Takes `tokens` if the bucket, refilled up to `now`, holds that many. A refused take
     /// leaves the level alone.
     pub fn try_take(&mut self, tokens: u64, now: Instant) -> bool {
-        self.refill(now);
-        let wanted = u128::from(tokens) * NANOS_PER_SEC;
-        if self.level_nanos < wanted {
-            return false;
+        let admitted = self.can_take(tokens, now);
+        if admitted {
+            self.take(tokens);
         }
-        self.level_nanos -= wanted;
-        true
+        admitted
+    }
+
+    fn can_take(&mut self, tokens: u64, now: Instant) -> bool {
+        self.refill(now);
+        self.level_nanos >= nanos(tokens)
+    }
+
+    fn take(&mut self, tokens: u64) {
+        self.level_nanos = self.level_nanos.saturating_sub(nanos(tokens));
     }
 
     fn refill(&mut self, now: Instant) {
@@ -50,6 +64,45 @@ impl TokenBucket {
         self.last = now;
         self.level_nanos =
             (self.level_nanos + elapsed * u128::from(self.rate_per_s)).min(self.burst_nanos);
+    }
+}
+
+/// The three buckets of DX-N3: one per [`Class`] on message count and one on payload bytes
+/// shared by both. Each bursts to one second of its rate.
+#[derive(Clone, Debug)]
+pub struct PublishLimits {
+    small: TokenBucket,
+    large: TokenBucket,
+    bytes: TokenBucket,
+}
+
+impl PublishLimits {
+    /// Full buckets at `now` from `bn.publish_rate_limit`. A constructor rather than a `From`
+    /// impl because the buckets need the instant they start counting from.
+    pub fn new(cfg: &PublishRateLimit, now: Instant) -> Self {
+        let bucket = |rate: u64| TokenBucket::new(rate, rate, now);
+        Self {
+            small: bucket(cfg.small_per_s.into()),
+            large: bucket(cfg.large_per_s.into()),
+            bytes: bucket(cfg.bytes_per_s),
+        }
+    }
+
+    /// Whether an item of `class` and `bytes` may go to the beacon node now. Admission costs
+    /// one token from the class bucket and `bytes` from the bytes bucket; both are checked
+    /// before either is charged, so a refused item costs nothing.
+    pub fn admit(&mut self, class: Class, bytes: usize, now: Instant) -> bool {
+        let bytes = bytes as u64;
+        let by_class = match class {
+            Class::Small => &mut self.small,
+            Class::Large => &mut self.large,
+        };
+        if !(by_class.can_take(1, now) && self.bytes.can_take(bytes, now)) {
+            return false;
+        }
+        by_class.take(1);
+        self.bytes.take(bytes);
+        true
     }
 }
 
