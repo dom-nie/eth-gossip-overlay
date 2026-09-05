@@ -584,6 +584,25 @@ mod tests {
         assert_eq!(mirror.sets(), &sets_of(&[ATTESTATION_3, NEXT_BLOCK]));
     }
 
+    #[test]
+    fn when_all_bn_topics_of_a_digest_are_gone_its_extra_columns_are_unsubscribed() {
+        let mut mirror = connected();
+        mirror.on_bn_event(&subscribed(ATTESTATION_3));
+        mirror.on_bn_event(&subscribed(BLOCK));
+
+        let one_left = mirror.on_bn_event(&unsubscribed(ATTESTATION_3));
+        let none_left = mirror.on_bn_event(&unsubscribed(BLOCK));
+
+        assert_eq!(
+            unsubscribes(&one_left),
+            BTreeSet::from([ATTESTATION_3.to_owned()])
+        );
+        let mut expected = columns("00000000", 0..128);
+        expected.insert(BLOCK.to_owned());
+        assert_eq!(unsubscribes(&none_left), expected);
+        assert_eq!(mirror.sets(), &SubscriptionSets::default());
+    }
+
     /// The fake's subscription has to show in the watch and come back to the fake as the
     /// sidecar's own subscription, both inside one second of the fake sending it.
     #[tokio::test(flavor = "multi_thread")]
