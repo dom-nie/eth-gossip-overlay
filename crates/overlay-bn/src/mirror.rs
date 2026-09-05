@@ -200,4 +200,18 @@ mod tests {
         );
         assert_eq!(mirror.sets(), &sets(&[]));
     }
+
+    #[test]
+    fn events_from_a_peer_other_than_the_bn_are_ignored() {
+        let mut mirror = Mirror::new(*BN);
+        let other = Keypair::generate_ed25519().public().to_peer_id();
+
+        let actions = mirror.on_bn_event(&BnEvent::Subscribed {
+            peer: other,
+            topic: ATTESTATION_3.to_owned(),
+        });
+
+        assert_eq!(actions, vec![]);
+        assert_eq!(mirror.sets(), &sets(&[]));
+    }
 }
