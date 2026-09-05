@@ -610,4 +610,19 @@ log:
         }
         assert!(Config::from_yaml("classes: { large: { chunk_bytes: 2048 } }").is_ok());
     }
+
+    #[test]
+    fn parity_ratio_outside_unit_interval_rejected() {
+        for doc in [
+            "classes: { large: { parity_ratio: 1.5 } }",
+            "classes: { large: { parity_ratio: -0.1 } }",
+        ] {
+            let err = Config::from_yaml(doc).unwrap_err();
+
+            assert!(
+                err.to_string().contains("classes.large.parity_ratio"),
+                "{doc}: {err}"
+            );
+        }
+    }
 }
