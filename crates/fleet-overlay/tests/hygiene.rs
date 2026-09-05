@@ -35,3 +35,39 @@ fn all_required_top_level_files_exist() {
         "missing from the repository root: {missing:?}"
     );
 }
+
+fn checklist_items(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|line| line.starts_with("- [ ]"))
+        .collect()
+}
+
+/// The `- [ ]` lines under CONTRIBUTING.md's "Pull request checklist" heading, up to the next
+/// heading; the file may grow other checklists later without widening this comparison.
+fn contributing_checklist(text: &str) -> Vec<&str> {
+    let section = text
+        .split_once("## Pull request checklist")
+        .map(|(_, rest)| rest)
+        .unwrap_or_default();
+    let section = section.split("\n## ").next().unwrap_or_default();
+    checklist_items(section)
+}
+
+#[test]
+fn pr_template_contains_baseline_dod_items() {
+    let root = workspace_root();
+    let contributing = std::fs::read_to_string(root.join("CONTRIBUTING.md")).unwrap();
+    let template = std::fs::read_to_string(root.join(".github/PULL_REQUEST_TEMPLATE.md")).unwrap();
+
+    let expected = contributing_checklist(&contributing);
+    let actual = checklist_items(&template);
+
+    assert!(
+        !expected.is_empty(),
+        "CONTRIBUTING.md has no pull request checklist"
+    );
+    assert_eq!(
+        actual, expected,
+        "the PR template's checklist drifted from CONTRIBUTING.md"
+    );
+}
