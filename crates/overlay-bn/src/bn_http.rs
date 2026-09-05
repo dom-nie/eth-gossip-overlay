@@ -529,4 +529,17 @@ mod tests {
             }
         );
     }
+
+    #[tokio::test]
+    async fn spec_non_numeric_value_is_body_error() {
+        let server = MockServer::start().await;
+        let mut data = spec_data();
+        data["SECONDS_PER_SLOT"] = json!("twelve");
+        serve(&server, "/eth/v1/config/spec", json!({"data": data})).await;
+
+        let err = client(&server).spec().await.unwrap_err();
+
+        assert!(matches!(err, BnHttpError::Body { .. }), "{err:?}");
+        assert!(err.to_string().contains("twelve"), "{err}");
+    }
 }
