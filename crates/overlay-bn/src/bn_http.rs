@@ -4,9 +4,11 @@
 //! with backoff, so a beacon node that is down or still starting costs a clear error and
 //! nothing else here.
 //!
-//! Checked against Lighthouse v8.2.2: `/eth/v1/node/identity` wraps its payload as
-//! `{"data": ...}` (`GenericResponse` in `common/eth2/src/types.rs`), where `IdentityData`
-//! carries `peer_id` as a string.
+//! Checked against Lighthouse v8.2.2: `/eth/v1/node/identity` and `/eth/v1/node/version` wrap
+//! their payload as `{"data": ...}` (`GenericResponse` in `common/eth2/src/types.rs`), where
+//! `IdentityData` carries `peer_id` as a string and `VersionData` carries `version` as the
+//! string `version_with_platform()` builds in the `node/version` handler of
+//! `beacon_node/http_api/src/lib.rs`.
 
 use std::time::Duration;
 
@@ -16,12 +18,14 @@ use serde::de::DeserializeOwned;
 use url::Url;
 
 const IDENTITY: &str = "/eth/v1/node/identity";
+const VERSION: &str = "/eth/v1/node/version";
 
 /// The client. One connection pool shared by every call, built once at startup.
 #[derive(Clone, Debug)]
 pub struct BnClient {
     http: reqwest::Client,
     identity: Url,
+    version: Url,
 }
 
 /// Why a call to the beacon node failed. Every message names the endpoint, because the four
@@ -103,6 +107,19 @@ struct Identity {
     peer_id: String,
 }
 
+#[derive(Deserialize)]
+struct Version {
+    version: String,
+}
+
+/// The identity URL with its path swapped: the other endpoints share its scheme, host and
+/// port, so there is one `bn.identity_url` key and no origin to keep in sync with it.
+fn sibling(identity: &Url, path: &str) -> Url {
+    let mut url = identity.clone();
+    url.set_path(path);
+    url
+}
+
 impl BnClient {
     /// Builds the client for the beacon node at `identity_url`. Every call shares the same
     /// `timeout`, which bounds the whole request; on localhost a few seconds is generous.
@@ -118,6 +135,7 @@ impl BnClient {
             .expect("plain HTTP client");
         Self {
             http,
+            version: sibling(&identity_url, VERSION),
             identity: identity_url,
         }
     }
@@ -131,6 +149,14 @@ impl BnClient {
         peer_id
             .parse()
             .map_err(|_| BnHttpError::InvalidPeerId(peer_id))
+    }
+
+    /// The beacon node's version string, verbatim. T-018 decides what it means.
+    pub async fn version(&self) -> Result<String, BnHttpError> {
+        let Data {
+            data: Version { version },
+        } = self.get(&self.version, VERSION).await?;
+        Ok(version)
     }
 
     async fn get<T: DeserializeOwned>(
