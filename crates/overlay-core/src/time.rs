@@ -1,6 +1,44 @@
 //! Injected time. Anything that asks "what time is it" takes a [`Clock`] so tests can drive it
 //! with [`FakeClock`] instead of sleeping.
 
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Instant;
+
+/// A source of monotonic time. Production code takes a `Clock` so tests can substitute
+/// [`FakeClock`] and drive it by hand.
+pub trait Clock: Send + Sync {
+    /// The current instant according to this clock.
+    fn now(&self) -> Instant;
+}
+
+/// A clock that only moves when a test tells it to.
+pub struct FakeClock(Arc<Mutex<Instant>>);
+
+impl FakeClock {
+    /// Starts at the real current instant.
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(Instant::now())))
+    }
+
+    fn slot(&self) -> MutexGuard<'_, Instant> {
+        // A poisoned lock means another test thread panicked mid-update. The stored instant is
+        // still a valid instant, so recover it instead of spreading the panic.
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Default for FakeClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clock for FakeClock {
+    fn now(&self) -> Instant {
+        *self.slot()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
