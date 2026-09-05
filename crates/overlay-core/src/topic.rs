@@ -484,4 +484,11 @@ mod tests {
             prop_assert_eq!(parsed.to_string(), text);
         }
     }
+
+    #[test]
+    fn fork_digest_bytes_are_decoded() {
+        let parsed = Topic::parse(&topic("beacon_block")).unwrap();
+
+        assert_eq!(parsed.fork_digest(), [0x6a, 0x95, 0xa1, 0xa9]);
+    }
 }
