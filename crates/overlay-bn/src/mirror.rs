@@ -6,7 +6,7 @@
 //!
 //! [`Mirror`] is pure: it takes the link's events and returns the actions they call for.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use libp2p::PeerId;
 use overlay_core::topic::{SubscriptionSets, Topic};
@@ -33,6 +33,9 @@ pub struct Mirror {
     /// parse is still mirrored to gossipsub; it only stays out of the sets.
     topics: BTreeMap<String, Option<Topic>>,
     sets: SubscriptionSets,
+    /// Unparsable strings already warned about, so a beacon node that re-announces one on
+    /// every reconnect does not repeat the warning.
+    warned: BTreeSet<String>,
 }
 
 impl Mirror {
@@ -42,6 +45,7 @@ impl Mirror {
             bn,
             topics: BTreeMap::new(),
             sets: SubscriptionSets::default(),
+            warned: BTreeSet::new(),
         }
     }
 
@@ -68,35 +72,48 @@ impl Mirror {
         if self.topics.contains_key(topic) {
             return Vec::new();
         }
-        let parsed = Topic::parse(topic).ok();
+        let parsed = match Topic::parse(topic) {
+            Ok(parsed) => Some(parsed),
+            Err(err) => {
+                if self.warned.insert(topic.to_owned()) {
+                    tracing::warn!(topic, %err, "mirroring a topic the sidecar cannot parse");
+                }
+                None
+            }
+        };
         self.topics.insert(topic.to_owned(), parsed);
-        vec![MirrorAction::Subscribe(topic.to_owned()), self.changed()]
+        let mut actions = vec![MirrorAction::Subscribe(topic.to_owned())];
+        actions.extend(self.changed());
+        actions
     }
 
     fn unsubscribe(&mut self, topic: &str) -> Vec<MirrorAction> {
         if self.topics.remove(topic).is_none() {
             return Vec::new();
         }
-        vec![MirrorAction::Unsubscribe(topic.to_owned()), self.changed()]
+        let mut actions = vec![MirrorAction::Unsubscribe(topic.to_owned())];
+        actions.extend(self.changed());
+        actions
     }
 
     /// Nothing survives a disconnect: the beacon node re-announces everything on reconnect.
     fn disconnected(&mut self) -> Vec<MirrorAction> {
-        if self.topics.is_empty() {
-            return Vec::new();
-        }
         let mut actions: Vec<_> = std::mem::take(&mut self.topics)
             .into_keys()
             .map(MirrorAction::Unsubscribe)
             .collect();
-        actions.push(self.changed());
+        actions.extend(self.changed());
         actions
     }
 
-    /// Rebuilds the sets from the parsed topics and reports them.
-    fn changed(&mut self) -> MirrorAction {
-        self.sets = SubscriptionSets::mirrored(self.topics.values().flatten().cloned().collect());
-        MirrorAction::Changed(self.sets.clone())
+    /// Rebuilds the sets from the parsed topics and reports them if they differ from before.
+    fn changed(&mut self) -> Option<MirrorAction> {
+        let sets = SubscriptionSets::mirrored(self.topics.values().flatten().cloned().collect());
+        if sets == self.sets {
+            return None;
+        }
+        self.sets = sets;
+        Some(MirrorAction::Changed(self.sets.clone()))
     }
 }
 
@@ -224,9 +241,7 @@ mod tests {
     fn connected_moves_the_peer_filter_to_the_new_bn() {
         let mut mirror = Mirror::new(*BN);
         let restarted = Keypair::generate_ed25519().public().to_peer_id();
-        mirror.on_bn_event(&BnEvent::Connected {
-            peer_id: restarted,
-        });
+        mirror.on_bn_event(&BnEvent::Connected { peer_id: restarted });
 
         let actions = mirror.on_bn_event(&BnEvent::Subscribed {
             peer: restarted,
