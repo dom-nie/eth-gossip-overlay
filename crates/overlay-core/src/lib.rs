@@ -3,6 +3,7 @@
 
 pub mod backoff;
 pub mod config;
+pub mod msgid;
 pub mod time;
 pub mod topic;
 
