@@ -19,8 +19,9 @@ use std::time::Duration;
 use libp2p::core::upgrade::Version;
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub::{self, IdentTopic, MessageAcceptance, MessageId, PublishError};
-use libp2p::swarm::{Swarm, SwarmEvent};
+use libp2p::swarm::{ConnectionError, Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, multiaddr, noise, tcp, yamux};
+use overlay_core::backoff::Backoff;
 use overlay_core::config::Bn;
 use prometheus_client::registry::Registry;
 use tokio::sync::mpsc::error::TrySendError;
@@ -137,10 +138,12 @@ impl BnLink {
     ) -> Self {
         let link = Link {
             swarm: build_swarm(&cfg.gossip, node_key, registry),
+            backoff: Backoff::new(cfg.backoff_min, cfg.backoff_max),
             cfg,
             bn_client,
             control,
             commands,
+            bn_peer: None,
             reconnect: None,
         };
         Self {
@@ -158,6 +161,9 @@ struct Link {
     bn_client: BnClient,
     control: mpsc::Sender<BnEvent>,
     commands: mpsc::Receiver<BnCommand>,
+    backoff: Backoff,
+    /// The beacon node this link is connected to, while it is.
+    bn_peer: Option<PeerId>,
     reconnect: Pending<Result<PeerId, BnHttpError>>,
 }
 
@@ -188,6 +194,13 @@ impl Link {
         }));
     }
 
+    /// Arms the reconnect with the next backoff delay. The RNG is a fresh thread-local each
+    /// time because it must not live across the loop's awaits.
+    fn retry_later(&mut self) {
+        let delay = self.backoff.next_delay(&mut rand::rng());
+        self.arm_reconnect(delay);
+    }
+
     fn on_identity(&mut self, identity: Result<PeerId, BnHttpError>) {
         let peer_id = match identity {
             Ok(peer_id) => peer_id,
@@ -212,8 +225,15 @@ impl Link {
         match event {
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 self.swarm.behaviour_mut().add_explicit_peer(&peer_id);
+                self.bn_peer = Some(peer_id);
                 self.emit(BnEvent::Connected { peer_id });
             }
+            SwarmEvent::ConnectionClosed {
+                peer_id,
+                num_established: 0,
+                cause,
+                ..
+            } => self.on_closed(peer_id, cause),
             SwarmEvent::Behaviour(gossipsub::Event::Subscribed { peer_id, topic, .. }) => {
                 self.emit(BnEvent::Subscribed {
                     peer: peer_id,
@@ -228,6 +248,17 @@ impl Link {
             }
             _ => {}
         }
+    }
+
+    /// The explicit peer is removed before the redial so gossipsub does not dial it too, with
+    /// no address, on its own schedule.
+    fn on_closed(&mut self, peer_id: PeerId, cause: Option<ConnectionError>) {
+        tracing::warn!(%peer_id, ?cause, "connection to the beacon node closed");
+        self.swarm.behaviour_mut().remove_explicit_peer(&peer_id);
+        if self.bn_peer.take().is_some() {
+            self.emit(BnEvent::Disconnected);
+        }
+        self.retry_later();
     }
 
     fn on_command(&mut self, command: BnCommand) {
