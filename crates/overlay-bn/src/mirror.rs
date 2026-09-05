@@ -307,6 +307,17 @@ mod tests {
         assert_eq!(mirror.sets(), &mirrored(&[]));
     }
 
+    /// Before the link has named the beacon node there is nobody to mirror.
+    #[test]
+    fn subscription_events_before_connected_are_ignored() {
+        let mut mirror = Mirror::new(*BN);
+
+        let actions = mirror.on_bn_event(&subscribed(ATTESTATION_3));
+
+        assert_eq!(actions, vec![]);
+        assert_eq!(mirror.sets(), &mirrored(&[]));
+    }
+
     #[test]
     fn events_from_a_peer_other_than_the_bn_are_ignored() {
         let mut mirror = Mirror::new(*BN);
