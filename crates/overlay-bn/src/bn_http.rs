@@ -316,4 +316,19 @@ mod tests {
             started.elapsed()
         );
     }
+
+    #[tokio::test]
+    async fn version_returns_the_data_version_string() {
+        let server = MockServer::start().await;
+        serve(
+            &server,
+            "/eth/v1/node/version",
+            json!({"data": {"version": "Lighthouse/v8.2.2-e423a66/x86_64-linux"}}),
+        )
+        .await;
+
+        let got = client(&server).version().await.unwrap();
+
+        assert_eq!(got, "Lighthouse/v8.2.2-e423a66/x86_64-linux");
+    }
 }
