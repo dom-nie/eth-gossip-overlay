@@ -93,6 +93,7 @@ mod tests {
     static BN: LazyLock<PeerId> =
         LazyLock::new(|| Keypair::generate_ed25519().public().to_peer_id());
     const ATTESTATION_3: &str = "/eth2/00000000/beacon_attestation_3/ssz_snappy";
+    const BLOCK: &str = "/eth2/00000000/beacon_block/ssz_snappy";
 
     fn subscribed(topic: &str) -> BnEvent {
         BnEvent::Subscribed {
@@ -164,6 +165,25 @@ mod tests {
         let actions = mirror.on_bn_event(&unsubscribed(ATTESTATION_3));
 
         assert_eq!(actions, vec![]);
+        assert_eq!(mirror.sets(), &sets(&[]));
+    }
+
+    #[test]
+    fn disconnected_clears_both_sets_and_emits_unsubscribe_for_each_topic() {
+        let mut mirror = Mirror::new(*BN);
+        mirror.on_bn_event(&subscribed(ATTESTATION_3));
+        mirror.on_bn_event(&subscribed(BLOCK));
+
+        let actions = mirror.on_bn_event(&BnEvent::Disconnected);
+
+        assert_eq!(
+            actions,
+            vec![
+                MirrorAction::Unsubscribe(ATTESTATION_3.to_owned()),
+                MirrorAction::Unsubscribe(BLOCK.to_owned()),
+                MirrorAction::Changed(sets(&[])),
+            ]
+        );
         assert_eq!(mirror.sets(), &sets(&[]));
     }
 }
