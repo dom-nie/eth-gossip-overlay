@@ -496,4 +496,11 @@ log:
     fn default_equals_appendix_a() {
         assert_eq!(Config::from_yaml(APPENDIX_A).unwrap(), Config::default());
     }
+
+    #[test]
+    fn unknown_field_is_rejected_with_its_name() {
+        let err = Config::from_yaml("overlay: { keepalive_sm: 5 }").unwrap_err();
+
+        assert!(err.to_string().contains("keepalive_sm"), "{err}");
+    }
 }
