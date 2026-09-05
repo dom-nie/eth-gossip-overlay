@@ -448,4 +448,22 @@ hosts:
         assert_eq!(me.region, region("eu"));
         assert_eq!(me.site.as_deref(), Some("ams1"));
     }
+
+    #[test]
+    fn resolve_self_region_env_override_wins_over_roster() {
+        let roster = Roster::from_yaml(APPENDIX_A).unwrap();
+
+        let me = resolve_self(
+            &roster,
+            &env(&[
+                ("FLEET_OVERLAY_HOSTNAME", "bn-nyc1-01"),
+                ("FLEET_OVERLAY_REGION", "eu"),
+            ]),
+            &gethostname,
+        )
+        .unwrap();
+
+        assert_eq!(me.region, region("eu"));
+        assert_eq!(me.site.as_deref(), Some("nyc1"));
+    }
 }
