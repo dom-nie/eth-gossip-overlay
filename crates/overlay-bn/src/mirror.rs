@@ -214,4 +214,22 @@ mod tests {
         assert_eq!(actions, vec![]);
         assert_eq!(mirror.sets(), &sets(&[]));
     }
+
+    /// A restarted beacon node has a new peer id; its subscriptions must not be ignored.
+    #[test]
+    fn connected_moves_the_peer_filter_to_the_new_bn() {
+        let mut mirror = Mirror::new(*BN);
+        let restarted = Keypair::generate_ed25519().public().to_peer_id();
+        mirror.on_bn_event(&BnEvent::Connected {
+            peer_id: restarted,
+        });
+
+        let actions = mirror.on_bn_event(&BnEvent::Subscribed {
+            peer: restarted,
+            topic: ATTESTATION_3.to_owned(),
+        });
+
+        assert_eq!(actions.len(), 2);
+        assert_eq!(mirror.sets(), &sets(&[ATTESTATION_3]));
+    }
 }
