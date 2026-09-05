@@ -22,13 +22,11 @@ allow = [
   "Zlib",
   "MPL-2.0",
 ]
-confidence-threshold = 0.8
 
 [bans]
 # Lighthouse's tree pins older rand, hkdf and ed25519-dalek next to the versions this workspace
 # uses, and cannot be unified from here.
 multiple-versions = "warn"
-wildcards = "allow"
 
 [sources]
 unknown-registry = "deny"

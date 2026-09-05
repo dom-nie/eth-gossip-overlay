@@ -12,10 +12,10 @@ cargo test -p overlay-core                                 # the pure crate, sec
 cargo clippy --workspace --all-targets -- -D warnings      # what CI enforces
 cargo fmt --all --check
 cargo deny check licenses advisories bans sources          # dependency licences, advisories, duplicate versions, git sources
-lychee --offline --no-progress '**/*.md'                   # internal links in the Markdown files
+lychee --offline --no-progress --exclude-path target '**/*.md'   # internal links in the Markdown files
 ```
 
-`cargo install cargo-deny lychee --locked` provides the last two. CI runs all six.
+`cargo install cargo-deny lychee --locked` provides the last two. CI runs the same checks.
 
 ## Formatting and lints
 
