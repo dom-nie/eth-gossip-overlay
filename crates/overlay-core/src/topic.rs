@@ -384,4 +384,25 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn malformed_topic_is_error() {
+        let no_index = topic("beacon_attestation_");
+        let leading_zeros = topic("beacon_attestation_007");
+        let too_big = topic("beacon_attestation_256");
+        for (input, expected) in [
+            ("/eth2/beacon_block/ssz_snappy", TopicError::Shape),
+            ("eth2/6a95a1a9/beacon_block/ssz_snappy", TopicError::Shape),
+            ("/eth2/6a95a1a9/beacon_block/ssz_snappy/", TopicError::Shape),
+            ("/eth2/6a95a1a/beacon_block/ssz_snappy", TopicError::Digest),
+            ("/eth2/6A95A1A9/beacon_block/ssz_snappy", TopicError::Digest),
+            ("/eth2/6a95a1a9/beacon_block/ssz", TopicError::Encoding),
+            ("/eth2/6a95a1a9//ssz_snappy", TopicError::EmptyName),
+            (no_index.as_str(), TopicError::Index),
+            (leading_zeros.as_str(), TopicError::Index),
+            (too_big.as_str(), TopicError::Index),
+        ] {
+            assert_eq!(Topic::parse(input), Err(expected), "{input}");
+        }
+    }
 }
