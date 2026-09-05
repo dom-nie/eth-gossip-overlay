@@ -78,6 +78,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn backoff_reset_returns_to_min() {
+        let mut backoff = Backoff::new(Duration::from_millis(100), Duration::from_millis(1000));
+        for _ in 0..4 {
+            backoff.next_delay(&mut NoJitter);
+        }
+
+        backoff.reset();
+
+        assert_eq!(
+            backoff.next_delay(&mut NoJitter),
+            Duration::from_millis(100)
+        );
+    }
+
     proptest! {
         #[test]
         fn backoff_jitter_stays_within_documented_bounds(
