@@ -10,6 +10,7 @@ use rand::Rng;
 /// exceed `max`.
 #[derive(Clone, Debug)]
 pub struct Backoff {
+    min: Duration,
     max: Duration,
     next: Duration,
 }
@@ -17,7 +18,11 @@ pub struct Backoff {
 impl Backoff {
     /// A backoff whose first delay is `min`.
     pub fn new(min: Duration, max: Duration) -> Self {
-        Self { max, next: min }
+        Self {
+            min,
+            max,
+            next: min,
+        }
     }
 
     /// The delay to wait before the next attempt.
@@ -25,6 +30,11 @@ impl Backoff {
         let full = self.next;
         self.next = self.next.saturating_mul(2).min(self.max);
         jitter(full, rng.next_u64())
+    }
+
+    /// Starts the sequence over from `min`, for after a connection has come back up.
+    pub fn reset(&mut self) {
+        self.next = self.min;
     }
 }
 
