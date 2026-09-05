@@ -1,7 +1,8 @@
 # cargo deny check licenses advisories bans sources
 #
-# The checked graph includes the dev-dependency tree (lighthouse_network, types), which is the
-# point: what the tests compile against is what an auditor asks about.
+# The checked graph is the workspace's normal dependency graph: dev-dependencies such as
+# lighthouse_network are not walked, but cargo metadata unifies their features onto crates the
+# workspace also uses, which is how reqwest's TLS tree reaches the licence check below.
 
 [advisories]
 ignore = [
