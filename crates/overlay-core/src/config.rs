@@ -733,4 +733,16 @@ log:
             "{err}"
         );
     }
+
+    #[test]
+    fn stripe_min_recipients_must_be_at_least_one() {
+        let err = Config::from_yaml("overlay: { fanout: { large: { stripe_min_recipients: 0 } } }")
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("overlay.fanout.large.stripe_min_recipients"),
+            "{err}"
+        );
+    }
 }
