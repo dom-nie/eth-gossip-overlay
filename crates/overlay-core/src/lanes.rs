@@ -64,6 +64,12 @@ impl<T> LanePusher<T> {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(item) | TrySendError::Closed(item)) => {
                 self.stats.dropped(class);
+                if class == Class::Large {
+                    tracing::error!(
+                        capacity = LARGE_LANE_CAPACITY,
+                        "large lane full: nothing is draining the BN link's messages"
+                    );
+                }
                 Err(Dropped(item))
             }
         }
