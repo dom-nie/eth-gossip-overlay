@@ -101,7 +101,7 @@ impl SeenCache {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use proptest::prelude::*;
@@ -115,6 +115,16 @@ mod tests {
 
     fn cache(ttl: Duration, capacity: usize, clock: &FakeClock) -> SeenCache {
         SeenCache::new(ttl, capacity, Arc::new(clock.clone()))
+    }
+
+    /// Records the count passed to every capacity eviction call.
+    #[derive(Default)]
+    struct CountingStats(Mutex<Vec<usize>>);
+
+    impl SeenStats for CountingStats {
+        fn evicted_for_capacity(&self, count: usize) {
+            self.0.lock().unwrap().push(count);
+        }
     }
 
     #[test]
@@ -218,5 +228,23 @@ mod tests {
         assert!(!cache.contains(&id(1)));
         assert!(cache.contains(&id(2)));
         assert!(cache.contains(&id(3)));
+    }
+
+    #[test]
+    fn capacity_eviction_fires_stats_and_expiry_does_not() {
+        let clock = FakeClock::new();
+        let stats = Arc::new(CountingStats::default());
+        let mut cache = cache(Duration::from_secs(60), 3, &clock).with_stats(stats.clone());
+
+        for byte in [1, 2, 3, 4] {
+            cache.insert(id(byte));
+        }
+        assert_eq!(*stats.0.lock().unwrap(), [1]);
+
+        clock.advance(Duration::from_secs(61));
+        cache.evict_expired();
+
+        assert!(cache.is_empty());
+        assert_eq!(*stats.0.lock().unwrap(), [1]);
     }
 }
