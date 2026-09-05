@@ -1,6 +1,6 @@
 //! The fleet roster: every host the sidecar may pair with, keyed by hostname. Configuration
-//! management renders it from the inventory, so a key nobody expects or a host that cannot be
-//! dialled is an inventory bug and fails the load with the host named.
+//! management renders it from the inventory, so an unknown key or an address that does not
+//! parse is an inventory bug, and the load fails naming the host.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
@@ -38,7 +38,7 @@ impl fmt::Display for Region {
     }
 }
 
-/// One line of the roster.
+/// One roster entry: a host, where it is and how to reach it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostEntry {
     /// The host's identity.
@@ -94,13 +94,6 @@ pub enum RosterError {
         /// The parser's own error, which names the offending key and its position.
         source: yaml::Error,
     },
-    /// The hostname this process resolved to has no roster entry and nothing in the
-    /// environment says which region it should fan out in.
-    #[error("{hostname} is not in the roster and {REGION_ENV} is not set")]
-    UnknownHost {
-        /// The hostname that was looked up.
-        hostname: Hostname,
-    },
     /// A host parsed but cannot be used as written.
     #[error("{}hosts[{index}] {:?}: {reason}", in_file(.path.as_deref()), .hostname.0)]
     Invalid {
@@ -112,6 +105,13 @@ pub enum RosterError {
         hostname: Hostname,
         /// What is wrong with the entry.
         reason: String,
+    },
+    /// The hostname this process resolved to has no roster entry and nothing in the
+    /// environment says which region it should fan out in.
+    #[error("{hostname} is not in the roster and {REGION_ENV} is not set")]
+    UnknownHost {
+        /// The hostname that was looked up.
+        hostname: Hostname,
     },
 }
 
