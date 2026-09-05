@@ -13,7 +13,7 @@ use url::Url;
 
 /// The whole `config.yaml`, one field per key.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
     /// `overlay`: the QUIC mesh between sidecars.
     pub overlay: Overlay,
@@ -34,7 +34,7 @@ pub struct Config {
 
 /// `overlay`: the QUIC mesh between sidecars.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Overlay {
     /// `listen`: the address the QUIC endpoint binds. `[::]` listens dual-stack.
     pub listen: SocketAddr,
@@ -63,7 +63,7 @@ pub struct Overlay {
 
 /// `overlay.fanout`: routing per traffic class.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Fanout {
     /// `large`: blocks and data columns.
     pub large: LargeFanout,
@@ -73,7 +73,7 @@ pub struct Fanout {
 
 /// `overlay.fanout.large`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LargeFanout {
     /// `in_region`: how a large message reaches the origin's own region.
     pub in_region: InRegion,
@@ -86,7 +86,7 @@ pub struct LargeFanout {
 
 /// `overlay.fanout.small`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SmallFanout {
     /// `in_region`: how a batch reaches the origin's own region.
     pub in_region: InRegion,
@@ -124,7 +124,7 @@ pub enum CrossRegion {
 
 /// `overlay.io_thread`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct IoThread {
     /// `pin_cpu`: a reserved core to pin the overlay I/O thread to. `null` leaves it unpinned.
     pub pin_cpu: Option<u32>,
@@ -152,7 +152,7 @@ pub enum Steering {
 
 /// `bn`: the link to the local beacon node.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Bn {
     /// `identity_url`: the beacon API endpoint that reports the node's peer id.
     pub identity_url: Url,
@@ -171,7 +171,7 @@ pub struct Bn {
 /// `bn.publish_rate_limit`: class-aware ceilings on the publish path. A bug guard, not a normal
 /// control; the defaults sit well above any legitimate rate.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct PublishRateLimit {
     /// `small_per_s`: small-class messages per second.
     pub small_per_s: u32,
@@ -183,7 +183,7 @@ pub struct PublishRateLimit {
 
 /// `classes`: tunables per traffic class.
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Classes {
     /// `small`: batched small messages over datagrams.
     pub small: SmallClass,
@@ -193,7 +193,7 @@ pub struct Classes {
 
 /// `classes.small`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct SmallClass {
     /// `batch_window_ms`: how long a batch collects entries before it is flushed.
     #[serde(rename = "batch_window_ms", deserialize_with = "millis")]
@@ -205,7 +205,7 @@ pub struct SmallClass {
 
 /// `classes.large`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct LargeClass {
     /// `chunk_bytes`: the fixed chunk size. A multiple of 64, which the Reed-Solomon shards
     /// require.
@@ -220,7 +220,7 @@ pub struct LargeClass {
 
 /// `log`.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct Log {
     /// `level`: the least severe level that is emitted. `RUST_LOG` overrides it.
     pub level: LogLevel,
