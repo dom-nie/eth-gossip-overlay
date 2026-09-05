@@ -681,10 +681,12 @@ mod tests {
         drop(harness.commands);
     }
 
-    /// The sidecar never subscribes here, so it has no mesh for the topic; the message reaches
-    /// the fake only because it is the explicit peer.
+    /// The sidecar never subscribes here, so it has no mesh for the topic, and the publish
+    /// still reaches the fake. That it is explicit-peer forwarding rather than gossipsub's
+    /// fanout fill (a subscribed peer is a fanout candidate either way) is only observable
+    /// against a real beacon node: T-018 conformance item 4.
     #[tokio::test(flavor = "multi_thread")]
-    async fn link_adds_bn_as_explicit_peer() {
+    async fn publish_without_sidecar_subscription_reaches_the_bn() {
         let mut bn = FakeBn::start().await;
         let mut harness = spawn(link_config(&bn), &bn);
         let mut received = bn.received();
