@@ -82,7 +82,17 @@ mod drift {
     use prometheus_client::registry::Registry;
 
     use super::*;
-    use crate::gossip::{BnLinkConfig, build_behaviour};
+    use crate::gossip::{self, BnLinkConfig, build_behaviour};
+
+    /// Local policy rather than wire-compat, but the table claims it equals the beacon node's
+    /// default and `NetworkConfig` is public, so the claim is pinned.
+    #[test]
+    fn idontwant_threshold_equals_lighthouse_default() {
+        assert_eq!(
+            gossip::IDONTWANT_MESSAGE_SIZE_THRESHOLD,
+            lighthouse_network::NetworkConfig::default().idontwant_message_size_threshold
+        );
+    }
 
     /// `Config` has no getter for the ids, so this reads what a fresh connection's handler
     /// offers to negotiate, which is the list the beacon node sees.
