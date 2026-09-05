@@ -8,7 +8,10 @@
 //! their payload as `{"data": ...}` (`GenericResponse` in `common/eth2/src/types.rs`), where
 //! `IdentityData` carries `peer_id` as a string and `VersionData` carries `version` as the
 //! string `version_with_platform()` builds in the `node/version` handler of
-//! `beacon_node/http_api/src/lib.rs`.
+//! `beacon_node/http_api/src/lib.rs`. `/lighthouse/peers` is not wrapped: its handler in the
+//! same file returns a bare array of `peer::Peer { peer_id, peer_info }`
+//! (`beacon_node/http_api/src/peer.rs`), and `is_trusted` is a plain `bool` field of
+//! `PeerInfo` in `beacon_node/lighthouse_network/src/peer_manager/peerdb/peer_info.rs`.
 
 use std::time::Duration;
 
@@ -19,6 +22,7 @@ use url::Url;
 
 const IDENTITY: &str = "/eth/v1/node/identity";
 const VERSION: &str = "/eth/v1/node/version";
+const PEERS: &str = "/lighthouse/peers";
 
 /// The client. One connection pool shared by every call, built once at startup.
 #[derive(Clone, Debug)]
@@ -26,6 +30,15 @@ pub struct BnClient {
     http: reqwest::Client,
     identity: Url,
     version: Url,
+    peers: Url,
+}
+
+/// What the beacon node knows about one of its peers, cut down to what the sidecar acts on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+pub struct PeerInfo {
+    /// Whether the peer is in the BN's `--trusted-peers`; how the sidecar learns that the
+    /// operator's flag took effect.
+    pub is_trusted: bool,
 }
 
 /// Why a call to the beacon node failed. Every message names the endpoint, because the four
@@ -112,6 +125,12 @@ struct Version {
     version: String,
 }
 
+#[derive(Deserialize)]
+struct Peer {
+    peer_id: String,
+    peer_info: PeerInfo,
+}
+
 /// The identity URL with its path swapped: the other endpoints share its scheme, host and
 /// port, so there is one `bn.identity_url` key and no origin to keep in sync with it.
 fn sibling(identity: &Url, path: &str) -> Url {
@@ -136,6 +155,7 @@ impl BnClient {
         Self {
             http,
             version: sibling(&identity_url, VERSION),
+            peers: sibling(&identity_url, PEERS),
             identity: identity_url,
         }
     }
@@ -157,6 +177,17 @@ impl BnClient {
             data: Version { version },
         } = self.get(&self.version, VERSION).await?;
         Ok(version)
+    }
+
+    /// What the beacon node reports about the sidecar itself, or `None` when it does not list
+    /// `own` at all. Other rows are matched by text and never parsed.
+    pub async fn peer_info(&self, own: &PeerId) -> Result<Option<PeerInfo>, BnHttpError> {
+        let own = own.to_string();
+        let peers: Vec<Peer> = self.get(&self.peers, PEERS).await?;
+        Ok(peers
+            .into_iter()
+            .find(|peer| peer.peer_id == own)
+            .map(|peer| peer.peer_info))
     }
 
     async fn get<T: DeserializeOwned>(
