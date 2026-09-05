@@ -23,6 +23,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use libp2p::gossipsub::PublishError;
 use overlay_core::pubqueue::{DropReason, PublishItem, PublishQueue, Pushed, QueueStats};
+use overlay_core::ratelimit::PublishLimits;
 use overlay_core::time::Clock;
 use overlay_core::topic::Class;
 use tokio::sync::{Notify, mpsc, oneshot};
@@ -85,6 +86,8 @@ pub enum PublishOutcome {
     Published,
     /// The inject kill switch is off; the item was discarded before any command was sent.
     SuppressedInjectOff,
+    /// The class bucket or the bytes bucket was empty; the item was discarded.
+    RateLimited,
     /// Gossipsub already had it: the beacon node echoed a message the sidecar had received.
     Duplicate,
     /// The sidecar's gossipsub instance is no longer subscribed to the topic: the `SUBS` race.
@@ -132,6 +135,7 @@ pub struct Publisher {
     queue: PublishHandle,
     commands: mpsc::Sender<BnCommand>,
     inject: Arc<AtomicBool>,
+    limits: PublishLimits,
     stats: Arc<dyn PublishStats>,
 }
 
@@ -139,20 +143,23 @@ impl Publisher {
     /// Builds the queue and starts draining it into `commands`. The handle is what T-032,
     /// T-062 and T-074 hold; the task keeps going until the link is gone. `inject` is the
     /// kill switch, shared with whoever flips it (config, SIGHUP, `fleet-overlayctl`); it is
-    /// read per item, so flipping it back on resumes without a restart.
+    /// read per item, so flipping it back on resumes without a restart. `limits` are
+    /// [`PublishLimits::new`] from `bn.publish_rate_limit`.
     pub fn spawn(
         commands: mpsc::Sender<BnCommand>,
         inject: Arc<AtomicBool>,
+        limits: PublishLimits,
         stats: Arc<dyn PublishStats>,
         clock: Arc<dyn Clock>,
     ) -> (PublishHandle, JoinHandle<()>) {
-        let (handle, publisher) = Self::new(commands, inject, stats, clock);
+        let (handle, publisher) = Self::new(commands, inject, limits, stats, clock);
         (handle, tokio::spawn(publisher.run()))
     }
 
     fn new(
         commands: mpsc::Sender<BnCommand>,
         inject: Arc<AtomicBool>,
+        limits: PublishLimits,
         stats: Arc<dyn PublishStats>,
         clock: Arc<dyn Clock>,
     ) -> (PublishHandle, Self) {
@@ -167,6 +174,7 @@ impl Publisher {
             queue: handle.clone(),
             commands,
             inject,
+            limits,
             stats,
         };
         (handle, publisher)
@@ -192,6 +200,13 @@ impl Publisher {
         if !self.inject.load(Ordering::Relaxed) {
             self.stats.suppressed_inject_off(class);
             return Some(PublishOutcome::SuppressedInjectOff);
+        }
+        if !self
+            .limits
+            .admit(class, item.payload.len(), self.queue.clock.now())
+        {
+            self.stats.rate_limited(class);
+            return Some(PublishOutcome::RateLimited);
         }
         let (reply, answer) = oneshot::channel();
         let command = BnCommand::Publish {
