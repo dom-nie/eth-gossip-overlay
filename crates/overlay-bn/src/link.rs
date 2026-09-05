@@ -415,7 +415,7 @@ mod tests {
 
     use prometheus_client::registry::Registry;
     use serde_json::json;
-    use wiremock::MockServer;
+    use wiremock::{MockServer, ResponseTemplate};
 
     use super::*;
     use crate::bn_http::BnClient;
@@ -740,5 +740,32 @@ mod tests {
             }
         );
         assert_eq!(harness.spec.borrow().number_of_columns, 64);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn connect_probe_failures_yield_none_fields_and_keep_the_default_spec() {
+        let mut bn = FakeBn::start().await;
+        bn.set_peers_response(ResponseTemplate::new(404)).await;
+        bn.set_version_response(ResponseTemplate::new(503)).await;
+        bn.set_spec_response(ResponseTemplate::new(503)).await;
+        let mut harness = spawn(link_config(&bn), &bn);
+
+        wait_for(&mut harness.control, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+        let info = next_event(&mut harness.control).await;
+        let later = tokio::time::timeout(Duration::from_millis(200), harness.control.recv()).await;
+
+        assert_eq!(
+            info,
+            BnEvent::BnInfo {
+                version: None,
+                trusted: None,
+            }
+        );
+        assert_eq!(*harness.spec.borrow(), SpecSnapshot::MAINNET);
+        assert!(later.is_err(), "unexpected event after BnInfo: {later:?}");
+        assert!(harness.link.connected.load(Ordering::Relaxed));
     }
 }
