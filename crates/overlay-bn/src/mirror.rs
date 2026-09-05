@@ -267,6 +267,13 @@ mod tests {
             .collect()
     }
 
+    fn column_subscribes(actions: &[MirrorAction]) -> BTreeSet<String> {
+        subscribes(actions)
+            .into_iter()
+            .filter(|t| t.contains("data_column_sidecar_"))
+            .collect()
+    }
+
     /// The sets a mirror of `topics` has under the mainnet column count: the topics
     /// themselves advertised, and every column of their digests in `local` as well.
     fn sets_of(topics: &[&str]) -> SubscriptionSets {
@@ -492,6 +499,25 @@ mod tests {
         let mut expected = columns("00000000", 0..8);
         expected.insert(ATTESTATION_3.to_owned());
         assert_eq!(subscribes(&actions), expected);
+    }
+
+    #[test]
+    fn column_count_comes_from_the_spec_snapshot_not_a_literal() {
+        let sixty_four = SpecSnapshot {
+            number_of_columns: 64,
+            ..SpecSnapshot::MAINNET
+        };
+        let mut small = connected_with(&sixty_four);
+        let mut mainnet = connected();
+
+        let from_small = small.on_bn_event(&subscribed(ATTESTATION_3));
+        let from_mainnet = mainnet.on_bn_event(&subscribed(ATTESTATION_3));
+
+        assert_eq!(column_subscribes(&from_small), columns("00000000", 0..64));
+        assert_eq!(
+            column_subscribes(&from_mainnet),
+            columns("00000000", 0..128)
+        );
     }
 
     /// The fake's subscription has to show in the watch and come back to the fake as the
