@@ -654,4 +654,20 @@ log:
             Config::from_yaml("overlay: { keepalive_ms: 4999, idle_timeout_ms: 5000 }").is_ok()
         );
     }
+
+    #[test]
+    fn stale_after_must_not_be_shorter_than_batch_window() {
+        let err =
+            Config::from_yaml("classes: { small: { batch_window_ms: 20, stale_after_ms: 10 } }")
+                .unwrap_err();
+
+        assert!(
+            err.to_string().contains("classes.small.stale_after_ms"),
+            "{err}"
+        );
+        assert!(
+            Config::from_yaml("classes: { small: { batch_window_ms: 20, stale_after_ms: 20 } }")
+                .is_ok()
+        );
+    }
 }
