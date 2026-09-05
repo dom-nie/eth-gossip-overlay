@@ -2,7 +2,7 @@
 //! management renders it from the inventory, so a key nobody expects or a host that cannot be
 //! dialled is an inventory bug and fails the load with the host named.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -185,6 +185,11 @@ impl Roster {
             .collect();
         hosts.sort_by(|a, b| a.hostname.cmp(&b.hostname));
         hosts
+    }
+
+    /// Every region that has at least one host, sorted.
+    pub fn regions(&self) -> BTreeSet<Region> {
+        self.hosts.iter().map(|host| host.region.clone()).collect()
     }
 }
 
