@@ -3,6 +3,7 @@
 
 pub mod backoff;
 pub mod config;
+pub mod fanout;
 pub mod identity;
 pub mod lanes;
 pub mod msgid;

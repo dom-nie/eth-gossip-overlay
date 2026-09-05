@@ -1,3 +1,155 @@
+//! The first hop of everything the beacon node forwards (§5.2, §6.1 to §6.3): each message the
+//! link queued is acknowledged, classified, checked against the seen cache and, when new,
+//! handed to the fanout task as an [`Outbound`].
+//!
+//! Three hand-offs, none of which waits. The link's lanes are drained with `recv()`, large
+//! first, so a block is never queued behind attestations (D07). `Accept` goes back to the
+//! swarm loop with `try_send` before anything else happens to the message, so neither the seen
+//! cache nor a full fanout lane can hold up gossipsub's memcache cleanup. The `Outbound` goes
+//! out with `push`, which is `try_send` too, so a stalled fanout drops here instead of backing
+//! up into the swarm loop.
+//!
+//! `Accept` is the only verdict there is: the beacon node validated the message before
+//! forwarding it, and the sidecar has no other gossipsub peers, so the report only lets
+//! gossipsub forget the message.
+
+use std::collections::BTreeSet;
+use std::sync::Arc;
+
+use overlay_core::fanout::Outbound;
+use overlay_core::lanes::{ClassLanes, LanePusher};
+use overlay_core::msgid::MessageId;
+use overlay_core::seen::SharedSeenCache;
+use overlay_core::time::Clock;
+use overlay_core::topic::{Class, Topic};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::task::JoinHandle;
+
+use crate::link::{BnCommand, BnMessage};
+
+/// Where the inbound path counts. Every call is about the beacon node side, so `source="bn"`
+/// is implied rather than passed: T-041 binds [`first_seen`](Self::first_seen) and
+/// [`duplicate`](Self::duplicate) to `first_seen_total` and `duplicates_dropped_total` under
+/// that label, [`unknown_kind`](Self::unknown_kind) to `unknown_topic_kind_total{class}` and
+/// [`dropped_full`](Self::dropped_full) to the fanout lane's drop series. `()` counts nothing.
+pub trait InboundStats: Send + Sync {
+    /// The seen cache did not hold the id: the beacon node reached this host before the
+    /// overlay did.
+    fn first_seen(&self, class: Class);
+    /// The seen cache already held the id: the overlay delivered the message earlier and the
+    /// beacon node is echoing it, or another beacon node's copy (§5.5).
+    fn duplicate(&self, class: Class);
+    /// The fanout lane for `class` was full and the message was dropped. The [`LanePusher`]
+    /// counts the same drop on the [`LaneStats`](overlay_core::lanes::LaneStats) the fanout
+    /// lanes were built with, so pass `()` there when this is the only series wanted.
+    fn dropped_full(&self, class: Class);
+    /// A message on a topic name the sidecar does not know, classified by payload size
+    /// (D02). Its name is logged once so a fork that adds a topic is visible before a release
+    /// names it.
+    fn unknown_kind(&self, class: Class);
+}
+
+impl InboundStats for () {
+    fn first_seen(&self, _: Class) {}
+    fn duplicate(&self, _: Class) {}
+    fn dropped_full(&self, _: Class) {}
+    fn unknown_kind(&self, _: Class) {}
+}
+
+/// The task's state. [`spawn`](Self::spawn) starts it; it runs until aborted, because the
+/// lanes never close.
+pub struct Inbound {
+    lanes: ClassLanes<BnMessage>,
+    commands: mpsc::Sender<BnCommand>,
+    seen: SharedSeenCache,
+    out: LanePusher<Outbound>,
+    clock: Arc<dyn Clock>,
+    stats: Arc<dyn InboundStats>,
+    /// Topic strings already warned about, so a stream of messages on one costs one line.
+    warned: BTreeSet<String>,
+}
+
+impl Inbound {
+    /// Starts draining `lanes`. Every message is reported `Accept` on `commands`; a new one
+    /// becomes an [`Outbound`] on `out`, stamped with `clock`'s time.
+    pub fn spawn(
+        lanes: ClassLanes<BnMessage>,
+        commands: mpsc::Sender<BnCommand>,
+        seen: SharedSeenCache,
+        out: LanePusher<Outbound>,
+        clock: Arc<dyn Clock>,
+        stats: Arc<dyn InboundStats>,
+    ) -> JoinHandle<()> {
+        let mut inbound = Self {
+            lanes,
+            commands,
+            seen,
+            out,
+            clock,
+            stats,
+            warned: BTreeSet::new(),
+        };
+        tokio::spawn(async move {
+            loop {
+                let msg = inbound.lanes.recv().await;
+                inbound.handle(msg);
+            }
+        })
+    }
+
+    fn handle(&mut self, msg: BnMessage) {
+        let received_at = self.clock.now();
+        // The swarm loop drains its commands without ever waiting, so a full channel means it
+        // is wedged, and waiting here would only add this task to what it holds up.
+        match self.commands.try_send(BnCommand::ReportAccept {
+            id: msg.id.clone(),
+            source: msg.source,
+        }) {
+            Ok(()) | Err(TrySendError::Closed(_)) => {}
+            Err(TrySendError::Full(_)) => {
+                tracing::warn!(id = %msg.id, "command channel full: accept not reported");
+            }
+        }
+        // The mirror only subscribes to strings it was given, so a message on one that does
+        // not parse means the beacon node announced it; the mirror warned then, this warns
+        // once more when a payload arrives, and T-041 has no series for it.
+        let topic = match Topic::parse(&msg.topic) {
+            Ok(topic) => topic,
+            Err(err) => {
+                if self.warned.insert(msg.topic.clone()) {
+                    tracing::warn!(topic = msg.topic, %err, "dropping messages on a topic the sidecar cannot parse");
+                }
+                return;
+            }
+        };
+        let class = Class::of(topic.kind(), msg.data.len());
+        // T-012's id function always yields 20 bytes; this only guards a future id function.
+        let Some(id) = MessageId::from_slice(&msg.id.0) else {
+            tracing::error!(id = %msg.id, topic = msg.topic, "gossipsub id is not 20 bytes");
+            return;
+        };
+        // Insert site 1 of 3 (D08). The other two are T-032's receiver, for what arrives whole
+        // from the overlay, and T-074's completion, for what the reassembler puts together.
+        if !self.seen.insert(id) {
+            self.stats.duplicate(class);
+            return;
+        }
+        self.stats.first_seen(class);
+        // A full fanout lane is counted, and for the large lane logged, by the pusher.
+        let _ = self.out.push(
+            class,
+            Outbound {
+                topic,
+                class,
+                id,
+                payload: msg.data.into(),
+                received_at,
+            },
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, LazyLock, Mutex};
@@ -19,7 +171,6 @@ mod tests {
     use crate::link::{BnCommand, BnMessage};
 
     const ATTESTATION_3: &str = "/eth2/00000000/beacon_attestation_3/ssz_snappy";
-    const BLOCK: &str = "/eth2/00000000/beacon_block/ssz_snappy";
 
     static BN: LazyLock<PeerId> =
         LazyLock::new(|| Keypair::generate_ed25519().public().to_peer_id());
@@ -89,7 +240,6 @@ mod tests {
         lanes: Option<ClassLanes<BnMessage>>,
         pusher: LanePusher<BnMessage>,
         command_tx: mpsc::Sender<BnCommand>,
-        commands: mpsc::Receiver<BnCommand>,
         seen: SharedSeenCache,
         out: ClassLanes<Outbound>,
         clock: FakeClock,
@@ -103,7 +253,7 @@ mod tests {
 
         fn with_out(out: ClassLanes<Outbound>) -> Self {
             let lanes = ClassLanes::new(Arc::new(()));
-            let (command_tx, commands) = mpsc::channel(64);
+            let (command_tx, _) = mpsc::channel(64);
             let clock = FakeClock::new();
             let seen = SharedSeenCache::new(SeenCache::new(
                 Duration::from_secs(60),
@@ -114,7 +264,6 @@ mod tests {
                 pusher: lanes.pusher(),
                 lanes: Some(lanes),
                 command_tx,
-                commands,
                 seen,
                 out,
                 clock,
