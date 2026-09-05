@@ -113,4 +113,15 @@ mod tests {
         assert!(cache.contains(&id(1)));
         assert!(!cache.contains(&id(2)));
     }
+
+    #[test]
+    fn entry_expires_after_ttl() {
+        let clock = FakeClock::new();
+        let mut cache = cache(Duration::from_secs(60), 100, &clock);
+        cache.insert(id(1));
+
+        clock.advance(Duration::from_secs(60));
+
+        assert!(cache.insert(id(1)));
+    }
 }
