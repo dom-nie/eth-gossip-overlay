@@ -228,4 +228,19 @@ mod tests {
 
         assert!(matches!(err, BnHttpError::Status(503)), "{err:?}");
     }
+
+    #[tokio::test]
+    async fn malformed_json_is_body_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/eth/v1/node/identity"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{\"data\": {\"peer_id\""))
+            .mount(&server)
+            .await;
+
+        let err = client(&server).peer_id().await.unwrap_err();
+
+        assert!(matches!(err, BnHttpError::Body { .. }), "{err:?}");
+        assert!(err.to_string().contains("/eth/v1/node/identity"), "{err}");
+    }
 }
