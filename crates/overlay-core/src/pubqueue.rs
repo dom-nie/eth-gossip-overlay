@@ -170,7 +170,7 @@ impl PublishQueue {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -264,5 +264,26 @@ mod tests {
         let survivors: Vec<usize> =
             std::iter::from_fn(|| queue.pop(now).as_ref().map(number)).collect();
         assert_eq!(survivors, vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn queue_pop_discards_large_entries_older_than_3_s_as_stale() {
+        let stats = Arc::new(Recorded::default());
+        let mut queue = PublishQueue::new(stats.clone());
+        let start = Instant::now();
+        queue.push(item(Class::Large, 0, 100), start);
+        queue.push(item(Class::Large, 1, 100), start + Duration::from_secs(2));
+
+        let popped = queue.pop(start + PUBLISH_LARGE_STALE_AFTER + Duration::from_millis(1));
+
+        assert_eq!(popped.as_ref().map(number), Some(1));
+        assert_eq!(stats.drops(), vec![(Class::Large, DropReason::Stale)]);
+        assert!(queue.is_empty());
+
+        // Exactly the bound is not older than it.
+        queue.push(item(Class::Large, 2, 100), start);
+        let at_bound = queue.pop(start + PUBLISH_LARGE_STALE_AFTER);
+        assert_eq!(at_bound.as_ref().map(number), Some(2));
+        assert_eq!(stats.drops().len(), 1);
     }
 }
