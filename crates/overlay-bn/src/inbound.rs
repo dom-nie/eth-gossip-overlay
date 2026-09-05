@@ -178,11 +178,18 @@ mod tests {
     use overlay_core::seen::{SeenCache, SharedSeenCache};
     use overlay_core::time::FakeClock;
     use overlay_core::topic::{Class, Topic, UNKNOWN_LARGE_THRESHOLD_BYTES};
+    use prometheus_client::registry::Registry;
     use tokio::sync::mpsc;
 
     use super::*;
+    use crate::bn_http::BnClient;
     use crate::gossip::wire;
-    use crate::link::{BnCommand, BnMessage};
+    use crate::link::{BnCommand, BnEvent, BnLink, BnMessage};
+    use crate::spec::spec_watch;
+    use crate::testutil::{FakeBn, FakeBnEvent, link_config, node_key};
+
+    /// Long enough for a dial and a gossipsub exchange on a loaded CI box.
+    const WAIT: Duration = Duration::from_secs(3);
 
     const ATTESTATION_3: &str = "/eth2/00000000/beacon_attestation_3/ssz_snappy";
     const BLOCK: &str = "/eth2/00000000/beacon_block/ssz_snappy";
@@ -532,5 +539,76 @@ mod tests {
         assert_eq!(h.stats.count("first_seen", Class::Small), 1);
         assert_eq!(h.stats.count("first_seen", Class::Large), 1);
         assert_eq!(h.stats.total(), 3);
+    }
+
+    /// The whole first hop: the fake publishes on a topic the sidecar subscribed to through
+    /// the link, and what comes out of the fanout lanes carries the beacon node's own id.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attestation_published_by_fake_bn_arrives_as_outbound() {
+        let mut bn = FakeBn::start().await;
+        let (commands, commands_rx) = mpsc::channel(64);
+        let (spec, _) = spec_watch();
+        let lanes = ClassLanes::new(Arc::new(()));
+        let mut link = BnLink::spawn(
+            link_config(&bn),
+            &node_key(&tempfile::tempdir().unwrap()),
+            BnClient::new(bn.http_addr(), Duration::from_secs(2)),
+            &mut Registry::default(),
+            lanes.pusher(),
+            spec,
+            commands_rx,
+        );
+        let clock = FakeClock::new();
+        let seen = SharedSeenCache::new(SeenCache::new(
+            Duration::from_secs(60),
+            1024,
+            Arc::new(clock.clone()),
+        ));
+        let mut out = ClassLanes::new(Arc::new(()));
+        Inbound::spawn(
+            lanes,
+            commands.clone(),
+            seen.clone(),
+            out.pusher(),
+            Arc::new(clock),
+            Arc::new(()),
+        );
+        tokio::time::timeout(WAIT, async {
+            loop {
+                match link.events.recv().await {
+                    Some(BnEvent::Connected { .. }) => break,
+                    Some(_) => {}
+                    None => panic!("the link ended"),
+                }
+            }
+        })
+        .await
+        .expect("the link never connected");
+        commands
+            .send(BnCommand::Subscribe(ATTESTATION_3.to_owned()))
+            .await
+            .unwrap();
+        bn.wait_for(
+            |e| matches!(e, FakeBnEvent::Subscribed { topic, .. } if topic == ATTESTATION_3),
+        )
+        .await;
+
+        let bn_id = bn.publish(ATTESTATION_3, b"an attestation").await.unwrap();
+
+        let outbound = tokio::time::timeout(WAIT, out.recv_from(Class::Small))
+            .await
+            .expect("no outbound arrived in time");
+        let compressed = snap::raw::Encoder::new()
+            .compress_vec(b"an attestation")
+            .unwrap();
+        assert_eq!(outbound.topic, Topic::parse(ATTESTATION_3).unwrap());
+        assert_eq!(outbound.class, Class::Small);
+        assert_eq!(outbound.payload, compressed);
+        assert_eq!(
+            outbound.id,
+            msgid::compute(ATTESTATION_3, &compressed, wire::MAX_PAYLOAD_SIZE as usize).id
+        );
+        assert_eq!(outbound.id.0[..], bn_id.0[..]);
+        assert!(seen.contains(&outbound.id));
     }
 }
