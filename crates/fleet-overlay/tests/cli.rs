@@ -94,3 +94,21 @@ fn gen_seed_writes_64_hex_chars_newline_and_mode_0600() {
         assert_eq!(mode, 0o600, "{mode:04o}");
     }
 }
+
+#[test]
+fn gen_seed_refuses_to_overwrite_existing_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let seed = dir.path().join("seed");
+    std::fs::write(&seed, "keep me\n").unwrap();
+
+    let output = fleet_overlay()
+        .args(["gen-seed", "--out"])
+        .arg(&seed)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(&seed.display().to_string()), "{stderr}");
+    assert_eq!(std::fs::read_to_string(&seed).unwrap(), "keep me\n");
+}
