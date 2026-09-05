@@ -476,7 +476,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use overlay_core::lanes::{ClassLanes, LaneStats};
+    use overlay_core::lanes::{ClassLanes, LaneStats, SMALL_LANE_CAPACITY};
     use overlay_core::topic::Class;
     use prometheus_client::registry::Registry;
     use serde_json::json;
@@ -920,5 +920,31 @@ mod tests {
         );
         assert_eq!(decompress(&attestation.data), b"an attestation");
         assert_eq!(harness.stats.small.load(Ordering::Relaxed), 0);
+    }
+
+    /// The small lane is never read. Gossipsub delivers in order on one connection, so by
+    /// the time the block arrives every attestation has been pushed, and the hundred past
+    /// the capacity were dropped rather than waited for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unread_small_lane_does_not_stall_the_swarm_loop_or_the_large_lane() {
+        let mut bn = FakeBn::start().await;
+        let mut harness = spawn(link_config(&bn), &bn);
+        wait_for(&mut harness.control, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+        subscribe_link(&harness, &mut bn, &[BLOCK_TOPIC, ATTESTATION_TOPIC]).await;
+
+        for i in 0..(SMALL_LANE_CAPACITY + 100) as u32 {
+            bn.publish(ATTESTATION_TOPIC, &i.to_le_bytes())
+                .await
+                .unwrap();
+        }
+        let block_id = bn.publish(BLOCK_TOPIC, b"a block").await.unwrap();
+        let block = recv_from(&mut harness.lanes, Class::Large).await;
+
+        assert_eq!(block.id, block_id);
+        assert_eq!(harness.stats.small.load(Ordering::Relaxed), 100);
+        assert_eq!(harness.stats.large.load(Ordering::Relaxed), 0);
     }
 }
