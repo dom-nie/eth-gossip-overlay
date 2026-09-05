@@ -9,6 +9,7 @@ libp2p.workspace = true
 
 [dev-dependencies]
 lighthouse_network.workspace = true
+tempfile.workspace = true
 types.workspace = true
 
 [lints]
