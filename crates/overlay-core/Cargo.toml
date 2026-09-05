@@ -6,6 +6,10 @@ edition.workspace = true
 
 [dependencies]
 rand.workspace = true
+serde.workspace = true
+serde_yaml_bw.workspace = true
+thiserror.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
