@@ -4310,6 +4310,7 @@ dependencies = [
 name = "overlay-core"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "ed25519-dalek 3.0.0",
  "hkdf 0.13.0",
  "proptest",

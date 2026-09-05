@@ -192,6 +192,14 @@ mod tests {
         MessageId::from_slice(&msg.id.0).unwrap()
     }
 
+    /// Whether the fanout lanes stay empty. Under `start_paused` the timeout fires as soon as
+    /// the runtime has nothing left to run, so this costs no wall-clock time.
+    async fn nothing_out(out: &mut ClassLanes<Outbound>) -> bool {
+        tokio::time::timeout(Duration::from_secs(1), out.recv())
+            .await
+            .is_err()
+    }
+
     /// Every stats call in the order it was made.
     #[derive(Default)]
     struct Recorded(Mutex<Vec<(&'static str, Class)>>);
@@ -326,5 +334,22 @@ mod tests {
 
         assert_eq!(h.accepted().await, (msg.id.clone(), *BN));
         assert_eq!(h.accepted().await, (msg.id, *BN));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn duplicate_id_is_dropped_and_counted() {
+        let mut h = Harness::new();
+        let msg = message(ATTESTATION_3, b"an attestation");
+        h.push(Class::Small, msg.clone());
+        h.push(Class::Small, msg.clone());
+        h.start();
+
+        let out = h.out.recv().await;
+
+        assert_eq!(out.id, core_id(&msg));
+        assert!(nothing_out(&mut h.out).await);
+        assert_eq!(h.stats.count("first_seen", Class::Small), 1);
+        assert_eq!(h.stats.count("duplicate", Class::Small), 1);
+        assert_eq!(h.stats.total(), 2);
     }
 }
