@@ -650,4 +650,43 @@ mod drift {
         assert_eq!(tag_of("lighthouse_network"), format!("v{PINNED}"));
         assert_eq!(tag_of("types"), format!("v{PINNED}"));
     }
+
+    /// The Lighthouse section of `COMPATIBILITY.md` is what the generator renders, and the
+    /// matrix workflow's version list is `SUPPORTED`. With `UPDATE_COMPATIBILITY_MD` set the
+    /// test rewrites the section between the markers first, which is how it is regenerated.
+    #[test]
+    fn compatibility_md_matches_the_constant() {
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../.."));
+        let path = root.join("COMPATIBILITY.md");
+        let rendered = format!(
+            "<!-- compat:begin -->\n{}<!-- compat:end -->",
+            render_compatibility_section()
+        );
+        let text = std::fs::read_to_string(&path).unwrap();
+        if std::env::var_os("UPDATE_COMPATIBILITY_MD").is_some() {
+            let (head, rest) = text.split_once("<!-- compat:begin -->").unwrap();
+            let (_, tail) = rest.split_once("<!-- compat:end -->").unwrap();
+            std::fs::write(&path, format!("{head}{rendered}{tail}")).unwrap();
+        }
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains(&rendered),
+            "COMPATIBILITY.md is stale; regenerate it with \
+             UPDATE_COMPATIBILITY_MD=1 cargo test -p overlay-bn compatibility_md_matches_the_constant"
+        );
+
+        let workflow =
+            std::fs::read_to_string(root.join(".github/workflows/lighthouse-matrix.yml")).unwrap();
+        let list = workflow
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("version: ["))
+            .and_then(|rest| rest.strip_suffix(']'))
+            .expect("the workflow's matrix has an inline `version: [..]` list");
+        let listed: Vec<String> = list
+            .split(',')
+            .map(|v| v.trim().trim_matches('"').to_owned())
+            .collect();
+        assert_eq!(listed, matrix_versions());
+    }
 }
