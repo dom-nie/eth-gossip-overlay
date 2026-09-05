@@ -75,7 +75,7 @@ impl<T> LanePusher<T> {
                 self.stats.dropped(class);
                 if class == Class::Large {
                     tracing::error!(
-                        capacity = LARGE_LANE_CAPACITY,
+                        capacity = lane.max_capacity(),
                         "large lane full: nothing is draining the BN link's messages"
                     );
                 }
@@ -94,10 +94,16 @@ pub struct ClassLanes<T> {
 }
 
 impl<T> ClassLanes<T> {
-    /// Two empty lanes reporting drops to `stats`.
+    /// Two empty lanes at the D07 capacities, reporting drops to `stats`.
     pub fn new(stats: Arc<dyn LaneStats>) -> Self {
-        let (small_tx, small) = mpsc::channel(SMALL_LANE_CAPACITY);
-        let (large_tx, large) = mpsc::channel(LARGE_LANE_CAPACITY);
+        Self::with_capacities(SMALL_LANE_CAPACITY, LARGE_LANE_CAPACITY, stats)
+    }
+
+    /// Two empty lanes of the given sizes, at least one slot each. For a test that wants a
+    /// full lane without filling thousands of slots; production uses [`new`](Self::new).
+    pub fn with_capacities(small: usize, large: usize, stats: Arc<dyn LaneStats>) -> Self {
+        let (small_tx, small) = mpsc::channel(small);
+        let (large_tx, large) = mpsc::channel(large);
         Self {
             pusher: LanePusher {
                 small: small_tx,
