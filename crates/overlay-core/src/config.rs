@@ -568,4 +568,20 @@ log:
             assert!(err.to_string().contains(field), "{doc}: {err}");
         }
     }
+
+    #[test]
+    fn chunk_bytes_must_be_multiple_of_64() {
+        for doc in [
+            "classes: { large: { chunk_bytes: 2000 } }",
+            "classes: { large: { chunk_bytes: 0 } }",
+        ] {
+            let err = Config::from_yaml(doc).unwrap_err();
+
+            assert!(
+                err.to_string().contains("classes.large.chunk_bytes"),
+                "{doc}: {err}"
+            );
+        }
+        assert!(Config::from_yaml("classes: { large: { chunk_bytes: 2048 } }").is_ok());
+    }
 }
