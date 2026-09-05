@@ -193,4 +193,16 @@ hosts:
         let message = err.to_string();
         assert!(message.contains("bn-1") && message.contains("duplicate"), "{message}");
     }
+
+    #[test]
+    fn empty_region_is_rejected() {
+        let doc = r#"hosts:
+  - { hostname: bn-1, region: "", addr: "192.0.2.1:7788" }
+"#;
+
+        let err = Roster::from_yaml(doc).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("bn-1") && message.contains("region"), "{message}");
+    }
 }
