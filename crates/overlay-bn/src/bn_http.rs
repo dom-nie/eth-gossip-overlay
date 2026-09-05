@@ -509,4 +509,24 @@ mod tests {
 
         assert_eq!(got, MOCKED);
     }
+
+    #[tokio::test]
+    async fn spec_missing_key_keeps_compiled_default() {
+        let server = MockServer::start().await;
+        let mut data = spec_data();
+        data.as_object_mut()
+            .unwrap()
+            .remove("NUMBER_OF_CUSTODY_GROUPS");
+        serve(&server, "/eth/v1/config/spec", json!({"data": data})).await;
+
+        let got = client(&server).spec().await.unwrap();
+
+        assert_eq!(
+            got,
+            SpecSnapshot {
+                number_of_custody_groups: SpecSnapshot::MAINNET.number_of_custody_groups,
+                ..MOCKED
+            }
+        );
+    }
 }
