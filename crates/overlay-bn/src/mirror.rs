@@ -603,6 +603,22 @@ mod tests {
         assert_eq!(mirror.sets(), &SubscriptionSets::default());
     }
 
+    #[test]
+    fn bn_disconnect_drops_extra_columns_too() {
+        let mut mirror = connected();
+        mirror.on_bn_event(&subscribed(ATTESTATION_3));
+
+        let actions = mirror.on_bn_event(&BnEvent::Disconnected);
+
+        let mut expected = columns("00000000", 0..128);
+        expected.insert(ATTESTATION_3.to_owned());
+        assert_eq!(unsubscribes(&actions), expected);
+        assert_eq!(
+            actions.last(),
+            Some(&MirrorAction::Changed(SubscriptionSets::default()))
+        );
+    }
+
     /// The fake's subscription has to show in the watch and come back to the fake as the
     /// sidecar's own subscription, both inside one second of the fake sending it.
     #[tokio::test(flavor = "multi_thread")]
