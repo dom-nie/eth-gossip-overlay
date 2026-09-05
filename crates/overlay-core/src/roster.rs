@@ -471,4 +471,25 @@ hosts:
         assert_eq!(me.region, region("eu"));
         assert_eq!(me.site.as_deref(), Some("nyc1"));
     }
+
+    #[test]
+    fn resolve_self_unknown_hostname_without_region_override_is_error() {
+        let roster = Roster::from_yaml(APPENDIX_A).unwrap();
+
+        let err = resolve_self(
+            &roster,
+            &env(&[("FLEET_OVERLAY_HOSTNAME", "bn-lon1-03")]),
+            &gethostname,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(&err, RosterError::UnknownHost { hostname } if hostname == &host("bn-lon1-03"))
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("bn-lon1-03") && message.contains("FLEET_OVERLAY_REGION"),
+            "{message}"
+        );
+    }
 }
