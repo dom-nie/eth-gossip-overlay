@@ -75,4 +75,13 @@ mod tests {
 
         assert_eq!(first.to_bytes(), second.to_bytes());
     }
+    #[test]
+    fn different_hostnames_give_different_tls_keys() {
+        let seed = seed(0x11);
+
+        let one = derive_tls_keypair(&seed, &host("bn-1"));
+        let two = derive_tls_keypair(&seed, &host("bn-2"));
+
+        assert_ne!(one.to_bytes(), two.to_bytes());
+    }
 }
