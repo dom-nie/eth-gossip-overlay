@@ -381,4 +381,22 @@ mod tests {
 
         assert!(h.seen.contains(&out.id));
     }
+
+    #[tokio::test]
+    async fn payload_is_forwarded_unchanged() {
+        let mut h = Harness::new();
+        let compressed = snap::raw::Encoder::new()
+            .compress_vec(b"an attestation")
+            .unwrap();
+        h.push(Class::Small, message(ATTESTATION_3, &compressed));
+        h.start();
+
+        let out = h.out.recv().await;
+
+        assert_eq!(out.payload, compressed);
+        let decompressed = snap::raw::Decoder::new()
+            .decompress_vec(&out.payload)
+            .unwrap();
+        assert_eq!(decompressed, b"an attestation");
+    }
 }
