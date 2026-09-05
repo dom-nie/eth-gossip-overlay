@@ -166,4 +166,21 @@ mod tests {
             assert!(parse(garbage).is_err(), "{garbage:?} parsed");
         }
     }
+
+    /// Newer than the range is untested, older is unsupported; the ends of the range are in.
+    #[test]
+    fn check_classifies_supported_untested_and_unsupported() {
+        let (start, end) = (*SUPPORTED.start(), *SUPPORTED.end());
+
+        assert_eq!(check(start), Compat::Supported);
+        assert_eq!(check(end), Compat::Supported);
+        assert_eq!(check(PINNED), Compat::Supported);
+        assert_eq!(check(v(end.major, end.minor, end.patch + 1)), Compat::Untested);
+        assert_eq!(check(v(end.major + 1, 0, 0)), Compat::Untested);
+        assert_eq!(check(v(start.major, start.minor, 0)), Compat::Unsupported);
+        assert_eq!(check(v(0, 0, 0)), Compat::Unsupported);
+        assert_eq!(Compat::Supported.state(), STATE_SUPPORTED);
+        assert_eq!(Compat::Untested.state(), STATE_UNTESTED);
+        assert_eq!(Compat::Unsupported.state(), STATE_UNSUPPORTED);
+    }
 }
