@@ -117,4 +117,24 @@ mod tests {
         assert_eq!(computed.branch, Branch::Invalid);
         assert_eq!(computed.id.to_string(), TRUNCATED_ID);
     }
+
+    #[test]
+    fn topic_length_is_little_endian() {
+        let topic = "x".repeat(256);
+        let by_hand = |length: [u8; 8]| {
+            let digest = Sha256::new_with_prefix(MESSAGE_DOMAIN_VALID_SNAPPY)
+                .chain_update(length)
+                .chain_update(&topic)
+                .chain_update(b"hello")
+                .finalize();
+            let mut id = [0; 20];
+            id.copy_from_slice(&digest[..20]);
+            MessageId(id)
+        };
+
+        let computed = compute(&topic, HELLO_SNAPPY, 1024);
+
+        assert_eq!(computed.id, by_hand(256u64.to_le_bytes()));
+        assert_ne!(computed.id, by_hand(256u64.to_be_bytes()));
+    }
 }
