@@ -266,4 +266,22 @@ mod tests {
             vec![MirrorAction::Unsubscribe(raw.to_owned())]
         );
     }
+
+    #[test]
+    fn changed_carries_advertised_and_local_and_they_are_equal_without_extras() {
+        let mut mirror = Mirror::new(*BN);
+        mirror.on_bn_event(&subscribed(ATTESTATION_3));
+
+        let actions = mirror.on_bn_event(&subscribed(BLOCK));
+
+        let Some(MirrorAction::Changed(changed)) = actions.last() else {
+            panic!("no Changed in {actions:?}");
+        };
+        let expected: BTreeSet<Topic> = [ATTESTATION_3, BLOCK]
+            .iter()
+            .map(|t| Topic::parse(t).unwrap())
+            .collect();
+        assert_eq!(changed.advertised, expected);
+        assert_eq!(changed.local, changed.advertised);
+    }
 }
