@@ -225,4 +225,18 @@ hosts:
         let message = err.to_string();
         assert!(message.contains("hosts[1]") && message.contains("hostname"), "{message}");
     }
+
+    #[test]
+    fn unparseable_addr_is_rejected_with_hostname_in_message() {
+        for bad in ["192.0.2.1", "2001:db8:1::120:7788", "bn-1.example.org:7788"] {
+            let doc = format!(
+                "hosts:\n  - {{ hostname: bn-1, region: eu, addr: \"{bad}\" }}\n"
+            );
+
+            let err = Roster::from_yaml(&doc).unwrap_err();
+
+            let message = err.to_string();
+            assert!(message.contains("bn-1") && message.contains(bad), "{message}");
+        }
+    }
 }
