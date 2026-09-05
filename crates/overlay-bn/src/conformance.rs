@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use libp2p::PeerId;
+use libp2p::gossipsub::PublishError;
 use overlay_core::lanes::ClassLanes;
 use overlay_core::topic::Class;
 use prometheus_client::registry::Registry;
@@ -101,6 +102,13 @@ impl Sidecar {
             .await
             .expect("nothing arrived on the large lane in time")
     }
+
+    /// Whether the large lane stays empty for a second.
+    async fn nothing_large_within_a_second(&mut self) -> bool {
+        tokio::time::timeout(Duration::from_secs(1), self.lanes.recv_from(Class::Large))
+            .await
+            .is_err()
+    }
 }
 
 fn decompress(data: &[u8]) -> Vec<u8> {
@@ -137,4 +145,29 @@ async fn bn_forwards_validated_message_to_a_subscribed_explicit_peer_outside_its
     let mesh = bn.mesh_peers(BLOCK).await;
     assert!(mesh.contains(&public.peer_id()), "{mesh:?}");
     assert!(!mesh.contains(&sidecar.peer_id), "{mesh:?}");
+}
+
+/// CL-N2 (4). The fake never subscribes to the topic. Before the sidecar subscribes, the
+/// fake's `publish` has no recipient and refuses; after, the message reaches the sidecar
+/// through the explicit-peer path, which is the only one a non-subscribed publisher has
+/// besides fanout, and fanout never holds an explicit peer.
+#[tokio::test(flavor = "multi_thread")]
+async fn bn_publish_reaches_explicit_peer_on_a_topic_the_bn_is_not_subscribed_to_and_needs_the_sidecar_subscription()
+ {
+    let mut bn = FakeBn::start().await;
+    let mut sidecar = connected_sidecar(&bn).await;
+
+    let refused = bn.publish(BLOCK, b"nobody listens").await;
+    let heard_nothing = sidecar.nothing_large_within_a_second().await;
+    sidecar.subscribe(&mut bn, BLOCK).await;
+    let id = bn.publish(BLOCK, b"the sidecar listens").await.unwrap();
+    let delivered = sidecar.recv_large().await;
+
+    assert!(
+        matches!(refused, Err(PublishError::NoPeersSubscribedToTopic)),
+        "{refused:?}"
+    );
+    assert!(heard_nothing);
+    assert_eq!((delivered.id, delivered.source), (id, bn.peer_id()));
+    assert_eq!(decompress(&delivered.data), b"the sidecar listens");
 }
