@@ -115,13 +115,17 @@ impl Roster {
     fn validate(&self, path: Option<&Path>) -> Result<(), RosterError> {
         let mut seen = HashSet::with_capacity(self.hosts.len());
         for (index, host) in self.hosts.iter().enumerate() {
+            let invalid = |reason: String| RosterError::Invalid {
+                path: path.map(Path::to_owned),
+                index,
+                hostname: host.hostname.clone(),
+                reason,
+            };
+            if host.region.0.is_empty() {
+                return Err(invalid("empty region".to_owned()));
+            }
             if !seen.insert(&host.hostname) {
-                return Err(RosterError::Invalid {
-                    path: path.map(Path::to_owned),
-                    index,
-                    hostname: host.hostname.clone(),
-                    reason: "duplicate hostname".to_owned(),
-                });
+                return Err(invalid("duplicate hostname".to_owned()));
             }
         }
         Ok(())
