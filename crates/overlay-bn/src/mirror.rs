@@ -520,6 +520,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn columns_already_mirrored_by_the_bn_are_not_subscribed_twice() {
+        let mut mirror = connected();
+        let column_5 = column("00000000", 5);
+
+        let mut actions = mirror.on_bn_event(&subscribed(&column_5));
+        actions.extend(mirror.on_bn_event(&subscribed(ATTESTATION_3)));
+
+        let subscribes_of_5 = actions
+            .iter()
+            .filter(|a| **a == MirrorAction::Subscribe(column_5.clone()))
+            .count();
+        assert_eq!(subscribes_of_5, 1);
+        assert_eq!(column_subscribes(&actions), columns("00000000", 0..128));
+        assert_eq!(mirror.sets(), &sets_of(&[ATTESTATION_3, &column_5]));
+    }
+
     /// The fake's subscription has to show in the watch and come back to the fake as the
     /// sidecar's own subscription, both inside one second of the fake sending it.
     #[tokio::test(flavor = "multi_thread")]
