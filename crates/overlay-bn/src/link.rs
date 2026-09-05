@@ -1063,9 +1063,9 @@ mod tests {
         );
     }
 
-    /// The burst the capacity is sized for: the fake holds one subscription more than the
+    /// The burst the capacity is sized for: the fake holds as many subscriptions as the
     /// channel has slots when the link connects, and nothing reads the events. Connected
-    /// takes the first slot, so at least one Subscribed is dropped and counted.
+    /// takes one, so at least one Subscribed is dropped and counted.
     #[tokio::test(flavor = "multi_thread")]
     async fn full_control_channel_drops_the_event_and_counts_control() {
         let bn = FakeBn::start().await;
