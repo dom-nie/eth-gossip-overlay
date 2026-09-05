@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use assert_cmd::Command;
 use assert_cmd::cargo::cargo_bin;
 use overlay_bn::node_key::PeerId;
+use overlay_core::identity::FleetSeed;
 
 /// A config whose node key lives in `dir`; every other key keeps its default. No seed, no
 /// roster.
@@ -111,4 +112,18 @@ fn gen_seed_refuses_to_overwrite_existing_file() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(&seed.display().to_string()), "{stderr}");
     assert_eq!(std::fs::read_to_string(&seed).unwrap(), "keep me\n");
+}
+
+#[test]
+fn gen_seed_output_loads_as_a_valid_fleet_seed() {
+    let dir = tempfile::tempdir().unwrap();
+    let seed = dir.path().join("seed");
+
+    fleet_overlay()
+        .args(["gen-seed", "--out"])
+        .arg(&seed)
+        .assert()
+        .success();
+
+    FleetSeed::load_from(None, &seed).unwrap();
 }
