@@ -191,6 +191,13 @@ impl Roster {
     pub fn regions(&self) -> BTreeSet<Region> {
         self.hosts.iter().map(|host| host.region.clone()).collect()
     }
+
+    /// Every host but `hostname`, in file order: the peers this host dials or accepts.
+    pub fn others<'s>(&'s self, hostname: &Hostname) -> impl Iterator<Item = &'s HostEntry> {
+        self.hosts
+            .iter()
+            .filter(move |host| &host.hostname != hostname)
+    }
 }
 
 #[cfg(test)]
