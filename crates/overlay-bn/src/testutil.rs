@@ -32,6 +32,7 @@ use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, noise, yamux};
 use lighthouse_network::types::SnappyTransform;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tokio::sync::mpsc;
 use types::ChainSpec;
 use url::Url;
 use wiremock::matchers::{method, path};
@@ -52,9 +53,19 @@ pub struct FakeBn {
     peer_id: PeerId,
     port: u16,
     http: MockServer,
+    commands: mpsc::Sender<Cmd>,
+    received: Option<mpsc::Receiver<Received>>,
 }
 
+/// A message the fake received: the topic, the payload as its snappy transform decompressed
+/// it, and the id its copy of Lighthouse's id function gave it.
+pub type Received = (String, Vec<u8>, MessageId);
+
 type LighthouseBehaviour = gossipsub::Behaviour<SnappyTransform, AllowAllSubscriptionFilter>;
+
+enum Cmd {
+    Subscribe(String),
+}
 
 impl FakeBn {
     /// A fake on a fresh loopback port with a fresh key, next to a fresh mock server.
@@ -80,11 +91,15 @@ impl FakeBn {
         .await
         .expect("the fake beacon node never reported its listen address");
         let peer_id = *swarm.local_peer_id();
-        tokio::spawn(drive(swarm));
+        let (commands, command_rx) = mpsc::channel(64);
+        let (received_tx, received) = mpsc::channel(8192);
+        tokio::spawn(drive(swarm, command_rx, received_tx));
         let bn = Self {
             peer_id,
             port,
             http,
+            commands,
+            received: Some(received),
         };
         bn.remount().await;
         bn
@@ -103,6 +118,19 @@ impl FakeBn {
     /// What `bn.identity_url` would say.
     pub fn http_addr(&self) -> Url {
         Url::parse(&format!("{}/eth/v1/node/identity", self.http.uri())).unwrap()
+    }
+
+    /// Subscribes the fake to `topic`; the link sees `BnEvent::Subscribed` once it has.
+    pub async fn subscribe(&self, topic: &str) {
+        self.commands
+            .send(Cmd::Subscribe(topic.to_owned()))
+            .await
+            .unwrap();
+    }
+
+    /// Everything the fake receives, in order. Taken once per fake.
+    pub fn received(&mut self) -> mpsc::Receiver<Received> {
+        self.received.take().expect("received() is taken once")
     }
 
     async fn remount(&self) {
@@ -145,25 +173,39 @@ fn tcp_port(addr: &Multiaddr) -> u16 {
         .expect("a TCP listen address")
 }
 
-/// Polls the fake's swarm until its task is aborted.
-async fn drive(mut swarm: Swarm<LighthouseBehaviour>) {
+/// Polls the fake's swarm until its task is aborted. What it receives is passed on with
+/// `try_send`, so a test that never reads loses messages rather than stalling the fake.
+async fn drive(
+    mut swarm: Swarm<LighthouseBehaviour>,
+    mut commands: mpsc::Receiver<Cmd>,
+    received: mpsc::Sender<Received>,
+) {
     loop {
-        match swarm.select_next_some().await {
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                swarm.behaviour_mut().add_explicit_peer(&peer_id);
-            }
-            SwarmEvent::Behaviour(gossipsub::Event::Message {
-                propagation_source,
-                message_id,
-                ..
-            }) => {
-                swarm.behaviour_mut().report_message_validation_result(
-                    &message_id,
-                    &propagation_source,
-                    MessageAcceptance::Accept,
-                );
-            }
-            _ => {}
+        tokio::select! {
+            event = swarm.select_next_some() => match event {
+                SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                    swarm.behaviour_mut().add_explicit_peer(&peer_id);
+                }
+                SwarmEvent::Behaviour(gossipsub::Event::Message {
+                    propagation_source,
+                    message_id,
+                    message,
+                }) => {
+                    swarm.behaviour_mut().report_message_validation_result(
+                        &message_id,
+                        &propagation_source,
+                        MessageAcceptance::Accept,
+                    );
+                    let _ = received.try_send((message.topic.into_string(), message.data, message_id));
+                }
+                _ => {}
+            },
+            command = commands.recv() => match command {
+                Some(Cmd::Subscribe(topic)) => {
+                    swarm.behaviour_mut().subscribe(&IdentTopic::new(topic)).unwrap();
+                }
+                None => return,
+            },
         }
     }
 }

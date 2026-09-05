@@ -311,6 +311,9 @@ mod tests {
     /// Long enough for a dial, a noise handshake and a gossipsub exchange on a loaded CI box,
     /// short enough that a test which waits in vain still ends inside its 5 s budget.
     const WAIT: Duration = Duration::from_secs(3);
+    const BLOCK_TOPIC: &str = "/eth2/6a95a1a9/beacon_block/ssz_snappy";
+    /// `hello`, snappy-compressed: T-006's spec vector input.
+    const HELLO_SNAPPY: &[u8] = &[0x05, 0x10, 0x68, 0x65, 0x6c, 0x6c, 0x6f];
 
     fn link_config(bn: &FakeBn) -> LinkConfig {
         LinkConfig {
@@ -362,6 +365,43 @@ mod tests {
             .expect("the link ended")
     }
 
+    /// Skips control events until one satisfies `wanted`.
+    async fn wait_for(
+        control: &mut mpsc::Receiver<BnEvent>,
+        mut wanted: impl FnMut(&BnEvent) -> bool,
+    ) -> BnEvent {
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let event = control.recv().await.expect("the link ended");
+                if wanted(&event) {
+                    return event;
+                }
+            }
+        })
+        .await
+        .expect("the awaited control event never arrived")
+    }
+
+    async fn publish(
+        commands: &mpsc::Sender<BnCommand>,
+        topic: &str,
+        data: &[u8],
+    ) -> Result<MessageId, PublishError> {
+        let (reply, answer) = oneshot::channel();
+        commands
+            .send(BnCommand::Publish {
+                topic: topic.to_owned(),
+                data: data.to_vec(),
+                reply,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(WAIT, answer)
+            .await
+            .expect("no publish reply in time")
+            .unwrap()
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn link_connects_and_emits_connected_with_bn_peer_id() {
         let bn = FakeBn::start().await;
@@ -377,5 +417,32 @@ mod tests {
         );
         assert!(!harness.link.task.is_finished());
         drop(harness.commands);
+    }
+
+    /// The sidecar never subscribes here, so it has no mesh for the topic; the message reaches
+    /// the fake only because it is the explicit peer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn link_adds_bn_as_explicit_peer() {
+        let mut bn = FakeBn::start().await;
+        let mut harness = spawn(link_config(&bn), &bn);
+        let mut received = bn.received();
+        bn.subscribe(BLOCK_TOPIC).await;
+        wait_for(
+            &mut harness.control,
+            |event| matches!(event, BnEvent::Subscribed { topic, .. } if topic == BLOCK_TOPIC),
+        )
+        .await;
+
+        let id = publish(&harness.commands, BLOCK_TOPIC, HELLO_SNAPPY)
+            .await
+            .unwrap();
+
+        let (topic, data, bn_id) = tokio::time::timeout(WAIT, received.recv())
+            .await
+            .expect("the fake never received the publish")
+            .unwrap();
+        assert_eq!(topic, BLOCK_TOPIC);
+        assert_eq!(data, b"hello");
+        assert_eq!(bn_id, id);
     }
 }
