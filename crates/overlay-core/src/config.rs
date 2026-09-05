@@ -424,6 +424,17 @@ impl Config {
                 format!("{ratio} is outside 0.0..=1.0"),
             ));
         }
+        let (keepalive, idle) = (self.overlay.keepalive, self.overlay.idle_timeout);
+        if keepalive >= idle {
+            return Err(invalid(
+                "overlay.keepalive_ms",
+                format!(
+                    "{} ms is not shorter than idle_timeout_ms ({} ms)",
+                    keepalive.as_millis(),
+                    idle.as_millis()
+                ),
+            ));
+        }
         Ok(())
     }
 }
