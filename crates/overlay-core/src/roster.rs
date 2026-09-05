@@ -209,4 +209,17 @@ hosts:
         let message = err.to_string();
         assert!(message.contains("bn-1") && message.contains("region"), "{message}");
     }
+
+    #[test]
+    fn empty_hostname_is_rejected_with_its_index() {
+        let doc = r#"hosts:
+  - { hostname: bn-1, region: eu, addr: "192.0.2.1:7788" }
+  - { hostname: "", region: eu, addr: "192.0.2.2:7788" }
+"#;
+
+        let err = Roster::from_yaml(doc).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("hosts[1]") && message.contains("hostname"), "{message}");
+    }
 }
