@@ -88,6 +88,7 @@ pub enum Pushed {
 pub struct PublishQueue {
     small: VecDeque<PublishItem>,
     large: VecDeque<(Instant, PublishItem)>,
+    large_bytes: usize,
     stats: Arc<dyn QueueStats>,
 }
 
@@ -97,44 +98,62 @@ impl PublishQueue {
         Self {
             small: VecDeque::new(),
             large: VecDeque::new(),
+            large_bytes: 0,
             stats,
         }
     }
 
     /// Queues `item` on the lane for its class, evicting the lane's oldest entries if that
     /// is what it takes. `now` is when the item entered, which the large lane's age bound
-    /// reads back at [`pop`](Self::pop).
+    /// reads back at [`pop`](Self::pop). A payload larger than the whole large lane empties
+    /// it and goes in alone; gossipsub refuses it later, and the bound holds again once the
+    /// drain task takes it.
     pub fn push(&mut self, item: PublishItem, now: Instant) -> Pushed {
         let class = item.class;
-        let mut dropped = false;
+        let mut evicted = 0;
         match class {
             Class::Small => {
                 while self.small.len() >= PUBLISH_SMALL_LANE_ENTRIES {
                     self.small.pop_front();
-                    dropped = true;
+                    evicted += 1;
                 }
                 self.small.push_back(item);
             }
-            Class::Large => self.large.push_back((now, item)),
-        }
-        if dropped {
-            self.stats.dropped(class, DropReason::Full);
-            Pushed::Dropped {
-                class,
-                reason: DropReason::Full,
+            Class::Large => {
+                while self.large_bytes + item.payload.len() > PUBLISH_LARGE_LANE_BYTES
+                    && self.pop_large().is_some()
+                {
+                    evicted += 1;
+                }
+                self.large_bytes += item.payload.len();
+                self.large.push_back((now, item));
             }
-        } else {
-            Pushed::Enqueued
+        }
+        if evicted == 0 {
+            return Pushed::Enqueued;
+        }
+        for _ in 0..evicted {
+            self.stats.dropped(class, DropReason::Full);
+        }
+        Pushed::Dropped {
+            class,
+            reason: DropReason::Full,
         }
     }
 
     /// The next item to publish: from the large lane while it has one, else from the small
     /// lane.
     pub fn pop(&mut self, _now: Instant) -> Option<PublishItem> {
-        if let Some((_, item)) = self.large.pop_front() {
+        if let Some((_, item)) = self.pop_large() {
             return Some(item);
         }
         self.small.pop_front()
+    }
+
+    fn pop_large(&mut self) -> Option<(Instant, PublishItem)> {
+        let entry = self.large.pop_front()?;
+        self.large_bytes -= entry.1.payload.len();
+        Some(entry)
     }
 
     /// Entries waiting across both lanes.
