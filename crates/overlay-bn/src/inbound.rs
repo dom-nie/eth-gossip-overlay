@@ -21,7 +21,7 @@ use overlay_core::lanes::{ClassLanes, LanePusher};
 use overlay_core::msgid::MessageId;
 use overlay_core::seen::SharedSeenCache;
 use overlay_core::time::Clock;
-use overlay_core::topic::{Class, Topic};
+use overlay_core::topic::{Class, Topic, TopicKind};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::task::JoinHandle;
@@ -66,7 +66,9 @@ pub struct Inbound {
     out: LanePusher<Outbound>,
     clock: Arc<dyn Clock>,
     stats: Arc<dyn InboundStats>,
-    /// Topic strings already warned about, so a stream of messages on one costs one line.
+    /// Unknown topic names and unparsable topic strings already warned about, so a stream
+    /// of messages on one costs one line. A name never contains a `/`, so the two cannot
+    /// collide.
     warned: BTreeSet<String>,
 }
 
@@ -124,6 +126,16 @@ impl Inbound {
             }
         };
         let class = Class::of(topic.kind(), msg.data.len());
+        if let TopicKind::Other(name) = topic.kind() {
+            self.stats.unknown_kind(class);
+            if self.warned.insert(name.clone()) {
+                tracing::warn!(
+                    name,
+                    ?class,
+                    "relaying a topic kind the sidecar does not know"
+                );
+            }
+        }
         // T-012's id function always yields 20 bytes; this only guards a future id function.
         let Some(id) = MessageId::from_slice(&msg.id.0) else {
             tracing::error!(id = %msg.id, topic = msg.topic, "gossipsub id is not 20 bytes");
