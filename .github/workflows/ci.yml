@@ -48,3 +48,12 @@ jobs:
             echo "lighthouse_network or types is a production dependency of overlay-bn; they are dev-dependencies only until the v3 features land"
             exit 1
           fi
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses advisories bans sources

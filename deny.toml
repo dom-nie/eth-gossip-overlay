@@ -1,0 +1,43 @@
+# cargo deny check licenses advisories bans sources
+#
+# The checked graph includes the dev-dependency tree (lighthouse_network, types), which is the
+# point: what the tests compile against is what an auditor asks about.
+
+[advisories]
+ignore = [
+  # `paste` is an unmaintained proc-macro. It enters through netlink-packet-core (libp2p's if-watch,
+  # Linux only) and alloy-primitives (Lighthouse's crates); no newer compatible version of either
+  # drops it, so nothing in this workspace can fix it.
+  { id = "RUSTSEC-2024-0436", reason = "paste is pinned by libp2p's if-watch and by Lighthouse's alloy-primitives; not fixable from this workspace" },
+]
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "MPL-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Lighthouse's tree pins older rand, hkdf and ed25519-dalek next to the versions this workspace
+# uses, and cannot be unified from here.
+multiple-versions = "warn"
+wildcards = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = [
+  "https://github.com/sigp/lighthouse",
+  "https://github.com/sigp/rust-libp2p",
+  # Declared in workspace.dependencies and rewritten by the [patch] table to sigp's fork, so the
+  # lock never carries it; cargo deny reports the entry as unmatched, which is expected.
+  "https://github.com/libp2p/rust-libp2p",
+]
