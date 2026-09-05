@@ -45,6 +45,13 @@ pub const BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// Lighthouse's own bound on the noise and yamux upgrade (`build_transport`).
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Slots in the control channel. On connect Lighthouse sends its whole subscription set in
+/// one RPC, up to `max_topics_at_any_fork * 2` topics (`service/mod.rs:336-338`, hundreds
+/// at a fork boundary), and each one is a `Subscribed` pushed in a single swarm burst; a
+/// dropped one is a topic T-014 never mirrors until the next reconnect, so the channel
+/// holds the burst with room to spare.
+pub const CONTROL_CHANNEL_CAPACITY: usize = 1024;
+
 /// Topic names that take the large lane on sight: D02's known large kinds, matched by prefix
 /// as the §7 row "Lane classification in the swarm loop" has it. Any other name is large only
 /// from [`UNKNOWN_LARGE_THRESHOLD_BYTES`] up. The lane is a queueing priority; T-016 computes
@@ -161,26 +168,24 @@ pub struct BnLink {
     /// Whether a connection to the beacon node is up right now; what T-041 exports as
     /// `bn_connected`.
     pub connected: Arc<AtomicBool>,
+    /// The control events, [`CONTROL_CHANNEL_CAPACITY`] deep.
+    pub events: mpsc::Receiver<BnEvent>,
 }
 
 impl BnLink {
     /// Builds the swarm under the node key and starts the task. The first dial happens at
     /// once; every later one waits for the backoff. `registry` receives gossipsub's metrics.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "every channel end the loop owns is handed in by the wiring, one each"
-    )]
     pub fn spawn(
         cfg: LinkConfig,
         node_key: &NodeKey,
         bn_client: BnClient,
         registry: &mut Registry,
-        control: mpsc::Sender<BnEvent>,
         lanes: LanePusher<BnMessage>,
         spec: watch::Sender<SpecSnapshot>,
         commands: mpsc::Receiver<BnCommand>,
     ) -> Self {
         let connected = Arc::new(AtomicBool::new(false));
+        let (control, events) = mpsc::channel(CONTROL_CHANNEL_CAPACITY);
         let link = Link {
             swarm: build_swarm(&cfg.gossip, node_key, registry),
             backoff: Backoff::new(cfg.backoff_min, cfg.backoff_max),
@@ -199,6 +204,7 @@ impl BnLink {
         Self {
             task: tokio::spawn(link.run()),
             connected,
+            events,
         }
     }
 }
@@ -516,7 +522,6 @@ mod tests {
     /// A running link and the test's ends of its channels.
     struct Harness {
         link: BnLink,
-        control: mpsc::Receiver<BnEvent>,
         commands: mpsc::Sender<BnCommand>,
         spec: watch::Receiver<SpecSnapshot>,
         lanes: ClassLanes<BnMessage>,
@@ -571,7 +576,6 @@ mod tests {
     }
 
     fn spawn_with_key(cfg: LinkConfig, bn: &FakeBn, node_key: &NodeKey) -> Harness {
-        let (control_tx, control) = mpsc::channel(64);
         let (commands, commands_rx) = mpsc::channel(64);
         let (spec_tx, spec) = spec_watch();
         let stats = Arc::new(Counts::default());
@@ -581,14 +585,12 @@ mod tests {
             node_key,
             BnClient::new(bn.http_addr(), Duration::from_secs(2)),
             &mut Registry::default(),
-            control_tx,
             lanes.pusher(),
             spec_tx,
             commands_rx,
         );
         Harness {
             link,
-            control,
             commands,
             spec,
             lanes,
@@ -669,7 +671,7 @@ mod tests {
         let bn = FakeBn::start().await;
         let mut harness = spawn(link_config(&bn), &bn);
 
-        let event = next_event(&mut harness.control).await;
+        let event = next_event(&mut harness.link.events).await;
 
         assert_eq!(
             event,
@@ -692,7 +694,7 @@ mod tests {
         let mut received = bn.received();
         bn.subscribe(BLOCK_TOPIC).await;
         wait_for(
-            &mut harness.control,
+            &mut harness.link.events,
             |event| matches!(event, BnEvent::Subscribed { topic, .. } if topic == BLOCK_TOPIC),
         )
         .await;
@@ -716,21 +718,21 @@ mod tests {
         let mut harness = spawn(link_config(&bn), &bn);
         let old_id = bn.peer_id();
         assert_eq!(
-            next_event(&mut harness.control).await,
+            next_event(&mut harness.link.events).await,
             BnEvent::Connected { peer_id: old_id }
         );
 
         let port = bn.port();
         let http = bn.shutdown().await;
         assert_eq!(
-            next_event(&mut harness.control).await,
+            next_event(&mut harness.link.events).await,
             BnEvent::Disconnected
         );
         let bn = FakeBn::start_on(port, http).await;
 
         assert_ne!(bn.peer_id(), old_id);
         assert_eq!(
-            next_event(&mut harness.control).await,
+            next_event(&mut harness.link.events).await,
             BnEvent::Connected {
                 peer_id: bn.peer_id()
             }
@@ -762,14 +764,14 @@ mod tests {
         let gauge = harness.link.connected.clone();
         assert!(!gauge.load(Ordering::Relaxed));
 
-        wait_for(&mut harness.control, |e| {
+        wait_for(&mut harness.link.events, |e| {
             matches!(e, BnEvent::Connected { .. })
         })
         .await;
         assert!(gauge.load(Ordering::Relaxed));
 
         bn.shutdown().await;
-        wait_for(&mut harness.control, |e| *e == BnEvent::Disconnected).await;
+        wait_for(&mut harness.link.events, |e| *e == BnEvent::Disconnected).await;
         assert!(!gauge.load(Ordering::Relaxed));
     }
 
@@ -780,22 +782,22 @@ mod tests {
         let bn = FakeBn::start().await;
         let port = bn.port();
         let mut harness = spawn(link_config(&bn), &bn);
-        wait_for(&mut harness.control, |e| {
+        wait_for(&mut harness.link.events, |e| {
             matches!(e, BnEvent::Connected { .. })
         })
         .await;
 
         let http = bn.shutdown().await;
-        wait_for(&mut harness.control, |e| *e == BnEvent::Disconnected).await;
+        wait_for(&mut harness.link.events, |e| *e == BnEvent::Disconnected).await;
         tokio::time::sleep(Duration::from_millis(300)).await;
         let bn = FakeBn::start_on(port, http).await;
-        wait_for(&mut harness.control, |e| {
+        wait_for(&mut harness.link.events, |e| {
             matches!(e, BnEvent::Connected { .. })
         })
         .await;
 
         let http = bn.shutdown().await;
-        wait_for(&mut harness.control, |e| *e == BnEvent::Disconnected).await;
+        wait_for(&mut harness.link.events, |e| *e == BnEvent::Disconnected).await;
         let before = identity_requests(&http).await;
         tokio::time::sleep(Duration::from_millis(40)).await;
         let after = identity_requests(&http).await;
@@ -851,11 +853,11 @@ mod tests {
         .await;
         let mut harness = spawn_with_key(link_config(&bn), &bn, &key);
 
-        wait_for(&mut harness.control, |e| {
+        wait_for(&mut harness.link.events, |e| {
             matches!(e, BnEvent::Connected { .. })
         })
         .await;
-        let info = next_event(&mut harness.control).await;
+        let info = next_event(&mut harness.link.events).await;
 
         assert_eq!(
             info,
@@ -875,12 +877,13 @@ mod tests {
         bn.set_spec_response(ResponseTemplate::new(503)).await;
         let mut harness = spawn(link_config(&bn), &bn);
 
-        wait_for(&mut harness.control, |e| {
+        wait_for(&mut harness.link.events, |e| {
             matches!(e, BnEvent::Connected { .. })
         })
         .await;
-        let info = next_event(&mut harness.control).await;
-        let later = tokio::time::timeout(Duration::from_millis(200), harness.control.recv()).await;
+        let info = next_event(&mut harness.link.events).await;
+        let later =
+            tokio::time::timeout(Duration::from_millis(200), harness.link.events.recv()).await;
 
         assert_eq!(
             info,
@@ -898,7 +901,7 @@ mod tests {
     async fn block_lands_in_the_large_lane_and_attestation_in_the_small_lane() {
         let mut bn = FakeBn::start().await;
         let mut harness = spawn(link_config(&bn), &bn);
-        wait_for(&mut harness.control, |e| {
+        wait_for(&mut harness.link.events, |e| {
             matches!(e, BnEvent::Connected { .. })
         })
         .await;
@@ -936,7 +939,7 @@ mod tests {
     async fn unread_small_lane_does_not_stall_the_swarm_loop_or_the_large_lane() {
         let mut bn = FakeBn::start().await;
         let mut harness = spawn(link_config(&bn), &bn);
-        wait_for(&mut harness.control, |e| {
+        wait_for(&mut harness.link.events, |e| {
             matches!(e, BnEvent::Connected { .. })
         })
         .await;
@@ -983,7 +986,7 @@ mod tests {
         let mut bn = FakeBn::start().await;
         let mut received = bn.received();
         let mut harness = spawn(link_config(&bn), &bn);
-        wait_for(&mut harness.control, |e| {
+        wait_for(&mut harness.link.events, |e| {
             matches!(e, BnEvent::Connected { .. })
         })
         .await;
@@ -996,7 +999,7 @@ mod tests {
             if subscribed.insert(topic.clone()) {
                 bn.subscribe(&topic).await;
                 wait_for(
-                    &mut harness.control,
+                    &mut harness.link.events,
                     |e| matches!(e, BnEvent::Subscribed { topic: t, .. } if *t == topic),
                 )
                 .await;
@@ -1062,29 +1065,20 @@ mod tests {
         );
     }
 
-    /// A control channel of one slot holds Connected; the BnInfo behind it is dropped and
-    /// counted as a control drop.
+    /// The burst the capacity is sized for: the fake holds one subscription more than the
+    /// channel has slots when the link connects, and nothing reads the events. Connected
+    /// takes the first slot, so at least one Subscribed is dropped and counted.
     #[tokio::test(flavor = "multi_thread")]
     async fn full_control_channel_drops_the_event_and_counts_control() {
         let bn = FakeBn::start().await;
-        let (control_tx, mut control) = mpsc::channel(1);
-        let (commands, commands_rx) = mpsc::channel(64);
-        let (spec_tx, _spec) = spec_watch();
-        let stats = Arc::new(Counts::default());
-        let lanes = ClassLanes::new(stats.clone());
-        let _link = BnLink::spawn(
-            link_config(&bn),
-            &node_key(&tempfile::tempdir().unwrap()),
-            BnClient::new(bn.http_addr(), Duration::from_secs(2)),
-            &mut Registry::default(),
-            control_tx,
-            lanes.pusher(),
-            spec_tx,
-            commands_rx,
-        );
+        for i in 0..CONTROL_CHANNEL_CAPACITY {
+            bn.subscribe(&format!("/eth2/6a95a1a9/topic_{i}/ssz_snappy"))
+                .await;
+        }
+        let mut harness = spawn(link_config(&bn), &bn);
 
         tokio::time::timeout(WAIT, async {
-            while stats.control.load(Ordering::Relaxed) == 0 {
+            while harness.stats.control.load(Ordering::Relaxed) == 0 {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
@@ -1092,9 +1086,8 @@ mod tests {
         .expect("no control drop was counted");
 
         assert!(matches!(
-            next_event(&mut control).await,
+            next_event(&mut harness.link.events).await,
             BnEvent::Connected { .. }
         ));
-        drop(commands);
     }
 }
