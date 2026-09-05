@@ -41,7 +41,7 @@ impl Clock for FakeClock {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use super::*;
 
@@ -56,5 +56,15 @@ mod tests {
 
         assert!(before <= first && first <= after);
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn fake_clock_advance_moves_now_by_exactly_that_duration() {
+        let clock = FakeClock::new();
+        let start = clock.now();
+
+        clock.advance(Duration::from_millis(1500));
+
+        assert_eq!(clock.now() - start, Duration::from_millis(1500));
     }
 }
