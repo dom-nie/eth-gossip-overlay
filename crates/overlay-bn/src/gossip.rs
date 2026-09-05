@@ -54,6 +54,8 @@ pub fn build_behaviour(cfg: &BnLinkConfig, registry: &mut Registry) -> GossipBeh
 
 #[cfg(test)]
 mod tests {
+    use libp2p::gossipsub::{Message, TopicHash};
+    use overlay_core::msgid;
     use prometheus_client::registry::Registry;
 
     use super::*;
@@ -67,6 +69,27 @@ mod tests {
         BnLinkConfig {
             idontwant_on_publish: true,
         }
+    }
+
+    fn message(data: &[u8]) -> Message {
+        Message {
+            source: None,
+            data: data.to_vec(),
+            sequence_number: None,
+            topic: TopicHash::from_raw(TOPIC),
+        }
+    }
+
+    #[test]
+    fn message_id_matches_core_compute_for_compressed_payload() {
+        let payload: Vec<u8> = (0..240u32).map(|i| (i * 7 % 251) as u8).collect();
+        let compressed = snap::raw::Encoder::new().compress_vec(&payload).unwrap();
+        let expected = msgid::compute(TOPIC, &compressed, wire::MAX_TRANSMIT_SIZE as usize);
+        assert_eq!(expected.branch, msgid::Branch::Valid);
+
+        let id = config(&cfg()).message_id(&message(&compressed));
+
+        assert_eq!(id.0, expected.id.0);
     }
 
     #[test]

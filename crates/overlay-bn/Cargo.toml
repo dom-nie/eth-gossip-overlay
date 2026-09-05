@@ -19,6 +19,7 @@ url.workspace = true
 [dev-dependencies]
 lighthouse_network.workspace = true
 serde_json.workspace = true
+snap.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 types.workspace = true
