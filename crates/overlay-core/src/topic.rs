@@ -1,6 +1,6 @@
 //! Gossipsub topic strings, read but never written. The sidecar mirrors whatever topics the
 //! beacon node subscribes to, so it parses `/eth2/<fork_digest>/<name>/ssz_snappy` into a typed
-//! value and renders it back unchanged, without ever computing a topic of its own.
+//! value and renders it back unchanged. [`Topic::data_column`] is the one topic it builds.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -185,6 +185,18 @@ impl Topic {
             fork_digest: fork_digest(digest)?,
             kind: TopicKind::parse(name)?,
         })
+    }
+
+    /// The `data_column_sidecar_{index}` topic under `fork_digest`: the one topic the sidecar
+    /// builds instead of mirroring. Architecture §5.2 "All column topics, always": a beacon
+    /// node publishes every column of its own proposal but subscribes only to the ones it
+    /// custodies, so the sidecar subscribes to all columns of each digest the beacon node
+    /// announces to capture a whole proposal.
+    pub fn data_column(fork_digest: [u8; 4], index: u8) -> Self {
+        Self {
+            fork_digest,
+            kind: TopicKind::DataColumnSidecar(index),
+        }
     }
 
     /// The fork digest the topic is scoped to.
@@ -526,6 +538,9 @@ mod tests {
         let built = Topic::data_column([0x6a, 0x95, 0xa1, 0xa9], 17);
 
         assert_eq!(built.to_string(), topic("data_column_sidecar_17"));
-        assert_eq!(built, Topic::parse(&topic("data_column_sidecar_17")).unwrap());
+        assert_eq!(
+            built,
+            Topic::parse(&topic("data_column_sidecar_17")).unwrap()
+        );
     }
 }
