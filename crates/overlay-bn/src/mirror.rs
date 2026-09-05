@@ -674,6 +674,20 @@ mod tests {
         assert_eq!(changed.local, local);
     }
 
+    /// The watch fires on every connect; a snapshot with the same count must not churn.
+    #[test]
+    fn spec_with_the_same_column_count_is_a_no_op() {
+        let mut mirror = connected();
+        mirror.on_bn_event(&subscribed(ATTESTATION_3));
+
+        let actions = mirror.on_spec(&SpecSnapshot {
+            seconds_per_slot: 6,
+            ..SpecSnapshot::MAINNET
+        });
+
+        assert_eq!(actions, vec![]);
+    }
+
     /// The fake's subscription has to show in the watch and come back to the fake as the
     /// sidecar's own subscription, both inside one second of the fake sending it.
     #[tokio::test(flavor = "multi_thread")]
