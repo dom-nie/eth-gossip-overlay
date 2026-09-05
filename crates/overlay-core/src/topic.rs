@@ -123,8 +123,11 @@ pub enum TopicError {
     /// The encoding suffix is something other than `ssz_snappy`.
     #[error("encoding is not ssz_snappy")]
     Encoding,
-    /// A subnet, column or blob index is missing or does not fit in `u8`.
-    #[error("index is not a number in 0..=255")]
+    /// The name between the digest and the encoding is empty.
+    #[error("empty topic name")]
+    EmptyName,
+    /// A subnet, column or blob index is missing, has leading zeros or does not fit in `u8`.
+    #[error("index is not a number in 0..=255 without leading zeros")]
     Index,
 }
 
@@ -193,6 +196,9 @@ impl TopicKind {
     }
 
     fn parse(name: &str) -> Result<Self, TopicError> {
+        if name.is_empty() {
+            return Err(TopicError::EmptyName);
+        }
         Ok(match name {
             "beacon_block" => Self::BeaconBlock,
             "beacon_aggregate_and_proof" => Self::BeaconAggregateAndProof,
@@ -218,7 +224,14 @@ impl TopicKind {
     }
 }
 
+/// `str::parse` takes a sign and leading zeros. Those are refused here because the parsed
+/// index has to print back as the exact text it came from.
 fn index(digits: &str) -> Result<u8, TopicError> {
+    let leading_zero = digits.len() > 1 && digits.starts_with('0');
+    let all_digits = digits.bytes().all(|b| b.is_ascii_digit());
+    if leading_zero || !all_digits {
+        return Err(TopicError::Index);
+    }
     digits.parse().map_err(|_| TopicError::Index)
 }
 
