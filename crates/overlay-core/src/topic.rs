@@ -199,4 +199,24 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn parses_all_128_column_subnets() {
+        for i in 0..128 {
+            assert_eq!(
+                kind(&format!("data_column_sidecar_{i}")),
+                TopicKind::DataColumnSidecar(i)
+            );
+        }
+    }
+
+    #[test]
+    fn parses_blob_sidecar_indices() {
+        for i in 0..=u8::MAX {
+            assert_eq!(
+                kind(&format!("blob_sidecar_{i}")),
+                TopicKind::BlobSidecar(i)
+            );
+        }
+    }
 }
