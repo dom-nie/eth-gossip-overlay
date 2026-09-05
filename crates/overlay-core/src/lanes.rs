@@ -159,7 +159,7 @@ impl<T> ClassLanes<T> {
 mod tests {
     use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, LazyLock, Mutex};
 
     use super::*;
     use crate::topic::Class;
@@ -228,13 +228,35 @@ mod tests {
         assert_eq!(counts.large.load(Ordering::Relaxed), 0);
     }
 
-    /// Collects everything a `tracing` subscriber writes, so a test can read it back.
+    /// Everything `tracing` writes in this test binary. One process-wide subscriber rather
+    /// than a thread-scoped one: tracing caches a call site's interest by asking whichever
+    /// dispatcher first hits it, so a test that pushes to a full large lane with no
+    /// subscriber installed would cache "never" for the `error!` in `LanePusher::push`, and a
+    /// thread-scoped subscriber running after it would see nothing.
+    static LOG: LazyLock<Log> = LazyLock::new(|| {
+        let log = Log::default();
+        let sink = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || sink.clone())
+            .finish();
+        // Another global subscriber in this binary would be a bug, but the test would still
+        // fail on its assertion, so there is no need to panic here.
+        let _ = tracing::subscriber::set_global_default(subscriber);
+        log
+    });
+
     #[derive(Clone, Default)]
     struct Log(Arc<Mutex<Vec<u8>>>);
 
     impl Log {
-        fn text(&self) -> String {
-            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        fn len(&self) -> usize {
+            self.0.lock().unwrap().len()
+        }
+
+        /// What was written after the first `from` bytes.
+        fn since(&self, from: usize) -> String {
+            String::from_utf8(self.0.lock().unwrap()[from..].to_vec()).unwrap()
         }
     }
 
@@ -250,28 +272,23 @@ mod tests {
 
     #[test]
     fn lanes_full_large_lane_drops_counts_large_and_logs_at_error() {
+        let log = &*LOG;
         let counts = Arc::new(Counts::default());
         let lanes = ClassLanes::new(counts.clone());
-        let log = Log::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer({
-                let log = log.clone();
-                move || log.clone()
-            })
-            .finish();
+        for i in 0..LARGE_LANE_CAPACITY {
+            lanes.push(Class::Large, i).unwrap();
+        }
+        let before = log.len();
 
-        let overflow = tracing::subscriber::with_default(subscriber, || {
-            for i in 0..LARGE_LANE_CAPACITY {
-                lanes.push(Class::Large, i).unwrap();
-            }
-            lanes.push(Class::Large, usize::MAX)
-        });
+        let overflow = lanes.push(Class::Large, usize::MAX);
 
         assert_eq!(overflow, Err(Dropped(usize::MAX)));
         assert_eq!(counts.large.load(Ordering::Relaxed), 1);
         assert_eq!(counts.small.load(Ordering::Relaxed), 0);
-        let text = log.text();
-        assert!(text.contains("ERROR"), "{text:?}");
+        let text = log.since(before);
+        assert!(
+            text.contains("ERROR") && text.contains("large lane full"),
+            "{text:?}"
+        );
     }
 }
