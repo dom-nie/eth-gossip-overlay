@@ -12,6 +12,11 @@
 //! same file returns a bare array of `peer::Peer { peer_id, peer_info }`
 //! (`beacon_node/http_api/src/peer.rs`), and `is_trusted` is a plain `bool` field of
 //! `PeerInfo` in `beacon_node/lighthouse_network/src/peer_manager/peerdb/peer_info.rs`.
+//! `/eth/v1/config/spec` wraps a `ConfigAndPreset`
+//! (`consensus/types/src/core/config_and_preset.rs`): `UPPERCASE` keys with numbers as
+//! quoted decimal strings, plus `BLOB_SCHEDULE`, which is an array. A map of strings would
+//! choke on that array, which is why the snapshot is a struct that names its keys and
+//! ignores the rest.
 
 use std::time::Duration;
 
@@ -20,9 +25,12 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use url::Url;
 
+use crate::spec::SpecSnapshot;
+
 const IDENTITY: &str = "/eth/v1/node/identity";
 const VERSION: &str = "/eth/v1/node/version";
 const PEERS: &str = "/lighthouse/peers";
+const SPEC: &str = "/eth/v1/config/spec";
 
 /// The client. One connection pool shared by every call, built once at startup.
 #[derive(Clone, Debug)]
@@ -31,6 +39,7 @@ pub struct BnClient {
     identity: Url,
     version: Url,
     peers: Url,
+    spec: Url,
 }
 
 /// What the beacon node knows about one of its peers, cut down to what the sidecar acts on.
@@ -156,6 +165,7 @@ impl BnClient {
             http,
             version: sibling(&identity_url, VERSION),
             peers: sibling(&identity_url, PEERS),
+            spec: sibling(&identity_url, SPEC),
             identity: identity_url,
         }
     }
@@ -188,6 +198,12 @@ impl BnClient {
             .into_iter()
             .find(|peer| peer.peer_id == own)
             .map(|peer| peer.peer_info))
+    }
+
+    /// The spec constants as the beacon node runs them.
+    pub async fn spec(&self) -> Result<SpecSnapshot, BnHttpError> {
+        let Data { data } = self.get(&self.spec, SPEC).await?;
+        Ok(data)
     }
 
     async fn get<T: DeserializeOwned>(
