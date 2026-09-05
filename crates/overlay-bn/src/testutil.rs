@@ -341,8 +341,12 @@ async fn drive(
 }
 
 /// Lighthouse's swarm as `service/mod.rs` builds it for a node without QUIC or mplex: its
-/// `build_transport` (TCP nodelay, noise, yamux, 10 s upgrade timeout) and its 10 s idle
-/// connection timeout (`service/mod.rs:498`).
+/// `build_transport` (TCP nodelay, noise, yamux, 10 s for the dial and upgrade). Not its 10 s
+/// idle connection timeout (`service/mod.rs:498`): on the real node the RPC behaviour's
+/// handler keeps a connection alive (`rpc/handler.rs` `connection_keep_alive` is true unless
+/// deactivated) while gossipsub's keeps alive only mesh peers, and the fake has no RPC
+/// behaviour, so copying the timeout would drop a quiet link after 10 s where a real beacon
+/// node would not.
 fn lighthouse_swarm() -> Swarm<LighthouseBehaviour> {
     SwarmBuilder::with_new_identity()
         .with_tokio()
@@ -356,7 +360,7 @@ fn lighthouse_swarm() -> Swarm<LighthouseBehaviour> {
         .unwrap()
         .with_behaviour(|_| lighthouse_behaviour())
         .unwrap()
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(10)))
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::MAX))
         .build()
 }
 
