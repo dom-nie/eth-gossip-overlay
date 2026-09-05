@@ -205,4 +205,18 @@ mod tests {
 
         assert_eq!(got, own);
     }
+
+    #[tokio::test]
+    async fn non_200_is_status_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/eth/v1/node/identity"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let err = client(&server).peer_id().await.unwrap_err();
+
+        assert!(matches!(err, BnHttpError::Status(503)), "{err:?}");
+    }
 }
