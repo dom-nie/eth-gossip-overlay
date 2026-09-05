@@ -148,17 +148,18 @@ impl Inbound {
             return;
         }
         self.stats.first_seen(class);
-        // A full fanout lane is counted, and for the large lane logged, by the pusher.
-        let _ = self.out.push(
+        let outbound = Outbound {
+            topic,
             class,
-            Outbound {
-                topic,
-                class,
-                id,
-                payload: msg.data.into(),
-                received_at,
-            },
-        );
+            id,
+            payload: msg.data.into(),
+            received_at,
+        };
+        // The pusher has already counted the drop on its own LaneStats, and for the large
+        // lane logged it; this is the series T-041 reads under the inbound path's name.
+        if self.out.push(class, outbound).is_err() {
+            self.stats.dropped_full(class);
+        }
     }
 }
 
