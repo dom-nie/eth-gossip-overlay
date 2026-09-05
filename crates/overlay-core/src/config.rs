@@ -483,7 +483,7 @@ fn millis<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Err
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::Duration;
 
     use super::*;
@@ -766,5 +766,18 @@ log:
         ] {
             assert!(Config::from_yaml(doc).is_ok(), "{doc}");
         }
+    }
+
+    #[test]
+    fn load_reports_path_when_file_missing() {
+        let path = Path::new("/nonexistent/fleet-overlay/config.yaml");
+
+        let err = Config::load(path).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("/nonexistent/fleet-overlay/config.yaml"),
+            "{err}"
+        );
     }
 }
