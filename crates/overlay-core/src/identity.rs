@@ -5,6 +5,7 @@
 //! never touches a beacon node.
 
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 use ed25519_dalek::SigningKey;
 use hkdf::Hkdf;
@@ -34,6 +35,89 @@ impl fmt::Debug for FleetSeed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("FleetSeed(..)")
     }
+}
+
+impl FleetSeed {
+    /// Reads the seed file at `configured`. `credentials_dir` is where systemd's
+    /// `LoadCredential=` puts the unit's credentials.
+    pub fn load_from(
+        _credentials_dir: Option<&Path>,
+        configured: &Path,
+    ) -> Result<Self, SecretFileError> {
+        read_secret_file(configured).map(Self)
+    }
+}
+
+/// Why a seed or node key file could not be read or written.
+#[derive(Debug, thiserror::Error)]
+pub enum SecretFileError {
+    /// The file could not be read or created.
+    #[error("{}: {source}", .path.display())]
+    Io {
+        /// The file that was asked for.
+        path: PathBuf,
+        /// What the filesystem said.
+        source: std::io::Error,
+    },
+    /// The file exists but is not 64 hex characters and an optional newline.
+    #[error("{}: {reason}", .path.display())]
+    Malformed {
+        /// The file that was read.
+        path: PathBuf,
+        /// What is wrong with the text.
+        reason: String,
+    },
+}
+
+/// Reads 32 secret bytes from `path`, written as 64 hex characters with an optional trailing
+/// newline. The seed and the node key share this format. A file that other users can read is
+/// reported with a warning rather than refused: configuration management may be halfway
+/// through fixing it, and a sidecar that will not start helps nobody.
+pub fn read_secret_file(path: &Path) -> Result<Zeroizing<[u8; 32]>, SecretFileError> {
+    let io = |source| SecretFileError::Io {
+        path: path.to_owned(),
+        source,
+    };
+    let raw = Zeroizing::new(std::fs::read(path).map_err(io)?);
+    #[cfg(unix)]
+    warn_if_readable_by_others(path, &std::fs::metadata(path).map_err(io)?);
+    let hex = raw.strip_suffix(b"\n").unwrap_or(&raw);
+    decode_hex(hex).map_err(|reason| SecretFileError::Malformed {
+        path: path.to_owned(),
+        reason,
+    })
+}
+
+#[cfg(unix)]
+fn warn_if_readable_by_others(path: &Path, metadata: &std::fs::Metadata) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        tracing::warn!(
+            path = %path.display(),
+            mode = format_args!("{mode:04o}"),
+            "secret file is readable by other users; expected mode 0600"
+        );
+    }
+}
+
+fn decode_hex(hex: &[u8]) -> Result<Zeroizing<[u8; 32]>, String> {
+    if hex.len() != 64 {
+        return Err(format!("expected 64 hex characters, found {}", hex.len()));
+    }
+    let mut bytes = Zeroizing::new([0u8; 32]);
+    for (byte, [high, low]) in bytes.iter_mut().zip(hex.as_chunks::<2>().0) {
+        *byte = (nibble(*high)? << 4) | nibble(*low)?;
+    }
+    Ok(bytes)
+}
+
+fn nibble(c: u8) -> Result<u8, String> {
+    (c as char)
+        .to_digit(16)
+        .map(|digit| digit as u8)
+        .ok_or_else(|| format!("{:?} is not a hex digit", c as char))
 }
 
 /// The overlay TLS key of `hostname` under `seed`: HKDF-SHA256 with the fleet salt and an
