@@ -2,6 +2,7 @@
 //! beacon node subscribes to, so it parses `/eth2/<fork_digest>/<name>/ssz_snappy` into a typed
 //! value and renders it back unchanged, without ever computing a topic of its own.
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 /// Payloads on a topic name the sidecar does not know travel as [`Class::Large`] from this size
@@ -11,7 +12,9 @@ pub const UNKNOWN_LARGE_THRESHOLD_BYTES: usize = 16 * 1024;
 
 /// A parsed `/eth2/<fork_digest>/<name>/ssz_snappy` topic. [`fmt::Display`] renders the exact
 /// string it was parsed from.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// Ordered by fork digest, then kind: a stable order for sets, with no other meaning.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Topic {
     fork_digest: [u8; 4],
     kind: TopicKind,
@@ -24,7 +27,9 @@ pub struct Topic {
 ///
 /// `Other` holds the name as a `String`, which is why this is `Clone` and not `Copy`. Every
 /// known kind is a couple of bytes, so cloning only allocates for unknown names.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+///
+/// Ordered by variant, then index, so a set of topics lists in a stable order.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum TopicKind {
     /// `beacon_block`.
     BeaconBlock,
@@ -51,6 +56,30 @@ pub enum TopicKind {
     /// A name the sidecar does not know, kept verbatim. Such a topic is still relayed; only the
     /// transport class has to be guessed from the payload size.
     Other(String),
+}
+
+/// What the sidecar subscribes to, as two sets with one source (D12). `advertised` is exactly
+/// what the beacon node subscribes to; `local` is what the sidecar's own gossipsub instance
+/// subscribes to. T-027's SUBS bitmap and T-019's MetaData read `advertised`; T-026 interns
+/// and announces `local`. The mirror keeps them equal, and T-015's extra column topics are the
+/// only thing that makes them differ (D06). T-041's `bn_subscriptions` gauge is
+/// `advertised.len()` read from the `watch` receiver the mirror's shell feeds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SubscriptionSets {
+    /// The beacon node's own subscriptions.
+    pub advertised: BTreeSet<Topic>,
+    /// The sidecar's own gossipsub subscriptions.
+    pub local: BTreeSet<Topic>,
+}
+
+impl SubscriptionSets {
+    /// Both sets equal to `topics`: the plain mirror, with no extras.
+    pub fn mirrored(topics: BTreeSet<Topic>) -> Self {
+        Self {
+            advertised: topics.clone(),
+            local: topics,
+        }
+    }
 }
 
 /// Which transport path a message takes.

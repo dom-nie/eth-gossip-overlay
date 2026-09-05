@@ -3,6 +3,73 @@
 //! forward that topic's validated messages to it, and the same set is what the sidecar
 //! advertises to its siblings. The sidecar never computes a topic name, so a fork digest
 //! change needs no sidecar release (§3 principle 6).
+//!
+//! [`Mirror`] is pure: it takes the link's events and returns the actions they call for.
+
+use std::collections::BTreeMap;
+
+use libp2p::PeerId;
+use overlay_core::topic::{SubscriptionSets, Topic};
+
+use crate::link::BnEvent;
+
+/// What a beacon node event asks the shell to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MirrorAction {
+    /// Subscribe the sidecar's gossipsub instance to the full topic string.
+    Subscribe(String),
+    /// Unsubscribe it from the full topic string.
+    Unsubscribe(String),
+    /// The sets changed; this is their whole new value.
+    Changed(SubscriptionSets),
+}
+
+/// The beacon node's subscriptions as the link reports them. Events from any other peer are
+/// ignored: the sidecar has one peer, but the event carries an id, so it is checked.
+#[derive(Debug)]
+pub struct Mirror {
+    bn: PeerId,
+    /// Every topic string the beacon node is subscribed to, with its parse. One that does not
+    /// parse is still mirrored to gossipsub; it only stays out of the sets.
+    topics: BTreeMap<String, Option<Topic>>,
+    sets: SubscriptionSets,
+}
+
+impl Mirror {
+    /// A mirror of nothing yet, filtering on `bn` until a `Connected` names the real id.
+    pub fn new(bn: PeerId) -> Self {
+        Self {
+            bn,
+            topics: BTreeMap::new(),
+            sets: SubscriptionSets::default(),
+        }
+    }
+
+    /// The current sets.
+    pub fn sets(&self) -> &SubscriptionSets {
+        &self.sets
+    }
+
+    /// Applies `ev` and returns what the shell has to do about it, in order.
+    pub fn on_bn_event(&mut self, ev: &BnEvent) -> Vec<MirrorAction> {
+        match ev {
+            BnEvent::Subscribed { peer, topic } if *peer == self.bn => self.subscribe(topic),
+            _ => Vec::new(),
+        }
+    }
+
+    fn subscribe(&mut self, topic: &str) -> Vec<MirrorAction> {
+        let parsed = Topic::parse(topic).ok();
+        self.topics.insert(topic.to_owned(), parsed);
+        vec![MirrorAction::Subscribe(topic.to_owned()), self.changed()]
+    }
+
+    /// Rebuilds the sets from the parsed topics and reports them.
+    fn changed(&mut self) -> MirrorAction {
+        self.sets = SubscriptionSets::mirrored(self.topics.values().flatten().cloned().collect());
+        MirrorAction::Changed(self.sets.clone())
+    }
+}
 
 #[cfg(test)]
 mod tests {
