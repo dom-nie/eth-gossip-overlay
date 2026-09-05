@@ -365,4 +365,36 @@ hosts:
 
         assert_eq!(names(&others), ["bn-ams1-07", "bn-nyc1-01"]);
     }
+
+    fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let vars: Vec<(String, String)> = vars
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        move |key| {
+            vars.iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.clone())
+        }
+    }
+
+    fn gethostname() -> String {
+        "bn-ams1-07".to_owned()
+    }
+
+    #[test]
+    fn resolve_self_prefers_env_hostname_over_gethostname() {
+        let roster = Roster::from_yaml(APPENDIX_A).unwrap();
+
+        let me = resolve_self(
+            &roster,
+            &env(&[("FLEET_OVERLAY_HOSTNAME", "bn-nyc1-01")]),
+            &gethostname,
+        )
+        .unwrap();
+
+        assert_eq!(me.hostname, host("bn-nyc1-01"));
+        assert_eq!(me.region, region("us"));
+        assert_eq!(me.site.as_deref(), Some("nyc1"));
+    }
 }
