@@ -632,4 +632,15 @@ log:
             );
         }
     }
+
+    #[test]
+    fn keepalive_must_be_shorter_than_idle_timeout() {
+        let err = Config::from_yaml("overlay: { keepalive_ms: 5000, idle_timeout_ms: 5000 }")
+            .unwrap_err();
+
+        assert!(err.to_string().contains("overlay.keepalive_ms"), "{err}");
+        assert!(
+            Config::from_yaml("overlay: { keepalive_ms: 4999, idle_timeout_ms: 5000 }").is_ok()
+        );
+    }
 }
