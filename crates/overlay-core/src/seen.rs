@@ -126,6 +126,7 @@ impl SeenCache {
 
 #[cfg(test)]
 mod tests {
+    use std::mem::size_of;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -271,5 +272,38 @@ mod tests {
 
         assert!(cache.is_empty());
         assert_eq!(*stats.0.lock().unwrap(), [1]);
+    }
+
+    /// Run by hand with `--ignored --nocapture` to put the number in a PR. Counts the deque
+    /// slots and the set's buckets (one key plus one hashbrown control byte each) as allocated,
+    /// which is what the process actually holds. hashbrown reports 7/8 of a power of two of
+    /// buckets as capacity, so the bucket count is worked back from that.
+    #[test]
+    #[ignore]
+    fn memory_footprint_estimate() {
+        const ENTRIES: usize = 200_000;
+        let mut cache = cache(Duration::from_secs(60), ENTRIES, &FakeClock::new());
+        for n in 0..ENTRIES as u32 {
+            let mut bytes = [0; 20];
+            bytes[..4].copy_from_slice(&n.to_le_bytes());
+            cache.insert(MessageId(bytes));
+        }
+
+        let deque = cache.order.capacity() * size_of::<(Instant, MessageId)>();
+        let buckets = (cache.seen.capacity() * 8 / 7).next_power_of_two();
+        let set = buckets * (size_of::<MessageId>() + 1);
+        let total = deque + set;
+        println!(
+            "{ENTRIES} entries: deque {} KB + set {} KB = {:.1} MB",
+            deque / 1024,
+            set / 1024,
+            total as f64 / (1024.0 * 1024.0)
+        );
+
+        assert_eq!(cache.len(), ENTRIES);
+        assert!(
+            total < 15 * 1024 * 1024,
+            "{total} bytes is over the 15 MB target"
+        );
     }
 }
