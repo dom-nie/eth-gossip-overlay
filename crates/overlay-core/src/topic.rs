@@ -237,6 +237,8 @@ fn index(digits: &str) -> Result<u8, TopicError> {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     const DIGEST: &str = "6a95a1a9";
@@ -416,6 +418,37 @@ mod tests {
             (too_big.as_str(), TopicError::Index),
         ] {
             assert_eq!(Topic::parse(input), Err(expected), "{input}");
+        }
+    }
+
+    fn any_kind() -> impl Strategy<Value = TopicKind> {
+        prop_oneof![
+            Just(TopicKind::BeaconBlock),
+            Just(TopicKind::BeaconAggregateAndProof),
+            any::<u8>().prop_map(TopicKind::Attestation),
+            any::<u8>().prop_map(TopicKind::SyncCommittee),
+            Just(TopicKind::SyncContributionAndProof),
+            Just(TopicKind::VoluntaryExit),
+            Just(TopicKind::ProposerSlashing),
+            Just(TopicKind::AttesterSlashing),
+            Just(TopicKind::BlsToExecutionChange),
+            any::<u8>().prop_map(TopicKind::DataColumnSidecar),
+            any::<u8>().prop_map(TopicKind::BlobSidecar),
+            "light_client_[a-z_]{1,24}".prop_map(TopicKind::Other),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn display_round_trips_parse(digest: [u8; 4], kind in any_kind()) {
+            let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+            let text = format!("/eth2/{hex}/{kind}/ssz_snappy");
+
+            let parsed = Topic::parse(&text).unwrap();
+
+            prop_assert_eq!(parsed.fork_digest(), digest);
+            prop_assert_eq!(parsed.kind(), &kind);
+            prop_assert_eq!(parsed.to_string(), text);
         }
     }
 }
