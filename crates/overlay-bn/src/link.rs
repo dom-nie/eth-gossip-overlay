@@ -337,6 +337,7 @@ fn build_swarm(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
 
     use prometheus_client::registry::Registry;
@@ -546,5 +547,23 @@ mod tests {
         let attempts = identity_requests(&bn).await;
         assert!((2..=20).contains(&attempts), "{attempts} identity requests");
         drop(harness);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bn_connected_gauge_tracks_state() {
+        let bn = FakeBn::start().await;
+        let mut harness = spawn(link_config(&bn), &bn);
+        let gauge = harness.link.connected.clone();
+        assert!(!gauge.load(Ordering::Relaxed));
+
+        wait_for(&mut harness.control, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+        assert!(gauge.load(Ordering::Relaxed));
+
+        bn.shutdown().await;
+        wait_for(&mut harness.control, |e| *e == BnEvent::Disconnected).await;
+        assert!(!gauge.load(Ordering::Relaxed));
     }
 }
