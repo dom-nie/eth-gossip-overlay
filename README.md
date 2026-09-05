@@ -2,7 +2,7 @@
 
 A sidecar for [Lighthouse](https://github.com/sigp/lighthouse) beacon nodes. Drop `fleet-overlay` next to each node you run and the sidecars build a private QUIC overlay between your own machines, so blocks, blobs and columns your fleet already has reach your other nodes without a second trip through the public gossip mesh. `fleet-overlayctl` talks to a running sidecar over its admin socket.
 
-The design is in [Architecture.md](Architecture.md). The work is broken into tickets under [tickets/](tickets/), starting from [tickets/MASTER.md](tickets/MASTER.md), which also describes the branch, TDD and commit conventions.
+The design document and the ticket backlog are maintained outside this repository. Work happens on one branch per ticket, test first: a failing test is committed, then the code that makes it pass, with commit subjects prefixed by the ticket id (`T-001: ...`).
 
 ## Build
 
