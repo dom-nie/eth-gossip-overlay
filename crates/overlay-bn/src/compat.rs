@@ -547,6 +547,25 @@ mod tests {
         assert_eq!(trusted, Some(true));
         assert_eq!(stats.gauges().trusted, Some(false));
     }
+
+    /// The message has no per-test payload, so the count is taken before and after; nothing
+    /// else in this binary drives a watch with `trusted: None`.
+    #[test]
+    fn trusted_gauge_is_unset_and_logged_once_when_peers_endpoint_is_absent() {
+        let log = &*LOG;
+        let absent = |text: &str| text.matches("peers endpoint absent").count();
+        let (mut watch, stats) = watch();
+        let version = Some(format!("Lighthouse/v{PINNED}"));
+        watch.on_bn_info(version.clone(), Some(true));
+        let before = absent(&log.text());
+
+        for _ in 0..3 {
+            watch.on_bn_info(version.clone(), None);
+        }
+
+        assert_eq!(stats.gauges().trusted, None);
+        assert_eq!(absent(&log.text()) - before, 1);
+    }
 }
 
 #[cfg(test)]
