@@ -106,4 +106,15 @@ mod tests {
         assert_eq!(computed.branch, Branch::Valid);
         assert_eq!(computed.id.to_string(), HELLO_ID);
     }
+
+    const TRUNCATED_SNAPPY: &[u8] = &[0x05, 0x10, 0x68];
+    const TRUNCATED_ID: &str = "0c900438f873351253246db4766f6035ababcbb0";
+
+    #[test]
+    fn undecompressable_payload_uses_invalid_domain_vector() {
+        let computed = compute(TOPIC, TRUNCATED_SNAPPY, 1024);
+
+        assert_eq!(computed.branch, Branch::Invalid);
+        assert_eq!(computed.id.to_string(), TRUNCATED_ID);
+    }
 }
