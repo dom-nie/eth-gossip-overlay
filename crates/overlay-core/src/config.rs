@@ -838,4 +838,18 @@ log:
             );
         }
     }
+
+    #[test]
+    fn durations_are_converted_to_duration() {
+        let cfg = Config::from_yaml(
+            "overlay: { keepalive_ms: 1000 }\nclasses: { large: { repair_deadline_ms: 250 } }",
+        )
+        .unwrap();
+
+        assert_eq!(cfg.overlay.keepalive, Duration::from_secs(1));
+        assert_eq!(
+            cfg.classes.large.repair_deadline,
+            Duration::from_millis(250)
+        );
+    }
 }
