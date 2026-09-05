@@ -109,6 +109,15 @@ pub enum RosterError {
 }
 
 impl Roster {
+    /// Reads and parses the file at `path`.
+    pub fn load(path: &Path) -> Result<Self, RosterError> {
+        let text = std::fs::read_to_string(path).map_err(|source| RosterError::Io {
+            path: path.to_owned(),
+            source,
+        })?;
+        Self::parse(&text, Some(path))
+    }
+
     /// Parses a complete `roster.yaml` document.
     pub fn from_yaml(text: &str) -> Result<Self, RosterError> {
         Self::parse(text, None)
