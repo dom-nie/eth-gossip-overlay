@@ -81,4 +81,19 @@ mod tests {
         }
         assert!(!bucket.try_take(1, much_later));
     }
+
+    #[test]
+    fn token_bucket_denies_when_empty() {
+        let start = Instant::now();
+        let mut bucket = TokenBucket::new(1000, 3, start);
+        assert!(bucket.try_take(3, start));
+
+        assert!(!bucket.try_take(1, start));
+
+        // More than the burst can never be taken at once, and asking leaves the level alone.
+        let later = start + Duration::from_secs(10);
+        assert!(!bucket.try_take(4, later));
+        assert!(bucket.try_take(3, later));
+        assert!(!bucket.try_take(1, later));
+    }
 }
