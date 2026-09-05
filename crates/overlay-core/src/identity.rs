@@ -84,4 +84,11 @@ mod tests {
 
         assert_ne!(one.to_bytes(), two.to_bytes());
     }
+    #[test]
+    fn different_seeds_give_different_tls_keys() {
+        let one = derive_tls_keypair(&seed(0x11), &host("bn-1"));
+        let two = derive_tls_keypair(&seed(0x22), &host("bn-1"));
+
+        assert_ne!(one.to_bytes(), two.to_bytes());
+    }
 }
