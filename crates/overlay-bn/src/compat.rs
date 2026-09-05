@@ -249,3 +249,31 @@ mod tests {
         assert_eq!(Compat::Unsupported.state(), STATE_UNSUPPORTED);
     }
 }
+
+#[cfg(test)]
+mod drift {
+    use super::*;
+
+    /// `PINNED` and the tag the root `Cargo.toml` pins for Lighthouse's crates move together;
+    /// a bump that forgets one of them would report the wrong version as supported.
+    #[test]
+    fn pinned_version_equals_the_lighthouse_tag_in_the_root_cargo_toml() {
+        let manifest =
+            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.toml"))
+                .unwrap();
+        let tag_of = |krate: &str| {
+            let line = manifest
+                .lines()
+                .find(|line| line.starts_with(&format!("{krate} = ")))
+                .unwrap_or_else(|| panic!("no {krate} in the root Cargo.toml"));
+            line.split("tag = \"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_else(|| panic!("{krate} is not pinned by tag: {line}"))
+                .to_owned()
+        };
+
+        assert_eq!(tag_of("lighthouse_network"), format!("v{PINNED}"));
+        assert_eq!(tag_of("types"), format!("v{PINNED}"));
+    }
+}
