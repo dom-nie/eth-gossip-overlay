@@ -54,6 +54,7 @@ impl Mirror {
     pub fn on_bn_event(&mut self, ev: &BnEvent) -> Vec<MirrorAction> {
         match ev {
             BnEvent::Subscribed { peer, topic } if *peer == self.bn => self.subscribe(topic),
+            BnEvent::Unsubscribed { peer, topic } if *peer == self.bn => self.unsubscribe(topic),
             _ => Vec::new(),
         }
     }
@@ -62,6 +63,11 @@ impl Mirror {
         let parsed = Topic::parse(topic).ok();
         self.topics.insert(topic.to_owned(), parsed);
         vec![MirrorAction::Subscribe(topic.to_owned()), self.changed()]
+    }
+
+    fn unsubscribe(&mut self, topic: &str) -> Vec<MirrorAction> {
+        self.topics.remove(topic);
+        vec![MirrorAction::Unsubscribe(topic.to_owned()), self.changed()]
     }
 
     /// Rebuilds the sets from the parsed topics and reports them.
