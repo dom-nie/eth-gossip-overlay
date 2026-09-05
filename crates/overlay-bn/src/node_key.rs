@@ -7,6 +7,7 @@ use std::fmt;
 use std::io::ErrorKind;
 use std::path::Path;
 
+pub use libp2p::PeerId;
 use libp2p::identity::{Keypair, ed25519};
 use overlay_core::identity::{SecretFileError, create_secret_file, read_secret_file};
 
@@ -35,6 +36,11 @@ impl NodeKey {
     /// The identity the BN link's swarm runs under.
     pub fn keypair(&self) -> Keypair {
         self.0.clone()
+    }
+
+    /// What the beacon node gets in `--trusted-peers`.
+    pub fn peer_id(&self) -> PeerId {
+        self.0.public().to_peer_id()
     }
 }
 
