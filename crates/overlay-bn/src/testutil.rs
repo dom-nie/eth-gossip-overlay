@@ -6,12 +6,14 @@
 //!
 //! ```ignore
 //! let mut bn = FakeBn::start().await;
+//! let cfg = LinkConfig { libp2p_addr: bn.addr(), ..with a 10 ms backoff };
 //! let client = BnClient::new(bn.http_addr(), Duration::from_secs(2));
-//! let link = BnLink::spawn(link_config(bn.addr()), &node_key, client, ..);
-//! // BnEvent::Connected { peer_id: bn.peer_id() } arrives on the control channel.
+//! let link = BnLink::spawn(cfg, &node_key, client, &mut registry, control_tx, lanes.pusher(), spec_tx, commands_rx);
+//! // BnEvent::Connected { peer_id: bn.peer_id() } arrives on `control`.
 //! bn.subscribe(TOPIC).await;
-//! // BnEvent::Subscribed { .. } arrives; now a publish from the link reaches the fake:
+//! // BnEvent::Subscribed { .. } arrives; a publish from the link now reaches the fake:
 //! let (topic, decompressed, id) = bn.received().recv().await.unwrap();
+//! // The other way round: subscribe the link, bn.wait_for(Subscribed), then bn.publish(..).
 //! ```
 //!
 //! The two-swarm helpers at the bottom ([`connected_pair`], [`subscribe_both`],
