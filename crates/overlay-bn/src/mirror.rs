@@ -537,6 +537,27 @@ mod tests {
         assert_eq!(mirror.sets(), &sets_of(&[ATTESTATION_3, &column_5]));
     }
 
+    #[test]
+    fn extra_columns_are_in_local_but_not_in_advertised() {
+        let mut mirror = connected();
+
+        let actions = mirror.on_bn_event(&subscribed(ATTESTATION_3));
+
+        let Some(MirrorAction::Changed(changed)) = actions.last() else {
+            panic!("no Changed in {actions:?}");
+        };
+        assert_eq!(
+            changed.advertised,
+            BTreeSet::from([Topic::parse(ATTESTATION_3).unwrap()])
+        );
+        let extras: BTreeSet<String> = changed
+            .local
+            .difference(&changed.advertised)
+            .map(Topic::to_string)
+            .collect();
+        assert_eq!(extras, columns("00000000", 0..128));
+    }
+
     /// The fake's subscription has to show in the watch and come back to the fake as the
     /// sidecar's own subscription, both inside one second of the fake sending it.
     #[tokio::test(flavor = "multi_thread")]
