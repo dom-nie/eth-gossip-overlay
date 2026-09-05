@@ -520,4 +520,12 @@ mod tests {
 
         assert_eq!(parsed.fork_digest(), [0x6a, 0x95, 0xa1, 0xa9]);
     }
+
+    #[test]
+    fn data_column_builds_the_column_topic_of_a_digest() {
+        let built = Topic::data_column([0x6a, 0x95, 0xa1, 0xa9], 17);
+
+        assert_eq!(built.to_string(), topic("data_column_sidecar_17"));
+        assert_eq!(built, Topic::parse(&topic("data_column_sidecar_17")).unwrap());
+    }
 }
