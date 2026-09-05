@@ -2,12 +2,15 @@
 //! beacon node subscribes to, so it parses `/eth2/<fork_digest>/<name>/ssz_snappy` into a typed
 //! value and renders it back unchanged, without ever computing a topic of its own.
 
+use std::fmt;
+
 /// Payloads on a topic name the sidecar does not know travel as [`Class::Large`] from this size
 /// up. A constant rather than a config key: the class only picks the transport path, and a
 /// release is the place to correct a wrong guess for a new topic.
 pub const UNKNOWN_LARGE_THRESHOLD_BYTES: usize = 16 * 1024;
 
-/// A parsed `/eth2/<fork_digest>/<name>/ssz_snappy` topic.
+/// A parsed `/eth2/<fork_digest>/<name>/ssz_snappy` topic. [`fmt::Display`] renders the exact
+/// string it was parsed from.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Topic {
     fork_digest: [u8; 4],
@@ -166,6 +169,17 @@ impl Topic {
     }
 }
 
+impl fmt::Display for Topic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let [a, b, c, d] = self.fork_digest;
+        write!(
+            f,
+            "/eth2/{a:02x}{b:02x}{c:02x}{d:02x}/{}/ssz_snappy",
+            self.kind
+        )
+    }
+}
+
 fn fork_digest(hex: &str) -> Result<[u8; 4], TopicError> {
     let hex: &[u8; 8] = hex.as_bytes().try_into().map_err(|_| TopicError::Digest)?;
     let mut digest = [0; 4];
@@ -221,6 +235,25 @@ impl TopicKind {
                 }
             }
         })
+    }
+}
+
+impl fmt::Display for TopicKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::BeaconBlock => f.write_str("beacon_block"),
+            Self::BeaconAggregateAndProof => f.write_str("beacon_aggregate_and_proof"),
+            Self::Attestation(i) => write!(f, "beacon_attestation_{i}"),
+            Self::SyncCommittee(i) => write!(f, "sync_committee_{i}"),
+            Self::SyncContributionAndProof => f.write_str("sync_committee_contribution_and_proof"),
+            Self::VoluntaryExit => f.write_str("voluntary_exit"),
+            Self::ProposerSlashing => f.write_str("proposer_slashing"),
+            Self::AttesterSlashing => f.write_str("attester_slashing"),
+            Self::BlsToExecutionChange => f.write_str("bls_to_execution_change"),
+            Self::DataColumnSidecar(i) => write!(f, "data_column_sidecar_{i}"),
+            Self::BlobSidecar(i) => write!(f, "blob_sidecar_{i}"),
+            Self::Other(name) => f.write_str(name),
+        }
     }
 }
 
