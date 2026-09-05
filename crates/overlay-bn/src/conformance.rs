@@ -20,11 +20,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use libp2p::PeerId;
-use libp2p::gossipsub::PublishError;
+use libp2p::gossipsub::{MessageId, PublishError};
 use overlay_core::lanes::ClassLanes;
 use overlay_core::topic::Class;
 use prometheus_client::registry::Registry;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::bn_http::BnClient;
 use crate::link::{BnCommand, BnEvent, BnLink, BnMessage};
@@ -103,6 +103,23 @@ impl Sidecar {
             .expect("nothing arrived on the large lane in time")
     }
 
+    async fn publish(&self, topic: &str, data: &[u8]) -> MessageId {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(BnCommand::Publish {
+                topic: topic.to_owned(),
+                data: data.to_vec(),
+                reply,
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(WAIT, answer)
+            .await
+            .expect("no publish reply in time")
+            .unwrap()
+            .unwrap()
+    }
+
     /// Whether the large lane stays empty for a second.
     async fn nothing_large_within_a_second(&mut self) -> bool {
         tokio::time::timeout(Duration::from_secs(1), self.lanes.recv_from(Class::Large))
@@ -170,4 +187,56 @@ async fn bn_publish_reaches_explicit_peer_on_a_topic_the_bn_is_not_subscribed_to
     assert!(heard_nothing);
     assert_eq!((delivered.id, delivered.source), (id, bn.peer_id()));
     assert_eq!(decompress(&delivered.data), b"the sidecar listens");
+}
+
+/// CL-N2 (5). With `idontwant_on_publish` the sidecar sends an IDONTWANT ahead of any
+/// publish above the 1000-byte threshold, to every recipient including its explicit peer;
+/// the fake counts it in the fork's `idontwant_msgs` metric and records the id against the
+/// sidecar, which is what its `forward_msg` consults. That is as far as a fake can take
+/// "honours": the fork skips a peer that announced IDONTWANT for the id, but every way the
+/// sidecar can send one also hands the fake the message itself (or makes the sidecar an
+/// originating peer of it), so no forward to the sidecar is ever due and the skip cannot be
+/// seen from outside. What is asserted is the wire exchange and the count; the skip is the
+/// fork's code, which the beacon node compiles unchanged.
+///
+/// The other half: both sides negotiate `/meshsub/1.3.0`, but neither registers the topic for
+/// partial messages, so a payload above the threshold arrives as one whole message with the
+/// beacon node's compressed bytes untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn bn_honours_idontwant_from_explicit_peer_and_sends_full_messages_without_partial_message_negotiation()
+ {
+    let mut bn = FakeBn::start_with_metrics().await;
+    let mut received = bn.received();
+    let mut sidecar = connected_sidecar(&bn).await;
+    bn.subscribe(BLOCK).await;
+    sidecar.subscribe(&mut bn, BLOCK).await;
+    let incompressible: Vec<u8> = (0..4096u32)
+        .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
+        .collect();
+    let compressed = snap::raw::Encoder::new()
+        .compress_vec(&incompressible)
+        .unwrap();
+    assert!(compressed.len() > crate::gossip::IDONTWANT_MESSAGE_SIZE_THRESHOLD);
+
+    let id = sidecar.publish(BLOCK, &compressed).await;
+    let (topic, data, bn_id) = tokio::time::timeout(WAIT, received.recv())
+        .await
+        .expect("the fake never received the publish")
+        .unwrap();
+    let idontwants = bn.idontwant_msgs();
+    let bn_id_back = bn.publish(BLOCK, &incompressible[..2048]).await.unwrap();
+    let whole = sidecar.recv_large().await;
+
+    assert_eq!(
+        (topic.as_str(), data, bn_id),
+        (BLOCK, incompressible.clone(), id)
+    );
+    assert!(idontwants > 0, "{}", bn.metrics_text());
+    assert_eq!(whole.id, bn_id_back);
+    assert_eq!(
+        whole.data,
+        snap::raw::Encoder::new()
+            .compress_vec(&incompressible[..2048])
+            .unwrap()
+    );
 }
