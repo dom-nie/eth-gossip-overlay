@@ -5,6 +5,118 @@
 //! because the capacities, the drop policy and which class wins are the decision, and the
 //! channels are only its carrier.
 
+use std::sync::Arc;
+use std::task::Poll;
+
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::error::TrySendError;
+
+use crate::topic::Class;
+
+/// Slots in the small lane, fixed by D07 and the §7 row "Swarm control events". When it is
+/// full the newest attestation is dropped and counted; the swarm loop never waits for room.
+pub const SMALL_LANE_CAPACITY: usize = 4096;
+/// Slots in the large lane (D07). Blocks and columns arrive at a rate that cannot fill 1,024
+/// slots unless the consumer is dead, which is why a large drop is logged at error level.
+pub const LARGE_LANE_CAPACITY: usize = 1024;
+
+/// Where drops are counted. T-041 binds `bn_events_dropped_total{class}`; `()` counts
+/// nothing, for tests and for wiring that has no registry yet.
+pub trait LaneStats: Send + Sync {
+    /// An item for `class` found its lane full and was dropped.
+    fn dropped(&self, class: Class);
+}
+
+impl LaneStats for () {
+    fn dropped(&self, _: Class) {}
+}
+
+/// The item that found its lane full, handed back so the caller decides what to say about it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Dropped<T>(pub T);
+
+/// The sending side of both lanes. The swarm task holds one of these; the consumer owns the
+/// [`ClassLanes`] it came from.
+pub struct LanePusher<T> {
+    small: mpsc::Sender<T>,
+    large: mpsc::Sender<T>,
+    stats: Arc<dyn LaneStats>,
+}
+
+impl<T> Clone for LanePusher<T> {
+    fn clone(&self) -> Self {
+        Self {
+            small: self.small.clone(),
+            large: self.large.clone(),
+            stats: Arc::clone(&self.stats),
+        }
+    }
+}
+
+impl<T> LanePusher<T> {
+    /// Queues `item` on the lane for `class` without waiting. A full lane hands the item back.
+    pub fn push(&self, class: Class, item: T) -> Result<(), Dropped<T>> {
+        let lane = match class {
+            Class::Small => &self.small,
+            Class::Large => &self.large,
+        };
+        match lane.try_send(item) {
+            Ok(()) => Ok(()),
+            Err(TrySendError::Full(item) | TrySendError::Closed(item)) => Err(Dropped(item)),
+        }
+    }
+}
+
+/// Both lanes with their receiving ends. The consumer owns this and calls [`recv`](Self::recv);
+/// the swarm task gets a [`LanePusher`] from [`pusher`](Self::pusher).
+pub struct ClassLanes<T> {
+    pusher: LanePusher<T>,
+    small: mpsc::Receiver<T>,
+    large: mpsc::Receiver<T>,
+}
+
+impl<T> ClassLanes<T> {
+    /// Two empty lanes reporting drops to `stats`.
+    pub fn new(stats: Arc<dyn LaneStats>) -> Self {
+        let (small_tx, small) = mpsc::channel(SMALL_LANE_CAPACITY);
+        let (large_tx, large) = mpsc::channel(LARGE_LANE_CAPACITY);
+        Self {
+            pusher: LanePusher {
+                small: small_tx,
+                large: large_tx,
+                stats,
+            },
+            small,
+            large,
+        }
+    }
+
+    /// See [`LanePusher::push`].
+    pub fn push(&self, class: Class, item: T) -> Result<(), Dropped<T>> {
+        self.pusher.push(class, item)
+    }
+
+    /// A sending handle for the task that fills the lanes.
+    pub fn pusher(&self) -> LanePusher<T> {
+        self.pusher.clone()
+    }
+
+    /// The next item, from the large lane whenever it has one and from the small lane
+    /// otherwise. Never returns `None`: the lanes hold their own senders, so neither closes.
+    pub async fn recv(&mut self) -> T {
+        std::future::poll_fn(|cx| {
+            if let Poll::Ready(Some(item)) = self.large.poll_recv(cx) {
+                return Poll::Ready(item);
+            }
+            if let Poll::Ready(Some(item)) = self.small.poll_recv(cx) {
+                return Poll::Ready(item);
+            }
+            Poll::Pending
+        })
+        .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
