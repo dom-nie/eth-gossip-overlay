@@ -497,10 +497,10 @@ mod tests {
 
     use super::*;
     use crate::bn_http::BnClient;
-    use crate::gossip::{BnLinkConfig, wire};
+    use crate::gossip::wire;
     use crate::node_key::NodeKey;
     use crate::spec::spec_watch;
-    use crate::testutil::{FakeBn, FakeBnEvent, ok_json};
+    use crate::testutil::{FakeBn, FakeBnEvent, link_config, node_key, ok_json};
 
     /// Long enough for a dial, a noise handshake and a gossipsub exchange on a loaded CI box,
     /// short enough that a test which waits in vain still ends inside its 5 s budget.
@@ -509,17 +509,6 @@ mod tests {
     const ATTESTATION_TOPIC: &str = "/eth2/6a95a1a9/beacon_attestation_7/ssz_snappy";
     /// `hello`, snappy-compressed: T-006's spec vector input.
     const HELLO_SNAPPY: &[u8] = &[0x05, 0x10, 0x68, 0x65, 0x6c, 0x6c, 0x6f];
-
-    fn link_config(bn: &FakeBn) -> LinkConfig {
-        LinkConfig {
-            libp2p_addr: bn.addr(),
-            backoff_min: Duration::from_millis(10),
-            backoff_max: Duration::from_millis(100),
-            gossip: BnLinkConfig {
-                idontwant_on_publish: true,
-            },
-        }
-    }
 
     /// A running link and the test's ends of its channels.
     struct Harness {
@@ -566,10 +555,6 @@ mod tests {
             .iter()
             .filter(|request| request.url.path() == "/eth/v1/node/identity")
             .count()
-    }
-
-    fn node_key(dir: &tempfile::TempDir) -> NodeKey {
-        NodeKey::load_or_create(&dir.path().join("node.key")).unwrap()
     }
 
     /// A link under a fresh node key. The key file is read at spawn and not needed after.

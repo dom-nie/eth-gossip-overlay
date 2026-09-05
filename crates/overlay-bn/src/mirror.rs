@@ -119,11 +119,21 @@ impl Mirror {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::LazyLock;
+    use std::sync::{Arc, LazyLock};
+    use std::time::Duration;
 
     use libp2p::identity::Keypair;
+    use overlay_core::lanes::ClassLanes;
+    use prometheus_client::registry::Registry;
 
     use super::*;
+    use crate::bn_http::BnClient;
+    use crate::link::BnLink;
+    use crate::spec::spec_watch;
+    use crate::testutil::{FakeBn, FakeBnEvent, link_config, node_key};
+
+    /// Long enough for a dial and a gossipsub exchange on a loaded CI box.
+    const WAIT: Duration = Duration::from_secs(3);
 
     static BN: LazyLock<PeerId> =
         LazyLock::new(|| Keypair::generate_ed25519().public().to_peer_id());
@@ -145,8 +155,48 @@ mod tests {
     }
 
     /// The sets a plain mirror of `topics` has.
-    fn sets(topics: &[&str]) -> SubscriptionSets {
+    fn mirrored(topics: &[&str]) -> SubscriptionSets {
         SubscriptionSets::mirrored(topics.iter().map(|t| Topic::parse(t).unwrap()).collect())
+    }
+
+    /// A link to `bn` with the mirror shell on its events, and the watch the shell feeds.
+    /// Neither task is kept: the runtime drops them with the test.
+    fn mirrored_link(bn: &FakeBn) -> watch::Receiver<SubscriptionSets> {
+        let (commands, commands_rx) = mpsc::channel(64);
+        let (spec, _) = spec_watch();
+        let lanes = ClassLanes::new(Arc::new(()));
+        let link = BnLink::spawn(
+            link_config(bn),
+            &node_key(&tempfile::tempdir().unwrap()),
+            BnClient::new(bn.http_addr(), Duration::from_secs(2)),
+            &mut Registry::default(),
+            lanes.pusher(),
+            spec,
+            commands_rx,
+        );
+        let (sets, watch) = watch::channel(SubscriptionSets::default());
+        run(link.events, commands, sets, bn.peer_id());
+        watch
+    }
+
+    async fn wait_connected(bn: &mut FakeBn) {
+        tokio::time::timeout(
+            WAIT,
+            bn.wait_for(|e| matches!(e, FakeBnEvent::Connected(_))),
+        )
+        .await
+        .expect("the link never connected to the fake");
+    }
+
+    async fn wait_sets(
+        watch: &mut watch::Receiver<SubscriptionSets>,
+        within: Duration,
+        wanted: impl FnMut(&SubscriptionSets) -> bool,
+    ) {
+        tokio::time::timeout(within, watch.wait_for(wanted))
+            .await
+            .expect("the sets never reached the awaited value")
+            .unwrap();
     }
 
     #[test]
@@ -159,10 +209,10 @@ mod tests {
             actions,
             vec![
                 MirrorAction::Subscribe(ATTESTATION_3.to_owned()),
-                MirrorAction::Changed(sets(&[ATTESTATION_3])),
+                MirrorAction::Changed(mirrored(&[ATTESTATION_3])),
             ]
         );
-        assert_eq!(mirror.sets(), &sets(&[ATTESTATION_3]));
+        assert_eq!(mirror.sets(), &mirrored(&[ATTESTATION_3]));
     }
 
     #[test]
@@ -176,10 +226,10 @@ mod tests {
             actions,
             vec![
                 MirrorAction::Unsubscribe(ATTESTATION_3.to_owned()),
-                MirrorAction::Changed(sets(&[])),
+                MirrorAction::Changed(mirrored(&[])),
             ]
         );
-        assert_eq!(mirror.sets(), &sets(&[]));
+        assert_eq!(mirror.sets(), &mirrored(&[]));
     }
 
     #[test]
@@ -190,7 +240,7 @@ mod tests {
         let actions = mirror.on_bn_event(&subscribed(ATTESTATION_3));
 
         assert_eq!(actions, vec![]);
-        assert_eq!(mirror.sets(), &sets(&[ATTESTATION_3]));
+        assert_eq!(mirror.sets(), &mirrored(&[ATTESTATION_3]));
     }
 
     #[test]
@@ -200,7 +250,7 @@ mod tests {
         let actions = mirror.on_bn_event(&unsubscribed(ATTESTATION_3));
 
         assert_eq!(actions, vec![]);
-        assert_eq!(mirror.sets(), &sets(&[]));
+        assert_eq!(mirror.sets(), &mirrored(&[]));
     }
 
     #[test]
@@ -216,10 +266,10 @@ mod tests {
             vec![
                 MirrorAction::Unsubscribe(ATTESTATION_3.to_owned()),
                 MirrorAction::Unsubscribe(BLOCK.to_owned()),
-                MirrorAction::Changed(sets(&[])),
+                MirrorAction::Changed(mirrored(&[])),
             ]
         );
-        assert_eq!(mirror.sets(), &sets(&[]));
+        assert_eq!(mirror.sets(), &mirrored(&[]));
     }
 
     #[test]
@@ -233,7 +283,7 @@ mod tests {
         });
 
         assert_eq!(actions, vec![]);
-        assert_eq!(mirror.sets(), &sets(&[]));
+        assert_eq!(mirror.sets(), &mirrored(&[]));
     }
 
     /// A restarted beacon node has a new peer id; its subscriptions must not be ignored.
@@ -249,7 +299,7 @@ mod tests {
         });
 
         assert_eq!(actions.len(), 2);
-        assert_eq!(mirror.sets(), &sets(&[ATTESTATION_3]));
+        assert_eq!(mirror.sets(), &mirrored(&[ATTESTATION_3]));
     }
 
     #[test]
@@ -260,7 +310,7 @@ mod tests {
         let actions = mirror.on_bn_event(&subscribed(raw));
 
         assert_eq!(actions, vec![MirrorAction::Subscribe(raw.to_owned())]);
-        assert_eq!(mirror.sets(), &sets(&[]));
+        assert_eq!(mirror.sets(), &mirrored(&[]));
         assert_eq!(
             mirror.on_bn_event(&BnEvent::Disconnected),
             vec![MirrorAction::Unsubscribe(raw.to_owned())]
@@ -283,5 +333,29 @@ mod tests {
             .collect();
         assert_eq!(changed.advertised, expected);
         assert_eq!(changed.local, changed.advertised);
+    }
+
+    /// The fake's subscription has to show in the watch and come back to the fake as the
+    /// sidecar's own subscription, both inside one second of the fake sending it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fake_bn_subscribe_is_mirrored_within_one_second() {
+        let mut bn = FakeBn::start().await;
+        let mut watch = mirrored_link(&bn);
+        wait_connected(&mut bn).await;
+
+        bn.subscribe(ATTESTATION_3).await;
+
+        let (shown, seen) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(
+                watch.wait_for(|s| s == &mirrored(&[ATTESTATION_3])),
+                bn.wait_for(
+                    |e| matches!(e, FakeBnEvent::Subscribed { topic, .. } if topic == ATTESTATION_3)
+                ),
+            )
+        })
+        .await
+        .expect("the subscription was not mirrored within a second");
+        shown.unwrap();
+        assert!(matches!(seen, FakeBnEvent::Subscribed { .. }));
     }
 }

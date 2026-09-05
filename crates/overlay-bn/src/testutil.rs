@@ -42,7 +42,9 @@ use url::Url;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use crate::gossip::GossipBehaviour;
+use crate::gossip::{BnLinkConfig, GossipBehaviour};
+use crate::link::LinkConfig;
+use crate::node_key::NodeKey;
 
 /// Long enough for a noise handshake plus a few gossipsub round trips on a loaded CI box.
 const WAIT: Duration = Duration::from_secs(5);
@@ -94,6 +96,23 @@ impl Default for Responses {
 /// A 200 with `body` as JSON, the shape every beacon API answer has.
 pub fn ok_json(body: serde_json::Value) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(body)
+}
+
+/// A link config pointed at `bn`, with a backoff fast enough for a test to see a reconnect.
+pub fn link_config(bn: &FakeBn) -> LinkConfig {
+    LinkConfig {
+        libp2p_addr: bn.addr(),
+        backoff_min: Duration::from_millis(10),
+        backoff_max: Duration::from_millis(100),
+        gossip: BnLinkConfig {
+            idontwant_on_publish: true,
+        },
+    }
+}
+
+/// A fresh node key in `dir`. The file is read at spawn and not needed after.
+pub fn node_key(dir: &tempfile::TempDir) -> NodeKey {
+    NodeKey::load_or_create(&dir.path().join("node.key")).unwrap()
 }
 
 /// A message the fake received: the topic, the payload as its snappy transform decompressed
