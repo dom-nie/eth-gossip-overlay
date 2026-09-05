@@ -352,6 +352,7 @@ mod tests {
     use std::time::Duration;
 
     use prometheus_client::registry::Registry;
+    use wiremock::MockServer;
 
     use super::*;
     use crate::bn_http::BnClient;
@@ -393,9 +394,8 @@ mod tests {
         format!("/ip4/127.0.0.1/tcp/{port}").parse().unwrap()
     }
 
-    async fn identity_requests(bn: &FakeBn) -> usize {
-        bn.http()
-            .received_requests()
+    async fn identity_requests(http: &MockServer) -> usize {
+        http.received_requests()
             .await
             .unwrap()
             .iter()
@@ -555,7 +555,7 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(500)).await;
 
-        let attempts = identity_requests(&bn).await;
+        let attempts = identity_requests(bn.http()).await;
         assert!((2..=20).contains(&attempts), "{attempts} identity requests");
         drop(harness);
     }
@@ -576,5 +576,38 @@ mod tests {
         bn.shutdown().await;
         wait_for(&mut harness.control, |e| *e == BnEvent::Disconnected).await;
         assert!(!gauge.load(Ordering::Relaxed));
+    }
+
+    /// The first outage runs the backoff up to its 100 ms ceiling; after the reconnect, the
+    /// second outage must redial within the 10 ms minimum again, jittered down to 5 ms.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn backoff_resets_after_a_successful_connect_so_the_next_outage_starts_at_min() {
+        let bn = FakeBn::start().await;
+        let port = bn.port();
+        let mut harness = spawn(link_config(&bn), &bn);
+        wait_for(&mut harness.control, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+
+        let http = bn.shutdown().await;
+        wait_for(&mut harness.control, |e| *e == BnEvent::Disconnected).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let bn = FakeBn::start_on(port, http).await;
+        wait_for(&mut harness.control, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+
+        let http = bn.shutdown().await;
+        wait_for(&mut harness.control, |e| *e == BnEvent::Disconnected).await;
+        let before = identity_requests(&http).await;
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let after = identity_requests(&http).await;
+
+        assert!(
+            after > before,
+            "no redial within 40 ms of the second outage"
+        );
     }
 }
