@@ -356,4 +356,18 @@ mod tests {
         assert!(unset.previous.is_none());
         assert_eq!(set.previous.unwrap().0, seed(0x22).0);
     }
+    /// Freezes the derivation. The value is from the first green run of the tests above and
+    /// was recomputed independently before merge; any other HKDF-SHA256 and Ed25519
+    /// implementation must reproduce it. If this test ever fails, every sibling's pin table
+    /// would reject this host.
+    #[test]
+    fn golden_vector_seed_all_zero_host_bn_test_01() {
+        let key = expected_tls_public_key(&FleetSeed::from([0u8; 32]), &host("bn-test-01"));
+
+        let hex: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
+        assert_eq!(
+            hex,
+            "ed0588b1ad3f567cd8049b42ddb34fc435e71298c9571ad9a5e86957e2682645"
+        );
+    }
 }
