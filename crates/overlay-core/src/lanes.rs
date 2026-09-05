@@ -120,9 +120,26 @@ impl<T> ClassLanes<T> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
     use crate::topic::Class;
+
+    #[derive(Default)]
+    struct Counts {
+        small: AtomicUsize,
+        large: AtomicUsize,
+    }
+
+    impl LaneStats for Counts {
+        fn dropped(&self, class: Class) {
+            match class {
+                Class::Small => &self.small,
+                Class::Large => &self.large,
+            }
+            .fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     #[tokio::test]
     async fn lanes_recv_prefers_large_when_both_have_items() {
@@ -132,5 +149,20 @@ mod tests {
 
         assert_eq!(lanes.recv().await, "block");
         assert_eq!(lanes.recv().await, "attestation");
+    }
+
+    #[test]
+    fn lanes_full_small_lane_drops_the_new_item_and_counts_small() {
+        let counts = Arc::new(Counts::default());
+        let lanes = ClassLanes::new(counts.clone());
+        for i in 0..SMALL_LANE_CAPACITY {
+            lanes.push(Class::Small, i).unwrap();
+        }
+
+        let overflow = lanes.push(Class::Small, usize::MAX);
+
+        assert_eq!(overflow, Err(Dropped(usize::MAX)));
+        assert_eq!(counts.small.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.large.load(Ordering::Relaxed), 0);
     }
 }
