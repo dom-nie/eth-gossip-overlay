@@ -50,11 +50,7 @@ impl SeenCache {
     /// at capacity the oldest entry goes, and both containers are updated once.
     pub fn insert(&mut self, id: MessageId) -> bool {
         let now = self.clock.now();
-        while let Some((at, _)) = self.order.front()
-            && *at + self.ttl <= now
-        {
-            self.pop_oldest();
-        }
+        self.expire(now);
         if self.seen.contains(&id) {
             return false;
         }
@@ -80,6 +76,20 @@ impl SeenCache {
     /// Whether nothing is held.
     pub fn is_empty(&self) -> bool {
         self.order.is_empty()
+    }
+
+    /// Drops every entry past its TTL now, for a caller that wants memory back between
+    /// inserts. `insert` does the same sweep on its own before adding.
+    pub fn evict_expired(&mut self) {
+        self.expire(self.clock.now());
+    }
+
+    fn expire(&mut self, now: Instant) {
+        while let Some((at, _)) = self.order.front()
+            && *at + self.ttl <= now
+        {
+            self.pop_oldest();
+        }
     }
 
     fn pop_oldest(&mut self) {
