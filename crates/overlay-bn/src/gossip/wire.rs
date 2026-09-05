@@ -17,6 +17,18 @@ pub const PROTOCOL_IDS: [&str; 4] = [
     "/meshsub/1.0.0",
 ];
 
+/// Publish messages the sidecar accepts in one RPC, `gossipsub_config` at
+/// `beacon_node/lighthouse_network/src/config.rs:511`. The beacon node packs IWANT responses
+/// by its own limit, so the sidecar must take at least as many. No drift test: the module is
+/// private.
+pub const MAX_PUBLISH_MESSAGES: usize = 500;
+/// Control messages sent in one RPC, `config.rs:512`. No drift test: the module is private.
+pub const MAX_CONTROL_MESSAGES_SENT: usize = 500;
+/// The largest control message or subscription accepted in one RPC, `config.rs:513`. The
+/// beacon node subscribes to hundreds of topics at a fork and the fork's 16 KiB default would
+/// reject that RPC. No drift test: the module is private.
+pub const MAX_CONTROL_MESSAGE_SIZE: usize = 128 << 10;
+
 /// The largest gossipsub RPC either side sends or accepts, from
 /// `beacon_node/lighthouse_network/src/service/mod.rs:243` (`ctx.chain_spec.max_message_size()`
 /// into `gossipsub_max_transmit_size`) with mainnet's `MAX_PAYLOAD_SIZE`.
@@ -116,10 +128,17 @@ mod tests {
         });
 
         assert_eq!(config.max_publish_messages(), MAX_PUBLISH_MESSAGES);
-        assert_eq!(config.max_control_messages_sent(), MAX_CONTROL_MESSAGES_SENT);
+        assert_eq!(
+            config.max_control_messages_sent(),
+            MAX_CONTROL_MESSAGES_SENT
+        );
         assert_eq!(config.max_control_message_size(), MAX_CONTROL_MESSAGE_SIZE);
         assert_eq!(
-            (MAX_PUBLISH_MESSAGES, MAX_CONTROL_MESSAGES_SENT, MAX_CONTROL_MESSAGE_SIZE),
+            (
+                MAX_PUBLISH_MESSAGES,
+                MAX_CONTROL_MESSAGES_SENT,
+                MAX_CONTROL_MESSAGE_SIZE
+            ),
             (500, 500, 128 << 10)
         );
     }
