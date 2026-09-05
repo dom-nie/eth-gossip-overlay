@@ -27,6 +27,11 @@ impl FakeClock {
         *self.slot() += by;
     }
 
+    /// Jumps the clock to `instant`, forwards or backwards.
+    pub fn set(&self, instant: Instant) {
+        *self.slot() = instant;
+    }
+
     fn slot(&self) -> MutexGuard<'_, Instant> {
         // A poisoned lock means another test thread panicked mid-update. The stored instant is
         // still a valid instant, so recover it instead of spreading the panic.
