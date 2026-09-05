@@ -62,3 +62,15 @@ fn quoted<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::E
         serde::de::Error::custom(format!("{text:?} is not a decimal integer: {err}"))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spec_watch_starts_at_mainnet_defaults() {
+        let (_tx, rx) = spec_watch();
+
+        assert_eq!(*rx.borrow(), SpecSnapshot::MAINNET);
+    }
+}
