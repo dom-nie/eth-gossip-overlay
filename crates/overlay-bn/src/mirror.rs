@@ -110,6 +110,8 @@ impl Mirror {
     }
 
     /// Rebuilds the sets from the parsed topics and reports them if they differ from before.
+    /// A rebuild per event keeps `topics` the one source of truth and makes the comparison
+    /// the change detector; it walks the few hundred topics a beacon node announces.
     fn changed(&mut self) -> Option<MirrorAction> {
         let sets = SubscriptionSets::mirrored(self.topics.values().flatten().cloned().collect());
         if sets == self.sets {
