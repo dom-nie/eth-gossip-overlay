@@ -310,4 +310,14 @@ mod tests {
             Class::Small
         );
     }
+
+    #[test]
+    fn unknown_at_threshold_is_large() {
+        let other = TopicKind::Other("light_client_finality_update".to_owned());
+
+        assert_eq!(
+            Class::of(&other, UNKNOWN_LARGE_THRESHOLD_BYTES),
+            Class::Large
+        );
+    }
 }
