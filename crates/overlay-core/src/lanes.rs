@@ -110,6 +110,20 @@ impl<T> ClassLanes<T> {
         self.pusher.clone()
     }
 
+    /// The next item on the lane for `class` alone, for tests and diagnostics that ask where
+    /// something landed; [`recv`](Self::recv) is the consumer's call.
+    pub async fn recv_from(&mut self, class: Class) -> T {
+        let lane = match class {
+            Class::Small => &mut self.small,
+            Class::Large => &mut self.large,
+        };
+        match lane.recv().await {
+            Some(item) => item,
+            // Unreachable while the lanes hold their own senders; pending beats a panic path.
+            None => std::future::pending().await,
+        }
+    }
+
     /// The next item, from the large lane whenever it has one and from the small lane
     /// otherwise. Never returns `None`: the lanes hold their own senders, so neither closes.
     pub async fn recv(&mut self) -> T {
