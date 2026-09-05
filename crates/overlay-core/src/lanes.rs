@@ -122,8 +122,9 @@ impl<T> ClassLanes<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use super::*;
     use crate::topic::Class;
@@ -167,5 +168,52 @@ mod tests {
         assert_eq!(overflow, Err(Dropped(usize::MAX)));
         assert_eq!(counts.small.load(Ordering::Relaxed), 1);
         assert_eq!(counts.large.load(Ordering::Relaxed), 0);
+    }
+
+    /// Collects everything a `tracing` subscriber writes, so a test can read it back.
+    #[derive(Clone, Default)]
+    struct Log(Arc<Mutex<Vec<u8>>>);
+
+    impl Log {
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl Write for Log {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn lanes_full_large_lane_drops_counts_large_and_logs_at_error() {
+        let counts = Arc::new(Counts::default());
+        let lanes = ClassLanes::new(counts.clone());
+        let log = Log::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer({
+                let log = log.clone();
+                move || log.clone()
+            })
+            .finish();
+
+        let overflow = tracing::subscriber::with_default(subscriber, || {
+            for i in 0..LARGE_LANE_CAPACITY {
+                lanes.push(Class::Large, i).unwrap();
+            }
+            lanes.push(Class::Large, usize::MAX)
+        });
+
+        assert_eq!(overflow, Err(Dropped(usize::MAX)));
+        assert_eq!(counts.large.load(Ordering::Relaxed), 1);
+        assert_eq!(counts.small.load(Ordering::Relaxed), 0);
+        let text = log.text();
+        assert!(text.contains("ERROR"), "{text:?}");
     }
 }
