@@ -223,6 +223,17 @@ mod tests {
         assert_eq!(config.idontwant_message_size_threshold(), 1000);
     }
 
+    #[test]
+    fn idontwant_on_publish_follows_config() {
+        for on in [true, false] {
+            let cfg = BnLinkConfig {
+                idontwant_on_publish: on,
+            };
+
+            assert_eq!(config(&cfg).idontwant_on_publish(), on);
+        }
+    }
+
     #[tokio::test]
     async fn payload_is_not_decompressed_by_transform() {
         let mut registry = Registry::default();
