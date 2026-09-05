@@ -387,6 +387,14 @@ pub enum ConfigError {
         /// The parser's own error, which names the offending key and its position.
         source: yaml::Error,
     },
+    /// A value parsed but is outside what the sidecar can run with.
+    #[error("{field}: {reason}")]
+    Invalid {
+        /// The dotted YAML path of the offending key, such as `classes.large.chunk_bytes`.
+        field: &'static str,
+        /// What is wrong with the value.
+        reason: String,
+    },
 }
 
 impl Config {
@@ -394,9 +402,27 @@ impl Config {
     pub fn from_yaml(text: &str) -> Result<Self, ConfigError> {
         // Not yaml::from_str: on any error it retries through a Value tree to resolve merge
         // keys and returns that second error, which has lost the key path and the line.
-        Self::deserialize(yaml::Deserializer::from_str(text))
-            .map_err(|source| ConfigError::Parse { source })
+        let config = Self::deserialize(yaml::Deserializer::from_str(text))
+            .map_err(|source| ConfigError::Parse { source })?;
+        config.validate()?;
+        Ok(config)
     }
+
+    /// Range and cross-field checks the types alone cannot express.
+    fn validate(&self) -> Result<(), ConfigError> {
+        let chunk = self.classes.large.chunk_bytes;
+        if chunk == 0 || !chunk.is_multiple_of(64) {
+            return Err(invalid(
+                "classes.large.chunk_bytes",
+                format!("{chunk} is not a positive multiple of 64"),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn invalid(field: &'static str, reason: String) -> ConfigError {
+    ConfigError::Invalid { field, reason }
 }
 
 /// Reads an integer `_ms` key as a [`Duration`], so nothing downstream multiplies by 1000.
