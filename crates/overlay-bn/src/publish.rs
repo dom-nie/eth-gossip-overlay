@@ -218,6 +218,7 @@ fn reason(err: &PublishError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -264,6 +265,15 @@ mod tests {
             self.0.lock().unwrap().push((what.into(), class));
         }
 
+        fn count(&self, what: &str, class: Class) -> usize {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(w, c)| w == what && *c == class)
+                .count()
+        }
+
         fn total(&self) -> usize {
             self.0.lock().unwrap().len()
         }
@@ -291,27 +301,42 @@ mod tests {
         }
     }
 
-    /// A running publisher with the command receiver the link would own held by the test.
+    /// The publisher's surroundings, with the command receiver the link would own held by
+    /// the test. [`spawn`](Self::spawn) runs the drain task; a test that wants one outcome
+    /// at a time calls [`step`](Self::step) instead and answers the command itself.
     struct Harness {
         handle: PublishHandle,
+        publisher: Option<Publisher>,
         commands: mpsc::Receiver<BnCommand>,
-        #[expect(dead_code, reason = "keeps the task alive for the test's duration")]
-        task: JoinHandle<()>,
+        inject: Arc<AtomicBool>,
         stats: Arc<Recorded>,
     }
 
     impl Harness {
-        fn spawn() -> Self {
+        fn new() -> Self {
             let (commands_tx, commands) = mpsc::channel(64);
             let clock = FakeClock::new();
             let stats = Arc::new(Recorded::default());
-            let (handle, task) = Publisher::spawn(commands_tx, stats.clone(), Arc::new(clock));
+            let inject = Arc::new(AtomicBool::new(true));
+            let (handle, publisher) =
+                Publisher::new(commands_tx, inject.clone(), stats.clone(), Arc::new(clock));
             Self {
                 handle,
+                publisher: Some(publisher),
                 commands,
-                task,
+                inject,
                 stats,
             }
+        }
+
+        fn spawn(&mut self) -> JoinHandle<()> {
+            tokio::spawn(self.publisher.take().expect("spawn() is called once").run())
+        }
+
+        fn publisher(&mut self) -> &mut Publisher {
+            self.publisher
+                .as_mut()
+                .expect("the publisher was not spawned")
         }
 
         fn queued(&self) -> usize {
@@ -321,7 +346,8 @@ mod tests {
 
     #[tokio::test]
     async fn enqueue_returns_immediately_while_the_drain_task_is_blocked_on_gossipsub() {
-        let mut h = Harness::spawn();
+        let mut h = Harness::new();
+        h.spawn();
         h.handle.enqueue(item(Class::Small, 0));
         let BnCommand::Publish { reply: _held, .. } = h.commands.recv().await.unwrap() else {
             panic!("expected a Publish command");
@@ -337,5 +363,18 @@ mod tests {
         assert!(outcomes.iter().all(|o| *o == EnqueueOutcome::Enqueued));
         assert_eq!(h.queued(), 100);
         assert_eq!(h.stats.total(), 0);
+    }
+
+    #[tokio::test]
+    async fn inject_off_suppresses_and_counts_without_sending_a_command() {
+        let mut h = Harness::new();
+        h.inject.store(false, Ordering::Relaxed);
+
+        let outcome = h.publisher().step(item(Class::Small, 0)).await;
+
+        assert_eq!(outcome, Some(PublishOutcome::SuppressedInjectOff));
+        assert_eq!(h.stats.count("suppressed_inject_off", Class::Small), 1);
+        assert_eq!(h.stats.total(), 1);
+        assert!(h.commands.try_recv().is_err());
     }
 }
