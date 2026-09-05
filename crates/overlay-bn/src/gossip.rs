@@ -234,6 +234,24 @@ mod tests {
         }
     }
 
+    #[test]
+    fn metrics_register_under_overlay_gossipsub_prefix() {
+        let mut registry = Registry::default();
+        build_behaviour(&cfg(), &mut registry);
+        let mut text = String::new();
+        prometheus_client::encoding::text::encode(&mut text, &registry).unwrap();
+
+        let families: Vec<&str> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix("# TYPE "))
+            .filter_map(|rest| rest.split(' ').next())
+            .collect();
+        assert!(!families.is_empty(), "{text}");
+        for name in families {
+            assert!(name.starts_with("overlay_gossipsub_"), "{name}");
+        }
+    }
+
     #[tokio::test]
     async fn payload_is_not_decompressed_by_transform() {
         let mut registry = Registry::default();
