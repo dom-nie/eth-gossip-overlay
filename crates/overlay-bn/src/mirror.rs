@@ -161,7 +161,7 @@ mod tests {
     use super::*;
     use crate::bn_http::BnClient;
     use crate::link::BnLink;
-    use crate::spec::spec_watch;
+    use crate::spec::{SpecSnapshot, spec_watch};
     use crate::testutil::{FakeBn, FakeBnEvent, link_config, node_key};
 
     /// Long enough for a dial and a gossipsub exchange on a loaded CI box.
@@ -188,9 +188,34 @@ mod tests {
 
     /// A mirror whose link has connected to `BN`.
     fn connected() -> Mirror {
-        let mut mirror = Mirror::new();
+        connected_with(&SpecSnapshot::MAINNET)
+    }
+
+    /// A mirror built from `spec` whose link has connected to `BN`.
+    fn connected_with(spec: &SpecSnapshot) -> Mirror {
+        let mut mirror = Mirror::new(spec);
         mirror.on_bn_event(&BnEvent::Connected { peer_id: *BN });
         mirror
+    }
+
+    /// The column topic string as the spec spells it, built here on purpose without
+    /// `Topic::data_column` so the tests check that constructor rather than trust it.
+    fn column(digest: &str, i: u8) -> String {
+        format!("/eth2/{digest}/data_column_sidecar_{i}/ssz_snappy")
+    }
+
+    fn columns(digest: &str, indices: impl IntoIterator<Item = u8>) -> BTreeSet<String> {
+        indices.into_iter().map(|i| column(digest, i)).collect()
+    }
+
+    fn subscribes(actions: &[MirrorAction]) -> BTreeSet<String> {
+        actions
+            .iter()
+            .filter_map(|a| match a {
+                MirrorAction::Subscribe(topic) => Some(topic.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// The sets a plain mirror of `topics` has.
@@ -382,6 +407,22 @@ mod tests {
             .collect();
         assert_eq!(changed.advertised, expected);
         assert_eq!(changed.local, changed.advertised);
+    }
+
+    /// The count is the snapshot's the mirror was built with: eight columns here.
+    #[test]
+    fn first_topic_with_new_digest_subscribes_every_column_of_it() {
+        let spec = SpecSnapshot {
+            number_of_columns: 8,
+            ..SpecSnapshot::MAINNET
+        };
+        let mut mirror = connected_with(&spec);
+
+        let actions = mirror.on_bn_event(&subscribed(ATTESTATION_3));
+
+        let mut expected = columns("00000000", 0..8);
+        expected.insert(ATTESTATION_3.to_owned());
+        assert_eq!(subscribes(&actions), expected);
     }
 
     /// The fake's subscription has to show in the watch and come back to the fake as the
