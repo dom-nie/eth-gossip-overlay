@@ -722,4 +722,17 @@ log:
             assert!(err.to_string().contains(field), "{doc}: {err}");
         }
     }
+
+    #[test]
+    fn relays_per_remote_region_must_be_at_least_one() {
+        let err =
+            Config::from_yaml("overlay: { fanout: { small: { relays_per_remote_region: 0 } } }")
+                .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("overlay.fanout.small.relays_per_remote_region"),
+            "{err}"
+        );
+    }
 }
