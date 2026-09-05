@@ -223,4 +223,29 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn class_table_matches_appendix_b() {
+        for (kind, expected) in [
+            (TopicKind::BeaconBlock, Class::Large),
+            (TopicKind::BeaconAggregateAndProof, Class::Small),
+            (TopicKind::Attestation(0), Class::Small),
+            (TopicKind::SyncCommittee(0), Class::Small),
+            (TopicKind::SyncContributionAndProof, Class::Small),
+            (TopicKind::VoluntaryExit, Class::Small),
+            (TopicKind::ProposerSlashing, Class::Small),
+            (TopicKind::AttesterSlashing, Class::Small),
+            (TopicKind::BlsToExecutionChange, Class::Small),
+            (TopicKind::DataColumnSidecar(0), Class::Large),
+            (TopicKind::BlobSidecar(0), Class::Large),
+        ] {
+            for payload_len in [0, 1 << 20] {
+                assert_eq!(
+                    Class::of(&kind, payload_len),
+                    expected,
+                    "{kind:?} at {payload_len} bytes"
+                );
+            }
+        }
+    }
 }
