@@ -449,19 +449,17 @@ impl Config {
                 ),
             ));
         }
-        let limits = &self.bn.publish_rate_limit;
-        for (field, value) in [
+        let (fanout, limits) = (&self.overlay.fanout, &self.bn.publish_rate_limit);
+        for (field, zero) in [
             (
-                "bn.publish_rate_limit.small_per_s",
-                u64::from(limits.small_per_s),
+                "overlay.fanout.small.relays_per_remote_region",
+                fanout.small.relays_per_remote_region == 0,
             ),
-            (
-                "bn.publish_rate_limit.large_per_s",
-                u64::from(limits.large_per_s),
-            ),
-            ("bn.publish_rate_limit.bytes_per_s", limits.bytes_per_s),
+            ("bn.publish_rate_limit.small_per_s", limits.small_per_s == 0),
+            ("bn.publish_rate_limit.large_per_s", limits.large_per_s == 0),
+            ("bn.publish_rate_limit.bytes_per_s", limits.bytes_per_s == 0),
         ] {
-            if value == 0 {
+            if zero {
                 return Err(invalid(field, "must be at least 1".to_owned()));
             }
         }
