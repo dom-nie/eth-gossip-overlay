@@ -2,7 +2,7 @@
 //! with [`FakeClock`] instead of sleeping.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// A source of monotonic time. Production code takes a `Clock` so tests can substitute
 /// [`FakeClock`] and drive it by hand.
@@ -18,6 +18,11 @@ impl FakeClock {
     /// Starts at the real current instant.
     pub fn new() -> Self {
         Self(Arc::new(Mutex::new(Instant::now())))
+    }
+
+    /// Moves the clock forward by `by`.
+    pub fn advance(&self, by: Duration) {
+        *self.slot() += by;
     }
 
     fn slot(&self) -> MutexGuard<'_, Instant> {
