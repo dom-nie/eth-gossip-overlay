@@ -70,6 +70,8 @@ pub fn build_behaviour(cfg: &BnLinkConfig, registry: &mut Registry) -> GossipBeh
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use libp2p::gossipsub::{Message, TopicHash};
     use overlay_core::msgid;
     use prometheus_client::registry::Registry;
@@ -147,6 +149,18 @@ mod tests {
 
         assert_eq!(wire::MAX_TRANSMIT_SIZE, lighthouse);
         assert_eq!(config(&cfg()).max_transmit_size() as u64, lighthouse);
+    }
+
+    #[test]
+    fn duplicate_cache_time_is_the_sidecar_policy_value_not_lighthouses() {
+        let config = config(&cfg());
+
+        assert_eq!(config.duplicate_cache_time(), DUPLICATE_CACHE_TIME);
+        assert_eq!(
+            DUPLICATE_CACHE_TIME,
+            Duration::from_secs(120),
+            "twice the seen cache; Lighthouse's own is two epochs (768 s on mainnet) and is the backstop"
+        );
     }
 
     #[tokio::test]
