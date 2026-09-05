@@ -193,4 +193,35 @@ mod tests {
         assert_eq!(MessageId::from_slice(&[7; 21]), None);
         assert_eq!(MessageId::from_slice(&[7; 20]), Some(MessageId([7; 20])));
     }
+
+    /// Run by hand with `--ignored --nocapture` to put numbers in a PR. Payloads are
+    /// pseudo-random so snappy stores them as literals, close to what signed SSZ looks like.
+    #[test]
+    #[ignore]
+    fn benchmark_attestation_and_block_sized_payloads() {
+        for (label, size, rounds) in [
+            ("240 B attestation", 240, 20_000),
+            ("200 KB block", 200 * 1024, 200),
+        ] {
+            let mut state = 0x9E37_79B1u32;
+            let payload: Vec<u8> = (0..size)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    state as u8
+                })
+                .collect();
+            let compressed = snap::raw::Encoder::new().compress_vec(&payload).unwrap();
+            let started = Instant::now();
+            for _ in 0..rounds {
+                std::hint::black_box(compute(TOPIC, &compressed, size as usize));
+            }
+            let per_call = started.elapsed().as_secs_f64() * 1e6 / f64::from(rounds);
+            println!(
+                "{label}: {per_call:.1} us per id ({} compressed bytes)",
+                compressed.len()
+            );
+        }
+    }
 }
