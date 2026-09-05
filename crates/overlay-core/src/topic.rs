@@ -61,8 +61,8 @@ pub enum TopicKind {
 /// What the sidecar subscribes to, as two sets with one source (D12). `advertised` is exactly
 /// what the beacon node subscribes to; `local` is what the sidecar's own gossipsub instance
 /// subscribes to. T-027's SUBS bitmap and T-019's MetaData read `advertised`; T-026 interns
-/// and announces `local`. The mirror keeps them equal, and T-015's extra column topics are the
-/// only thing that makes them differ (D06). T-041's `bn_subscriptions` gauge is
+/// and announces `local`. The mirror builds both, and the extra data column topics it adds
+/// are the only thing that makes them differ (D06). T-041's `bn_subscriptions` gauge is
 /// `advertised.len()` read from the `watch` receiver the mirror's shell feeds.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SubscriptionSets {
@@ -70,16 +70,6 @@ pub struct SubscriptionSets {
     pub advertised: BTreeSet<Topic>,
     /// The sidecar's own gossipsub subscriptions.
     pub local: BTreeSet<Topic>,
-}
-
-impl SubscriptionSets {
-    /// Both sets equal to `topics`: the plain mirror, with no extras.
-    pub fn mirrored(topics: BTreeSet<Topic>) -> Self {
-        Self {
-            advertised: topics.clone(),
-            local: topics,
-        }
-    }
 }
 
 /// Which transport path a message takes.
