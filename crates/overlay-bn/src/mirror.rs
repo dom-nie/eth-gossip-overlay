@@ -140,4 +140,25 @@ mod tests {
         );
         assert_eq!(mirror.sets(), &sets(&[]));
     }
+
+    #[test]
+    fn duplicate_subscribe_is_idempotent_no_actions() {
+        let mut mirror = Mirror::new(*BN);
+        mirror.on_bn_event(&subscribed(ATTESTATION_3));
+
+        let actions = mirror.on_bn_event(&subscribed(ATTESTATION_3));
+
+        assert_eq!(actions, vec![]);
+        assert_eq!(mirror.sets(), &sets(&[ATTESTATION_3]));
+    }
+
+    #[test]
+    fn unsubscribe_of_unknown_topic_produces_no_actions() {
+        let mut mirror = Mirror::new(*BN);
+
+        let actions = mirror.on_bn_event(&unsubscribed(ATTESTATION_3));
+
+        assert_eq!(actions, vec![]);
+        assert_eq!(mirror.sets(), &sets(&[]));
+    }
 }
