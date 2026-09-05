@@ -1,9 +1,10 @@
 //! The gossipsub behaviour on the BN link.
 
 use libp2p::gossipsub::{
-    AllowAllSubscriptionFilter, Behaviour, Config, ConfigBuilder, IdentityTransform,
-    MessageAuthenticity, MetricsConfig, ValidationMode,
+    AllowAllSubscriptionFilter, Behaviour, Config, ConfigBuilder, IdentityTransform, Message,
+    MessageAuthenticity, MessageId, MetricsConfig, ValidationMode,
 };
+use overlay_core::msgid;
 use prometheus_client::registry::Registry;
 
 pub mod wire;
@@ -19,6 +20,19 @@ pub struct BnLinkConfig {
     pub idontwant_on_publish: bool,
 }
 
+/// The spec's message id over the compressed bytes gossipsub hands over: T-006 decompresses
+/// inside the hash, which is what lets the transform stay the identity. The branch is dropped
+/// here because gossipsub only wants an id; the receive paths decide what to do with a payload
+/// that took the invalid branch.
+pub fn message_id_fn(message: &Message) -> MessageId {
+    let computed = msgid::compute(
+        message.topic.as_str(),
+        &message.data,
+        wire::MAX_TRANSMIT_SIZE as usize,
+    );
+    MessageId::new(&computed.id.0)
+}
+
 /// The gossipsub parameters, exposed on their own so tests can read the getters.
 #[expect(
     clippy::expect_used,
@@ -28,6 +42,7 @@ pub fn config(cfg: &BnLinkConfig) -> Config {
     ConfigBuilder::default()
         .max_transmit_size(wire::MAX_TRANSMIT_SIZE as usize)
         .validation_mode(ValidationMode::Anonymous)
+        .message_id_fn(message_id_fn)
         .idontwant_on_publish(cfg.idontwant_on_publish)
         .build()
         .expect("constant gossipsub parameters pass the builder's checks")
