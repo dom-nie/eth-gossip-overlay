@@ -99,4 +99,14 @@ mod tests {
 
         assert_eq!(clock.now(), target);
     }
+
+    #[test]
+    fn system_clock_is_monotonic() {
+        let clock = SystemClock;
+
+        let first = clock.now();
+        let second = clock.now();
+
+        assert!(second >= first);
+    }
 }
