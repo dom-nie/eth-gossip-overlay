@@ -549,4 +549,20 @@ log:
             Some(PathBuf::from("/etc/fleet-overlay/seed.previous"))
         );
     }
+
+    #[test]
+    fn log_enums_are_closed_sets() {
+        let ok = Config::from_yaml("log: { format: json, level: debug }").unwrap();
+        assert_eq!(ok.log.format, LogFormat::Json);
+        assert_eq!(ok.log.level, LogLevel::Debug);
+
+        for (doc, field) in [
+            ("log: { format: logfmt }", "log.format"),
+            ("log: { level: verbose }", "log.level"),
+        ] {
+            let err = Config::from_yaml(doc).unwrap_err();
+
+            assert!(err.to_string().contains(field), "{doc}: {err}");
+        }
+    }
 }
