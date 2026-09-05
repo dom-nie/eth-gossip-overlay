@@ -25,10 +25,14 @@ pub const LARGE_LANE_CAPACITY: usize = 1024;
 pub trait LaneStats: Send + Sync {
     /// An item for `class` found its lane full and was dropped.
     fn dropped(&self, class: Class);
+    /// A control event (connected, subscribed, ...) found its channel full and was dropped:
+    /// the `class="control"` series of the same counter.
+    fn control_dropped(&self);
 }
 
 impl LaneStats for () {
     fn dropped(&self, _: Class) {}
+    fn control_dropped(&self) {}
 }
 
 /// The item that found its lane full, handed back so the caller decides what to say about it.
@@ -54,6 +58,11 @@ impl<T> Clone for LanePusher<T> {
 }
 
 impl<T> LanePusher<T> {
+    /// The drop counter, for the task that also owns a control channel to count on.
+    pub fn stats(&self) -> &dyn LaneStats {
+        &*self.stats
+    }
+
     /// Queues `item` on the lane for `class` without waiting. A full lane hands the item back.
     pub fn push(&self, class: Class, item: T) -> Result<(), Dropped<T>> {
         let lane = match class {
@@ -163,6 +172,8 @@ mod tests {
             }
             .fetch_add(1, Ordering::Relaxed);
         }
+
+        fn control_dropped(&self) {}
     }
 
     #[tokio::test]

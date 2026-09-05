@@ -25,6 +25,8 @@ use libp2p::swarm::{ConnectionError, Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, multiaddr, noise, tcp, yamux};
 use overlay_core::backoff::Backoff;
 use overlay_core::config::Bn;
+use overlay_core::lanes::LanePusher;
+use overlay_core::topic::{Class, UNKNOWN_LARGE_THRESHOLD_BYTES};
 use prometheus_client::registry::Registry;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -42,6 +44,13 @@ pub const BACKOFF_MIN: Duration = Duration::from_millis(500);
 pub const BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// Lighthouse's own bound on the noise and yamux upgrade (`build_transport`).
 const UPGRADE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Topic names that take the large lane on sight: D02's known large kinds, matched by prefix
+/// as the §7 row "Lane classification in the swarm loop" has it. Any other name is large only
+/// from [`UNKNOWN_LARGE_THRESHOLD_BYTES`] up. The lane is a queueing priority; T-016 computes
+/// the authoritative class.
+pub const LARGE_NAME_PREFIXES: [&str; 3] =
+    ["beacon_block", "data_column_sidecar_", "blob_sidecar_"];
 
 /// What the link needs from the operator's config.
 #[derive(Clone, Debug)]
@@ -106,6 +115,20 @@ pub enum BnEvent {
     },
 }
 
+/// A message the beacon node forwarded, as gossipsub handed it over: the payload is still in
+/// its compressed wire form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BnMessage {
+    /// The id gossipsub computed, which is the beacon node's id for it.
+    pub id: MessageId,
+    /// The full topic string.
+    pub topic: String,
+    /// The snappy-compressed payload.
+    pub data: Vec<u8>,
+    /// The peer it came from, needed to report validation.
+    pub source: PeerId,
+}
+
 /// What the rest of the sidecar asks the swarm to do.
 #[derive(Debug)]
 pub enum BnCommand {
@@ -143,12 +166,17 @@ pub struct BnLink {
 impl BnLink {
     /// Builds the swarm under the node key and starts the task. The first dial happens at
     /// once; every later one waits for the backoff. `registry` receives gossipsub's metrics.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every channel end the loop owns is handed in by the wiring, one each"
+    )]
     pub fn spawn(
         cfg: LinkConfig,
         node_key: &NodeKey,
         bn_client: BnClient,
         registry: &mut Registry,
         control: mpsc::Sender<BnEvent>,
+        lanes: LanePusher<BnMessage>,
         spec: watch::Sender<SpecSnapshot>,
         commands: mpsc::Receiver<BnCommand>,
     ) -> Self {
@@ -160,6 +188,7 @@ impl BnLink {
             cfg,
             bn_client,
             control,
+            lanes,
             spec,
             commands,
             connected: connected.clone(),
@@ -190,6 +219,7 @@ struct Link {
     bn_client: BnClient,
     own_peer_id: PeerId,
     control: mpsc::Sender<BnEvent>,
+    lanes: LanePusher<BnMessage>,
     spec: watch::Sender<SpecSnapshot>,
     commands: mpsc::Receiver<BnCommand>,
     connected: Arc<AtomicBool>,
@@ -271,6 +301,24 @@ impl Link {
             SwarmEvent::OutgoingConnectionError { error, .. } => {
                 tracing::warn!(%error, "dial to the beacon node failed");
                 self.retry_later();
+            }
+            SwarmEvent::Behaviour(gossipsub::Event::Message {
+                propagation_source,
+                message_id,
+                message,
+            }) => {
+                let topic = message.topic.into_string();
+                let class = lane_for(&topic, message.data.len());
+                // A dropped message is counted, and for the large lane logged, by the pusher.
+                let _ = self.lanes.push(
+                    class,
+                    BnMessage {
+                        id: message_id,
+                        topic,
+                        data: message.data,
+                        source: propagation_source,
+                    },
+                );
             }
             SwarmEvent::Behaviour(gossipsub::Event::Subscribed { peer_id, topic, .. }) => {
                 self.emit(BnEvent::Subscribed {
@@ -360,15 +408,30 @@ impl Link {
         }
     }
 
-    /// Hands `event` to the control channel without waiting. A full channel drops it and
-    /// says so at error level: the consumer is not keeping up with a handful of events.
+    /// Hands `event` to the control channel without waiting. A full channel drops it, counts
+    /// it and says so at error level: the consumer is not keeping up with a handful of events.
     fn emit(&self, event: BnEvent) {
         match self.control.try_send(event) {
             Ok(()) | Err(TrySendError::Closed(_)) => {}
             Err(TrySendError::Full(event)) => {
+                self.lanes.stats().control_dropped();
                 tracing::error!(?event, "control channel full; event dropped");
             }
         }
+    }
+}
+
+/// The lane a message queues in: a known large name by prefix, else by size (D02). The name
+/// is the third `/`-separated field of `/eth2/<digest>/<name>/ssz_snappy`.
+fn lane_for(topic: &str, payload_len: usize) -> Class {
+    let name = topic.split('/').nth(3).unwrap_or("");
+    let large_name = LARGE_NAME_PREFIXES
+        .iter()
+        .any(|prefix| name.starts_with(prefix));
+    if large_name || payload_len >= UNKNOWN_LARGE_THRESHOLD_BYTES {
+        Class::Large
+    } else {
+        Class::Small
     }
 }
 
