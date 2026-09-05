@@ -531,4 +531,23 @@ hosts:
         assert_eq!(me.hostname, host("bn-ams1-07"));
         assert_eq!(me.site.as_deref(), Some("ams2"));
     }
+
+    #[test]
+    fn single_region_roster_is_valid_and_others_returns_all_but_self() {
+        let doc = r#"hosts:
+  - { hostname: bn-1, region: home, addr: "192.0.2.1:7788" }
+  - { hostname: bn-2, region: home, addr: "192.0.2.2:7788" }
+  - { hostname: bn-3, region: home, addr: "192.0.2.3:7788" }
+"#;
+        let roster = Roster::from_yaml(doc).unwrap();
+
+        let others: Vec<_> = roster.others(&host("bn-2")).collect();
+
+        assert_eq!(names(&others), ["bn-1", "bn-3"]);
+        assert_eq!(roster.regions().len(), 1);
+        assert_eq!(
+            names(&roster.in_region(&region("home"))),
+            ["bn-1", "bn-2", "bn-3"]
+        );
+    }
 }
