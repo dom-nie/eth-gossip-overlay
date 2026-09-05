@@ -36,6 +36,11 @@ pub enum BnHttpError {
         /// What the HTTP client said.
         source: reqwest::Error,
     },
+    /// The BN answered outside 2xx. A 404 on `/lighthouse/peers` means a BN that is not
+    /// Lighthouse or has the endpoint off, which the caller reports differently from an
+    /// empty peer list.
+    #[error("beacon node answered HTTP {0}")]
+    Status(u16),
     /// The body was not the JSON the sidecar expects.
     #[error("GET {endpoint}: {}", root_cause(.source))]
     Body {
@@ -125,6 +130,10 @@ impl BnClient {
             .send()
             .await
             .map_err(|err| map(err, endpoint))?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(BnHttpError::Status(status.as_u16()));
+        }
         response.json().await.map_err(|err| map(err, endpoint))
     }
 }
