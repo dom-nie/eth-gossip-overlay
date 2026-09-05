@@ -4,6 +4,7 @@
 pub mod backoff;
 pub mod config;
 pub mod identity;
+pub mod lanes;
 pub mod msgid;
 pub mod roster;
 pub mod seen;
