@@ -36,6 +36,15 @@ pub enum BnHttpError {
         /// What the HTTP client said.
         source: reqwest::Error,
     },
+    /// No complete response within the client's timeout. On localhost that is a beacon node
+    /// that is wedged, not one that is slow.
+    #[error("GET {endpoint}: {}", root_cause(.source))]
+    Timeout {
+        /// The path that was requested.
+        endpoint: &'static str,
+        /// What the HTTP client said.
+        source: reqwest::Error,
+    },
     /// The BN answered outside 2xx. A 404 on `/lighthouse/peers` means a BN that is not
     /// Lighthouse or has the endpoint off, which the caller reports differently from an
     /// empty peer list.
@@ -65,7 +74,12 @@ fn root_cause(err: &reqwest::Error) -> String {
 }
 
 fn map(err: reqwest::Error, endpoint: &'static str) -> BnHttpError {
-    if err.is_decode() {
+    if err.is_timeout() {
+        BnHttpError::Timeout {
+            endpoint,
+            source: err,
+        }
+    } else if err.is_decode() {
         BnHttpError::Body {
             endpoint,
             source: err,
