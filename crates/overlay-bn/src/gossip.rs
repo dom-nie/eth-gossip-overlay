@@ -66,6 +66,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn max_transmit_size_equals_lighthouse() {
+        let lighthouse = types::ChainSpec::mainnet().max_message_size() as u64;
+
+        assert_eq!(wire::MAX_TRANSMIT_SIZE, lighthouse);
+        assert_eq!(config(&cfg()).max_transmit_size() as u64, lighthouse);
+    }
+
     #[tokio::test]
     async fn payload_is_not_decompressed_by_transform() {
         let mut registry = Registry::default();
