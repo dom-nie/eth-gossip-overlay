@@ -320,4 +320,35 @@ mod tests {
             Class::Large
         );
     }
+
+    #[test]
+    fn out_of_range_index_parses_and_exceeds_mainnet_bounds() {
+        for (name, expected, exceeds) in [
+            ("beacon_attestation_64", TopicKind::Attestation(64), true),
+            ("sync_committee_4", TopicKind::SyncCommittee(4), true),
+            (
+                "data_column_sidecar_128",
+                TopicKind::DataColumnSidecar(128),
+                true,
+            ),
+            ("beacon_attestation_63", TopicKind::Attestation(63), false),
+            ("sync_committee_3", TopicKind::SyncCommittee(3), false),
+            (
+                "data_column_sidecar_127",
+                TopicKind::DataColumnSidecar(127),
+                false,
+            ),
+            ("blob_sidecar_255", TopicKind::BlobSidecar(255), false),
+            ("beacon_block", TopicKind::BeaconBlock, false),
+        ] {
+            let parsed = kind(name);
+
+            assert_eq!(parsed, expected, "{name}");
+            assert_eq!(
+                parsed.index_exceeds(&SubnetBounds::MAINNET),
+                exceeds,
+                "{name}"
+            );
+        }
+    }
 }
