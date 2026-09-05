@@ -1,7 +1,157 @@
+//! The bounded queue in front of the beacon node (§5.7, DX-N4). Ingress sites push without
+//! waiting; one drain task (T-017's `Publisher`) pops and is the only code that awaits
+//! gossipsub. Two lanes: the small lane is bounded by entries, the large lane by bytes and
+//! age, and both evict their oldest entry to make room, because the newest attestation or
+//! column is the one the beacon node is still waiting for.
+//!
+//! No seen cache here (D08). The three ingress sites insert immediately before they push:
+//! T-016 for what the beacon node sent, T-032's receiver for whole messages and batch entries
+//! from the overlay, T-074's completion for reassembled messages. Whatever reaches this queue
+//! was already inserted, so a copy suppressed downstream is still remembered.
+//!
+//! [`ClassLanes`](crate::lanes::ClassLanes) looks similar and differs on purpose: the lanes
+//! drop the new item and are shaped for the swarm loop; this queue drops the oldest and
+//! tracks bytes and age. Do not merge them.
+
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use bytes::Bytes;
+
+use crate::msgid::MessageId;
+use crate::topic::{Class, Topic};
+
+/// Entries the small lane holds before it evicts the oldest (DX-N4).
+pub const PUBLISH_SMALL_LANE_ENTRIES: usize = 4096;
+/// Payload bytes the large lane holds before it evicts the oldest (DX-N4).
+pub const PUBLISH_LARGE_LANE_BYTES: usize = 32 * 1024 * 1024;
+/// A large entry older than this at dequeue is discarded: the slot has moved on and the
+/// beacon node has other sources for it (DX-N4).
+pub const PUBLISH_LARGE_STALE_AFTER: Duration = Duration::from_secs(3);
+
+/// What an ingress site hands over for publishing: the payload in its compressed wire form
+/// and the id the ingress site already inserted into the seen cache.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublishItem {
+    /// The topic to publish on.
+    pub topic: Topic,
+    /// The gossipsub message id, computed at the ingress site.
+    pub id: MessageId,
+    /// The snappy-compressed payload, sent to the beacon node untouched.
+    pub payload: Bytes,
+    /// The lane it queues in and the label its metrics carry.
+    pub class: Class,
+}
+
+/// Why the queue threw an entry away: the `reason` label of
+/// `publish_queue_drops_total{class, reason}`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DropReason {
+    /// The lane was full and this was its oldest entry.
+    Full,
+    /// A large entry was older than [`PUBLISH_LARGE_STALE_AFTER`] when the drain task reached
+    /// it.
+    Stale,
+}
+
+/// Where drops are counted, so `overlay-core` stays free of the metrics crate. `()` counts
+/// nothing. The call runs while the caller holds whatever lock guards the queue, so an
+/// implementation must be a counter increment and nothing slower.
+pub trait QueueStats: Send + Sync {
+    /// The queue discarded an entry of `class` for `reason`.
+    fn dropped(&self, class: Class, reason: DropReason);
+}
+
+impl QueueStats for () {
+    fn dropped(&self, _: Class, _: DropReason) {}
+}
+
+/// What a push did besides queueing the item, which it always does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pushed {
+    /// The lane had room.
+    Enqueued,
+    /// The lane was full and made room by evicting its oldest entries, each counted on the
+    /// queue's stats. `class` is the lane's; `reason` is always [`DropReason::Full`], carried
+    /// so the caller reports it without knowing that.
+    Dropped {
+        /// The lane that overflowed.
+        class: Class,
+        /// Why the evicted entries went.
+        reason: DropReason,
+    },
+}
+
+/// The two lanes. Pure: callers pass the instant, so a test drives age by hand and the
+/// drain task stamps it from the injected clock.
+pub struct PublishQueue {
+    small: VecDeque<PublishItem>,
+    large: VecDeque<(Instant, PublishItem)>,
+    stats: Arc<dyn QueueStats>,
+}
+
+impl PublishQueue {
+    /// Two empty lanes, reporting drops to `stats`.
+    pub fn new(stats: Arc<dyn QueueStats>) -> Self {
+        Self {
+            small: VecDeque::new(),
+            large: VecDeque::new(),
+            stats,
+        }
+    }
+
+    /// Queues `item` on the lane for its class, evicting the lane's oldest entries if that
+    /// is what it takes. `now` is when the item entered, which the large lane's age bound
+    /// reads back at [`pop`](Self::pop).
+    pub fn push(&mut self, item: PublishItem, now: Instant) -> Pushed {
+        let class = item.class;
+        let mut dropped = false;
+        match class {
+            Class::Small => {
+                while self.small.len() >= PUBLISH_SMALL_LANE_ENTRIES {
+                    self.small.pop_front();
+                    dropped = true;
+                }
+                self.small.push_back(item);
+            }
+            Class::Large => self.large.push_back((now, item)),
+        }
+        if dropped {
+            self.stats.dropped(class, DropReason::Full);
+            Pushed::Dropped {
+                class,
+                reason: DropReason::Full,
+            }
+        } else {
+            Pushed::Enqueued
+        }
+    }
+
+    /// The next item to publish: from the large lane while it has one, else from the small
+    /// lane.
+    pub fn pop(&mut self, _now: Instant) -> Option<PublishItem> {
+        if let Some((_, item)) = self.large.pop_front() {
+            return Some(item);
+        }
+        self.small.pop_front()
+    }
+
+    /// Entries waiting across both lanes.
+    pub fn len(&self) -> usize {
+        self.small.len() + self.large.len()
+    }
+
+    /// Whether nothing is waiting.
+    pub fn is_empty(&self) -> bool {
+        self.small.is_empty() && self.large.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     use super::*;
 
