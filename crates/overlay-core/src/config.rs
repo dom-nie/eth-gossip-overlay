@@ -417,6 +417,13 @@ impl Config {
                 format!("{chunk} is not a positive multiple of 64"),
             ));
         }
+        let ratio = self.classes.large.parity_ratio;
+        if !(0.0..=1.0).contains(&ratio) {
+            return Err(invalid(
+                "classes.large.parity_ratio",
+                format!("{ratio} is outside 0.0..=1.0"),
+            ));
+        }
         Ok(())
     }
 }
