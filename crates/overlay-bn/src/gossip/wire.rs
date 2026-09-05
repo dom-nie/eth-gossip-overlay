@@ -82,7 +82,23 @@ mod drift {
     use prometheus_client::registry::Registry;
 
     use super::*;
-    use crate::gossip::{self, BnLinkConfig, build_behaviour};
+    use crate::gossip::{self, BnLinkConfig, build_behaviour, config};
+
+    fn cfg() -> BnLinkConfig {
+        BnLinkConfig {
+            idontwant_on_publish: true,
+        }
+    }
+
+    /// `lighthouse_network::config` is private, so the comparison is with the value it reads
+    /// from `ChainSpec`, which is what reaches `max_transmit_size(..)`.
+    #[test]
+    fn max_transmit_size_equals_lighthouse() {
+        let lighthouse = types::ChainSpec::mainnet().max_message_size() as u64;
+
+        assert_eq!(MAX_TRANSMIT_SIZE, lighthouse);
+        assert_eq!(config(&cfg()).max_transmit_size() as u64, lighthouse);
+    }
 
     /// Local policy rather than wire-compat, but the table claims it equals the beacon node's
     /// default and `NetworkConfig` is public, so the claim is pinned.
@@ -98,10 +114,7 @@ mod drift {
     /// offers to negotiate, which is the list the beacon node sees.
     #[test]
     fn protocol_ids_equal_lighthouse() {
-        let cfg = BnLinkConfig {
-            idontwant_on_publish: true,
-        };
-        let mut behaviour = build_behaviour(&cfg, &mut Registry::default());
+        let mut behaviour = build_behaviour(&cfg(), &mut Registry::default());
         let addr: Multiaddr = "/memory/1".parse().unwrap();
 
         let handler = behaviour

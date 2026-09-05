@@ -1,4 +1,48 @@
-//! The gossipsub behaviour on the BN link.
+//! The gossipsub behaviour on the BN link: the fork Lighthouse compiles, configured so that
+//! everything the beacon node sees on the wire is what it expects, while the knobs that only
+//! shape this end suit a node with one explicit peer.
+//!
+//! Checked against Lighthouse v8.2.2 (`e423a66763bb1bd780492d635123f208d80c3538`) and the
+//! `sigp/rust-libp2p` rev the workspace pins. `gossipsub_config` in
+//! `beacon_node/lighthouse_network/src/config.rs:450-523` builds the beacon node's config;
+//! `beacon_node/lighthouse_network/src/service/mod.rs:341-362` constructs the behaviour with
+//! `new_with_subscription_filter_and_transform(MessageAuthenticity::Anonymous, ..)`, then
+//! `with_metrics`, then `with_peer_score`. That module is private, so the values the wire
+//! depends on are copied into [`wire`], each with a drift test where a public type carries
+//! the value. "Beacon node" below is Lighthouse at its default load profile, 3.
+//!
+//! # Must equal the beacon node
+//!
+//! | Parameter | Sidecar, and the beacon node's value |
+//! |---|---|
+//! | Protocol ids | [`wire::PROTOCOL_IDS`]: `/meshsub/1.3.0` (partial messages) down to `1.0.0`, the fork's defaults; Lighthouse sets no prefix |
+//! | `validation_mode` | `Anonymous` under `MessageAuthenticity::Anonymous`: no signature, sequence number or author, or the message is rejected; same on the BN |
+//! | `validate_messages` | on: nothing is forwarded until the application reports on it; same on the BN |
+//! | `max_transmit_size` | [`wire::MAX_TRANSMIT_SIZE`], 12,234,442 bytes from mainnet's `MAX_PAYLOAD_SIZE`; the BN passes `ChainSpec::max_message_size()` |
+//! | `max_publish_messages`, `max_control_messages_sent`, `max_control_message_size` | 500, 500, 128 KiB copied from the BN, which sizes its RPCs by them; no drift test, the module is private |
+//! | Message id | [`message_id_fn`]: the spec's `SHA256(domain ++ le64(len(topic)) ++ topic ++ decompressed)[..20]`; the BN computes the same over data its transform already decompressed |
+//!
+//! # Local policy, for a node with one explicit peer
+//!
+//! | Parameter | Sidecar, and the beacon node's value |
+//! |---|---|
+//! | `duplicate_cache_time` | [`DUPLICATE_CACHE_TIME`], 120 s, twice the seen cache; the BN's is two epochs, 768 s on mainnet, and is the backstop |
+//! | `gossip_lazy`, `gossip_factor`, `history_gossip` | 0, 0.0, 1: an explicit peer gets every message outright, so IHAVE could only advertise what it has; the BN runs 3, 0.25, 3 |
+//! | `history_length` | 5, the fork's default, bounds the message cache; the BN runs 12 |
+//! | `mesh_n_low`, `mesh_n`, `mesh_n_high`, `mesh_outbound_min` | 1, 1, 1, 0: an explicit peer is never grafted, so the mesh is bookkeeping and zero outbound is what makes a mesh of one legal; the BN runs 3, 5, 10, 2 |
+//! | `do_px`, `flood_publish` | off, off: no peers to exchange, and explicit peers are always publish targets; same on the BN |
+//! | `idontwant_message_size_threshold` | [`IDONTWANT_MESSAGE_SIZE_THRESHOLD`], 1000, the same line the BN draws |
+//! | `idontwant_on_publish` | `bn.idontwant_on_publish` from the operator's config (T-075); off in the fork's default and on the BN |
+//! | Peer scoring | never attached, so the sidecar can never score down or prune the beacon node; the BN attaches it, with trusted peers exempt |
+//! | Metrics | the fork's own, under `overlay_gossipsub_` in the registry [`build_behaviour`] is given; the BN uses `gossipsub_` |
+//! | `heartbeat_interval`, `fanout_ttl`, `allow_self_origin` | fork defaults: 1 s, 60 s, off (moot under `Anonymous`, there is no source); the BN runs 1 s, 60 s, on |
+//!
+//! # Deliberately differs
+//!
+//! | Parameter | Sidecar, and the beacon node's value |
+//! |---|---|
+//! | Data transform | identity: payloads stay in their compressed wire form end to end, which is what the overlay carries; the BN's snappy transform decompresses inbound and compresses outbound |
+//! | Where the id decompresses | inside [`message_id_fn`], because the transform no longer does; the bytes hashed and the id are the same as the BN's |
 
 use std::time::Duration;
 
@@ -114,11 +158,7 @@ pub fn build_behaviour(cfg: &BnLinkConfig, registry: &mut Registry) -> GossipBeh
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
-    use libp2p::gossipsub::{Message, TopicHash};
-    use overlay_core::msgid;
-    use prometheus_client::registry::Registry;
+    use libp2p::gossipsub::TopicHash;
 
     use super::*;
     use crate::testutil;
@@ -185,14 +225,6 @@ mod tests {
             config(&cfg()).validate_messages(),
             "Lighthouse forwards nothing until the application reports on it, and neither may the sidecar"
         );
-    }
-
-    #[test]
-    fn max_transmit_size_equals_lighthouse() {
-        let lighthouse = types::ChainSpec::mainnet().max_message_size() as u64;
-
-        assert_eq!(wire::MAX_TRANSMIT_SIZE, lighthouse);
-        assert_eq!(config(&cfg()).max_transmit_size() as u64, lighthouse);
     }
 
     #[test]
