@@ -16,6 +16,29 @@ pub mod wire;
 /// own cache, two epochs, is the backstop for anything older.
 pub const DUPLICATE_CACHE_TIME: Duration = Duration::from_secs(120);
 
+/// No IHAVE gossip at all: the beacon node is an explicit peer and gets every message
+/// forwarded outright, so gossip could only ever advertise what it already has.
+pub const GOSSIP_LAZY: usize = 0;
+/// The fraction of non-mesh peers to gossip to, likewise zero.
+pub const GOSSIP_FACTOR: f64 = 0.0;
+/// Heartbeats of history an IHAVE could cover; the minimum, since none is sent.
+pub const HISTORY_GOSSIP: usize = 1;
+/// Heartbeats a full message stays in the message cache for IWANT and late validation. The
+/// fork's default; nothing here asks for more.
+pub const HISTORY_LENGTH: usize = 5;
+/// Mesh bounds at their minimum. An explicit peer is never grafted, so a mesh of one exists
+/// only in gossipsub's bookkeeping; `mesh_outbound_min(0)` is what makes a mesh of one legal.
+pub const MESH_N_LOW: usize = 1;
+/// See [`MESH_N_LOW`].
+pub const MESH_N: usize = 1;
+/// See [`MESH_N_LOW`].
+pub const MESH_N_HIGH: usize = 1;
+/// See [`MESH_N_LOW`].
+pub const MESH_OUTBOUND_MIN: usize = 0;
+/// Messages at or above this size get an IDONTWANT sent ahead of them; the same 1 kB Lighthouse
+/// defaults to, so both ends draw the line in the same place.
+pub const IDONTWANT_MESSAGE_SIZE_THRESHOLD: usize = 1000;
+
 /// The behaviour type the BN link runs: identity transform, so payloads stay compressed, and
 /// no subscription filter, because the only peer is the operator's own beacon node.
 pub type GossipBehaviour = Behaviour<IdentityTransform, AllowAllSubscriptionFilter>;
@@ -52,6 +75,16 @@ pub fn config(cfg: &BnLinkConfig) -> Config {
         .validate_messages()
         .message_id_fn(message_id_fn)
         .duplicate_cache_time(DUPLICATE_CACHE_TIME)
+        .gossip_lazy(GOSSIP_LAZY)
+        .gossip_factor(GOSSIP_FACTOR)
+        .history_gossip(HISTORY_GOSSIP)
+        .history_length(HISTORY_LENGTH)
+        .mesh_n_low(MESH_N_LOW)
+        .mesh_n(MESH_N)
+        .mesh_n_high(MESH_N_HIGH)
+        .mesh_outbound_min(MESH_OUTBOUND_MIN)
+        .flood_publish(false)
+        .idontwant_message_size_threshold(IDONTWANT_MESSAGE_SIZE_THRESHOLD)
         .idontwant_on_publish(cfg.idontwant_on_publish)
         .build()
         .expect("constant gossipsub parameters pass the builder's checks")
