@@ -141,11 +141,15 @@ impl PublishQueue {
         }
     }
 
-    /// The next item to publish: from the large lane while it has one, else from the small
-    /// lane.
-    pub fn pop(&mut self, _now: Instant) -> Option<PublishItem> {
-        if let Some((_, item)) = self.pop_large() {
-            return Some(item);
+    /// The next item to publish: from the large lane while it has one that is not stale at
+    /// `now`, else from the small lane. Stale large entries are discarded on the way and
+    /// counted.
+    pub fn pop(&mut self, now: Instant) -> Option<PublishItem> {
+        while let Some((entered, item)) = self.pop_large() {
+            if now.saturating_duration_since(entered) <= PUBLISH_LARGE_STALE_AFTER {
+                return Some(item);
+            }
+            self.stats.dropped(Class::Large, DropReason::Stale);
         }
         self.small.pop_front()
     }
