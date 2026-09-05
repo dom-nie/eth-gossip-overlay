@@ -1,6 +1,7 @@
 //! The link between a sidecar and its local beacon node.
 
 pub mod bn_http;
+pub mod compat;
 pub mod gossip;
 pub mod inbound;
 pub mod link;
