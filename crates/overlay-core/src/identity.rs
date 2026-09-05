@@ -5,10 +5,14 @@
 //! never touches a beacon node.
 
 use std::fmt;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use ed25519_dalek::SigningKey;
 use hkdf::Hkdf;
+use rand::TryRng;
+use rand::rngs::SysRng;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
@@ -112,6 +116,43 @@ pub enum SecretFileError {
         /// What is wrong with the text.
         reason: String,
     },
+    /// The operating system would not give random bytes for a new file.
+    #[error("OS random number generator: {0}")]
+    Rng(#[from] rand::rngs::SysError),
+}
+
+/// Draws 32 bytes from the OS random number generator and writes them to a new file at
+/// `path`. Both the seed (`gen-seed`) and a first-start node key are made this way.
+pub fn create_secret_file(path: &Path) -> Result<Zeroizing<[u8; 32]>, SecretFileError> {
+    let mut bytes = Zeroizing::new([0u8; 32]);
+    SysRng.try_fill_bytes(&mut *bytes)?;
+    write_secret_file(path, &bytes)?;
+    Ok(bytes)
+}
+
+/// Writes `bytes` to a new file at `path` as 64 lowercase hex characters and a newline, mode
+/// 0600 on Unix. An existing file is an error and is left alone: `create_new` makes the
+/// check and the creation one step, so two racing writers cannot both succeed.
+pub fn write_secret_file(path: &Path, bytes: &[u8; 32]) -> Result<(), SecretFileError> {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut text = Zeroizing::new(Vec::with_capacity(65));
+    for &byte in bytes {
+        text.push(HEX[usize::from(byte >> 4)]);
+        text.push(HEX[usize::from(byte & 0x0f)]);
+    }
+    text.push(b'\n');
+    options
+        .open(path)
+        .and_then(|mut file| file.write_all(&text))
+        .map_err(|source| SecretFileError::Io {
+            path: path.to_owned(),
+            source,
+        })
 }
 
 /// Reads 32 secret bytes from `path`, written as 64 hex characters with an optional trailing
