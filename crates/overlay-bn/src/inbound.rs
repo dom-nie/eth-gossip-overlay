@@ -240,6 +240,7 @@ mod tests {
         lanes: Option<ClassLanes<BnMessage>>,
         pusher: LanePusher<BnMessage>,
         command_tx: mpsc::Sender<BnCommand>,
+        commands: mpsc::Receiver<BnCommand>,
         seen: SharedSeenCache,
         out: ClassLanes<Outbound>,
         clock: FakeClock,
@@ -253,7 +254,7 @@ mod tests {
 
         fn with_out(out: ClassLanes<Outbound>) -> Self {
             let lanes = ClassLanes::new(Arc::new(()));
-            let (command_tx, _) = mpsc::channel(64);
+            let (command_tx, commands) = mpsc::channel(64);
             let clock = FakeClock::new();
             let seen = SharedSeenCache::new(SeenCache::new(
                 Duration::from_secs(60),
@@ -264,6 +265,7 @@ mod tests {
                 pusher: lanes.pusher(),
                 lanes: Some(lanes),
                 command_tx,
+                commands,
                 seen,
                 out,
                 clock,
@@ -285,6 +287,14 @@ mod tests {
                 self.stats.clone(),
             );
         }
+
+        /// The next command, which has to be a `ReportAccept`, as its id and source.
+        async fn accepted(&mut self) -> (gossipsub::MessageId, PeerId) {
+            match self.commands.recv().await.unwrap() {
+                BnCommand::ReportAccept { id, source } => (id, source),
+                other => panic!("expected ReportAccept, got {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]
@@ -304,5 +314,17 @@ mod tests {
         assert_eq!(out.received_at, h.clock.now());
         assert_eq!(h.stats.count("first_seen", Class::Small), 1);
         assert_eq!(h.stats.total(), 1);
+    }
+
+    #[tokio::test]
+    async fn accept_is_reported_for_every_message_including_duplicates() {
+        let mut h = Harness::new();
+        let msg = message(ATTESTATION_3, b"an attestation");
+        h.push(Class::Small, msg.clone());
+        h.push(Class::Small, msg.clone());
+        h.start();
+
+        assert_eq!(h.accepted().await, (msg.id.clone(), *BN));
+        assert_eq!(h.accepted().await, (msg.id, *BN));
     }
 }
