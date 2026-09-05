@@ -292,4 +292,12 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn unknown_name_parses_as_other() {
+        assert_eq!(
+            kind("light_client_finality_update"),
+            TopicKind::Other("light_client_finality_update".to_owned())
+        );
+    }
 }
