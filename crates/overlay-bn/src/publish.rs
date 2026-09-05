@@ -236,8 +236,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use libp2p::gossipsub::{self, PublishError};
+    use overlay_core::config::PublishRateLimit;
     use overlay_core::msgid::MessageId;
     use overlay_core::pubqueue::PublishItem;
+    use overlay_core::ratelimit::PublishLimits;
     use overlay_core::time::FakeClock;
     use overlay_core::topic::{Class, Topic};
     use tokio::sync::mpsc;
@@ -323,22 +325,31 @@ mod tests {
         publisher: Option<Publisher>,
         commands: mpsc::Receiver<BnCommand>,
         inject: Arc<AtomicBool>,
+        clock: FakeClock,
         stats: Arc<Recorded>,
     }
 
     impl Harness {
+        /// The production limits, so the tests assert the DX-N3 numbers themselves.
         fn new() -> Self {
             let (commands_tx, commands) = mpsc::channel(64);
             let clock = FakeClock::new();
             let stats = Arc::new(Recorded::default());
             let inject = Arc::new(AtomicBool::new(true));
-            let (handle, publisher) =
-                Publisher::new(commands_tx, inject.clone(), stats.clone(), Arc::new(clock));
+            let limits = PublishLimits::new(&PublishRateLimit::default(), clock.now());
+            let (handle, publisher) = Publisher::new(
+                commands_tx,
+                inject.clone(),
+                limits,
+                stats.clone(),
+                Arc::new(clock.clone()),
+            );
             Self {
                 handle,
                 publisher: Some(publisher),
                 commands,
                 inject,
+                clock,
                 stats,
             }
         }
@@ -353,9 +364,39 @@ mod tests {
                 .expect("the publisher was not spawned")
         }
 
+        /// One step with its command, if it sends one, answered with `result`. Only the step
+        /// can finish the select: a step that sends nothing must not wait for a command.
+        async fn step_answered(
+            &mut self,
+            item: PublishItem,
+            result: Result<gossipsub::MessageId, PublishError>,
+        ) -> Option<PublishOutcome> {
+            let publisher = self
+                .publisher
+                .as_mut()
+                .expect("the publisher was not spawned");
+            let commands = &mut self.commands;
+            tokio::select! {
+                outcome = publisher.step(item) => outcome,
+                () = async {
+                    answer(commands, result).await;
+                    std::future::pending().await
+                } => unreachable!("only the step completes"),
+            }
+        }
+
+        async fn step_accepted(&mut self, item: PublishItem) -> Option<PublishOutcome> {
+            self.step_answered(item, Ok(accepted())).await
+        }
+
         fn queued(&self) -> usize {
             self.handle.queue.lock().unwrap().len()
         }
+    }
+
+    /// Any id: the publisher only looks at whether the reply is `Ok`.
+    fn accepted() -> gossipsub::MessageId {
+        gossipsub::MessageId::from(&[0u8; 20][..])
     }
 
     #[tokio::test]
@@ -438,5 +479,24 @@ mod tests {
         assert_eq!(data, item(Class::Small, 1).payload);
         assert_eq!(h.stats.count("suppressed_inject_off", Class::Small), 1);
         assert!(h.commands.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn small_beyond_8000_per_s_is_rate_limited_and_counted() {
+        let mut h = Harness::new();
+        for n in 0..8000 {
+            let outcome = h.step_accepted(item(Class::Small, n)).await;
+            assert_eq!(outcome, Some(PublishOutcome::Published), "item {n}");
+        }
+
+        let outcome = h.step_accepted(item(Class::Small, 8000)).await;
+
+        assert_eq!(outcome, Some(PublishOutcome::RateLimited));
+        assert_eq!(h.stats.count("rate_limited", Class::Small), 1);
+        assert_eq!(h.stats.count("published", Class::Small), 8000);
+        assert!(h.commands.try_recv().is_err());
+        h.clock.advance(Duration::from_secs(1));
+        let refilled = h.step_accepted(item(Class::Small, 8001)).await;
+        assert_eq!(refilled, Some(PublishOutcome::Published));
     }
 }
