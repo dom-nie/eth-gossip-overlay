@@ -491,4 +491,9 @@ log:
     fn empty_document_equals_default() {
         assert_eq!(Config::from_yaml("{}").unwrap(), Config::default());
     }
+
+    #[test]
+    fn default_equals_appendix_a() {
+        assert_eq!(Config::from_yaml(APPENDIX_A).unwrap(), Config::default());
+    }
 }
