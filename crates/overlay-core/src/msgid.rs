@@ -179,4 +179,11 @@ mod tests {
         assert_eq!(text.len(), 40);
         assert_eq!(text, "000102030405060708090a0b0c0d0e0f10111213");
     }
+
+    #[test]
+    fn from_slice_rejects_wrong_length() {
+        assert_eq!(MessageId::from_slice(&[7; 19]), None);
+        assert_eq!(MessageId::from_slice(&[7; 21]), None);
+        assert_eq!(MessageId::from_slice(&[7; 20]), Some(MessageId([7; 20])));
+    }
 }
