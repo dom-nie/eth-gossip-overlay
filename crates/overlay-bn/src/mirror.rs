@@ -60,13 +60,18 @@ impl Mirror {
     }
 
     fn subscribe(&mut self, topic: &str) -> Vec<MirrorAction> {
+        if self.topics.contains_key(topic) {
+            return Vec::new();
+        }
         let parsed = Topic::parse(topic).ok();
         self.topics.insert(topic.to_owned(), parsed);
         vec![MirrorAction::Subscribe(topic.to_owned()), self.changed()]
     }
 
     fn unsubscribe(&mut self, topic: &str) -> Vec<MirrorAction> {
-        self.topics.remove(topic);
+        if self.topics.remove(topic).is_none() {
+            return Vec::new();
+        }
         vec![MirrorAction::Unsubscribe(topic.to_owned()), self.changed()]
     }
 
