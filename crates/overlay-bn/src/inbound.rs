@@ -169,7 +169,6 @@ impl Inbound {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
     use std::sync::{Arc, LazyLock, Mutex};
     use std::time::{Duration, Instant};
 
@@ -190,7 +189,7 @@ mod tests {
     use crate::gossip::wire;
     use crate::link::{BnCommand, BnEvent, BnLink, BnMessage};
     use crate::spec::spec_watch;
-    use crate::testutil::{FakeBn, FakeBnEvent, link_config, node_key};
+    use crate::testutil::{FakeBn, FakeBnEvent, LOG, link_config, node_key};
 
     /// Long enough for a dial and a gossipsub exchange on a loaded CI box.
     const WAIT: Duration = Duration::from_secs(3);
@@ -226,43 +225,6 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), out.recv())
             .await
             .is_err()
-    }
-
-    /// Everything `tracing` writes in this test binary. One process-wide subscriber rather
-    /// than one per test: with a single dispatcher registered, tracing-core caches a call
-    /// site's interest by asking the dispatcher of whichever thread hits it first, and a
-    /// parallel test with no subscriber on its thread would cache "never" for the call site
-    /// a test with a thread-local subscriber is waiting on. A test looks for a string only
-    /// it logs.
-    static LOG: LazyLock<Log> = LazyLock::new(|| {
-        let log = Log::default();
-        let sink = log.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || sink.clone())
-            .finish();
-        tracing::subscriber::set_global_default(subscriber)
-            .expect("the only global subscriber in this test binary");
-        log
-    });
-
-    #[derive(Clone, Default)]
-    struct Log(Arc<Mutex<Vec<u8>>>);
-
-    impl Log {
-        fn text(&self) -> String {
-            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-        }
-    }
-
-    impl Write for Log {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().write(buf)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
     }
 
     /// Every stats call in the order it was made.

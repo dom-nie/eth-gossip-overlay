@@ -347,6 +347,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use super::*;
+    use crate::testutil::LOG;
 
     /// The gauges as T-041 will keep them, modelled so the trait's promises are what the
     /// tests assert: one compat series at 1, one info series, trusted absent when `None`.
@@ -491,6 +492,25 @@ mod tests {
             (second.compat, second.info),
             (Some(STATE_UNTESTED), Some(newer.to_owned()))
         );
+    }
+
+    /// Three connects to the same untested version, one warning. The version string is this
+    /// test's alone, so its count in the shared log is this test's count.
+    #[test]
+    fn untested_version_warns_once_per_version_across_reconnects() {
+        let log = &*LOG;
+        let (mut watch, stats) = watch();
+        let version = "Lighthouse/v97.3.1-0000abc/x86_64-linux";
+
+        for _ in 0..3 {
+            watch.on_bn_info(Some(version.to_owned()), Some(true));
+        }
+
+        let text = log.text();
+        let lines: Vec<&str> = text.lines().filter(|l| l.contains(version)).collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(lines[0].contains("WARN"), "{}", lines[0]);
+        assert_eq!(stats.gauges().compat, Some(STATE_UNTESTED));
     }
 }
 

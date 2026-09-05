@@ -20,7 +20,8 @@
 //! [`next_message`]) join two of the sidecar's own behaviours over the memory transport, for
 //! tests that need the protocol code and no beacon node at all.
 
-use std::sync::LazyLock;
+use std::io::Write;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use libp2p::core::transport::MemoryTransport;
@@ -48,6 +49,45 @@ use crate::node_key::NodeKey;
 
 /// Long enough for a noise handshake plus a few gossipsub round trips on a loaded CI box.
 const WAIT: Duration = Duration::from_secs(5);
+
+/// Everything `tracing` writes in this test binary. One process-wide subscriber rather
+/// than one per test: with a single dispatcher registered, tracing-core caches a call
+/// site's interest by asking the dispatcher of whichever thread hits it first, and a
+/// parallel test with no subscriber on its thread would cache "never" for the call site
+/// a test with a thread-local subscriber is waiting on. A test looks for a string only
+/// it logs.
+pub static LOG: LazyLock<Log> = LazyLock::new(|| {
+    let log = Log::default();
+    let sink = log.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || sink.clone())
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)
+        .expect("the only global subscriber in this test binary");
+    log
+});
+
+/// The captured log, shared by every test in the binary.
+#[derive(Clone, Default)]
+pub struct Log(Arc<Mutex<Vec<u8>>>);
+
+impl Log {
+    /// Everything logged so far.
+    pub fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+impl Write for Log {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 /// A beacon node's network side: Lighthouse's real transport
 /// (`lighthouse_network::build_transport`) and `SnappyTransform` under the gossipsub
