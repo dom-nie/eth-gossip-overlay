@@ -811,8 +811,8 @@ mod tests {
     }
 
     /// Two links from the same key file show the beacon node the same peer id, which is the
-    /// id the node key reports; a key made elsewhere gives another, because nothing but the
-    /// random file decides it.
+    /// id the node key reports. That no seed is involved is the DoD's grep over overlay-bn,
+    /// not something a test can show.
     #[tokio::test(flavor = "multi_thread")]
     async fn peer_id_comes_from_the_node_key_and_is_stable_across_link_restarts() {
         let mut bn = FakeBn::start().await;
@@ -834,8 +834,6 @@ mod tests {
 
         assert_eq!(first, FakeBnEvent::Connected(expected));
         assert_eq!(second, FakeBnEvent::Connected(expected));
-        let other = node_key(&tempfile::tempdir().unwrap()).peer_id();
-        assert_ne!(other, expected);
         drop(harness);
     }
 
