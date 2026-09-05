@@ -20,6 +20,7 @@
 //! [`next_message`]) join two of the sidecar's own behaviours over the memory transport, for
 //! tests that need the protocol code and no beacon node at all.
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
@@ -29,7 +30,7 @@ use libp2p::core::upgrade::Version;
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub::{
     self, AllowAllSubscriptionFilter, IdentTopic, Message, MessageAcceptance, MessageAuthenticity,
-    MessageId, PublishError, ValidationMode,
+    MessageId, PublishError, TopicHash, ValidationMode,
 };
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, noise, yamux};
@@ -184,6 +185,46 @@ enum Cmd {
         data: Vec<u8>,
         reply: oneshot::Sender<Result<MessageId, PublishError>>,
     },
+    /// The next connection from this peer is an ordinary one, not an explicit peer.
+    Public(PeerId),
+    MeshPeers {
+        topic: String,
+        reply: oneshot::Sender<Vec<PeerId>>,
+    },
+}
+
+/// A peer of the fake that is not trusted: an ordinary gossipsub node the fake grafts into its
+/// mesh, standing in for the public network. Built by [`FakeBn::attach_public_peer`].
+pub struct PublicPeer {
+    peer_id: PeerId,
+    commands: mpsc::Sender<Cmd>,
+    events: mpsc::Receiver<FakeBnEvent>,
+    _task: JoinHandle<()>,
+}
+
+impl PublicPeer {
+    pub fn peer_id(&self) -> PeerId {
+        self.peer_id
+    }
+
+    /// Publishes `payload` on `topic`, uncompressed here and snappy on the wire, the way a
+    /// public Lighthouse would.
+    pub async fn publish(&self, topic: &str, payload: &[u8]) -> MessageId {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Cmd::Publish {
+                topic: topic.to_owned(),
+                data: payload.to_vec(),
+                reply,
+            })
+            .await
+            .unwrap();
+        answer.await.unwrap().unwrap()
+    }
+
+    async fn wait_for(&mut self, wanted: impl FnMut(&FakeBnEvent) -> bool) -> FakeBnEvent {
+        wait_for(&mut self.events, wanted).await
+    }
 }
 
 impl FakeBn {
@@ -283,17 +324,57 @@ impl FakeBn {
     }
 
     /// Skips the fake's events until one satisfies `wanted`.
-    pub async fn wait_for(&mut self, mut wanted: impl FnMut(&FakeBnEvent) -> bool) -> FakeBnEvent {
-        tokio::time::timeout(WAIT, async {
-            loop {
-                let event = self.events.recv().await.expect("the fake's task ended");
-                if wanted(&event) {
-                    return event;
-                }
-            }
+    pub async fn wait_for(&mut self, wanted: impl FnMut(&FakeBnEvent) -> bool) -> FakeBnEvent {
+        wait_for(&mut self.events, wanted).await
+    }
+
+    /// The peers in the fake's mesh for `topic` right now.
+    pub async fn mesh_peers(&self, topic: &str) -> Vec<PeerId> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Cmd::MeshPeers {
+                topic: topic.to_owned(),
+                reply,
+            })
+            .await
+            .unwrap();
+        answer.await.unwrap()
+    }
+
+    /// Connects an ordinary peer to the fake, subscribed to `topic`, and returns once each
+    /// side has seen the other's subscription, so the fake's next heartbeat grafts it and a
+    /// publish from it reaches the fake. The fake must already be subscribed to `topic`.
+    pub async fn attach_public_peer(&mut self, topic: &str) -> PublicPeer {
+        let mut swarm = lighthouse_swarm();
+        let peer_id = *swarm.local_peer_id();
+        self.commands.send(Cmd::Public(peer_id)).await.unwrap();
+        swarm
+            .behaviour_mut()
+            .subscribe(&IdentTopic::new(topic))
+            .unwrap();
+        swarm
+            .dial(self.addr().with_p2p(self.peer_id).unwrap())
+            .unwrap();
+        let (commands, command_rx) = mpsc::channel(64);
+        let (received_tx, _received) = mpsc::channel(64);
+        let (events_tx, events) = mpsc::channel(64);
+        let mut public = PublicPeer {
+            peer_id,
+            commands,
+            events,
+            _task: tokio::spawn(drive(swarm, command_rx, received_tx, events_tx)),
+        };
+        self.wait_for(|e| {
+            matches!(e, FakeBnEvent::Subscribed { peer, topic: t } if *peer == peer_id && t == topic)
         })
-        .await
-        .expect("the fake beacon node never saw the awaited event")
+        .await;
+        let bn = self.peer_id;
+        public
+            .wait_for(|e| {
+                matches!(e, FakeBnEvent::Subscribed { peer, topic: t } if *peer == bn && t == topic)
+            })
+            .await;
+        public
     }
 
     /// Drops the swarm, which closes its connections and frees the port, and hands back the
@@ -340,6 +421,23 @@ impl FakeBn {
     }
 }
 
+/// Skips `events` until one satisfies `wanted`.
+async fn wait_for(
+    events: &mut mpsc::Receiver<FakeBnEvent>,
+    mut wanted: impl FnMut(&FakeBnEvent) -> bool,
+) -> FakeBnEvent {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            let event = events.recv().await.expect("the swarm task ended");
+            if wanted(&event) {
+                return event;
+            }
+        }
+    })
+    .await
+    .expect("the awaited swarm event never happened")
+}
+
 fn tcp_port(addr: &Multiaddr) -> u16 {
     addr.iter()
         .find_map(|p| match p {
@@ -351,17 +449,22 @@ fn tcp_port(addr: &Multiaddr) -> u16 {
 
 /// Polls the fake's swarm until its task is aborted. What it receives is passed on with
 /// `try_send`, so a test that never reads loses messages rather than stalling the fake.
+/// Every peer that connects becomes an explicit peer, the way `--trusted-peers` does it on
+/// the real node, except the ones a `Cmd::Public` named.
 async fn drive(
     mut swarm: Swarm<LighthouseBehaviour>,
     mut commands: mpsc::Receiver<Cmd>,
     received: mpsc::Sender<Received>,
     events: mpsc::Sender<FakeBnEvent>,
 ) {
+    let mut public = HashSet::new();
     loop {
         tokio::select! {
             event = swarm.select_next_some() => match event {
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                    swarm.behaviour_mut().add_explicit_peer(&peer_id);
+                    if !public.contains(&peer_id) {
+                        swarm.behaviour_mut().add_explicit_peer(&peer_id);
+                    }
                     let _ = events.try_send(FakeBnEvent::Connected(peer_id));
                 }
                 SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
@@ -393,6 +496,13 @@ async fn drive(
                 }
                 Some(Cmd::Publish { topic, data, reply }) => {
                     let _ = reply.send(swarm.behaviour_mut().publish(IdentTopic::new(topic), data));
+                }
+                Some(Cmd::Public(peer_id)) => {
+                    public.insert(peer_id);
+                }
+                Some(Cmd::MeshPeers { topic, reply }) => {
+                    let mesh = swarm.behaviour().mesh_peers(&TopicHash::from_raw(topic)).copied().collect();
+                    let _ = reply.send(mesh);
                 }
                 None => return,
             },
