@@ -726,10 +726,8 @@ mod tests {
 
         let port = bn.port();
         let http = bn.shutdown().await;
-        assert_eq!(
-            next_event(&mut harness.link.events).await,
-            BnEvent::Disconnected
-        );
+        // The connect probe's BnInfo may land before the swarm notices the close.
+        wait_for(&mut harness.link.events, |e| *e == BnEvent::Disconnected).await;
         let bn = FakeBn::start_on(port, http).await;
 
         assert_ne!(bn.peer_id(), old_id);
