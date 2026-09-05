@@ -179,4 +179,24 @@ mod tests {
             assert_eq!(kind(name), expected, "{name}");
         }
     }
+
+    #[test]
+    fn parses_all_64_attestation_subnets() {
+        for i in 0..64 {
+            assert_eq!(
+                kind(&format!("beacon_attestation_{i}")),
+                TopicKind::Attestation(i)
+            );
+        }
+    }
+
+    #[test]
+    fn parses_all_4_sync_subnets() {
+        for i in 0..4 {
+            assert_eq!(
+                kind(&format!("sync_committee_{i}")),
+                TopicKind::SyncCommittee(i)
+            );
+        }
+    }
 }
