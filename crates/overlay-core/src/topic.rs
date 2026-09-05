@@ -89,6 +89,28 @@ impl Class {
     }
 }
 
+/// How many attestation, sync committee and data column subnets the network has. Each count is
+/// the first index that is out of range. A topic past a bound is never refused, only warned
+/// about, because the beacon node validated it and a spec constant may simply have moved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SubnetBounds {
+    /// `ATTESTATION_SUBNET_COUNT`, a spec constant.
+    pub attestation_subnet_count: u16,
+    /// `SYNC_COMMITTEE_SUBNET_COUNT`, a spec constant.
+    pub sync_committee_subnet_count: u16,
+    /// `DATA_COLUMN_SIDECAR_SUBNET_COUNT`, read from the beacon node's spec snapshot.
+    pub data_column_sidecar_subnet_count: u16,
+}
+
+impl SubnetBounds {
+    /// The compiled-in mainnet counts.
+    pub const MAINNET: Self = Self {
+        attestation_subnet_count: 64,
+        sync_committee_subnet_count: 4,
+        data_column_sidecar_subnet_count: 128,
+    };
+}
+
 /// Why a string is not a topic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TopicError {
@@ -159,6 +181,17 @@ fn nibble(c: u8) -> Result<u8, TopicError> {
 }
 
 impl TopicKind {
+    /// Whether this kind carries a subnet or column index at or past `bounds`. Blob sidecars
+    /// have no bound, and kinds without an index never exceed.
+    pub fn index_exceeds(&self, bounds: &SubnetBounds) -> bool {
+        match *self {
+            Self::Attestation(i) => u16::from(i) >= bounds.attestation_subnet_count,
+            Self::SyncCommittee(i) => u16::from(i) >= bounds.sync_committee_subnet_count,
+            Self::DataColumnSidecar(i) => u16::from(i) >= bounds.data_column_sidecar_subnet_count,
+            _ => false,
+        }
+    }
+
     fn parse(name: &str) -> Result<Self, TopicError> {
         Ok(match name {
             "beacon_block" => Self::BeaconBlock,
