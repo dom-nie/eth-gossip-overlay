@@ -137,6 +137,14 @@ pub fn derive_tls_keypair(seed: &FleetSeed, hostname: &Hostname) -> SigningKey {
     SigningKey::from_bytes(&secret)
 }
 
+/// The public half of [`derive_tls_keypair`]: what a sibling pins for `hostname`. T-021 builds
+/// its pin table by calling this for every roster host.
+pub fn expected_tls_public_key(seed: &FleetSeed, hostname: &Hostname) -> [u8; 32] {
+    derive_tls_keypair(seed, hostname)
+        .verifying_key()
+        .to_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
