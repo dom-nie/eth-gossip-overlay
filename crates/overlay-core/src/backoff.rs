@@ -5,8 +5,9 @@ use std::time::Duration;
 
 use rand::Rng;
 
-/// Reconnect delays that start at `min` and double on every call until they reach `max`.
-/// `min` must not exceed `max`.
+/// Reconnect delays that start at `min` and double on every call until they reach `max`, each
+/// one jittered uniformly over `[d/2, d]` where `d` is the un-jittered step. `min` must not
+/// exceed `max`.
 #[derive(Clone, Debug)]
 pub struct Backoff {
     max: Duration,
@@ -20,11 +21,18 @@ impl Backoff {
     }
 
     /// The delay to wait before the next attempt.
-    pub fn next_delay(&mut self, _rng: &mut impl Rng) -> Duration {
-        let delay = self.next;
+    pub fn next_delay(&mut self, rng: &mut impl Rng) -> Duration {
+        let full = self.next;
         self.next = self.next.saturating_mul(2).min(self.max);
-        delay
+        jitter(full, rng.next_u64())
     }
+}
+
+/// Maps `draw` linearly onto `[d/2, d]`: zero keeps the full `d`, `u64::MAX` gives `d/2`.
+fn jitter(d: Duration, draw: u64) -> Duration {
+    let half = (d / 2).as_nanos();
+    let cut = half * u128::from(draw) / u128::from(u64::MAX);
+    d - Duration::from_nanos(cut as u64)
 }
 
 #[cfg(test)]
