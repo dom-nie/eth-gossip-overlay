@@ -39,8 +39,7 @@ impl fmt::Display for Region {
 }
 
 /// One line of the roster.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct HostEntry {
     /// The host's identity.
     pub hostname: Hostname,
@@ -53,11 +52,27 @@ pub struct HostEntry {
 }
 
 /// The whole `roster.yaml`.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Roster {
     /// Every host, in file order.
     pub hosts: Vec<HostEntry>,
+}
+
+/// The file as written. `addr` stays text until validation so a bad one is reported under
+/// its hostname; serde's own error only knows the key path.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawRoster {
+    hosts: Vec<RawHost>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHost {
+    hostname: Hostname,
+    region: Region,
+    site: Option<String>,
+    addr: String,
 }
 
 /// Why a roster could not be loaded.
@@ -102,19 +117,19 @@ impl Roster {
     fn parse(text: &str, path: Option<&Path>) -> Result<Self, RosterError> {
         // The direct deserializer, not yaml::from_str, for the reason config.rs gives: the
         // retry through a Value tree loses the key path and the line.
-        let roster = Self::deserialize(yaml::Deserializer::from_str(text)).map_err(|source| {
+        let raw = RawRoster::deserialize(yaml::Deserializer::from_str(text)).map_err(|source| {
             RosterError::Parse {
                 path: path.map(Path::to_owned),
                 source,
             }
         })?;
-        roster.validate(path)?;
-        Ok(roster)
+        Self::validate(raw, path)
     }
 
-    fn validate(&self, path: Option<&Path>) -> Result<(), RosterError> {
-        let mut seen = HashSet::with_capacity(self.hosts.len());
-        for (index, host) in self.hosts.iter().enumerate() {
+    fn validate(raw: RawRoster, path: Option<&Path>) -> Result<Self, RosterError> {
+        let mut hosts = Vec::with_capacity(raw.hosts.len());
+        let mut seen = HashSet::with_capacity(raw.hosts.len());
+        for (index, host) in raw.hosts.into_iter().enumerate() {
             let invalid = |reason: String| RosterError::Invalid {
                 path: path.map(Path::to_owned),
                 index,
@@ -127,11 +142,21 @@ impl Roster {
             if host.region.0.is_empty() {
                 return Err(invalid("empty region".to_owned()));
             }
-            if !seen.insert(&host.hostname) {
+            let addr = host
+                .addr
+                .parse()
+                .map_err(|err| invalid(format!("addr {:?}: {err}", host.addr)))?;
+            if !seen.insert(host.hostname.clone()) {
                 return Err(invalid("duplicate hostname".to_owned()));
             }
+            hosts.push(HostEntry {
+                hostname: host.hostname,
+                region: host.region,
+                site: host.site,
+                addr,
+            });
         }
-        Ok(())
+        Ok(Self { hosts })
     }
 
     /// The entry for `hostname`, if the roster has one.
@@ -198,7 +223,10 @@ hosts:
         let err = Roster::from_yaml(doc).unwrap_err();
 
         let message = err.to_string();
-        assert!(message.contains("bn-1") && message.contains("duplicate"), "{message}");
+        assert!(
+            message.contains("bn-1") && message.contains("duplicate"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -210,7 +238,10 @@ hosts:
         let err = Roster::from_yaml(doc).unwrap_err();
 
         let message = err.to_string();
-        assert!(message.contains("bn-1") && message.contains("region"), "{message}");
+        assert!(
+            message.contains("bn-1") && message.contains("region"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -223,20 +254,24 @@ hosts:
         let err = Roster::from_yaml(doc).unwrap_err();
 
         let message = err.to_string();
-        assert!(message.contains("hosts[1]") && message.contains("hostname"), "{message}");
+        assert!(
+            message.contains("hosts[1]") && message.contains("hostname"),
+            "{message}"
+        );
     }
 
     #[test]
     fn unparseable_addr_is_rejected_with_hostname_in_message() {
         for bad in ["192.0.2.1", "2001:db8:1::120:7788", "bn-1.example.org:7788"] {
-            let doc = format!(
-                "hosts:\n  - {{ hostname: bn-1, region: eu, addr: \"{bad}\" }}\n"
-            );
+            let doc = format!("hosts:\n  - {{ hostname: bn-1, region: eu, addr: \"{bad}\" }}\n");
 
             let err = Roster::from_yaml(&doc).unwrap_err();
 
             let message = err.to_string();
-            assert!(message.contains("bn-1") && message.contains(bad), "{message}");
+            assert!(
+                message.contains("bn-1") && message.contains(bad),
+                "{message}"
+            );
         }
     }
 }
