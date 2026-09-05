@@ -32,7 +32,7 @@
 //! | `mesh_n_low`, `mesh_n`, `mesh_n_high`, `mesh_outbound_min` | 1, 1, 1, 0: an explicit peer is never grafted, so the mesh is bookkeeping and zero outbound is what makes a mesh of one legal; the BN runs 3, 5, 10, 2 |
 //! | `do_px`, `flood_publish` | off, off: no peers to exchange, and explicit peers are always publish targets; same on the BN |
 //! | `idontwant_message_size_threshold` | [`IDONTWANT_MESSAGE_SIZE_THRESHOLD`], 1000, the same line the BN draws |
-//! | `idontwant_on_publish` | `bn.idontwant_on_publish` from the operator's config (T-075); off in the fork's default and on the BN |
+//! | `idontwant_on_publish` | `bn.idontwant_on_publish` from the operator's config; the fork's default is off and the BN leaves it there; T-075 turns the sidecar's on |
 //! | Peer scoring | never attached, so the sidecar can never score down or prune the beacon node; the BN attaches it, with trusted peers exempt |
 //! | Metrics | the fork's own, under `overlay_gossipsub_` in the registry [`build_behaviour`] is given; the BN uses `gossipsub_` |
 //! | `heartbeat_interval`, `fanout_ttl`, `allow_self_origin` | fork defaults: 1 s, 60 s, off (moot under `Anonymous`, there is no source); the BN runs 1 s, 60 s, on |
