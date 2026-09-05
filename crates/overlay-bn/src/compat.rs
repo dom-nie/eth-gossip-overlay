@@ -512,6 +512,28 @@ mod tests {
         assert!(lines[0].contains("WARN"), "{}", lines[0]);
         assert_eq!(stats.gauges().compat, Some(STATE_UNTESTED));
     }
+
+    /// An unsupported beacon node is an error in the log, once, and nothing else: the watch
+    /// goes on taking events, and the sidecar with it.
+    #[test]
+    fn unsupported_version_logs_error_and_does_not_exit() {
+        let log = &*LOG;
+        let (mut watch, stats) = watch();
+        let old = "Lighthouse/v0.9.9-0000abd/x86_64-linux";
+
+        for _ in 0..3 {
+            watch.on_bn_info(Some(old.to_owned()), Some(true));
+        }
+        let after_old = stats.gauges();
+        watch.on_bn_info(Some(format!("Lighthouse/v{PINNED}")), Some(true));
+
+        let text = log.text();
+        let lines: Vec<&str> = text.lines().filter(|l| l.contains(old)).collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(lines[0].contains("ERROR"), "{}", lines[0]);
+        assert_eq!(after_old.compat, Some(STATE_UNSUPPORTED));
+        assert_eq!(stats.gauges().compat, Some(STATE_SUPPORTED));
+    }
 }
 
 #[cfg(test)]
