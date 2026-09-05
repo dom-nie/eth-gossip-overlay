@@ -352,4 +352,9 @@ log:
         assert_eq!(cfg.bn.publish_rate_limit.small_per_s, 8000);
         assert_eq!(cfg.log.format, LogFormat::Auto);
     }
+
+    #[test]
+    fn empty_document_equals_default() {
+        assert_eq!(Config::from_yaml("{}").unwrap(), Config::default());
+    }
 }
