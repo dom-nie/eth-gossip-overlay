@@ -290,4 +290,18 @@ mod tests {
         assert_eq!(at_bound.as_ref().map(number), Some(2));
         assert_eq!(stats.drops().len(), 1);
     }
+
+    #[test]
+    fn queue_pop_returns_large_before_small() {
+        let mut queue = PublishQueue::new(Arc::new(()));
+        let now = Instant::now();
+        queue.push(item(Class::Small, 0, 100), now);
+        queue.push(item(Class::Large, 1, 100), now);
+        queue.push(item(Class::Small, 2, 100), now);
+
+        let order: Vec<usize> =
+            std::iter::from_fn(|| queue.pop(now).as_ref().map(number)).collect();
+
+        assert_eq!(order, vec![1, 0, 2]);
+    }
 }
