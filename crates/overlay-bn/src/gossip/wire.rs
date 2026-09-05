@@ -34,6 +34,34 @@ pub const fn max_transmit_size_for(max_payload_size: u64) -> u64 {
     }
 }
 
+/// The beacon node's `MAX_PAYLOAD_SIZE` gives a transmit size other than the compiled one: a
+/// Lighthouse or a network this binary was not built for. The behaviour is not rebuilt; T-018
+/// logs it and shows `overlay_bn_compat{state="size_mismatch"}`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "max transmit size mismatch: compiled for {compiled} bytes, the beacon node's spec gives {bn}"
+)]
+pub struct SizeMismatch {
+    /// [`MAX_TRANSMIT_SIZE`].
+    pub compiled: u64,
+    /// What the BN's spec value derives to.
+    pub bn: u64,
+}
+
+/// Derives the transmit size the beacon node runs with from the `MAX_PAYLOAD_SIZE` it reports
+/// and compares it with the compiled constant. The BN link calls this on every connect.
+pub fn check_max_payload_size(spec_max_payload_size: u64) -> Result<(), SizeMismatch> {
+    let bn = max_transmit_size_for(spec_max_payload_size);
+    if bn == MAX_TRANSMIT_SIZE {
+        Ok(())
+    } else {
+        Err(SizeMismatch {
+            compiled: MAX_TRANSMIT_SIZE,
+            bn,
+        })
+    }
+}
+
 #[cfg(test)]
 mod drift {
     use libp2p::core::UpgradeInfo;
