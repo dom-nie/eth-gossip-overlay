@@ -2,6 +2,7 @@
 //! management renders it from the inventory, so a key nobody expects or a host that cannot be
 //! dialled is an inventory bug and fails the load with the host named.
 
+use std::collections::HashSet;
 use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -78,6 +79,18 @@ pub enum RosterError {
         /// The parser's own error, which names the offending key and its position.
         source: yaml::Error,
     },
+    /// A host parsed but cannot be used as written.
+    #[error("{}hosts[{index}] {:?}: {reason}", in_file(.path.as_deref()), .hostname.0)]
+    Invalid {
+        /// The file the host came from, if it came from one.
+        path: Option<PathBuf>,
+        /// The host's position in `hosts`, so an empty hostname can still be found.
+        index: usize,
+        /// The hostname as written.
+        hostname: Hostname,
+        /// What is wrong with the entry.
+        reason: String,
+    },
 }
 
 impl Roster {
@@ -89,12 +102,29 @@ impl Roster {
     fn parse(text: &str, path: Option<&Path>) -> Result<Self, RosterError> {
         // The direct deserializer, not yaml::from_str, for the reason config.rs gives: the
         // retry through a Value tree loses the key path and the line.
-        Self::deserialize(yaml::Deserializer::from_str(text)).map_err(|source| {
+        let roster = Self::deserialize(yaml::Deserializer::from_str(text)).map_err(|source| {
             RosterError::Parse {
                 path: path.map(Path::to_owned),
                 source,
             }
-        })
+        })?;
+        roster.validate(path)?;
+        Ok(roster)
+    }
+
+    fn validate(&self, path: Option<&Path>) -> Result<(), RosterError> {
+        let mut seen = HashSet::with_capacity(self.hosts.len());
+        for (index, host) in self.hosts.iter().enumerate() {
+            if !seen.insert(&host.hostname) {
+                return Err(RosterError::Invalid {
+                    path: path.map(Path::to_owned),
+                    index,
+                    hostname: host.hostname.clone(),
+                    reason: "duplicate hostname".to_owned(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// The entry for `hostname`, if the roster has one.
