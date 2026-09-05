@@ -10,15 +10,19 @@ repository.workspace = true
 libp2p.workspace = true
 overlay-core.workspace = true
 prometheus-client.workspace = true
+rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
+tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
 lighthouse_network.workspace = true
+proptest.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 snap.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
