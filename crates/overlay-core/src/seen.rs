@@ -66,6 +66,12 @@ impl SeenCache {
         true
     }
 
+    /// Whether `id` is held. Expiry happens on `insert` and `evict_expired`, not here, so an
+    /// entry past its TTL that neither has removed yet still reads as present.
+    pub fn contains(&self, id: &MessageId) -> bool {
+        self.seen.contains(id)
+    }
+
     fn pop_oldest(&mut self) {
         if let Some((_, id)) = self.order.pop_front() {
             self.seen.remove(&id);
