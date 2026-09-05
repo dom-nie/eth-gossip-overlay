@@ -572,4 +572,20 @@ mod tests {
         assert_eq!(h.stats.total(), 1);
         assert_eq!(h.queued(), 0);
     }
+
+    /// The level of the log line is not asserted: the crate's shared subscriber captures
+    /// INFO and up, so a debug line is invisible to it and an error line from a parallel
+    /// test would be indistinguishable. The outcome and the counter say which path ran.
+    #[tokio::test]
+    async fn duplicate_error_from_gossipsub_is_counted_as_duplicate_not_error() {
+        let mut h = Harness::new();
+
+        let outcome = h
+            .step_answered(item(Class::Small, 0), Err(PublishError::Duplicate))
+            .await;
+
+        assert_eq!(outcome, Some(PublishOutcome::Duplicate));
+        assert_eq!(h.stats.count("error:duplicate", Class::Small), 1);
+        assert_eq!(h.stats.total(), 1);
+    }
 }
