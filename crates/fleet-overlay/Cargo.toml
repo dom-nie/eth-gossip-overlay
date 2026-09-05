@@ -4,6 +4,15 @@ description = "Sidecar binary for a private gossip overlay between Lighthouse be
 version.workspace = true
 edition.workspace = true
 
+[dependencies]
+clap.workspace = true
+overlay-bn.workspace = true
+overlay-core.workspace = true
+
+[dev-dependencies]
+assert_cmd.workspace = true
+tempfile.workspace = true
+
 [[bin]]
 name = "fleet-overlay"
 path = "src/bin/fleet-overlay.rs"
