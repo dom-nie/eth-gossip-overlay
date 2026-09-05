@@ -301,4 +301,24 @@ hosts:
             "{message}"
         );
     }
+
+    fn names(hosts: &[&HostEntry]) -> Vec<String> {
+        hosts.iter().map(|h| h.hostname.to_string()).collect()
+    }
+
+    #[test]
+    fn in_region_returns_hosts_sorted_by_hostname() {
+        let doc = r#"hosts:
+  - { hostname: bn-a, region: eu, addr: "192.0.2.1:7788" }
+  - { hostname: bn-9, region: eu, addr: "192.0.2.2:7788" }
+  - { hostname: bn-0, region: us, addr: "192.0.2.3:7788" }
+  - { hostname: bn-B, region: eu, addr: "192.0.2.4:7788" }
+  - { hostname: bn-10, region: eu, addr: "192.0.2.5:7788" }
+"#;
+        let roster = Roster::from_yaml(doc).unwrap();
+
+        let eu = roster.in_region(&region("eu"));
+
+        assert_eq!(names(&eu), ["bn-10", "bn-9", "bn-B", "bn-a"]);
+    }
 }
