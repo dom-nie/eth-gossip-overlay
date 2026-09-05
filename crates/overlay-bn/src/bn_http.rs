@@ -243,4 +243,22 @@ mod tests {
         assert!(matches!(err, BnHttpError::Body { .. }), "{err:?}");
         assert!(err.to_string().contains("/eth/v1/node/identity"), "{err}");
     }
+
+    #[tokio::test]
+    async fn invalid_peer_id_string_is_invalid_peer_id_error() {
+        let server = MockServer::start().await;
+        serve(
+            &server,
+            "/eth/v1/node/identity",
+            json!({"data": {"peer_id": "not-a-peer-id"}}),
+        )
+        .await;
+
+        let err = client(&server).peer_id().await.unwrap_err();
+
+        assert!(
+            matches!(&err, BnHttpError::InvalidPeerId(text) if text == "not-a-peer-id"),
+            "{err:?}"
+        );
+    }
 }
