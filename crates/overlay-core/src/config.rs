@@ -390,14 +390,18 @@ pub enum ConfigError {
         source: std::io::Error,
     },
     /// The text is not valid YAML or does not fit the schema.
-    #[error("{source}")]
+    #[error("{}{source}", in_file(.path.as_deref()))]
     Parse {
+        /// The file the text came from, if it came from one.
+        path: Option<PathBuf>,
         /// The parser's own error, which names the offending key and its position.
         source: yaml::Error,
     },
     /// A value parsed but is outside what the sidecar can run with.
-    #[error("{field}: {reason}")]
+    #[error("{}{field}: {reason}", in_file(.path.as_deref()))]
     Invalid {
+        /// The file the value came from, if it came from one.
+        path: Option<PathBuf>,
         /// The dotted YAML path of the offending key, such as `classes.large.chunk_bytes`.
         field: &'static str,
         /// What is wrong with the value.
@@ -412,21 +416,34 @@ impl Config {
             path: path.to_owned(),
             source,
         })?;
-        Self::from_yaml(&text)
+        Self::parse(&text, Some(path))
     }
 
     /// Parses a complete `config.yaml` document.
     pub fn from_yaml(text: &str) -> Result<Self, ConfigError> {
+        Self::parse(text, None)
+    }
+
+    fn parse(text: &str, path: Option<&Path>) -> Result<Self, ConfigError> {
         // Not yaml::from_str: on any error it retries through a Value tree to resolve merge
         // keys and returns that second error, which has lost the key path and the line.
-        let config = Self::deserialize(yaml::Deserializer::from_str(text))
-            .map_err(|source| ConfigError::Parse { source })?;
-        config.validate()?;
+        let config = Self::deserialize(yaml::Deserializer::from_str(text)).map_err(|source| {
+            ConfigError::Parse {
+                path: path.map(Path::to_owned),
+                source,
+            }
+        })?;
+        config.validate(path)?;
         Ok(config)
     }
 
     /// Range and cross-field checks the types alone cannot express.
-    fn validate(&self) -> Result<(), ConfigError> {
+    fn validate(&self, path: Option<&Path>) -> Result<(), ConfigError> {
+        let invalid = |field: &'static str, reason: String| ConfigError::Invalid {
+            path: path.map(Path::to_owned),
+            field,
+            reason,
+        };
         let chunk = self.classes.large.chunk_bytes;
         if chunk == 0 || !chunk.is_multiple_of(64) {
             return Err(invalid(
@@ -488,8 +505,10 @@ impl Config {
     }
 }
 
-fn invalid(field: &'static str, reason: String) -> ConfigError {
-    ConfigError::Invalid { field, reason }
+/// The `path: ` prefix for an error from a file, or nothing for text parsed from memory.
+fn in_file(path: Option<&Path>) -> String {
+    path.map(|path| format!("{}: ", path.display()))
+        .unwrap_or_default()
 }
 
 /// Reads an integer `_ms` key as a [`Duration`], so nothing downstream multiplies by 1000.
