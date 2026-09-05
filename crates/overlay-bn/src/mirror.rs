@@ -642,6 +642,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn spec_change_rederives_extras_for_live_digests() {
+        let mut mirror = connected();
+        mirror.on_bn_event(&subscribed(ATTESTATION_3));
+        let sixty_four = SpecSnapshot {
+            number_of_columns: 64,
+            ..SpecSnapshot::MAINNET
+        };
+
+        let actions = mirror.on_spec(&sixty_four);
+
+        assert_eq!(unsubscribes(&actions), columns("00000000", 64..128));
+        assert_eq!(subscribes(&actions), BTreeSet::new());
+        let Some(MirrorAction::Changed(changed)) = actions.last() else {
+            panic!("no Changed in {actions:?}");
+        };
+        assert_eq!(changed.advertised, sets_of(&[ATTESTATION_3]).advertised);
+        let mut local = changed.advertised.clone();
+        local.extend((0..64).map(|i| Topic::data_column([0; 4], i)));
+        assert_eq!(changed.local, local);
+    }
+
     /// The fake's subscription has to show in the watch and come back to the fake as the
     /// sidecar's own subscription, both inside one second of the fake sending it.
     #[tokio::test(flavor = "multi_thread")]
