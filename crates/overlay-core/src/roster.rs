@@ -493,4 +493,23 @@ hosts:
             "{message}"
         );
     }
+
+    #[test]
+    fn resolve_self_unknown_hostname_with_region_override_succeeds_with_no_site() {
+        let roster = Roster::from_yaml(APPENDIX_A).unwrap();
+
+        let me = resolve_self(
+            &roster,
+            &env(&[
+                ("FLEET_OVERLAY_HOSTNAME", "bn-lon1-03"),
+                ("FLEET_OVERLAY_REGION", "eu"),
+            ]),
+            &gethostname,
+        )
+        .unwrap();
+
+        assert_eq!(me.hostname, host("bn-lon1-03"));
+        assert_eq!(me.region, region("eu"));
+        assert_eq!(me.site, None);
+    }
 }
