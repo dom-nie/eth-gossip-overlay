@@ -14,6 +14,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use libp2p::core::upgrade::Version;
@@ -123,6 +125,9 @@ pub enum BnCommand {
 pub struct BnLink {
     /// The swarm task. It ends when the command sender is dropped.
     pub task: JoinHandle<()>,
+    /// Whether a connection to the beacon node is up right now; what T-041 exports as
+    /// `bn_connected`.
+    pub connected: Arc<AtomicBool>,
 }
 
 impl BnLink {
@@ -136,6 +141,7 @@ impl BnLink {
         control: mpsc::Sender<BnEvent>,
         commands: mpsc::Receiver<BnCommand>,
     ) -> Self {
+        let connected = Arc::new(AtomicBool::new(false));
         let link = Link {
             swarm: build_swarm(&cfg.gossip, node_key, registry),
             backoff: Backoff::new(cfg.backoff_min, cfg.backoff_max),
@@ -143,11 +149,13 @@ impl BnLink {
             bn_client,
             control,
             commands,
+            connected: connected.clone(),
             bn_peer: None,
             reconnect: None,
         };
         Self {
             task: tokio::spawn(link.run()),
+            connected,
         }
     }
 }
@@ -161,6 +169,7 @@ struct Link {
     bn_client: BnClient,
     control: mpsc::Sender<BnEvent>,
     commands: mpsc::Receiver<BnCommand>,
+    connected: Arc<AtomicBool>,
     backoff: Backoff,
     /// The beacon node this link is connected to, while it is.
     bn_peer: Option<PeerId>,
@@ -227,6 +236,7 @@ impl Link {
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                 self.swarm.behaviour_mut().add_explicit_peer(&peer_id);
                 self.bn_peer = Some(peer_id);
+                self.connected.store(true, Ordering::Relaxed);
                 self.emit(BnEvent::Connected { peer_id });
             }
             SwarmEvent::ConnectionClosed {
@@ -261,6 +271,7 @@ impl Link {
         tracing::warn!(%peer_id, ?cause, "connection to the beacon node closed");
         self.swarm.behaviour_mut().remove_explicit_peer(&peer_id);
         if self.bn_peer.take().is_some() {
+            self.connected.store(false, Ordering::Relaxed);
             self.emit(BnEvent::Disconnected);
         }
         self.retry_later();
