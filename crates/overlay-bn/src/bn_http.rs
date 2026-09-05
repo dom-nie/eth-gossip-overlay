@@ -440,4 +440,18 @@ mod tests {
 
         assert_eq!(got, None);
     }
+
+    #[tokio::test]
+    async fn peer_info_404_is_status_error_not_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/lighthouse/peers"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let err = client(&server).peer_info(&peer_id(1)).await.unwrap_err();
+
+        assert!(matches!(err, BnHttpError::Status(404)), "{err:?}");
+    }
 }
