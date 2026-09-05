@@ -225,6 +225,11 @@ impl Publisher {
                 self.stats.error(class, "duplicate");
                 PublishOutcome::Duplicate
             }
+            Err(PublishError::NoPeersSubscribedToTopic) => {
+                tracing::debug!(id = %item.id, topic = %item.topic, "no longer subscribed");
+                self.stats.error(class, "no_subscribers");
+                PublishOutcome::NoSubscribers
+            }
             Err(err) => {
                 let reason = reason(&err);
                 tracing::warn!(%err, id = %item.id, topic = %item.topic, "publish refused");
