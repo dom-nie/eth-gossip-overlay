@@ -352,4 +352,20 @@ mod tests {
         assert_eq!(h.stats.count("duplicate", Class::Small), 1);
         assert_eq!(h.stats.total(), 2);
     }
+
+    /// The id got into the cache from the overlay side, and the beacon node is now echoing
+    /// the message the sidecar published into it: the normal dedup path (§5.5).
+    #[tokio::test(start_paused = true)]
+    async fn message_already_in_seen_cache_from_overlay_is_dropped() {
+        let mut h = Harness::new();
+        let msg = message(ATTESTATION_3, b"an attestation");
+        assert!(h.seen.insert(core_id(&msg)));
+        h.push(Class::Small, msg.clone());
+        h.start();
+
+        assert_eq!(h.accepted().await, (msg.id, *BN));
+        assert!(nothing_out(&mut h.out).await);
+        assert_eq!(h.stats.count("duplicate", Class::Small), 1);
+        assert_eq!(h.stats.total(), 1);
+    }
 }
