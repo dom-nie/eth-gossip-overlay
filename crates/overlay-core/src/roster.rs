@@ -514,4 +514,19 @@ hosts:
         assert_eq!(me.region, region("eu"));
         assert_eq!(me.site, None);
     }
+
+    #[test]
+    fn resolve_self_site_env_override_wins_over_roster() {
+        let roster = Roster::from_yaml(APPENDIX_A).unwrap();
+
+        let me = resolve_self(
+            &roster,
+            &env(&[("FLEET_OVERLAY_SITE", "ams2")]),
+            &gethostname,
+        )
+        .unwrap();
+
+        assert_eq!(me.hostname, host("bn-ams1-07"));
+        assert_eq!(me.site.as_deref(), Some("ams2"));
+    }
 }
