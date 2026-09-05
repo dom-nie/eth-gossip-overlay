@@ -2,6 +2,8 @@
 
 pub mod bn_http;
 pub mod compat;
+#[cfg(test)]
+mod conformance;
 pub mod gossip;
 pub mod inbound;
 pub mod link;
