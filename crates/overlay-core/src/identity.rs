@@ -267,4 +267,15 @@ mod tests {
 
         assert_eq!(loaded.0, seed(0x11).0);
     }
+    #[test]
+    fn seed_load_falls_back_to_path_when_credential_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let credentials = dir.path().join("credentials");
+        std::fs::create_dir(&credentials).unwrap();
+        let configured = seed_file(dir.path(), "seed", &"22".repeat(32));
+
+        let loaded = FleetSeed::load_from(Some(&credentials), &configured).unwrap();
+
+        assert_eq!(loaded.0, seed(0x22).0);
+    }
 }
