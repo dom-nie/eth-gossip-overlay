@@ -616,4 +616,25 @@ mod tests {
         assert_eq!(h.stats.count("error:no_subscribers", Class::Small), 1);
         assert_eq!(h.stats.total(), 1);
     }
+
+    #[tokio::test]
+    async fn other_gossipsub_errors_are_counted_by_reason() {
+        let mut h = Harness::new();
+        let refusals = [
+            (PublishError::MessageTooLarge, "message_too_large"),
+            (PublishError::AllQueuesFull(3), "all_queues_full"),
+            (
+                PublishError::TransformFailed(std::io::Error::other("bad snappy")),
+                "transform_failed",
+            ),
+        ];
+
+        for (n, (err, reason)) in refusals.into_iter().enumerate() {
+            let outcome = h.step_answered(item(Class::Large, n), Err(err)).await;
+
+            assert_eq!(outcome, Some(PublishOutcome::Error(reason)));
+            assert_eq!(h.stats.count(&format!("error:{reason}"), Class::Large), 1);
+        }
+        assert_eq!(h.stats.total(), 3);
+    }
 }
