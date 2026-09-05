@@ -534,6 +534,19 @@ mod tests {
         assert_eq!(after_old.compat, Some(STATE_UNSUPPORTED));
         assert_eq!(stats.gauges().compat, Some(STATE_SUPPORTED));
     }
+
+    #[test]
+    fn trusted_gauge_follows_is_trusted() {
+        let (mut watch, stats) = watch();
+        let version = Some(format!("Lighthouse/v{PINNED}"));
+
+        watch.on_bn_info(version.clone(), Some(true));
+        let trusted = stats.gauges().trusted;
+        watch.on_bn_info(version, Some(false));
+
+        assert_eq!(trusted, Some(true));
+        assert_eq!(stats.gauges().trusted, Some(false));
+    }
 }
 
 #[cfg(test)]
