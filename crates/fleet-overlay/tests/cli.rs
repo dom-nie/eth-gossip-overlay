@@ -69,3 +69,28 @@ fn peer_id_subcommand_fails_on_malformed_node_key() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(&node_key.display().to_string()), "{stderr}");
 }
+
+#[test]
+fn gen_seed_writes_64_hex_chars_newline_and_mode_0600() {
+    let dir = tempfile::tempdir().unwrap();
+    let seed = dir.path().join("seed");
+
+    let output = fleet_overlay()
+        .args(["gen-seed", "--out"])
+        .arg(&seed)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let text = std::fs::read_to_string(&seed).unwrap();
+    assert_eq!(text.len(), 65, "{text:?}");
+    let (hex, rest) = text.split_at(64);
+    assert!(hex.chars().all(|c| c.is_ascii_hexdigit()), "{hex}");
+    assert_eq!(rest, "\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&seed).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{mode:04o}");
+    }
+}
