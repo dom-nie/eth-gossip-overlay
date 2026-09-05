@@ -424,4 +424,20 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn peer_info_is_none_when_own_peer_id_not_listed() {
+        let (own, other) = (peer_id(1), peer_id(2));
+        let server = MockServer::start().await;
+        serve(
+            &server,
+            "/lighthouse/peers",
+            json!([peer_row(&other, true)]),
+        )
+        .await;
+
+        let got = client(&server).peer_info(&own).await.unwrap();
+
+        assert_eq!(got, None);
+    }
 }
