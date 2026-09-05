@@ -30,11 +30,12 @@ use libp2p::core::upgrade::Version;
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub::{
     self, AllowAllSubscriptionFilter, IdentTopic, Message, MessageAcceptance, MessageAuthenticity,
-    MessageId, PublishError, TopicHash, ValidationMode,
+    MessageId, MetricsConfig, PublishError, TopicHash, ValidationMode,
 };
 use libp2p::swarm::{Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, noise, yamux};
 use lighthouse_network::types::SnappyTransform;
+use prometheus_client::registry::Registry;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
@@ -105,6 +106,9 @@ pub struct FakeBn {
     received: Option<mpsc::Receiver<Received>>,
     events: mpsc::Receiver<FakeBnEvent>,
     responses: Responses,
+    /// The fork's gossipsub metrics under `gossipsub_`, as Lighthouse registers them; only
+    /// a fake from [`start_with_metrics`](Self::start_with_metrics) has one.
+    metrics: Option<Registry>,
 }
 
 /// What the mock answers on the three endpoints the connect probe reads. The identity
@@ -233,11 +237,20 @@ impl FakeBn {
         Self::start_on(0, MockServer::start().await).await
     }
 
+    /// A fake whose gossipsub metrics can be read with [`metrics_text`](Self::metrics_text).
+    pub async fn start_with_metrics() -> Self {
+        Self::build(0, MockServer::start().await, Some(Registry::default())).await
+    }
+
     /// A fake with a fresh key on `port` (0 for any), served by `http`, whose identity
     /// endpoint is repointed at the new key. This is how a test restarts the beacon node
     /// behind the HTTP endpoint a link was configured with.
     pub async fn start_on(port: u16, http: MockServer) -> Self {
-        let mut swarm = lighthouse_swarm();
+        Self::build(port, http, None).await
+    }
+
+    async fn build(port: u16, http: MockServer, mut metrics: Option<Registry>) -> Self {
+        let mut swarm = lighthouse_swarm(metrics.as_mut());
         swarm
             .listen_on(format!("/ip4/127.0.0.1/tcp/{port}").parse().unwrap())
             .unwrap();
@@ -264,9 +277,30 @@ impl FakeBn {
             received: Some(received),
             events,
             responses: Responses::default(),
+            metrics,
         };
         bn.remount().await;
         bn
+    }
+
+    /// The fake's gossipsub metrics in Prometheus text form.
+    pub fn metrics_text(&self) -> String {
+        let registry = self
+            .metrics
+            .as_ref()
+            .expect("a fake from start_with_metrics");
+        let mut text = String::new();
+        prometheus_client::encoding::text::encode(&mut text, registry).unwrap();
+        text
+    }
+
+    /// How many IDONTWANT control messages the fake has received.
+    pub fn idontwant_msgs(&self) -> u64 {
+        self.metrics_text()
+            .lines()
+            .find_map(|line| line.strip_prefix("gossipsub_idontwant_msgs_total "))
+            .map(|count| count.trim().parse().unwrap())
+            .unwrap_or(0)
     }
 
     /// The identity the mock serves and the swarm runs under.
@@ -345,7 +379,7 @@ impl FakeBn {
     /// side has seen the other's subscription, so the fake's next heartbeat grafts it and a
     /// publish from it reaches the fake. The fake must already be subscribed to `topic`.
     pub async fn attach_public_peer(&mut self, topic: &str) -> PublicPeer {
-        let mut swarm = lighthouse_swarm();
+        let mut swarm = lighthouse_swarm(None);
         let peer_id = *swarm.local_peer_id();
         self.commands.send(Cmd::Public(peer_id)).await.unwrap();
         swarm
@@ -517,7 +551,7 @@ async fn drive(
 /// deactivated) while gossipsub's keeps alive only mesh peers, and the fake has no RPC
 /// behaviour, so copying the timeout would drop a quiet link after 10 s where a real beacon
 /// node would not.
-fn lighthouse_swarm() -> Swarm<LighthouseBehaviour> {
+fn lighthouse_swarm(metrics: Option<&mut Registry>) -> Swarm<LighthouseBehaviour> {
     SwarmBuilder::with_new_identity()
         .with_tokio()
         .with_other_transport(|keypair| {
@@ -528,7 +562,7 @@ fn lighthouse_swarm() -> Swarm<LighthouseBehaviour> {
             )?)
         })
         .unwrap()
-        .with_behaviour(|_| lighthouse_behaviour())
+        .with_behaviour(|_| lighthouse_behaviour(metrics))
         .unwrap()
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::MAX))
         .build()
@@ -536,16 +570,24 @@ fn lighthouse_swarm() -> Swarm<LighthouseBehaviour> {
 
 /// The behaviour as `service/mod.rs:341-350` constructs it, minus the whitelist filter (every
 /// topic a test uses is one the beacon node would allow) and the peer scoring (trusted peers
-/// are exempt from it anyway).
-fn lighthouse_behaviour() -> LighthouseBehaviour {
+/// are exempt from it anyway). `metrics` attaches the fork's metrics under `gossipsub_`, the
+/// prefix the beacon node uses.
+fn lighthouse_behaviour(metrics: Option<&mut Registry>) -> LighthouseBehaviour {
     let spec = ChainSpec::mainnet();
-    gossipsub::Behaviour::new_with_subscription_filter_and_transform(
+    let behaviour = gossipsub::Behaviour::new_with_subscription_filter_and_transform(
         MessageAuthenticity::Anonymous,
         lighthouse_gossipsub_config(&spec),
         AllowAllSubscriptionFilter::default(),
         SnappyTransform::new(spec.max_payload_size as usize, spec.max_compressed_len()),
     )
-    .unwrap()
+    .unwrap();
+    match metrics {
+        Some(registry) => behaviour.with_metrics(
+            registry.sub_registry_with_prefix("gossipsub"),
+            MetricsConfig::default(),
+        ),
+        None => behaviour,
+    }
 }
 
 /// `gossipsub_config` from `beacon_node/lighthouse_network/src/config.rs:450-523` at v8.2.2,
