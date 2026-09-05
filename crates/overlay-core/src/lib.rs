@@ -3,6 +3,7 @@
 
 pub mod backoff;
 pub mod config;
+pub mod identity;
 pub mod msgid;
 pub mod roster;
 pub mod seen;
