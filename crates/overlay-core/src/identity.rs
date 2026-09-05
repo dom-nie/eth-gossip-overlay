@@ -55,6 +55,8 @@ pub fn derive_tls_keypair(seed: &FleetSeed, hostname: &Hostname) -> SigningKey {
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+
     use super::*;
     use crate::roster::Hostname;
 
@@ -90,5 +92,46 @@ mod tests {
         let two = derive_tls_keypair(&seed(0x22), &host("bn-1"));
 
         assert_ne!(one.to_bytes(), two.to_bytes());
+    }
+    fn seed_file(dir: &Path, name: &str, text: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    #[test]
+    fn seed_file_with_63_hex_chars_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = seed_file(dir.path(), "seed", &format!("{}c", "ab".repeat(31)));
+
+        let message = FleetSeed::load_from(None, &path).unwrap_err().to_string();
+
+        assert!(
+            message.contains(&path.display().to_string()) && message.contains("63"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn seed_file_with_trailing_newline_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = seed_file(dir.path(), "seed", &format!("{}\n", "ab".repeat(32)));
+
+        let loaded = FleetSeed::load_from(None, &path).unwrap();
+
+        assert_eq!(loaded.0, seed(0xab).0);
+    }
+
+    #[test]
+    fn seed_file_with_non_hex_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = seed_file(dir.path(), "seed", &"zz".repeat(32));
+
+        let message = FleetSeed::load_from(None, &path).unwrap_err().to_string();
+
+        assert!(
+            message.contains(&path.display().to_string()) && message.contains("'z'"),
+            "{message}"
+        );
     }
 }
