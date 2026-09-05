@@ -368,6 +368,24 @@ mod tests {
         _dir: tempfile::TempDir,
     }
 
+    /// A loopback port nothing listens on.
+    fn closed_port() -> Multiaddr {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        format!("/ip4/127.0.0.1/tcp/{port}").parse().unwrap()
+    }
+
+    async fn identity_requests(bn: &FakeBn) -> usize {
+        bn.http()
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/eth/v1/node/identity")
+            .count()
+    }
+
     fn node_key(dir: &tempfile::TempDir) -> NodeKey {
         NodeKey::load_or_create(&dir.path().join("node.key")).unwrap()
     }
@@ -505,5 +523,23 @@ mod tests {
                 peer_id: bn.peer_id()
             }
         );
+    }
+
+    /// With 10 ms doubling to 100 ms, jittered down to half, 500 ms holds a dozen attempts
+    /// at most; a loop that redials as fast as the port refuses would make hundreds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn link_does_not_spin_when_bn_is_down() {
+        let bn = FakeBn::start().await;
+        let cfg = LinkConfig {
+            libp2p_addr: closed_port(),
+            ..link_config(&bn)
+        };
+        let harness = spawn(cfg, &bn);
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let attempts = identity_requests(&bn).await;
+        assert!((2..=20).contains(&attempts), "{attempts} identity requests");
+        drop(harness);
     }
 }

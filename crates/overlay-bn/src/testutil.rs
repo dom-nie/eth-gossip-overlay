@@ -128,6 +128,11 @@ impl FakeBn {
         Url::parse(&format!("{}/eth/v1/node/identity", self.http.uri())).unwrap()
     }
 
+    /// The mock server, for counting what the link asked it.
+    pub fn http(&self) -> &MockServer {
+        &self.http
+    }
+
     /// Subscribes the fake to `topic`; the link sees `BnEvent::Subscribed` once it has.
     pub async fn subscribe(&self, topic: &str) {
         self.commands
