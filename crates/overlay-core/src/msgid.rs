@@ -93,7 +93,20 @@ fn decompress(compressed: &[u8], max_decompressed: usize) -> Result<Vec<u8>, Bra
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::*;
+
+    fn by_hand(domain: [u8; 4], length: [u8; 8], topic: &str, data: &[u8]) -> MessageId {
+        let digest = Sha256::new_with_prefix(domain)
+            .chain_update(length)
+            .chain_update(topic)
+            .chain_update(data)
+            .finalize();
+        let mut id = [0; 20];
+        id.copy_from_slice(&digest[..20]);
+        MessageId(id)
+    }
 
     const TOPIC: &str = "/eth2/6a95a1a9/beacon_block/ssz_snappy";
     const HELLO_SNAPPY: &[u8] = &[0x05, 0x10, 0x68, 0x65, 0x6c, 0x6c, 0x6f];
@@ -121,20 +134,32 @@ mod tests {
     #[test]
     fn topic_length_is_little_endian() {
         let topic = "x".repeat(256);
-        let by_hand = |length: [u8; 8]| {
-            let digest = Sha256::new_with_prefix(MESSAGE_DOMAIN_VALID_SNAPPY)
-                .chain_update(length)
-                .chain_update(&topic)
-                .chain_update(b"hello")
-                .finalize();
-            let mut id = [0; 20];
-            id.copy_from_slice(&digest[..20]);
-            MessageId(id)
-        };
+        let by_hand =
+            |length: [u8; 8]| by_hand(MESSAGE_DOMAIN_VALID_SNAPPY, length, &topic, b"hello");
 
         let computed = compute(&topic, HELLO_SNAPPY, 1024);
 
         assert_eq!(computed.id, by_hand(256u64.to_le_bytes()));
         assert_ne!(computed.id, by_hand(256u64.to_be_bytes()));
+    }
+
+    #[test]
+    fn payload_claiming_huge_length_does_not_allocate() {
+        let four_gib_header = [0x80, 0x80, 0x80, 0x80, 0x10, 0x00];
+        let started = Instant::now();
+
+        let computed = compute(TOPIC, &four_gib_header, 1024);
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert_eq!(computed.branch, Branch::TooLarge);
+        assert_eq!(
+            computed.id,
+            by_hand(
+                MESSAGE_DOMAIN_INVALID_SNAPPY,
+                (TOPIC.len() as u64).to_le_bytes(),
+                TOPIC,
+                &four_gib_header
+            )
+        );
     }
 }
