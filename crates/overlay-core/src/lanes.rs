@@ -197,6 +197,17 @@ mod tests {
     }
 
     #[test]
+    fn lanes_with_capacities_sizes_each_lane() {
+        let lanes = ClassLanes::with_capacities(1, 2, Arc::new(()));
+        lanes.push(Class::Small, 1).unwrap();
+        lanes.push(Class::Large, 1).unwrap();
+        lanes.push(Class::Large, 2).unwrap();
+
+        assert_eq!(lanes.push(Class::Small, 2), Err(Dropped(2)));
+        assert_eq!(lanes.push(Class::Large, 3), Err(Dropped(3)));
+    }
+
+    #[test]
     fn lanes_full_small_lane_drops_the_new_item_and_counts_small() {
         let counts = Arc::new(Counts::default());
         let lanes = ClassLanes::new(counts.clone());
