@@ -8,6 +8,8 @@ edition.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_yaml_bw.workspace = true
+sha2.workspace = true
+snap.workspace = true
 thiserror.workspace = true
 url.workspace = true
 
