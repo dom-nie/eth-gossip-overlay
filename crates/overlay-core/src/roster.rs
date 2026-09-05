@@ -94,6 +94,12 @@ pub enum RosterError {
         /// The parser's own error, which names the offending key and its position.
         source: yaml::Error,
     },
+    /// The hostname this process resolved to has no roster entry.
+    #[error("{hostname} is not in the roster")]
+    UnknownHost {
+        /// The hostname that was looked up.
+        hostname: Hostname,
+    },
     /// A host parsed but cannot be used as written.
     #[error("{}hosts[{index}] {:?}: {reason}", in_file(.path.as_deref()), .hostname.0)]
     Invalid {
@@ -198,6 +204,40 @@ impl Roster {
             .iter()
             .filter(move |host| &host.hostname != hostname)
     }
+}
+
+/// Which roster host this process is and where it fans out from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelfIdentity {
+    /// The name this process runs under, and its key in every peer's roster.
+    pub hostname: Hostname,
+    /// The region this process fans out in.
+    pub region: Region,
+    /// The site label, if there is one.
+    pub site: Option<String>,
+}
+
+const HOSTNAME_ENV: &str = "FLEET_OVERLAY_HOSTNAME";
+
+/// Works out who this process is: `FLEET_OVERLAY_HOSTNAME` if set, else `gethostname`, looked
+/// up in `roster`. Both sources are passed in so this crate never reads the real environment
+/// and a test can stage any combination.
+pub fn resolve_self(
+    roster: &Roster,
+    env: &dyn Fn(&str) -> Option<String>,
+    gethostname: &dyn Fn() -> String,
+) -> Result<SelfIdentity, RosterError> {
+    let hostname = Hostname(env(HOSTNAME_ENV).unwrap_or_else(gethostname));
+    let entry = roster
+        .get(&hostname)
+        .ok_or_else(|| RosterError::UnknownHost {
+            hostname: hostname.clone(),
+        })?;
+    Ok(SelfIdentity {
+        hostname,
+        region: entry.region.clone(),
+        site: entry.site.clone(),
+    })
 }
 
 #[cfg(test)]
