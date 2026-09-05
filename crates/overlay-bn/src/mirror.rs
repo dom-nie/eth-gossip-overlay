@@ -222,6 +222,16 @@ mod tests {
         .expect("the link never connected to the fake");
     }
 
+    async fn wait_sets(
+        watch: &mut watch::Receiver<SubscriptionSets>,
+        wanted: impl FnMut(&SubscriptionSets) -> bool,
+    ) {
+        tokio::time::timeout(WAIT, watch.wait_for(wanted))
+            .await
+            .expect("the sets never reached the awaited value")
+            .unwrap();
+    }
+
     #[test]
     fn subscribe_event_produces_subscribe_action_and_changed_sets() {
         let mut mirror = Mirror::new(*BN);
@@ -380,5 +390,27 @@ mod tests {
         .expect("the subscription was not mirrored within a second");
         shown.unwrap();
         assert!(matches!(seen, FakeBnEvent::Subscribed { .. }));
+    }
+
+    /// The link's Disconnected has to empty the sets before the replacement fake, under a
+    /// new peer id, comes up on the same port and announces a different topic.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fake_bn_restart_rebuilds_sets_from_reannounced_subscriptions() {
+        let mut bn = FakeBn::start().await;
+        let mut watch = mirrored_link(&bn);
+        wait_connected(&mut bn).await;
+        bn.subscribe(ATTESTATION_3).await;
+        wait_sets(&mut watch, |s| s == &mirrored(&[ATTESTATION_3])).await;
+
+        let port = bn.port();
+        let http = bn.shutdown().await;
+        wait_sets(&mut watch, |s| s == &SubscriptionSets::default()).await;
+        let mut bn = FakeBn::start_on(port, http).await;
+        wait_connected(&mut bn).await;
+        bn.subscribe(BLOCK).await;
+
+        let block = Topic::parse(BLOCK).unwrap();
+        wait_sets(&mut watch, |s| s.advertised.contains(&block)).await;
+        assert_eq!(*watch.borrow(), mirrored(&[BLOCK]));
     }
 }
