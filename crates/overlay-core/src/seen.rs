@@ -148,4 +148,17 @@ mod tests {
 
         assert!(cache.insert(id(1)));
     }
+
+    #[test]
+    fn capacity_evicts_oldest_first() {
+        let mut cache = cache(Duration::from_secs(60), 3, &FakeClock::new());
+
+        for byte in [1, 2, 3, 4] {
+            cache.insert(id(byte));
+        }
+
+        assert!(!cache.contains(&id(1)));
+        assert!(cache.contains(&id(2)));
+        assert!(cache.contains(&id(4)));
+    }
 }
