@@ -9,6 +9,7 @@ repository.workspace = true
 [dependencies]
 libp2p.workspace = true
 overlay-core.workspace = true
+prometheus-client.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 thiserror.workspace = true
@@ -19,7 +20,7 @@ url.workspace = true
 lighthouse_network.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 types.workspace = true
 wiremock.workspace = true
 
