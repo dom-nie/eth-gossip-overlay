@@ -190,4 +190,23 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn evict_expired_removes_only_expired() {
+        let clock = FakeClock::new();
+        let mut cache = cache(Duration::from_secs(60), 100, &clock);
+        cache.insert(id(1));
+        clock.advance(Duration::from_secs(30));
+        cache.insert(id(2));
+        clock.advance(Duration::from_secs(20));
+        cache.insert(id(3));
+
+        clock.advance(Duration::from_secs(10));
+        cache.evict_expired();
+
+        assert_eq!(cache.len(), 2);
+        assert!(!cache.contains(&id(1)));
+        assert!(cache.contains(&id(2)));
+        assert!(cache.contains(&id(3)));
+    }
 }
