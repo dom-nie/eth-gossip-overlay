@@ -452,6 +452,10 @@ impl Config {
         let (fanout, limits) = (&self.overlay.fanout, &self.bn.publish_rate_limit);
         for (field, zero) in [
             (
+                "overlay.fanout.large.stripe_min_recipients",
+                fanout.large.stripe_min_recipients == 0,
+            ),
+            (
                 "overlay.fanout.small.relays_per_remote_region",
                 fanout.small.relays_per_remote_region == 0,
             ),
