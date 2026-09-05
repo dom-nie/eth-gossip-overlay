@@ -22,6 +22,12 @@ allow = [
   "Zlib",
   "MPL-2.0",
 ]
+exceptions = [
+  # Mozilla's root store, under a data licence. cargo metadata unifies Lighthouse's rustls-tls
+  # feature onto the reqwest this workspace uses with json only, so cargo deny walks into it;
+  # no build of the binaries links it (cargo tree -p overlay-bn -e normal has no TLS crate).
+  { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+]
 
 [bans]
 # Lighthouse's tree pins older rand, hkdf and ed25519-dalek next to the versions this workspace
