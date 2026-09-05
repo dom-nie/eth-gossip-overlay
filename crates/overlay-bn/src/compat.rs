@@ -345,9 +345,20 @@ fn parse_triple(s: &str) -> Option<Version> {
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use overlay_core::lanes::ClassLanes;
+    use prometheus_client::registry::Registry;
+    use serde_json::json;
 
     use super::*;
-    use crate::testutil::LOG;
+    use crate::bn_http::BnClient;
+    use crate::link::BnLink;
+    use crate::spec::spec_watch;
+    use crate::testutil::{FakeBn, LOG, link_config, node_key, ok_json};
+
+    /// Long enough for a dial and the connect probe on a loaded CI box.
+    const WAIT: Duration = Duration::from_secs(3);
 
     /// The gauges as T-041 will keep them, modelled so the trait's promises are what the
     /// tests assert: one compat series at 1, one info series, trusted absent when `None`.
@@ -565,6 +576,51 @@ mod tests {
 
         assert_eq!(stats.gauges().trusted, None);
         assert_eq!(absent(&log.text()) - before, 1);
+    }
+
+    /// The task end to end: the fake's probe answers reach the gauges, and a spec whose
+    /// `MAX_PAYLOAD_SIZE` differs from the compiled one takes the compat state over.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fake_bn_probe_drives_info_trusted_and_size_mismatch_through_the_task() {
+        let mut bn = FakeBn::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let key = node_key(&dir);
+        bn.set_peers_response(ok_json(json!([{
+            "peer_id": key.peer_id().to_string(),
+            "peer_info": {"is_trusted": true}
+        }])))
+        .await;
+        bn.set_spec_response(ok_json(json!({"data": {"MAX_PAYLOAD_SIZE": "1048576"}})))
+            .await;
+        let (commands, commands_rx) = mpsc::channel(64);
+        let (spec_tx, spec_rx) = spec_watch();
+        let lanes = ClassLanes::new(Arc::new(()));
+        let link = BnLink::spawn(
+            link_config(&bn),
+            &key,
+            BnClient::new(bn.http_addr(), Duration::from_secs(2)),
+            &mut Registry::default(),
+            lanes.pusher(),
+            spec_tx,
+            commands_rx,
+        );
+        let stats = Arc::new(Recording::default());
+        let task = Watch::spawn(link.events, spec_rx, stats.clone());
+
+        let expected = Gauges {
+            compat: Some(STATE_SIZE_MISMATCH),
+            info: Some("Lighthouse/v8.2.2-e423a66/x86_64-linux".to_owned()),
+            trusted: Some(true),
+        };
+        tokio::time::timeout(WAIT, async {
+            while stats.gauges() != expected {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("gauges never reached {expected:?}: {:?}", stats.gauges()));
+        assert!(!task.is_finished());
+        drop(commands);
     }
 }
 
