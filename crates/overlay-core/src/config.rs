@@ -449,6 +449,22 @@ impl Config {
                 ),
             ));
         }
+        let limits = &self.bn.publish_rate_limit;
+        for (field, value) in [
+            (
+                "bn.publish_rate_limit.small_per_s",
+                u64::from(limits.small_per_s),
+            ),
+            (
+                "bn.publish_rate_limit.large_per_s",
+                u64::from(limits.large_per_s),
+            ),
+            ("bn.publish_rate_limit.bytes_per_s", limits.bytes_per_s),
+        ] {
+            if value == 0 {
+                return Err(invalid(field, "must be at least 1".to_owned()));
+            }
+        }
         Ok(())
     }
 }
