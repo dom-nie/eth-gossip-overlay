@@ -20,7 +20,7 @@
 //! | `validate_messages` | on: nothing is forwarded until the application reports on it; same on the BN |
 //! | `max_transmit_size` | [`wire::MAX_TRANSMIT_SIZE`], 12,234,442 bytes from mainnet's `MAX_PAYLOAD_SIZE`; the BN passes `ChainSpec::max_message_size()` |
 //! | `max_publish_messages`, `max_control_messages_sent`, `max_control_message_size` | 500, 500, 128 KiB copied from the BN, which sizes its RPCs by them; no drift test, the module is private |
-//! | Message id | [`message_id_fn`]: the spec's `SHA256(domain ++ le64(len(topic)) ++ topic ++ decompressed)[..20]`; the BN computes the same over data its transform already decompressed |
+//! | Message id | [`message_id_fn`]: the spec's `SHA256(domain ++ le64(len(topic)) ++ topic ++ decompressed)[..20]`, decompressing at most [`wire::MAX_PAYLOAD_SIZE`], the bound the BN's snappy transform enforces; the BN computes the same over data that transform already decompressed |
 //!
 //! # Local policy, for a node with one explicit peer
 //!
@@ -95,14 +95,15 @@ pub struct BnLinkConfig {
 }
 
 /// The spec's message id over the compressed bytes gossipsub hands over: T-006 decompresses
-/// inside the hash, which is what lets the transform stay the identity. The branch is dropped
-/// here because gossipsub only wants an id; the receive paths decide what to do with a payload
-/// that took the invalid branch.
+/// inside the hash, which is what lets the transform stay the identity. The decompressed bound
+/// is [`wire::MAX_PAYLOAD_SIZE`], the same the beacon node's snappy transform enforces, so a
+/// payload the BN would refuse never gets a valid-domain id here. The branch is dropped because
+/// gossipsub only wants an id; the receive paths decide what to do with an invalid one.
 pub fn message_id_fn(message: &Message) -> MessageId {
     let computed = msgid::compute(
         message.topic.as_str(),
         &message.data,
-        wire::MAX_TRANSMIT_SIZE as usize,
+        wire::MAX_PAYLOAD_SIZE as usize,
     );
     MessageId::new(&computed.id.0)
 }

@@ -29,6 +29,13 @@ pub const MAX_CONTROL_MESSAGES_SENT: usize = 500;
 /// reject that RPC. No drift test: the module is private.
 pub const MAX_CONTROL_MESSAGE_SIZE: usize = 128 << 10;
 
+/// The most a payload may decompress to. The beacon node's `SnappyTransform::inbound_transform`
+/// (`beacon_node/lighthouse_network/src/types/pubsub.rs:106`) refuses anything past
+/// `max_uncompressed_len`, which `service/mod.rs:343` sets to `spec.max_payload_size`, so the
+/// message id must use the same bound or it would give a valid-domain id to a payload the BN
+/// never accepts.
+pub const MAX_PAYLOAD_SIZE: u64 = SpecSnapshot::MAINNET.max_payload_size;
+
 /// The largest gossipsub RPC either side sends or accepts, from
 /// `beacon_node/lighthouse_network/src/service/mod.rs:243` (`ctx.chain_spec.max_message_size()`
 /// into `gossipsub_max_transmit_size`) with mainnet's `MAX_PAYLOAD_SIZE`.
