@@ -6,6 +6,8 @@ use libp2p::gossipsub::{
 };
 use prometheus_client::registry::Registry;
 
+pub mod wire;
+
 /// The behaviour type the BN link runs: identity transform, so payloads stay compressed, and
 /// no subscription filter, because the only peer is the operator's own beacon node.
 pub type GossipBehaviour = Behaviour<IdentityTransform, AllowAllSubscriptionFilter>;
@@ -24,6 +26,7 @@ pub struct BnLinkConfig {
 )]
 pub fn config(cfg: &BnLinkConfig) -> Config {
     ConfigBuilder::default()
+        .max_transmit_size(wire::MAX_TRANSMIT_SIZE as usize)
         .validation_mode(ValidationMode::Anonymous)
         .idontwant_on_publish(cfg.idontwant_on_publish)
         .build()
