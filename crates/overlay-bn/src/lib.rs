@@ -2,6 +2,7 @@
 
 pub mod bn_http;
 pub mod node_key;
+pub mod spec;
 
 #[cfg(test)]
 mod tests {

@@ -220,6 +220,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
+    use crate::spec::SpecSnapshot;
 
     fn client(server: &MockServer) -> BnClient {
         client_at(&format!("{}/eth/v1/node/identity", server.uri()))
@@ -453,5 +454,43 @@ mod tests {
         let err = client(&server).peer_info(&peer_id(1)).await.unwrap_err();
 
         assert!(matches!(err, BnHttpError::Status(404)), "{err:?}");
+    }
+
+    /// Every key the sidecar reads, with values a mainnet BN would never send, among the
+    /// clutter a real spec carries: a hundred keys nobody reads and v8's `BLOB_SCHEDULE`, the
+    /// one value that is not a string.
+    fn spec_data() -> serde_json::Value {
+        let mut data = json!({
+            "DATA_COLUMN_SIDECAR_SUBNET_COUNT": "64",
+            "NUMBER_OF_COLUMNS": "64",
+            "NUMBER_OF_CUSTODY_GROUPS": "32",
+            "MAX_PAYLOAD_SIZE": "1048576",
+            "SECONDS_PER_SLOT": "6",
+            "SLOTS_PER_EPOCH": "8",
+            "BLOB_SCHEDULE": [{"EPOCH": "412608", "MAX_BLOBS_PER_BLOCK": "15"}]
+        });
+        for n in 0..100 {
+            data[format!("UNRELATED_{n}")] = json!(n.to_string());
+        }
+        data
+    }
+
+    const MOCKED: SpecSnapshot = SpecSnapshot {
+        data_column_sidecar_subnet_count: 64,
+        number_of_columns: 64,
+        number_of_custody_groups: 32,
+        max_payload_size: 1_048_576,
+        seconds_per_slot: 6,
+        slots_per_epoch: 8,
+    };
+
+    #[tokio::test]
+    async fn spec_parses_decimal_strings_into_snapshot() {
+        let server = MockServer::start().await;
+        serve(&server, "/eth/v1/config/spec", json!({"data": spec_data()})).await;
+
+        let got = client(&server).spec().await.unwrap();
+
+        assert_eq!(got, MOCKED);
     }
 }
