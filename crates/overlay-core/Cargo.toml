@@ -3,6 +3,8 @@ name = "overlay-core"
 description = "Pure overlay logic: routing, batching, striping, codecs. No sockets, no channels."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 ed25519-dalek.workspace = true
