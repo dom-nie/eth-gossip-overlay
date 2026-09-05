@@ -749,4 +749,22 @@ log:
             "{err}"
         );
     }
+
+    #[test]
+    fn listen_must_be_a_socket_address() {
+        for (doc, field) in [
+            ("overlay: { listen: \"7788\" }", "overlay.listen"),
+            ("metrics_listen: \"7789\"", "metrics_listen"),
+        ] {
+            let err = Config::from_yaml(doc).unwrap_err();
+
+            assert!(err.to_string().contains(field), "{doc}: {err}");
+        }
+        for doc in [
+            "overlay: { listen: \"[::]:7788\" }",
+            "overlay: { listen: \"0.0.0.0:7788\" }",
+        ] {
+            assert!(Config::from_yaml(doc).is_ok(), "{doc}");
+        }
+    }
 }
