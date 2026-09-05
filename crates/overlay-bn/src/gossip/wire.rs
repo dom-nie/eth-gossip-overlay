@@ -105,6 +105,24 @@ mod drift {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gossip::{BnLinkConfig, config};
+
+    /// The beacon node sizes its RPCs by its own limits, so the sidecar must accept at least
+    /// what Lighthouse is willing to send in one RPC.
+    #[test]
+    fn rpc_limits_equal_the_copied_lighthouse_values() {
+        let config = config(&BnLinkConfig {
+            idontwant_on_publish: true,
+        });
+
+        assert_eq!(config.max_publish_messages(), MAX_PUBLISH_MESSAGES);
+        assert_eq!(config.max_control_messages_sent(), MAX_CONTROL_MESSAGES_SENT);
+        assert_eq!(config.max_control_message_size(), MAX_CONTROL_MESSAGE_SIZE);
+        assert_eq!(
+            (MAX_PUBLISH_MESSAGES, MAX_CONTROL_MESSAGES_SENT, MAX_CONTROL_MESSAGE_SIZE),
+            (500, 500, 128 << 10)
+        );
+    }
 
     #[test]
     fn max_payload_size_mismatch_is_reported() {
