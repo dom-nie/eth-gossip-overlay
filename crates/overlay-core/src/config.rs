@@ -392,7 +392,10 @@ pub enum ConfigError {
 impl Config {
     /// Parses a complete `config.yaml` document.
     pub fn from_yaml(text: &str) -> Result<Self, ConfigError> {
-        yaml::from_str(text).map_err(|source| ConfigError::Parse { source })
+        // Not yaml::from_str: on any error it retries through a Value tree to resolve merge
+        // keys and returns that second error, which has lost the key path and the line.
+        Self::deserialize(yaml::Deserializer::from_str(text))
+            .map_err(|source| ConfigError::Parse { source })
     }
 }
 
