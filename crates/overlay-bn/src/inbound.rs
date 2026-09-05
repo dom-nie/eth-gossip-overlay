@@ -152,6 +152,7 @@ impl Inbound {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write;
     use std::sync::{Arc, LazyLock, Mutex};
     use std::time::Duration;
 
@@ -200,6 +201,37 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), out.recv())
             .await
             .is_err()
+    }
+
+    /// Collects everything a `tracing` subscriber writes, so a test can read it back.
+    #[derive(Clone, Default)]
+    struct Log(Arc<Mutex<Vec<u8>>>);
+
+    impl Log {
+        /// Installs a subscriber writing into this log for the rest of the test. The task
+        /// runs on the test's thread under `#[tokio::test]`, so its lines land here too.
+        fn capture(&self) -> tracing::subscriber::DefaultGuard {
+            let log = self.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(move || log.clone())
+                .finish();
+            tracing::subscriber::set_default(subscriber)
+        }
+
+        fn text(&self) -> String {
+            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+        }
+    }
+
+    impl Write for Log {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
     /// Every stats call in the order it was made.
@@ -422,5 +454,25 @@ mod tests {
             (small.class, small.payload.len()),
             (Class::Small, below.len())
         );
+    }
+
+    #[tokio::test]
+    async fn unknown_kind_increments_counter_by_class_and_logs_the_name_once() {
+        let log = Log::default();
+        let _guard = log.capture();
+        let mut h = Harness::new();
+        for payload in [b"one", b"two", b"six"] {
+            h.push(Class::Small, message(NEW_THING, payload));
+        }
+        h.start();
+
+        for _ in 0..3 {
+            assert_eq!(h.out.recv().await.class, Class::Small);
+        }
+
+        assert_eq!(h.stats.count("unknown_kind", Class::Small), 3);
+        assert_eq!(h.stats.count("first_seen", Class::Small), 3);
+        let text = log.text();
+        assert_eq!(text.matches("new_thing_topic").count(), 1, "{text:?}");
     }
 }
