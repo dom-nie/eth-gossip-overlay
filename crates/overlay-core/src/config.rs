@@ -522,4 +522,16 @@ log:
             assert!(err.to_string().contains(key), "{doc}: {err}");
         }
     }
+
+    #[test]
+    fn pin_cpu_accepts_null_and_an_integer() {
+        let null = Config::from_yaml("overlay: { io_thread: { pin_cpu: null } }").unwrap();
+        let absent =
+            Config::from_yaml("overlay: { io_thread: { prefer_busy_poll: true } }").unwrap();
+        let pinned = Config::from_yaml("overlay: { io_thread: { pin_cpu: 30 } }").unwrap();
+
+        assert_eq!(null.overlay.io_thread.pin_cpu, None);
+        assert_eq!(absent.overlay.io_thread.pin_cpu, None);
+        assert_eq!(pinned.overlay.io_thread.pin_cpu, Some(30));
+    }
 }
