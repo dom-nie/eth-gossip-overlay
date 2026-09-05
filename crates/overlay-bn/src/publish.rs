@@ -1,3 +1,221 @@
+//! The one path into the beacon node (§5.2 "Publishing into the BN", §5.7, DX-N4). Ingress
+//! sites hold a [`PublishHandle`] and call [`enqueue`](PublishHandle::enqueue), which locks
+//! the queue for a push and returns; nothing on the overlay receive path ever awaits the
+//! beacon node. One [`Publisher`] task drains the queue large-first and is the only code in
+//! the sidecar that awaits gossipsub: it sends `BnCommand::Publish` to the link and waits for
+//! the reply, so a wedged beacon node stalls this task and nothing else.
+//!
+//! Neither the handle nor the publisher holds a seen cache (D08). The three ingress sites
+//! insert immediately before they enqueue: T-016 for what the beacon node sent, T-032's
+//! receiver for whole messages and batch entries from the overlay, T-074's completion for
+//! reassembled messages. Because the insert precedes the queue, a copy suppressed here is
+//! still remembered for the TTL.
+//!
+//! Gossipsub's own duplicate cache refuses anything it already received or published, so a
+//! `Duplicate` reply is a normal outcome (the beacon node echoed a message the sidecar
+//! already had), and `NoPeersSubscribedToTopic` is the `SUBS` race: a sibling routed on a
+//! subscription the beacon node has since dropped. Both are counted and logged at debug, never
+//! at error level. `idontwant_on_publish` is gossipsub's own flag (T-012); nothing here does
+//! anything extra for it (CL-N4).
+
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use libp2p::gossipsub::PublishError;
+use overlay_core::pubqueue::{DropReason, PublishItem, PublishQueue, Pushed, QueueStats};
+use overlay_core::time::Clock;
+use overlay_core::topic::Class;
+use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::task::JoinHandle;
+
+use crate::link::BnCommand;
+
+/// Where the publish path counts. T-041 binds [`published`](Self::published) to
+/// `messages_total{direction="bn_out", class}`, [`suppressed_inject_off`](Self::suppressed_inject_off)
+/// to `publish_suppressed_total{reason="inject_off", class}`,
+/// [`rate_limited`](Self::rate_limited) to `rate_limited_total{class}`,
+/// [`error`](Self::error) to `publish_errors_total{class, reason}` and
+/// [`queue_drop`](Self::queue_drop) to `publish_queue_drops_total{class, reason}`. `()` counts
+/// nothing.
+pub trait PublishStats: Send + Sync {
+    /// Gossipsub accepted the message; it is on its way to the beacon node.
+    fn published(&self, class: Class);
+    /// The inject kill switch is off; the item was dequeued and discarded.
+    fn suppressed_inject_off(&self, class: Class);
+    /// The class bucket or the bytes bucket was empty; the item was discarded.
+    fn rate_limited(&self, class: Class);
+    /// Gossipsub refused the message for `reason`: `duplicate` and `no_subscribers` are
+    /// normal outcomes, the others are logged as warnings.
+    fn error(&self, class: Class, reason: &'static str);
+    /// The queue evicted or expired an entry. Runs inside the queue's lock, so an
+    /// implementation must be a counter increment and nothing slower.
+    fn queue_drop(&self, class: Class, reason: DropReason);
+}
+
+impl PublishStats for () {
+    fn published(&self, _: Class) {}
+    fn suppressed_inject_off(&self, _: Class) {}
+    fn rate_limited(&self, _: Class) {}
+    fn error(&self, _: Class, _: &'static str) {}
+    fn queue_drop(&self, _: Class, _: DropReason) {}
+}
+
+/// The queue's drop counter, forwarded so T-041 implements one trait for the whole path.
+struct QueueDrops(Arc<dyn PublishStats>);
+
+impl QueueStats for QueueDrops {
+    fn dropped(&self, class: Class, reason: DropReason) {
+        self.0.queue_drop(class, reason);
+    }
+}
+
+/// What an ingress site learns from [`PublishHandle::enqueue`]. The item is queued either way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnqueueOutcome {
+    /// The lane had room.
+    Enqueued,
+    /// The lane was full and evicted its oldest entries to make room; they were counted.
+    Dropped(DropReason),
+}
+
+/// What the drain task did with one item.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PublishOutcome {
+    /// Gossipsub accepted it.
+    Published,
+    /// Gossipsub already had it: the beacon node echoed a message the sidecar had received.
+    Duplicate,
+    /// The sidecar's gossipsub instance is no longer subscribed to the topic: the `SUBS` race.
+    NoSubscribers,
+    /// Gossipsub refused it for the named reason, the `reason` label of `publish_errors_total`.
+    Error(&'static str),
+}
+
+/// The ingress sites' end of the publish queue. Cheap to clone; every clone feeds the same
+/// queue and wakes the same drain task. Holds no seen cache: see the module doc for the
+/// three insert sites.
+#[derive(Clone)]
+pub struct PublishHandle {
+    queue: Arc<Mutex<PublishQueue>>,
+    wake: Arc<Notify>,
+    clock: Arc<dyn Clock>,
+}
+
+impl PublishHandle {
+    /// Queues `item`, stamped with the clock's time, and wakes the drain task. Synchronous:
+    /// the lock is held for the push and nothing else.
+    pub fn enqueue(&self, item: PublishItem) -> EnqueueOutcome {
+        let pushed = self.lock().push(item, self.clock.now());
+        self.wake.notify_one();
+        match pushed {
+            Pushed::Enqueued => EnqueueOutcome::Enqueued,
+            Pushed::Dropped { reason, .. } => EnqueueOutcome::Dropped(reason),
+        }
+    }
+
+    fn pop(&self) -> Option<PublishItem> {
+        self.lock().pop(self.clock.now())
+    }
+
+    fn lock(&self) -> MutexGuard<'_, PublishQueue> {
+        // A poisoned lock means a thread panicked mid-push. The queue's accounting is updated
+        // before any call that could panic, so recover it instead of spreading the panic.
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The drain task. [`spawn`](Self::spawn) starts it; it ends when the link's command channel
+/// closes, because a publish can then never be answered.
+pub struct Publisher {
+    queue: PublishHandle,
+    commands: mpsc::Sender<BnCommand>,
+    stats: Arc<dyn PublishStats>,
+}
+
+impl Publisher {
+    /// Builds the queue and starts draining it into `commands`. The handle is what T-032,
+    /// T-062 and T-074 hold; the task keeps going until the link is gone.
+    pub fn spawn(
+        commands: mpsc::Sender<BnCommand>,
+        stats: Arc<dyn PublishStats>,
+        clock: Arc<dyn Clock>,
+    ) -> (PublishHandle, JoinHandle<()>) {
+        let (handle, publisher) = Self::new(commands, stats, clock);
+        (handle, tokio::spawn(publisher.run()))
+    }
+
+    fn new(
+        commands: mpsc::Sender<BnCommand>,
+        stats: Arc<dyn PublishStats>,
+        clock: Arc<dyn Clock>,
+    ) -> (PublishHandle, Self) {
+        let handle = PublishHandle {
+            queue: Arc::new(Mutex::new(PublishQueue::new(Arc::new(QueueDrops(
+                stats.clone(),
+            ))))),
+            wake: Arc::new(Notify::new()),
+            clock,
+        };
+        let publisher = Self {
+            queue: handle.clone(),
+            commands,
+            stats,
+        };
+        (handle, publisher)
+    }
+
+    async fn run(mut self) {
+        loop {
+            match self.queue.pop() {
+                Some(item) => {
+                    if self.step(item).await.is_none() {
+                        return;
+                    }
+                }
+                None => self.queue.wake.notified().await,
+            }
+        }
+    }
+
+    /// Publishes one item and reports what became of it. `None` means the link is gone:
+    /// the command could not be delivered or its reply was dropped.
+    async fn step(&mut self, item: PublishItem) -> Option<PublishOutcome> {
+        let class = item.class;
+        let (reply, answer) = oneshot::channel();
+        let command = BnCommand::Publish {
+            topic: item.topic.to_string(),
+            data: item.payload.to_vec(),
+            reply,
+        };
+        self.commands.send(command).await.ok()?;
+        let outcome = match answer.await.ok()? {
+            Ok(_) => {
+                self.stats.published(class);
+                PublishOutcome::Published
+            }
+            Err(err) => {
+                let reason = reason(&err);
+                tracing::warn!(%err, id = %item.id, topic = %item.topic, "publish refused");
+                self.stats.error(class, reason);
+                PublishOutcome::Error(reason)
+            }
+        };
+        Some(outcome)
+    }
+}
+
+/// The `reason` label for a gossipsub refusal.
+fn reason(err: &PublishError) -> &'static str {
+    match err {
+        PublishError::Duplicate => "duplicate",
+        PublishError::NoPeersSubscribedToTopic => "no_subscribers",
+        PublishError::MessageTooLarge => "message_too_large",
+        PublishError::SigningError(_) => "signing_error",
+        PublishError::TransformFailed(_) => "transform_failed",
+        PublishError::AllQueuesFull(_) => "all_queues_full",
+        PublishError::Partial(_) => "partial",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
@@ -44,15 +262,6 @@ mod tests {
     impl Recorded {
         fn record(&self, what: impl Into<String>, class: Class) {
             self.0.lock().unwrap().push((what.into(), class));
-        }
-
-        fn count(&self, what: &str, class: Class) -> usize {
-            self.0
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|(w, c)| w == what && *c == class)
-                .count()
         }
 
         fn total(&self) -> usize {
