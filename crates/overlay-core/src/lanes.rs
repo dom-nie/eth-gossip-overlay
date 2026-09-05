@@ -161,6 +161,16 @@ mod tests {
         assert_eq!(lanes.recv().await, "attestation");
     }
 
+    #[tokio::test]
+    async fn lanes_recv_from_reads_one_lane_only() {
+        let mut lanes = ClassLanes::new(Arc::new(()));
+        lanes.push(Class::Large, "block").unwrap();
+        lanes.push(Class::Small, "attestation").unwrap();
+
+        assert_eq!(lanes.recv_from(Class::Small).await, "attestation");
+        assert_eq!(lanes.recv_from(Class::Large).await, "block");
+    }
+
     #[test]
     fn lanes_full_small_lane_drops_the_new_item_and_counts_small() {
         let counts = Arc::new(Counts::default());
