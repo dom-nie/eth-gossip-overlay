@@ -121,6 +121,9 @@ impl Roster {
                 hostname: host.hostname.clone(),
                 reason,
             };
+            if host.hostname.0.is_empty() {
+                return Err(invalid("empty hostname".to_owned()));
+            }
             if host.region.0.is_empty() {
                 return Err(invalid("empty region".to_owned()));
             }
