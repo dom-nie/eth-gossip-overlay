@@ -51,3 +51,21 @@ fn peer_id_subcommand_prints_base58_and_exits_zero_without_seed_or_roster() {
         peer_id.to_string()
     );
 }
+
+#[test]
+fn peer_id_subcommand_fails_on_malformed_node_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_in(dir.path()).unwrap();
+    let node_key = dir.path().join("node.key");
+    std::fs::write(&node_key, format!("{}c\n", "ab".repeat(31))).unwrap();
+
+    let output = fleet_overlay()
+        .args(["peer-id", "--config"])
+        .arg(&config)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(&node_key.display().to_string()), "{stderr}");
+}
