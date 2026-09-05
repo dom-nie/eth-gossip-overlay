@@ -10,7 +10,7 @@
 //! (T-073) asking whether a chunk's message is already held. Do not add a fourth insert site.
 
 use std::collections::{HashSet, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::msgid::MessageId;
@@ -121,6 +121,51 @@ impl SeenCache {
             Some((_, id)) => self.seen.remove(&id),
             None => false,
         }
+    }
+}
+
+/// One [`SeenCache`] shared by the three insert sites and the readers. Every method takes the
+/// lock for that one call and releases it before returning, so the cache is never held across
+/// an `await`; the [`SeenStats`] hook runs inside that window, which is why it must be cheap.
+#[derive(Clone)]
+pub struct SharedSeenCache(Arc<Mutex<SeenCache>>);
+
+impl SharedSeenCache {
+    /// Wraps `cache` so clones of the handle share it.
+    pub fn new(cache: SeenCache) -> Self {
+        Self(Arc::new(Mutex::new(cache)))
+    }
+
+    /// [`SeenCache::insert`] under the lock.
+    pub fn insert(&self, id: MessageId) -> bool {
+        self.lock().insert(id)
+    }
+
+    /// [`SeenCache::contains`] under the lock.
+    pub fn contains(&self, id: &MessageId) -> bool {
+        self.lock().contains(id)
+    }
+
+    /// [`SeenCache::len`] under the lock.
+    pub fn len(&self) -> usize {
+        self.lock().len()
+    }
+
+    /// [`SeenCache::is_empty`] under the lock.
+    pub fn is_empty(&self) -> bool {
+        self.lock().is_empty()
+    }
+
+    /// [`SeenCache::evict_expired`] under the lock.
+    pub fn evict_expired(&self) {
+        self.lock().evict_expired();
+    }
+
+    fn lock(&self) -> MutexGuard<'_, SeenCache> {
+        // The only code that runs under the lock and can panic is a stats hook, and insert
+        // calls it after both containers are consistent, so a poisoned cache is still a valid
+        // cache. Dropping every message after a metrics panic would be the worse failure.
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
