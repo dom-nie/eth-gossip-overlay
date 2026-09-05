@@ -300,4 +300,14 @@ mod tests {
             TopicKind::Other("light_client_finality_update".to_owned())
         );
     }
+
+    #[test]
+    fn unknown_below_threshold_is_small() {
+        let other = TopicKind::Other("light_client_finality_update".to_owned());
+
+        assert_eq!(
+            Class::of(&other, UNKNOWN_LARGE_THRESHOLD_BYTES - 1),
+            Class::Small
+        );
+    }
 }
