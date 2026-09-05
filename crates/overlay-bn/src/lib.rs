@@ -2,6 +2,7 @@
 
 pub mod bn_http;
 pub mod gossip;
+pub mod inbound;
 pub mod link;
 pub mod mirror;
 pub mod node_key;
