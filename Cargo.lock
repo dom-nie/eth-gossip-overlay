@@ -4140,6 +4140,7 @@ dependencies = [
  "rand 0.10.2",
  "serde",
  "serde_yaml_bw",
+ "tempfile",
  "thiserror 2.0.20",
  "url",
 ]
