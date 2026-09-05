@@ -1,5 +1,7 @@
 //! The gossipsub behaviour on the BN link.
 
+use std::time::Duration;
+
 use libp2p::gossipsub::{
     AllowAllSubscriptionFilter, Behaviour, Config, ConfigBuilder, IdentityTransform, Message,
     MessageAuthenticity, MessageId, MetricsConfig, ValidationMode,
@@ -8,6 +10,11 @@ use overlay_core::msgid;
 use prometheus_client::registry::Registry;
 
 pub mod wire;
+
+/// How long gossipsub remembers an id it has received or published, so the same message is
+/// never handed to the router or the beacon node twice. Twice the seen cache; the beacon node's
+/// own cache, two epochs, is the backstop for anything older.
+pub const DUPLICATE_CACHE_TIME: Duration = Duration::from_secs(120);
 
 /// The behaviour type the BN link runs: identity transform, so payloads stay compressed, and
 /// no subscription filter, because the only peer is the operator's own beacon node.
@@ -44,6 +51,7 @@ pub fn config(cfg: &BnLinkConfig) -> Config {
         .validation_mode(ValidationMode::Anonymous)
         .validate_messages()
         .message_id_fn(message_id_fn)
+        .duplicate_cache_time(DUPLICATE_CACHE_TIME)
         .idontwant_on_publish(cfg.idontwant_on_publish)
         .build()
         .expect("constant gossipsub parameters pass the builder's checks")
