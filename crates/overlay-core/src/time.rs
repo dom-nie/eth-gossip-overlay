@@ -84,4 +84,14 @@ mod tests {
 
         assert_eq!(held_by_unit_under_test.now(), held_by_test.now());
     }
+
+    #[test]
+    fn fake_clock_set_jumps_to_the_given_instant() {
+        let clock = FakeClock::new();
+        let target = clock.now() + Duration::from_secs(3600);
+
+        clock.set(target);
+
+        assert_eq!(clock.now(), target);
+    }
 }
