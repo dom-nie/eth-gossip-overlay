@@ -1,8 +1,14 @@
 # Fleet Gossip Overlay
 
-A sidecar for [Lighthouse](https://github.com/sigp/lighthouse) beacon nodes. Drop `fleet-overlay` next to each node you run and the sidecars build a private QUIC overlay between your own machines, so blocks, blobs and columns your fleet already has reach your other nodes without a second trip through the public gossip mesh. `fleet-overlayctl` talks to a running sidecar over its admin socket.
+[![CI](https://github.com/dom-nie/eth-bn-gossip-overlay/actions/workflows/ci.yml/badge.svg)](https://github.com/dom-nie/eth-bn-gossip-overlay/actions/workflows/ci.yml)
 
-The design document and the ticket backlog are maintained outside this repository. Work happens on one branch per ticket, test first: a failing test is committed, then the code that makes it pass, with commit subjects prefixed by the ticket id (`T-001: ...`).
+A sidecar for [Lighthouse](https://github.com/sigp/lighthouse) beacon nodes. Drop `fleet-overlay` next to each node you run and the sidecars build a private QUIC overlay between your own machines, so blocks, blobs and columns one of your nodes has already validated reach the others without a second trip through the public gossip mesh. `fleet-overlayctl` talks to a running sidecar over its admin socket.
+
+It is for operators who run several Lighthouse beacon nodes they control, whether that is three hosts in one rack or a few hundred spread over regions. Only your own hosts join the overlay: admission is a key derived from a seed you generate once and copy to every host.
+
+The overlay is an accelerator, never a dependency. Every beacon node keeps its own public peers, the sidecar holds no validator keys and creates no messages, and the receiving node validates everything that arrives through it as it would any other gossip. When the overlay is down, or a sidecar dies, the node carries on as if it had never had one; nothing gets worse.
+
+The quickstart in docs/quickstart.md arrives with the operator documentation.
 
 ## Build
 
@@ -37,3 +43,7 @@ cargo fmt --all --check
 | `crates/overlay-transport` | QUIC between sidecars |
 | `crates/overlay-bn` | the link to the local beacon node |
 | `crates/fleet-overlay` | the two binaries and their wiring |
+
+## Contributing and policies
+
+[CONTRIBUTING.md](CONTRIBUTING.md) explains the test-first workflow, the commit convention, the sign-off and the pull request checklist. The design document and the ticket backlog it refers to are maintained outside this repository. [SECURITY.md](SECURITY.md) says how to report a vulnerability privately and what the overlay's key pinning does and does not protect. [COMPATIBILITY.md](COMPATIBILITY.md) lists the supported Rust toolchain, Lighthouse version and platforms.
