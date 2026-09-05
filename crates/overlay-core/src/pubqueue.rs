@@ -218,4 +218,32 @@ mod tests {
             (1..=PUBLISH_SMALL_LANE_ENTRIES).collect::<Vec<_>>()
         );
     }
+
+    const MIB: usize = 1024 * 1024;
+
+    #[test]
+    fn queue_large_lane_drops_oldest_past_32_mib() {
+        let stats = Arc::new(Recorded::default());
+        let mut queue = PublishQueue::new(stats.clone());
+        let now = Instant::now();
+        for n in 0..4 {
+            assert_eq!(
+                queue.push(item(Class::Large, n, 8 * MIB), now),
+                Pushed::Enqueued
+            );
+        }
+
+        let fifth = queue.push(item(Class::Large, 4, 8 * MIB), now);
+        let sixth = queue.push(item(Class::Large, 5, 16 * MIB), now);
+
+        let full = Pushed::Dropped {
+            class: Class::Large,
+            reason: DropReason::Full,
+        };
+        assert_eq!((fifth, sixth), (full, full));
+        assert_eq!(stats.drops(), vec![(Class::Large, DropReason::Full); 3]);
+        let survivors: Vec<usize> =
+            std::iter::from_fn(|| queue.pop(now).as_ref().map(number)).collect();
+        assert_eq!(survivors, vec![3, 4, 5]);
+    }
 }
