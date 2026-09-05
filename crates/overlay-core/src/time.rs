@@ -11,7 +11,9 @@ pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
 }
 
-/// A clock that only moves when a test tells it to.
+/// A clock that only moves when a test tells it to. Clones share one instant, so a test can
+/// keep a handle while the unit under test owns another.
+#[derive(Clone)]
 pub struct FakeClock(Arc<Mutex<Instant>>);
 
 impl FakeClock {
