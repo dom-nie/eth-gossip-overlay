@@ -84,6 +84,8 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use proptest::prelude::*;
+
     use super::*;
     use crate::time::FakeClock;
 
@@ -160,5 +162,22 @@ mod tests {
         assert!(!cache.contains(&id(1)));
         assert!(cache.contains(&id(2)));
         assert!(cache.contains(&id(4)));
+    }
+
+    proptest! {
+        #[test]
+        fn len_never_exceeds_capacity(
+            capacity in 1usize..=8,
+            steps in prop::collection::vec((0u8..8, 0u64..100), 0..64),
+        ) {
+            let clock = FakeClock::new();
+            let mut cache = cache(Duration::from_millis(150), capacity, &clock);
+
+            for (byte, advance_ms) in steps {
+                clock.advance(Duration::from_millis(advance_ms));
+                cache.insert(id(byte));
+                prop_assert!(cache.len() <= capacity, "{} entries over capacity {capacity}", cache.len());
+            }
+        }
     }
 }
