@@ -1,8 +1,12 @@
 //! The mirror of the beacon node's subscriptions (§5.2): whatever topic the beacon node
 //! subscribes to, the sidecar subscribes to as well, which is what makes the beacon node
 //! forward that topic's validated messages to it, and the same set is what the sidecar
-//! advertises to its siblings. The sidecar never computes a topic name, so a fork digest
-//! change needs no sidecar release (§3 principle 6).
+//! advertises to its siblings. On top of that it subscribes to every data column topic of
+//! each fork digest the beacon node uses, because a beacon node publishes all columns of its
+//! own proposal but custodies only some (§5.2 "All column topics, always"). Those extras are
+//! local only (D06), so no sibling pushes a column to a beacon node that did not ask for it.
+//! They are the one topic name the sidecar computes; a fork digest change still needs no
+//! sidecar release (§3 principle 6).
 //!
 //! [`Mirror`] is pure: it takes the link's events and returns the actions they call for.
 //! [`run`] is the shell that applies them to the link and to a `watch` of the sets.
@@ -15,6 +19,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::link::{BnCommand, BnEvent};
+use crate::spec::SpecSnapshot;
 
 /// What a beacon node event asks the shell to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,15 +32,20 @@ pub enum MirrorAction {
     Changed(SubscriptionSets),
 }
 
-/// The beacon node's subscriptions as the link reports them. Ignores subscription events
-/// until a `Connected` names the beacon node, and after that any from another peer: the
-/// sidecar has one peer, but the event carries an id, so it is checked.
-#[derive(Debug, Default)]
+/// The beacon node's subscriptions as the link reports them, plus the extra column topics.
+/// Ignores subscription events until a `Connected` names the beacon node, and after that any
+/// from another peer: the sidecar has one peer, but the event carries an id, so it is checked.
+#[derive(Debug)]
 pub struct Mirror {
     bn: Option<PeerId>,
     /// Every topic string the beacon node is subscribed to, with its parse. One that does not
     /// parse is still mirrored to gossipsub; it only stays out of the sets.
     topics: BTreeMap<String, Option<Topic>>,
+    /// `NUMBER_OF_COLUMNS` from the spec snapshot: how many column topics a digest gets.
+    columns: u64,
+    /// What the sidecar's own gossipsub instance is subscribed to, the beacon node's strings
+    /// plus the extra columns. Kept so the next rebuild's diff against it is the actions.
+    subscribed: BTreeSet<String>,
     sets: SubscriptionSets,
     /// Unparsable strings already warned about, so a beacon node that re-announces one on
     /// every reconnect does not repeat the warning.
@@ -43,9 +53,17 @@ pub struct Mirror {
 }
 
 impl Mirror {
-    /// A mirror of nothing yet, with no beacon node to mirror until the link connects.
-    pub fn new() -> Self {
-        Self::default()
+    /// A mirror of nothing yet, sized by `spec`'s column count, with no beacon node to mirror
+    /// until the link connects.
+    pub fn new(spec: &SpecSnapshot) -> Self {
+        Self {
+            bn: None,
+            topics: BTreeMap::new(),
+            columns: spec.number_of_columns,
+            subscribed: BTreeSet::new(),
+            sets: SubscriptionSets::default(),
+            warned: BTreeSet::new(),
+        }
     }
 
     /// The current sets.
@@ -83,40 +101,71 @@ impl Mirror {
             }
         };
         self.topics.insert(topic.to_owned(), parsed);
-        let mut actions = vec![MirrorAction::Subscribe(topic.to_owned())];
-        actions.extend(self.changed());
-        actions
+        self.rederive()
     }
 
     fn unsubscribe(&mut self, topic: &str) -> Vec<MirrorAction> {
         if self.topics.remove(topic).is_none() {
             return Vec::new();
         }
-        let mut actions = vec![MirrorAction::Unsubscribe(topic.to_owned())];
-        actions.extend(self.changed());
-        actions
+        self.rederive()
     }
 
     /// Nothing survives a disconnect: the beacon node re-announces everything on reconnect.
     fn disconnected(&mut self) -> Vec<MirrorAction> {
-        let mut actions: Vec<_> = std::mem::take(&mut self.topics)
-            .into_keys()
-            .map(MirrorAction::Unsubscribe)
-            .collect();
-        actions.extend(self.changed());
-        actions
+        self.topics.clear();
+        self.rederive()
     }
 
-    /// Rebuilds the sets from the parsed topics and reports them if they differ from before.
-    /// A rebuild per event keeps `topics` the one source of truth and makes the comparison
-    /// the change detector; it walks the few hundred topics a beacon node announces.
-    fn changed(&mut self) -> Option<MirrorAction> {
-        let sets = SubscriptionSets::mirrored(self.topics.values().flatten().cloned().collect());
-        if sets == self.sets {
-            return None;
+    /// Rebuilds everything that follows from `topics` and `columns`. The extras are every
+    /// column topic of each digest the beacon node has a topic under, minus the columns it
+    /// subscribes to itself; indices are `u8`, so a count past 256 yields the 256 topics that
+    /// can be named. `advertised` is the mirrored set alone and `local` adds the extras
+    /// (D06). The diff of the gossipsub subscriptions against the previous rebuild is the
+    /// actions, which is what lets a column move between the two sets without a subscribe
+    /// or unsubscribe: the sidecar was on it either way. A rebuild per event keeps `topics`
+    /// the one source of truth; it walks the few hundred topics a beacon node announces.
+    fn rederive(&mut self) -> Vec<MirrorAction> {
+        let advertised: BTreeSet<Topic> = self.topics.values().flatten().cloned().collect();
+        let digests: BTreeSet<[u8; 4]> = advertised.iter().map(Topic::fork_digest).collect();
+        let columns = self.columns;
+        let extra: BTreeSet<Topic> = digests
+            .iter()
+            .flat_map(|&digest| {
+                (0..=u8::MAX)
+                    .take_while(move |&i| u64::from(i) < columns)
+                    .map(move |i| Topic::data_column(digest, i))
+            })
+            .filter(|topic| !advertised.contains(topic))
+            .collect();
+        let subscribed: BTreeSet<String> = self
+            .topics
+            .keys()
+            .cloned()
+            .chain(extra.iter().map(Topic::to_string))
+            .collect();
+        let mut actions: Vec<_> = self
+            .subscribed
+            .difference(&subscribed)
+            .cloned()
+            .map(MirrorAction::Unsubscribe)
+            .collect();
+        actions.extend(
+            subscribed
+                .difference(&self.subscribed)
+                .cloned()
+                .map(MirrorAction::Subscribe),
+        );
+        self.subscribed = subscribed;
+        let sets = SubscriptionSets {
+            local: advertised.union(&extra).cloned().collect(),
+            advertised,
+        };
+        if sets != self.sets {
+            self.sets = sets;
+            actions.push(MirrorAction::Changed(self.sets.clone()));
         }
-        self.sets = sets;
-        Some(MirrorAction::Changed(self.sets.clone()))
+        actions
     }
 }
 
@@ -130,7 +179,7 @@ pub fn run(
     sets: watch::Sender<SubscriptionSets>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut mirror = Mirror::new();
+        let mut mirror = Mirror::new(&SpecSnapshot::MAINNET);
         while let Some(event) = events.recv().await {
             for action in mirror.on_bn_event(&event) {
                 let command = match action {
@@ -218,9 +267,29 @@ mod tests {
             .collect()
     }
 
-    /// The sets a plain mirror of `topics` has.
-    fn mirrored(topics: &[&str]) -> SubscriptionSets {
-        SubscriptionSets::mirrored(topics.iter().map(|t| Topic::parse(t).unwrap()).collect())
+    /// The sets a mirror of `topics` has under the mainnet column count: the topics
+    /// themselves advertised, and every column of their digests in `local` as well.
+    fn sets_of(topics: &[&str]) -> SubscriptionSets {
+        let advertised: BTreeSet<Topic> = topics.iter().map(|t| Topic::parse(t).unwrap()).collect();
+        let mut local = advertised.clone();
+        for digest in advertised.iter().map(Topic::fork_digest) {
+            local.extend((0..128).map(|i| Topic::data_column(digest, i)));
+        }
+        SubscriptionSets { advertised, local }
+    }
+
+    /// `actions` without the subscribes and unsubscribes of column topics, for the tests
+    /// about the beacon node's own topics; the T-015 tests look at the columns.
+    fn without_columns(actions: Vec<MirrorAction>) -> Vec<MirrorAction> {
+        actions
+            .into_iter()
+            .filter(|a| match a {
+                MirrorAction::Subscribe(t) | MirrorAction::Unsubscribe(t) => {
+                    !t.contains("data_column_sidecar_")
+                }
+                MirrorAction::Changed(_) => true,
+            })
+            .collect()
     }
 
     /// A link to `bn` with the mirror shell on its events, and the watch the shell feeds.
@@ -269,13 +338,13 @@ mod tests {
         let actions = mirror.on_bn_event(&subscribed(ATTESTATION_3));
 
         assert_eq!(
-            actions,
+            without_columns(actions),
             vec![
                 MirrorAction::Subscribe(ATTESTATION_3.to_owned()),
-                MirrorAction::Changed(mirrored(&[ATTESTATION_3])),
+                MirrorAction::Changed(sets_of(&[ATTESTATION_3])),
             ]
         );
-        assert_eq!(mirror.sets(), &mirrored(&[ATTESTATION_3]));
+        assert_eq!(mirror.sets(), &sets_of(&[ATTESTATION_3]));
     }
 
     #[test]
@@ -286,13 +355,13 @@ mod tests {
         let actions = mirror.on_bn_event(&unsubscribed(ATTESTATION_3));
 
         assert_eq!(
-            actions,
+            without_columns(actions),
             vec![
                 MirrorAction::Unsubscribe(ATTESTATION_3.to_owned()),
-                MirrorAction::Changed(mirrored(&[])),
+                MirrorAction::Changed(sets_of(&[])),
             ]
         );
-        assert_eq!(mirror.sets(), &mirrored(&[]));
+        assert_eq!(mirror.sets(), &sets_of(&[]));
     }
 
     #[test]
@@ -303,7 +372,7 @@ mod tests {
         let actions = mirror.on_bn_event(&subscribed(ATTESTATION_3));
 
         assert_eq!(actions, vec![]);
-        assert_eq!(mirror.sets(), &mirrored(&[ATTESTATION_3]));
+        assert_eq!(mirror.sets(), &sets_of(&[ATTESTATION_3]));
     }
 
     #[test]
@@ -313,7 +382,7 @@ mod tests {
         let actions = mirror.on_bn_event(&unsubscribed(ATTESTATION_3));
 
         assert_eq!(actions, vec![]);
-        assert_eq!(mirror.sets(), &mirrored(&[]));
+        assert_eq!(mirror.sets(), &sets_of(&[]));
     }
 
     #[test]
@@ -325,25 +394,25 @@ mod tests {
         let actions = mirror.on_bn_event(&BnEvent::Disconnected);
 
         assert_eq!(
-            actions,
+            without_columns(actions),
             vec![
                 MirrorAction::Unsubscribe(ATTESTATION_3.to_owned()),
                 MirrorAction::Unsubscribe(BLOCK.to_owned()),
-                MirrorAction::Changed(mirrored(&[])),
+                MirrorAction::Changed(sets_of(&[])),
             ]
         );
-        assert_eq!(mirror.sets(), &mirrored(&[]));
+        assert_eq!(mirror.sets(), &sets_of(&[]));
     }
 
     /// Before the link has named the beacon node there is nobody to mirror.
     #[test]
     fn subscription_events_before_connected_are_ignored() {
-        let mut mirror = Mirror::new();
+        let mut mirror = Mirror::new(&SpecSnapshot::MAINNET);
 
         let actions = mirror.on_bn_event(&subscribed(ATTESTATION_3));
 
         assert_eq!(actions, vec![]);
-        assert_eq!(mirror.sets(), &mirrored(&[]));
+        assert_eq!(mirror.sets(), &sets_of(&[]));
     }
 
     #[test]
@@ -357,7 +426,7 @@ mod tests {
         });
 
         assert_eq!(actions, vec![]);
-        assert_eq!(mirror.sets(), &mirrored(&[]));
+        assert_eq!(mirror.sets(), &sets_of(&[]));
     }
 
     /// A restarted beacon node has a new peer id; its subscriptions must not be ignored.
@@ -372,8 +441,8 @@ mod tests {
             topic: ATTESTATION_3.to_owned(),
         });
 
-        assert_eq!(actions.len(), 2);
-        assert_eq!(mirror.sets(), &mirrored(&[ATTESTATION_3]));
+        assert_eq!(without_columns(actions).len(), 2);
+        assert_eq!(mirror.sets(), &sets_of(&[ATTESTATION_3]));
     }
 
     #[test]
@@ -384,16 +453,20 @@ mod tests {
         let actions = mirror.on_bn_event(&subscribed(raw));
 
         assert_eq!(actions, vec![MirrorAction::Subscribe(raw.to_owned())]);
-        assert_eq!(mirror.sets(), &mirrored(&[]));
+        assert_eq!(mirror.sets(), &sets_of(&[]));
         assert_eq!(
             mirror.on_bn_event(&BnEvent::Disconnected),
             vec![MirrorAction::Unsubscribe(raw.to_owned())]
         );
     }
 
+    /// A supernode subscribes to every column itself, so there is nothing extra to add.
     #[test]
     fn changed_carries_advertised_and_local_and_they_are_equal_without_extras() {
         let mut mirror = connected();
+        for topic in columns("00000000", 0..128) {
+            mirror.on_bn_event(&subscribed(&topic));
+        }
         mirror.on_bn_event(&subscribed(ATTESTATION_3));
 
         let actions = mirror.on_bn_event(&subscribed(BLOCK));
@@ -401,11 +474,7 @@ mod tests {
         let Some(MirrorAction::Changed(changed)) = actions.last() else {
             panic!("no Changed in {actions:?}");
         };
-        let expected: BTreeSet<Topic> = [ATTESTATION_3, BLOCK]
-            .iter()
-            .map(|t| Topic::parse(t).unwrap())
-            .collect();
-        assert_eq!(changed.advertised, expected);
+        assert_eq!(changed.advertised, sets_of(&[ATTESTATION_3, BLOCK]).local);
         assert_eq!(changed.local, changed.advertised);
     }
 
@@ -437,7 +506,7 @@ mod tests {
 
         let (shown, seen) = tokio::time::timeout(Duration::from_secs(1), async {
             tokio::join!(
-                watch.wait_for(|s| s == &mirrored(&[ATTESTATION_3])),
+                watch.wait_for(|s| s == &sets_of(&[ATTESTATION_3])),
                 bn.wait_for(
                     |e| matches!(e, FakeBnEvent::Subscribed { topic, .. } if topic == ATTESTATION_3)
                 ),
@@ -457,7 +526,7 @@ mod tests {
         let mut watch = mirrored_link(&bn);
         wait_connected(&mut bn).await;
         bn.subscribe(ATTESTATION_3).await;
-        wait_sets(&mut watch, |s| s == &mirrored(&[ATTESTATION_3])).await;
+        wait_sets(&mut watch, |s| s == &sets_of(&[ATTESTATION_3])).await;
 
         let port = bn.port();
         let http = bn.shutdown().await;
@@ -468,6 +537,6 @@ mod tests {
 
         let block = Topic::parse(BLOCK).unwrap();
         wait_sets(&mut watch, |s| s.advertised.contains(&block)).await;
-        assert_eq!(*watch.borrow(), mirrored(&[BLOCK]));
+        assert_eq!(*watch.borrow(), sets_of(&[BLOCK]));
     }
 }
