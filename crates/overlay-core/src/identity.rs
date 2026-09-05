@@ -278,4 +278,16 @@ mod tests {
 
         assert_eq!(loaded.0, seed(0x22).0);
     }
+    #[test]
+    fn previous_seed_is_none_when_unset_and_loaded_when_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let current = seed_file(dir.path(), "seed", &"11".repeat(32));
+        let previous = seed_file(dir.path(), "seed.previous", &"22".repeat(32));
+
+        let unset = Seeds::load(&current, None).unwrap();
+        let set = Seeds::load(&current, Some(&previous)).unwrap();
+
+        assert!(unset.previous.is_none());
+        assert_eq!(set.previous.unwrap().0, seed(0x22).0);
+    }
 }
