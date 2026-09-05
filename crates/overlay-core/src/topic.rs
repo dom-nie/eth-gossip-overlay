@@ -129,6 +129,10 @@ impl TopicKind {
                     Self::Attestation(index(i)?)
                 } else if let Some(i) = name.strip_prefix("sync_committee_") {
                     Self::SyncCommittee(index(i)?)
+                } else if let Some(i) = name.strip_prefix("data_column_sidecar_") {
+                    Self::DataColumnSidecar(index(i)?)
+                } else if let Some(i) = name.strip_prefix("blob_sidecar_") {
+                    Self::BlobSidecar(index(i)?)
                 } else {
                     Self::Other(name.to_owned())
                 }
