@@ -224,22 +224,28 @@ mod tests {
             .is_err()
     }
 
-    /// Collects everything a `tracing` subscriber writes, so a test can read it back.
+    /// Everything `tracing` writes in this test binary. One process-wide subscriber rather
+    /// than one per test: with a single dispatcher registered, tracing-core caches a call
+    /// site's interest by asking the dispatcher of whichever thread hits it first, and a
+    /// parallel test with no subscriber on its thread would cache "never" for the call site
+    /// a test with a thread-local subscriber is waiting on. A test looks for a string only
+    /// it logs.
+    static LOG: LazyLock<Log> = LazyLock::new(|| {
+        let log = Log::default();
+        let sink = log.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || sink.clone())
+            .finish();
+        tracing::subscriber::set_global_default(subscriber)
+            .expect("the only global subscriber in this test binary");
+        log
+    });
+
     #[derive(Clone, Default)]
     struct Log(Arc<Mutex<Vec<u8>>>);
 
     impl Log {
-        /// Installs a subscriber writing into this log for the rest of the test. The task
-        /// runs on the test's thread under `#[tokio::test]`, so its lines land here too.
-        fn capture(&self) -> tracing::subscriber::DefaultGuard {
-            let log = self.clone();
-            let subscriber = tracing_subscriber::fmt()
-                .with_ansi(false)
-                .with_writer(move || log.clone())
-                .finish();
-            tracing::subscriber::set_default(subscriber)
-        }
-
         fn text(&self) -> String {
             String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
         }
@@ -477,13 +483,14 @@ mod tests {
         );
     }
 
+    /// The name is used nowhere else, so its count in the shared log is this test's alone.
     #[tokio::test]
     async fn unknown_kind_increments_counter_by_class_and_logs_the_name_once() {
-        let log = Log::default();
-        let _guard = log.capture();
+        let log = &*LOG;
+        let topic = "/eth2/00000000/logged_once_topic/ssz_snappy";
         let mut h = Harness::new();
         for payload in [b"one", b"two", b"six"] {
-            h.push(Class::Small, message(NEW_THING, payload));
+            h.push(Class::Small, message(topic, payload));
         }
         h.start();
 
@@ -494,7 +501,7 @@ mod tests {
         assert_eq!(h.stats.count("unknown_kind", Class::Small), 3);
         assert_eq!(h.stats.count("first_seen", Class::Small), 3);
         let text = log.text();
-        assert_eq!(text.matches("new_thing_topic").count(), 1, "{text:?}");
+        assert_eq!(text.matches("logged_once_topic").count(), 1, "{text:?}");
     }
 
     /// The command channel is FIFO, so the first `ReportAccept` says which message the task
