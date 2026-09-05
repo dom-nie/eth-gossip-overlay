@@ -5,6 +5,18 @@
 
 use crate::spec::SpecSnapshot;
 
+/// The protocol ids both sides negotiate, newest first. Lighthouse sets no prefix
+/// (`gossipsub_config` in `beacon_node/lighthouse_network/src/config.rs:450-523` never calls
+/// `protocol_id_prefix`), so these are the fork's defaults from
+/// `protocols/gossipsub/src/protocol.rs:49-66` and `Default for ProtocolConfig` at rev
+/// `c774d4e71357d7cd2f792c4767d616d2dd369ee3`. `1.3.0` is the partial-messages extension.
+pub const PROTOCOL_IDS: [&str; 4] = [
+    "/meshsub/1.3.0",
+    "/meshsub/1.2.0",
+    "/meshsub/1.1.0",
+    "/meshsub/1.0.0",
+];
+
 /// The largest gossipsub RPC either side sends or accepts, from
 /// `beacon_node/lighthouse_network/src/service/mod.rs:243` (`ctx.chain_spec.max_message_size()`
 /// into `gossipsub_max_transmit_size`) with mainnet's `MAX_PAYLOAD_SIZE`.
