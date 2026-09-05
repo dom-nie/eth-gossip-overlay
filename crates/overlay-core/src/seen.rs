@@ -72,6 +72,16 @@ impl SeenCache {
         self.seen.contains(id)
     }
 
+    /// How many ids are held, expired ones included until something removes them.
+    pub fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    /// Whether nothing is held.
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
     fn pop_oldest(&mut self) {
         if let Some((_, id)) = self.order.pop_front() {
             self.seen.remove(&id);
