@@ -90,6 +90,14 @@ mod drift {
         }
     }
 
+    #[test]
+    fn max_payload_size_equals_lighthouse() {
+        assert_eq!(
+            MAX_PAYLOAD_SIZE,
+            types::ChainSpec::mainnet().max_payload_size
+        );
+    }
+
     /// `lighthouse_network::config` is private, so the comparison is with the value it reads
     /// from `ChainSpec`, which is what reaches `max_transmit_size(..)`.
     #[test]

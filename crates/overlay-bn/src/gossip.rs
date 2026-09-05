@@ -186,8 +186,24 @@ mod tests {
     fn message_id_matches_core_compute_for_compressed_payload() {
         let payload: Vec<u8> = (0..240u32).map(|i| (i * 7 % 251) as u8).collect();
         let compressed = snap::raw::Encoder::new().compress_vec(&payload).unwrap();
-        let expected = msgid::compute(TOPIC, &compressed, wire::MAX_TRANSMIT_SIZE as usize);
+        let expected = msgid::compute(TOPIC, &compressed, wire::MAX_PAYLOAD_SIZE as usize);
         assert_eq!(expected.branch, msgid::Branch::Valid);
+
+        let id = config(&cfg()).message_id(&message(&compressed));
+
+        assert_eq!(id.0, expected.id.0);
+    }
+
+    /// Well-formed snappy that fits the transmit size but decompresses one byte past
+    /// `MAX_PAYLOAD_SIZE`: the beacon node's transform refuses it, so it must not get a
+    /// valid-domain id here either.
+    #[test]
+    fn payload_decompressing_past_max_payload_size_takes_the_invalid_branch() {
+        let zeros = vec![0u8; wire::MAX_PAYLOAD_SIZE as usize + 1];
+        let compressed = snap::raw::Encoder::new().compress_vec(&zeros).unwrap();
+        assert!((compressed.len() as u64) < wire::MAX_TRANSMIT_SIZE);
+        let expected = msgid::compute(TOPIC, &compressed, wire::MAX_PAYLOAD_SIZE as usize);
+        assert_eq!(expected.branch, msgid::Branch::TooLarge);
 
         let id = config(&cfg()).message_id(&message(&compressed));
 
