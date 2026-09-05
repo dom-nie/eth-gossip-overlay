@@ -349,4 +349,13 @@ hosts:
 
         assert_eq!(regions, [region("eu"), region("us")]);
     }
+
+    #[test]
+    fn others_excludes_self() {
+        let roster = Roster::from_yaml(APPENDIX_A).unwrap();
+
+        let others: Vec<_> = roster.others(&host("bn-fra1-02")).collect();
+
+        assert_eq!(names(&others), ["bn-ams1-07", "bn-nyc1-01"]);
+    }
 }
