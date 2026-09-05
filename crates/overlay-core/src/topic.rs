@@ -2,6 +2,11 @@
 //! beacon node subscribes to, so it parses `/eth2/<fork_digest>/<name>/ssz_snappy` into a typed
 //! value and renders it back unchanged, without ever computing a topic of its own.
 
+/// Payloads on a topic name the sidecar does not know travel as [`Class::Large`] from this size
+/// up. A constant rather than a config key: the class only picks the transport path, and a
+/// release is the place to correct a wrong guess for a new topic.
+pub const UNKNOWN_LARGE_THRESHOLD_BYTES: usize = 16 * 1024;
+
 /// A parsed `/eth2/<fork_digest>/<name>/ssz_snappy` topic.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Topic {
@@ -43,6 +48,45 @@ pub enum TopicKind {
     /// A name the sidecar does not know, kept verbatim. Such a topic is still relayed; only the
     /// transport class has to be guessed from the payload size.
     Other(String),
+}
+
+/// Which transport path a message takes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Class {
+    /// Batched with other small messages and sent as unreliable datagrams.
+    Small,
+    /// Chunked, parity-coded and striped over the region.
+    Large,
+}
+
+impl Class {
+    /// The class of a message on `kind`, following Appendix B: "Small class topics:
+    /// `beacon_attestation_{0..63}`, `beacon_aggregate_and_proof`, `sync_committee_{0..3}`,
+    /// `sync_committee_contribution_and_proof`, `voluntary_exit`, `proposer_slashing`,
+    /// `attester_slashing`, `bls_to_execution_change`. Large class topics: `beacon_block`,
+    /// `data_column_sidecar_{0..127}`, `blob_sidecar_*`." Known kinds ignore `payload_len`.
+    ///
+    /// A name the sidecar does not know is Large when `payload_len` is at least
+    /// [`UNKNOWN_LARGE_THRESHOLD_BYTES`] and Small below it. A small payload on the large path
+    /// wastes chunking and parity; a large payload on the small path exceeds the datagram limit
+    /// and defeats batching.
+    pub fn of(kind: &TopicKind, payload_len: usize) -> Self {
+        match kind {
+            TopicKind::BeaconBlock
+            | TopicKind::DataColumnSidecar(_)
+            | TopicKind::BlobSidecar(_) => Self::Large,
+            TopicKind::BeaconAggregateAndProof
+            | TopicKind::Attestation(_)
+            | TopicKind::SyncCommittee(_)
+            | TopicKind::SyncContributionAndProof
+            | TopicKind::VoluntaryExit
+            | TopicKind::ProposerSlashing
+            | TopicKind::AttesterSlashing
+            | TopicKind::BlsToExecutionChange => Self::Small,
+            TopicKind::Other(_) if payload_len >= UNKNOWN_LARGE_THRESHOLD_BYTES => Self::Large,
+            TopicKind::Other(_) => Self::Small,
+        }
+    }
 }
 
 /// Why a string is not a topic.
