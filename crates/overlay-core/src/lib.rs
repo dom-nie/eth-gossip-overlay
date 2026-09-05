@@ -4,6 +4,7 @@
 pub mod backoff;
 pub mod config;
 pub mod msgid;
+pub mod seen;
 pub mod time;
 pub mod topic;
 
