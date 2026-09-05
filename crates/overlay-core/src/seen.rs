@@ -135,4 +135,17 @@ mod tests {
 
         assert!(!cache.insert(id(1)));
     }
+
+    #[test]
+    fn reinsert_does_not_extend_ttl() {
+        let clock = FakeClock::new();
+        let mut cache = cache(Duration::from_secs(60), 100, &clock);
+        cache.insert(id(1));
+
+        clock.advance(Duration::from_secs(59));
+        assert!(!cache.insert(id(1)));
+        clock.advance(Duration::from_secs(1));
+
+        assert!(cache.insert(id(1)));
+    }
 }
