@@ -171,6 +171,25 @@ mod tests {
         );
     }
 
+    /// One explicit peer that is never in the mesh: nothing to gossip to, nothing to graft,
+    /// nothing to exchange peers with.
+    #[test]
+    fn local_policy_parameters_are_set() {
+        let config = config(&cfg());
+
+        assert_eq!(config.gossip_lazy(), 0);
+        assert_eq!(config.gossip_factor(), 0.0);
+        assert_eq!(config.history_gossip(), 1);
+        assert_eq!(config.history_length(), 5, "the fork's default");
+        assert_eq!(config.mesh_n_low(), 1);
+        assert_eq!(config.mesh_n(), 1);
+        assert_eq!(config.mesh_n_high(), 1);
+        assert_eq!(config.mesh_outbound_min(), 0);
+        assert!(!config.do_px());
+        assert!(!config.flood_publish());
+        assert_eq!(config.idontwant_message_size_threshold(), 1000);
+    }
+
     #[tokio::test]
     async fn payload_is_not_decompressed_by_transform() {
         let mut registry = Registry::default();
