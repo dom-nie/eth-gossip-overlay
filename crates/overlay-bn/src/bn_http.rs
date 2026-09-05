@@ -186,4 +186,23 @@ mod tests {
 
         assert_eq!(got, own);
     }
+
+    #[tokio::test]
+    async fn ignores_unknown_fields() {
+        let server = MockServer::start().await;
+        let own = peer_id(1);
+        serve(
+            &server,
+            "/eth/v1/node/identity",
+            json!({
+                "data": {"peer_id": own.to_string(), "added_in_a_later_release": {"x": [1, 2]}},
+                "execution_optimistic": false
+            }),
+        )
+        .await;
+
+        let got = client(&server).peer_id().await.unwrap();
+
+        assert_eq!(got, own);
+    }
 }
