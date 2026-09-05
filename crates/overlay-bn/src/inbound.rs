@@ -184,6 +184,7 @@ mod tests {
     use crate::link::{BnCommand, BnMessage};
 
     const ATTESTATION_3: &str = "/eth2/00000000/beacon_attestation_3/ssz_snappy";
+    const BLOCK: &str = "/eth2/00000000/beacon_block/ssz_snappy";
     /// A name the sidecar does not know, as a future fork might add one.
     const NEW_THING: &str = "/eth2/00000000/new_thing_topic/ssz_snappy";
 
@@ -486,5 +487,20 @@ mod tests {
         assert_eq!(h.stats.count("first_seen", Class::Small), 3);
         let text = log.text();
         assert_eq!(text.matches("new_thing_topic").count(), 1, "{text:?}");
+    }
+
+    /// The command channel is FIFO, so the first `ReportAccept` says which message the task
+    /// took first; the fanout lanes would show the block first either way.
+    #[tokio::test]
+    async fn large_lane_is_drained_before_small() {
+        let mut h = Harness::new();
+        let attestation = message(ATTESTATION_3, b"an attestation");
+        let block = message(BLOCK, b"a block");
+        h.push(Class::Small, attestation);
+        h.push(Class::Large, block.clone());
+        h.start();
+
+        assert_eq!(h.accepted().await.0, block.id);
+        assert_eq!(h.out.recv().await.id, core_id(&block));
     }
 }
