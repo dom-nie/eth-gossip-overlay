@@ -18,6 +18,7 @@
 //! at error level. `idontwant_on_publish` is gossipsub's own flag (T-012); nothing here does
 //! anything extra for it (CL-N4).
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use libp2p::gossipsub::PublishError;
@@ -82,6 +83,8 @@ pub enum EnqueueOutcome {
 pub enum PublishOutcome {
     /// Gossipsub accepted it.
     Published,
+    /// The inject kill switch is off; the item was discarded before any command was sent.
+    SuppressedInjectOff,
     /// Gossipsub already had it: the beacon node echoed a message the sidecar had received.
     Duplicate,
     /// The sidecar's gossipsub instance is no longer subscribed to the topic: the `SUBS` race.
@@ -128,23 +131,28 @@ impl PublishHandle {
 pub struct Publisher {
     queue: PublishHandle,
     commands: mpsc::Sender<BnCommand>,
+    inject: Arc<AtomicBool>,
     stats: Arc<dyn PublishStats>,
 }
 
 impl Publisher {
     /// Builds the queue and starts draining it into `commands`. The handle is what T-032,
-    /// T-062 and T-074 hold; the task keeps going until the link is gone.
+    /// T-062 and T-074 hold; the task keeps going until the link is gone. `inject` is the
+    /// kill switch, shared with whoever flips it (config, SIGHUP, `fleet-overlayctl`); it is
+    /// read per item, so flipping it back on resumes without a restart.
     pub fn spawn(
         commands: mpsc::Sender<BnCommand>,
+        inject: Arc<AtomicBool>,
         stats: Arc<dyn PublishStats>,
         clock: Arc<dyn Clock>,
     ) -> (PublishHandle, JoinHandle<()>) {
-        let (handle, publisher) = Self::new(commands, stats, clock);
+        let (handle, publisher) = Self::new(commands, inject, stats, clock);
         (handle, tokio::spawn(publisher.run()))
     }
 
     fn new(
         commands: mpsc::Sender<BnCommand>,
+        inject: Arc<AtomicBool>,
         stats: Arc<dyn PublishStats>,
         clock: Arc<dyn Clock>,
     ) -> (PublishHandle, Self) {
@@ -158,6 +166,7 @@ impl Publisher {
         let publisher = Self {
             queue: handle.clone(),
             commands,
+            inject,
             stats,
         };
         (handle, publisher)
@@ -180,6 +189,10 @@ impl Publisher {
     /// the command could not be delivered or its reply was dropped.
     async fn step(&mut self, item: PublishItem) -> Option<PublishOutcome> {
         let class = item.class;
+        if !self.inject.load(Ordering::Relaxed) {
+            self.stats.suppressed_inject_off(class);
+            return Some(PublishOutcome::SuppressedInjectOff);
+        }
         let (reply, answer) = oneshot::channel();
         let command = BnCommand::Publish {
             topic: item.topic.to_string(),
