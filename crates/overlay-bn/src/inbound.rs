@@ -166,13 +166,13 @@ impl Inbound {
 mod tests {
     use std::io::Write;
     use std::sync::{Arc, LazyLock, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use libp2p::PeerId;
     use libp2p::gossipsub;
     use libp2p::identity::Keypair;
     use overlay_core::fanout::Outbound;
-    use overlay_core::lanes::{ClassLanes, LanePusher};
+    use overlay_core::lanes::{ClassLanes, LARGE_LANE_CAPACITY, LanePusher};
     use overlay_core::msgid::{self, MessageId};
     use overlay_core::seen::{SeenCache, SharedSeenCache};
     use overlay_core::time::FakeClock;
@@ -502,5 +502,34 @@ mod tests {
 
         assert_eq!(h.accepted().await.0, block.id);
         assert_eq!(h.out.recv().await.id, core_id(&block));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_small_fanout_lane_drops_and_counts_while_large_still_passes() {
+        let out = ClassLanes::with_capacities(1, LARGE_LANE_CAPACITY, Arc::new(()));
+        let filler = Outbound {
+            topic: Topic::parse(ATTESTATION_3).unwrap(),
+            class: Class::Small,
+            id: MessageId([0; 20]),
+            payload: Vec::new().into(),
+            received_at: Instant::now(),
+        };
+        out.push(Class::Small, filler).unwrap();
+        let mut h = Harness::with_out(out);
+        let attestation = message(ATTESTATION_3, b"an attestation");
+        let block = message(BLOCK, b"a block");
+        h.push(Class::Small, attestation);
+        h.push(Class::Large, block.clone());
+        h.start();
+        h.accepted().await;
+        h.accepted().await;
+
+        assert_eq!(h.out.recv_from(Class::Large).await.id, core_id(&block));
+        assert_eq!(h.out.recv_from(Class::Small).await.id, MessageId([0; 20]));
+        assert!(nothing_out(&mut h.out).await);
+        assert_eq!(h.stats.count("dropped_full", Class::Small), 1);
+        assert_eq!(h.stats.count("first_seen", Class::Small), 1);
+        assert_eq!(h.stats.count("first_seen", Class::Large), 1);
+        assert_eq!(h.stats.total(), 3);
     }
 }
