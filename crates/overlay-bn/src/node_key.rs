@@ -83,6 +83,39 @@ mod tests {
             assert_eq!(mode, 0o600, "{mode:04o}");
         }
     }
+    /// The record Lighthouse reads back: `CombinedKeyPublicExt::as_peer_id`
+    /// (`common/network_utils/src/enr_ext.rs`) puts the ENR's 32 Ed25519 bytes straight into a
+    /// libp2p public key, so those bytes have to be the node key's own for the beacon node to
+    /// dial the peer id it already trusts.
+    #[test]
+    fn enr_carries_the_node_key_peer_id_and_the_listen_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = NodeKey::load_or_create(&dir.path().join("node.key")).unwrap();
+
+        let text = key.enr(&"/ip4/127.0.0.1/tcp/7787".parse().unwrap()).unwrap();
+
+        assert!(text.starts_with("enr:"), "{text}");
+        let record: enr::Enr<enr::ed25519_dalek::SigningKey> = text.parse().unwrap();
+        assert_eq!(record.ip4(), Some(std::net::Ipv4Addr::LOCALHOST));
+        assert_eq!(record.tcp4(), Some(7787));
+        let public =
+            libp2p::identity::ed25519::PublicKey::try_from_bytes(&record.public_key().to_bytes())
+                .unwrap();
+        assert_eq!(PeerId::from_public_key(&public.into()), key.peer_id());
+    }
+
+    #[test]
+    fn enr_rejects_an_address_that_is_not_ip_and_tcp() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = NodeKey::load_or_create(&dir.path().join("node.key")).unwrap();
+
+        for addr in ["/ip4/127.0.0.1/udp/7787/quic-v1", "/memory/7787"] {
+            let err = key.enr(&addr.parse().unwrap()).unwrap_err();
+
+            assert!(err.to_string().contains(addr), "{addr}: {err}");
+        }
+    }
+
     #[test]
     fn node_key_second_load_returns_same_peer_id() {
         let dir = tempfile::tempdir().unwrap();

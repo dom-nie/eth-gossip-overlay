@@ -18,6 +18,9 @@ overlay-bn = { path = "crates/overlay-bn" }
 lighthouse_network = { git = "https://github.com/sigp/lighthouse.git", tag = "v8.2.2" }
 types = { git = "https://github.com/sigp/lighthouse.git", tag = "v8.2.2", features = ["saturating-arith"] }
 libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", default-features = false, features = ["tcp", "noise", "yamux", "identify", "gossipsub", "gossipsub-partial-messages", "request-response", "metrics", "tokio", "macros"] }
+# The version Lighthouse's discv5 already resolves to, so the sidecar signs the records the
+# beacon node parses. Only the ed25519 signing scheme is needed; k256 and serde stay off.
+enr = { version = "0.13", default-features = false, features = ["ed25519"] }
 
 tokio = "1"
 quinn = "0.11"
