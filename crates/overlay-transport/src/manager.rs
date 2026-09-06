@@ -555,18 +555,14 @@ impl Shared {
     /// failed. An orderly close says nothing, which is what
     /// [`HandshakeFailure::from_connection_error`] answers `None` to, and a peer that was
     /// admitted and then went quiet is a sibling going down (§9) rather than a handshake
-    /// problem, so its timeout is not counted either. Every other ending is, because a dial
-    /// that resolved before the acceptor judged its key is rejected here and nowhere else.
-    ///
-    /// Answers whether the ending was counted, which is also what tells the dial loop that its
-    /// pairing was refused rather than lost.
-    fn count_close(&self, role: Role, error: &quinn::ConnectionError) -> bool {
-        let counted = HandshakeFailure::from_connection_error(role, error)
-            .filter(|failure| failure.reason != FailureReason::Timeout);
-        if let Some(failure) = counted {
+    /// problem, so its timeout is not counted either. Everything else that ends a connection
+    /// short is counted, so a pair that keeps failing in some way nobody has named is visible.
+    fn count_close(&self, role: Role, error: &quinn::ConnectionError) {
+        if let Some(failure) = HandshakeFailure::from_connection_error(role, error)
+            .filter(|failure| failure.reason != FailureReason::Timeout)
+        {
             self.stats.handshake_failure(failure);
         }
-        counted.is_some()
     }
 
     fn warn_once(&self, remote: SocketAddr, reason: FailureReason) {
@@ -769,18 +765,14 @@ async fn dial_loop<A: Admission>(peer: Hostname, shared: Arc<Shared>, admission:
         };
         match dial_once(&peer, &entry, &shared, &admission).await {
             Ok(connection) => {
-                // Admission, not the QUIC connect. The two come apart when the acceptor judges
-                // the key after the dial has already resolved: admission passes, the peer
-                // reaches the live set, and the refusal turns up on `closed()`. That was never
-                // a pairing, so the reset is undone rather than left to redial at the floor for
-                // as long as the peer keeps refusing.
-                let unproven = backoff.clone();
+                // Admission, not the QUIC connect. In TLS 1.3 a dial can resolve before the
+                // acceptor has judged its key, but admission cannot: HELLO is a round trip, and
+                // an acceptor that is about to reject the key never answers one. So a peer that
+                // reached here paired, and the floor is where its next dial belongs.
                 backoff.reset();
                 warned = false;
                 let error = connection.closed().await;
-                if shared.count_close(Role::Dial, &error) {
-                    backoff = unproven;
-                }
+                shared.count_close(Role::Dial, &error);
                 shared.down(&peer, &connection, None);
             }
             Err(failure) => {
@@ -1318,10 +1310,11 @@ mod tests {
         assert_eq!(warned, 1);
     }
 
-    /// A dial that resolved before the acceptor judged its key is not a pairing, so the
-    /// backoff it reset has to go back where it was. Otherwise a host that every peer has
+    /// A dial that resolves before the acceptor has judged its key is not a pairing, and the
+    /// backoff has to grow as if it had never resolved. Otherwise a host that every peer has
     /// dropped from its roster is redialled at the floor for as long as it keeps being
-    /// dropped, which is the tight loop the reset exists to avoid.
+    /// dropped, which is the tight loop the backoff exists to avoid. HELLO is what makes the
+    /// two tell apart: the rejection lands on the exchange, before anything is admitted.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_dial_refused_after_it_resolves_does_not_reset_the_backoff() {
         let cluster = Builder::new(&[NodeKind::Manager, NodeKind::RefusesEveryone])
@@ -1452,5 +1445,29 @@ mod tests {
         assert_eq!(lines, WARNED_PEERS_MAX);
         assert_eq!(warned.len(), WARNED_PEERS_MAX);
         assert!(!first_refusal(&mut warned, peer(0)), "one peer, one line");
+    }
+
+    /// A sibling that goes quiet is a host going down (§9), not a handshake that failed, so
+    /// nothing about it reaches `handshake_failures_total`. The accepting side is where that
+    /// shows on its own: it has no dial to retry, so nothing else can move the counter.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peer_that_vanishes_after_pairing_is_not_counted_as_a_handshake_failure() {
+        let mut cluster = Builder::new(&[NodeKind::Vanishing, NodeKind::Manager])
+            .start()
+            .await;
+        let peer = cluster.hostname(0);
+        let dialler = cluster.self_hello(0);
+        let _paired = cluster.dial_with_hello(0, 1, &dialler).await;
+        assert!(matches!(cluster.next_event(1).await, PeerEvent::Up(up) if up.hostname == peer));
+
+        cluster.vanish(0);
+
+        assert!(matches!(cluster.next_event(1).await, PeerEvent::Down(down, None) if down == peer));
+        assert_eq!(
+            cluster
+                .stats(1)
+                .handshake_failures(Role::Accept, FailureReason::Timeout),
+            0
+        );
     }
 }
