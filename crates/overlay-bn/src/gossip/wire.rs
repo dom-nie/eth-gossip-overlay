@@ -106,6 +106,17 @@ mod drift {
         );
     }
 
+    /// `overlay-core` carries the same number for its frame limits and cannot reach Lighthouse
+    /// itself, because the dependency runs this way round. This is the only place the two can be
+    /// compared (T-024).
+    #[test]
+    fn max_payload_size_equals_the_frame_codec_limit() {
+        assert_eq!(
+            MAX_PAYLOAD_SIZE,
+            overlay_core::wire::MAX_PAYLOAD_BYTES as u64
+        );
+    }
+
     /// `lighthouse_network::config` is private, so the comparison is with the value it reads
     /// from `ChainSpec`, which is what reaches `max_transmit_size(..)`.
     #[test]
