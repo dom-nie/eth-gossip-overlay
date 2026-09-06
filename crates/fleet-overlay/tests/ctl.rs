@@ -8,8 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use assert_cmd::Command;
 use assert_cmd::cargo::cargo_bin;
-use fleet_overlay::admin::Response;
+use fleet_overlay::admin::{Bn, Host, Peer, Queue, Response, Status};
 use fleet_overlay::reload::{ReloadError, ReloadReport, Trigger};
+use overlay_core::protocol::features;
 use tempfile::TempDir;
 
 /// A socket that answers every line with the same response and remembers what it was asked.
@@ -146,4 +147,102 @@ fn ctl_json_flag_prints_raw_response() {
         serde_json::from_str::<serde_json::Value>(printed.trim()).unwrap(),
         serde_json::json!({"ok": true, "inject": true})
     );
+}
+
+#[test]
+fn ctl_status_table_prints_the_peers_and_their_feature_bit_names() {
+    let server = TestServer::start(Response {
+        ok: true,
+        status: Some(Status {
+            hostname: "bn-ams1-07".to_owned(),
+            region: "eu".to_owned(),
+            site: Some("ams1".to_owned()),
+            inject: false,
+            bn: Bn {
+                connected: true,
+                version: Some("Lighthouse/v8.2.2".to_owned()),
+                trusted: Some(true),
+                subscriptions: 96,
+            },
+            peers: vec![Peer {
+                hostname: "bn-fra1-02".to_owned(),
+                region: "eu".to_owned(),
+                site: None,
+                rtt_ms: 12.54,
+                connected_for_ms: 252_000,
+                queue: Queue {
+                    small_frames: 1,
+                    small_bytes: 300,
+                    large_frames: 0,
+                    large_bytes: 0,
+                },
+                software_version: "0.1.0".to_owned(),
+                features: features::DATAGRAM_BATCHES | features::STRIPING,
+            }],
+        }),
+        ..Response::default()
+    });
+
+    let output = ctl(&server.socket).arg("status").output().unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(server.asked(), [r#"{"cmd":"status"}"#]);
+    let printed = String::from_utf8(output.stdout).unwrap();
+    for expected in [
+        "bn-ams1-07",
+        "ams1",
+        "inject off",
+        "Lighthouse/v8.2.2",
+        "bn-fra1-02",
+        "12.5",
+        "4m12s",
+        "0.1.0",
+        // The bitset as an operator reads it during a rollout: the number, and the names of
+        // the bits that are set (D29).
+        "0x3 (datagram_batches, striping)",
+    ] {
+        assert!(
+            printed.contains(expected),
+            "{expected:?} missing:\n{printed}"
+        );
+    }
+}
+
+#[test]
+fn ctl_roster_table_prints_every_host() {
+    let server = TestServer::start(Response {
+        ok: true,
+        roster: Some(vec![
+            Host {
+                hostname: "bn-ams1-07".to_owned(),
+                region: "eu".to_owned(),
+                site: Some("ams1".to_owned()),
+                addr: "203.0.113.37:7788".parse().unwrap(),
+            },
+            Host {
+                hostname: "bn-nyc1-01".to_owned(),
+                region: "us".to_owned(),
+                site: None,
+                addr: "[2001:db8:1::120]:7788".parse().unwrap(),
+            },
+        ]),
+        ..Response::default()
+    });
+
+    let output = ctl(&server.socket).arg("roster").output().unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(server.asked(), [r#"{"cmd":"roster"}"#]);
+    let printed = String::from_utf8(output.stdout).unwrap();
+    for expected in [
+        "bn-ams1-07",
+        "203.0.113.37:7788",
+        "bn-nyc1-01",
+        "[2001:db8:1::120]:7788",
+    ] {
+        assert!(
+            printed.contains(expected),
+            "{expected:?} missing:\n{printed}"
+        );
+    }
 }
