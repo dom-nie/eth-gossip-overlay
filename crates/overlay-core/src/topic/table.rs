@@ -348,4 +348,20 @@ mod tests {
 
         assert_eq!(announcer.announce(&host("a"), &own), [topic_add(2, 2)]);
     }
+
+    #[test]
+    fn announcer_for_new_peer_after_hello_yields_nothing() {
+        let mut own = OwnTopicTable::new();
+        let mut announcer = Announcer::new();
+        own.intern(&column(0)).unwrap();
+        own.intern(&column(1)).unwrap();
+
+        announcer.hello_sent(&host("c"), &own);
+
+        assert!(announcer.announce(&host("c"), &own).is_empty());
+
+        own.intern(&column(2)).unwrap();
+
+        assert_eq!(announcer.announce(&host("c"), &own), [topic_add(2, 2)]);
+    }
 }
