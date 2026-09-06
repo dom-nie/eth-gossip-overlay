@@ -1038,6 +1038,7 @@ mod tests {
     /// the counter.
     #[tokio::test(flavor = "multi_thread")]
     async fn incoming_connection_with_a_key_absent_from_the_pin_table_never_reaches_the_manager() {
+        let mark = LOG.len();
         let mut cluster = Builder::new(&[NodeKind::Sink, NodeKind::Manager])
             .start()
             .await;
@@ -1056,6 +1057,15 @@ mod tests {
         drop(refused);
         assert!(cluster.try_next_event(1).await.is_none());
         assert!(cluster.live(1).is_empty());
+        // A rejected key has no hostname, so the warn names the address it came from.
+        assert_eq!(
+            LOG.since(mark)
+                .lines()
+                .filter(|line| line.contains("refusing an incoming connection")
+                    && line.contains(&cluster.addr(0).to_string()))
+                .count(),
+            1
+        );
     }
 
     /// Newer wins, once it has passed admission (D15). A peer that restarted or moved is live
@@ -1063,6 +1073,7 @@ mod tests {
     /// and the old connection is told what happened to it.
     #[tokio::test(flavor = "multi_thread")]
     async fn second_connection_from_same_peer_supersedes_the_first_after_admission() {
+        let mark = LOG.len();
         let mut cluster = Builder::new(&[NodeKind::Sink, NodeKind::Manager])
             .start()
             .await;
@@ -1093,6 +1104,14 @@ mod tests {
             matches!(&closed, quinn::ConnectionError::ApplicationClosed(frame)
                 if frame.error_code == CloseCode::Superseded.code()),
             "{closed:?}"
+        );
+        // Both connections carry instance id 0 until HELLO declares one (T-025), so what
+        // changed is the path and the line has to say so (D15).
+        assert!(
+            LOG.since(mark)
+                .lines()
+                .any(|line| line.contains("path changed") && line.contains(&peer.0)),
+            "no supersede line for {peer}"
         );
     }
 
@@ -1155,6 +1174,12 @@ mod tests {
         assert_eq!(
             cluster.live(1).get(&host).unwrap().connection.stable_id(),
             before.connection.stable_id()
+        );
+        assert_eq!(
+            cluster
+                .stats(1)
+                .handshake_failures(Role::Accept, FailureReason::Hostname),
+            1
         );
     }
 
