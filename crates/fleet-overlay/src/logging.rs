@@ -170,6 +170,27 @@ mod tests {
     /// A moment with a nanosecond part, so a truncating conversion cannot pass.
     const AT_NANOS: u64 = 1_757_000_000_123_456_789;
 
+    /// Every field of a `first_arrival` line, as the table in `docs/events.md` lists it. The
+    /// queries in that file and T-052's dashboard read these names, so one of them changing
+    /// without the document changing leaves a panel silently empty.
+    const SCHEMA: [&str; 12] = [
+        "timestamp",
+        "level",
+        "target",
+        "event",
+        "msg_id",
+        "class",
+        "topic",
+        "node",
+        "region",
+        "site",
+        "first_arrival_ns",
+        "source",
+    ];
+
+    /// The field only an arrival from the overlay carries.
+    const ORIGIN_PEER: &str = "origin_peer";
+
     /// What the subscriber under test wrote, kept in memory so a test can read it back.
     #[derive(Clone, Default)]
     struct Sink(Arc<Mutex<Vec<u8>>>);
@@ -220,6 +241,13 @@ mod tests {
             build(cfg, sink.clone(), is_tty, rust_log.map(str::to_owned), None);
         tracing::dispatcher::with_default(&dispatch, || body(&handle));
         sink
+    }
+
+    /// A line's field names, sorted, whatever order the formatter wrote them in.
+    fn keys(line: &Map<String, Value>) -> Vec<&str> {
+        let mut names: Vec<&str> = line.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
     }
 
     fn node() -> SelfIdentity {
@@ -399,5 +427,30 @@ mod tests {
         );
         assert_eq!(lines[1]["rust_log"], "debug");
         assert_eq!(lines[2]["message"], "and still does");
+    }
+
+    #[test]
+    fn field_names_match_the_documented_schema() {
+        let node = node();
+        let topic = block();
+        let origin = Hostname("bn-fra1-02".to_owned());
+
+        let sink = capture(&Log::default(), false, None, |_| {
+            emit_first_arrival(&arrival(&topic, &node, Class::Large, Source::Bn));
+            emit_first_arrival(&arrival(
+                &topic,
+                &node,
+                Class::Large,
+                Source::Overlay { origin: &origin },
+            ));
+        });
+
+        let lines = sink.objects();
+        let mut expected = SCHEMA.to_vec();
+        expected.sort_unstable();
+        assert_eq!(keys(&lines[0]), expected);
+        expected.push(ORIGIN_PEER);
+        expected.sort_unstable();
+        assert_eq!(keys(&lines[1]), expected);
     }
 }
