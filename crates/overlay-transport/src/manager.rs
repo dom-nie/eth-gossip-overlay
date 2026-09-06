@@ -302,7 +302,7 @@ pub struct AdmitError {
 /// made: a second connection from a live peer is adopted only if this succeeds on it.
 ///
 /// `pinned` is the entry the pin table yielded for the key the peer presented, which is the
-/// hostname HELLO is cross-checked against (D14). [`HelloAdmission`] is the implementation the
+/// hostname HELLO is cross-checked against (D14). [`HelloAdmission`](crate::hello::HelloAdmission) is what the
 /// sidecar runs.
 pub trait Admission: Send + Sync + 'static {
     /// Admits `connection`, or says what to count for refusing it.
