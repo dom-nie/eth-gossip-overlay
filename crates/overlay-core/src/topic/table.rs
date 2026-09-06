@@ -219,26 +219,27 @@ impl Announcer {
         Self::default()
     }
 
-    /// The whole table, as `peer`'s HELLO carries it, recorded as told in the same call. T-025
-    /// sends what this returns and nothing else.
-    ///
-    /// Handing out the entries and recording the count is one method because the two have to
-    /// come from one read of the table. The mirror interns into that same table from another
-    /// task, so a caller that took a snapshot and marked the peer told in two steps would
-    /// record whatever landed in between as sent. Those ids would then never be announced to
-    /// that peer at all, and every frame carrying one would be dropped: the race the eager
-    /// announcement exists to close.
-    pub fn hello_snapshot(
-        &mut self,
-        peer: &Hostname,
-        table: &OwnTopicTable,
-    ) -> Vec<(TopicId, String)> {
-        let entries: Vec<(TopicId, String)> = table
+    /// The whole table, as a peer's HELLO carries it. T-025 sends what this returns and nothing
+    /// else, and records it with [`Self::hello_sent`] once it has gone.
+    pub fn snapshot(&self, table: &OwnTopicTable) -> Vec<(TopicId, String)> {
+        table
             .entries_from(0)
             .map(|(id, topic)| (id, topic.to_owned()))
-            .collect();
-        self.told.insert(peer.clone(), entries.len());
-        entries
+            .collect()
+    }
+
+    /// Records that `peer` has been told the first `sent` bindings, where `sent` is the length
+    /// of a snapshot that really reached it.
+    ///
+    /// Counting what was sent rather than reading the table again is what keeps the record
+    /// honest in both directions. The mirror interns from another task, so a count taken from
+    /// the table would include whatever landed after the snapshot was built and those ids would
+    /// never be announced to that peer at all. And a HELLO that failed records nothing, so a
+    /// peer whose second connection was refused (D15) is still owed everything its surviving
+    /// connection has not been sent. Either mistake ends the same way: frames carrying ids the
+    /// peer was never told, dropped as `unknown_topic_id_total`.
+    pub fn hello_sent(&mut self, peer: &Hostname, sent: usize) {
+        self.told.insert(peer.clone(), sent);
     }
 
     /// The bindings `peer` has not been told, which this call records as told. T-027 puts them
@@ -334,7 +335,8 @@ mod tests {
         let mut announcer = Announcer::new();
         let mut peer = PeerTopicTable::new();
 
-        let snapshot = announcer.hello_snapshot(&host("a"), &own);
+        let snapshot = announcer.snapshot(&own);
+        announcer.hello_sent(&host("a"), snapshot.len());
         peer.apply_snapshot(snapshot.clone()).unwrap();
 
         assert_eq!(snapshot.len(), 4);
@@ -471,7 +473,8 @@ mod tests {
         own.intern(&column(0)).unwrap();
         own.intern(&column(1)).unwrap();
 
-        let hello = announcer.hello_snapshot(&host("c"), &own);
+        let hello = announcer.snapshot(&own);
+        announcer.hello_sent(&host("c"), hello.len());
 
         assert_eq!(hello.len(), 2);
         assert!(announcer.announce(&host("c"), &own).is_empty());
@@ -481,17 +484,40 @@ mod tests {
         assert_eq!(announcer.announce(&host("c"), &own), [topic_add(2, 2)]);
     }
 
+    /// The mirror interns from its own task, so a topic can appear between the snapshot and the
+    /// record. What is recorded is the length of what was sent, so the newcomer is still owed
+    /// rather than counted as already announced.
     #[test]
     fn a_topic_interned_after_the_hello_snapshot_is_still_announced() {
         let mut own = OwnTopicTable::new();
         let mut announcer = Announcer::new();
         own.intern(&column(0)).unwrap();
 
-        let hello = announcer.hello_snapshot(&host("d"), &own);
+        let hello = announcer.snapshot(&own);
         own.intern(&column(1)).unwrap();
+        announcer.hello_sent(&host("d"), hello.len());
 
         assert_eq!(hello, [(TopicId::new(0), column(0).to_string())]);
         assert_eq!(announcer.announce(&host("d"), &own), [topic_add(1, 1)]);
+    }
+
+    /// A snapshot that never reached its peer records nothing. A HELLO can fail after the
+    /// snapshot is built, and the peer it was for keeps whatever connection it had; recording at
+    /// the read would leave those ids announced to nobody.
+    #[test]
+    fn a_snapshot_that_is_never_sent_leaves_the_peer_owed_everything() {
+        let mut own = OwnTopicTable::new();
+        let mut announcer = Announcer::new();
+        own.intern(&column(0)).unwrap();
+        own.intern(&column(1)).unwrap();
+
+        let hello = announcer.snapshot(&own);
+
+        assert_eq!(hello.len(), 2);
+        assert_eq!(
+            announcer.announce(&host("e"), &own),
+            [topic_add(0, 0), topic_add(1, 1)]
+        );
     }
 
     #[test]

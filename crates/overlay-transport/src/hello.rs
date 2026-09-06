@@ -234,8 +234,8 @@ impl HelloError {
 ///
 /// `pinned` is the hostname the pin table yielded for the key this connection was made with, and
 /// HELLO's own hostname has to equal it. `own_topics` is the sender's whole topic table as
-/// [`Announcer::hello_snapshot`] handed it over, which is the only place it may come from: the
-/// entries sent and the watermark recorded have to be one read of the table (D12).
+/// [`Announcer::snapshot`] built it, which is the only place it may come from; the caller
+/// records what it sent with [`Announcer::hello_sent`], and only once this has succeeded (D12).
 ///
 /// The stream is returned rather than read from here. The peer's task owns it from now on.
 pub async fn perform(
@@ -369,6 +369,15 @@ pub struct OwnTopics {
     pub announcer: Announcer,
 }
 
+/// The topic state, recovering the guard from a poisoned lock: nothing between a lock and its
+/// release can panic, so the table itself is whole and refusing every connection after some
+/// other task died would take the overlay down for an unrelated reason.
+fn lock(topics: &Mutex<OwnTopics>) -> std::sync::MutexGuard<'_, OwnTopics> {
+    topics
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Admission by HELLO: a connection becomes a peer only once the exchange has finished and the
 /// name checks out. It is the manager's only [`Admission`] in production.
 pub struct HelloAdmission {
@@ -402,19 +411,17 @@ impl Admission for HelloAdmission {
         pinned: &PinEntry,
     ) -> impl Future<Output = Result<PeerInfo, AdmitError>> + Send {
         let snapshot = {
-            let mut topics = self
-                .topics
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let OwnTopics { table, announcer } = &mut *topics;
-            announcer.hello_snapshot(&pinned.hostname, table)
+            let topics = lock(&self.topics);
+            topics.announcer.snapshot(&topics.table)
         };
+        let sent = snapshot.len();
         let hostname = pinned.hostname.clone();
         let self_hello = self.self_hello.clone();
         let stats = self.stats.clone();
         let timeout = self.timeout;
+        let topics = self.topics.clone();
         async move {
-            perform(
+            let peer = perform(
                 connection,
                 role,
                 &self_hello,
@@ -424,7 +431,12 @@ impl Admission for HelloAdmission {
                 stats.as_ref(),
             )
             .await
-            .map_err(|error| error.refusal(role))
+            .map_err(|error| error.refusal(role))?;
+            // Only now, and only what went: a HELLO that failed leaves the peer owed every
+            // binding the attempt would have carried, because whatever connection it already
+            // had was never sent them.
+            lock(&topics).announcer.hello_sent(&hostname, sent);
+            Ok(peer)
         }
     }
 }
@@ -439,6 +451,7 @@ mod tests {
     use crate::testutil::{
         Builder, CountingStats, NodeKind, REGION, TestCluster, WAIT, eventually,
     };
+    use crate::tls::SeedGeneration;
 
     /// A fork digest, as a topic string carries one.
     const DIGEST: [u8; 4] = [0x6a, 0x95, 0xa1, 0xa9];
@@ -464,6 +477,34 @@ mod tests {
         let mut out = (body.len() as u32).to_le_bytes().to_vec();
         out.extend_from_slice(body);
         send.write_all(&out).await.unwrap();
+    }
+
+    /// An admission with one topic already interned, and the table it announces from.
+    fn admission_with_a_topic(self_hello: SelfHello) -> (HelloAdmission, Arc<Mutex<OwnTopics>>) {
+        let topics = Arc::new(Mutex::new(OwnTopics::default()));
+        lock(&topics)
+            .table
+            .intern(&Topic::data_column(DIGEST, 0))
+            .unwrap();
+        (
+            HelloAdmission::new(self_hello, topics.clone(), Arc::new(())),
+            topics,
+        )
+    }
+
+    /// What `peer` is still owed.
+    fn owed(topics: &Arc<Mutex<OwnTopics>>, peer: &Hostname) -> Vec<Frame> {
+        let mut own = lock(topics);
+        let OwnTopics { table, announcer } = &mut *own;
+        announcer.announce(peer, table)
+    }
+
+    /// The pin entry a connection from `peer` arrives with.
+    fn pinned(peer: &Hostname) -> PinEntry {
+        PinEntry {
+            hostname: peer.clone(),
+            seed: SeedGeneration::Current,
+        }
     }
 
     /// A HELLO as a peer would send it, which a test then changes one field of to be the peer
@@ -551,7 +592,8 @@ mod tests {
             .iter()
             .map(|topic| own.table.intern(topic).unwrap().0)
             .collect();
-        let snapshot = own.announcer.hello_snapshot(&higher, &own.table);
+        let snapshot = own.announcer.snapshot(&own.table);
+        own.announcer.hello_sent(&higher, snapshot.len());
         let (announcing, silent) = (cluster.self_hello(0), cluster.self_hello(1));
         let (dialling, accepting) = cluster.connected_pair(0, 1).await;
 
@@ -952,5 +994,62 @@ mod tests {
         assert!(negotiated.allows(features::REPAIR));
         assert!(!negotiated.allows(features::STRIPING));
         assert!(!negotiated.allows(features::DATAGRAM_BATCHES | features::STRIPING));
+    }
+
+    /// A HELLO that fails records nothing. The peer keeps whatever connection it already had
+    /// (D15), and that connection was never sent these bindings, so it is still owed them; an
+    /// announcer that recorded them at the snapshot would leave the ids announced to nobody and
+    /// every frame carrying one dropped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_failed_hello_leaves_the_peer_owed_its_topics() {
+        let cluster = Builder::new(&[NodeKind::Bare; 2]).start().await;
+        let lower = cluster.hostname(0);
+        let (admission, topics) = admission_with_a_topic(cluster.self_hello(1));
+        let (dialling, accepting) = cluster.connected_pair(0, 1).await;
+        let (mut send, _recv) = dialling.open_bi().await.unwrap();
+        let impostor = Hello {
+            hostname: "bn-someone-else".to_owned(),
+            ..peer_hello(&lower)
+        };
+        write_frame(&mut send, &Frame::Hello(impostor))
+            .await
+            .unwrap();
+
+        let refused = admission
+            .admit(accepting, Role::Accept, &pinned(&lower))
+            .await
+            .expect_err("the name in HELLO is not the name the key is pinned to");
+
+        assert_eq!(refused.close, CloseCode::HostnameMismatch);
+        assert_eq!(owed(&topics, &lower).len(), 1);
+    }
+
+    /// The other half: a HELLO that went records what went with it, so the peer is owed nothing
+    /// until the local subscription set changes again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_successful_hello_records_the_topics_it_carried() {
+        let cluster = Builder::new(&[NodeKind::Bare; 2]).start().await;
+        let (lower, higher) = (cluster.hostname(0), cluster.hostname(1));
+        let (admission, topics) = admission_with_a_topic(cluster.self_hello(1));
+        let dialler = cluster.self_hello(0);
+        let from = pinned(&lower);
+        let (dialling, accepting) = cluster.connected_pair(0, 1).await;
+
+        let (dialled, admitted) = tokio::join!(
+            perform(
+                dialling,
+                Role::Dial,
+                &dialler,
+                &higher,
+                Vec::new(),
+                WAIT,
+                &()
+            ),
+            admission.admit(accepting, Role::Accept, &from),
+        );
+
+        admitted.expect("the dialler sent a HELLO of its own");
+        assert!(dialled.unwrap().topics.resolve(TopicId::new(0)).is_some());
+        assert!(owed(&topics, &lower).is_empty());
     }
 }
