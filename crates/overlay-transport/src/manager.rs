@@ -797,13 +797,16 @@ async fn dial_loop<A: Admission>(peer: Hostname, shared: Arc<Shared>, admission:
         };
         match dial_once(&peer, &entry, &shared, &admission).await {
             Ok(connection) => {
+                let error = connection.closed().await;
                 // Admission, not the QUIC connect. In TLS 1.3 a dial can resolve before the
                 // acceptor has judged its key, but admission cannot: HELLO is a round trip, and
                 // an acceptor that is about to reject the key never answers one. So a peer that
-                // reached here paired, and the floor is where its next dial belongs.
-                backoff.reset();
-                warned = false;
-                let error = connection.closed().await;
+                // reached here paired, and the floor is where its next dial belongs, unless how
+                // the connection ended says the pairing is worth nothing.
+                if pairing_proven(&error) {
+                    backoff.reset();
+                    warned = false;
+                }
                 shared.count_close(Role::Dial, &error);
                 shared.down(&peer, &connection, None);
             }
@@ -826,6 +829,29 @@ async fn dial_loop<A: Admission>(peer: Hostname, shared: Arc<Shared>, admission:
         let delay = backoff.next_delay(&mut rand::rng());
         shared.set_slot(peer.clone(), Slot::Backoff(Instant::now() + delay));
         tokio::time::sleep(delay).await;
+    }
+}
+
+/// Whether a connection that ended this way leaves a pairing the next dial can count on.
+///
+/// A peer that simply went away does: an idle timeout, a transport error or a shutdown is the
+/// path or the process, and the usual cause is a sidecar restart that is already finishing, so
+/// the floor is where the retry belongs (§5.3). A connection either end closed for a protocol
+/// error is the opposite. The fault is in what the peer says, not in reaching it, and it
+/// survives a reconnect: the redial would pair, read the same frame and close again, at the
+/// floor, for as long as both hosts are up. Growing the backoff is what bounds that (T-027).
+///
+/// [`ConnectionError::LocallyClosed`](quinn::ConnectionError::LocallyClosed) covers the half of
+/// it this host decided, because quinn does not hand a local close code back. Every live
+/// connection this host closes, it closes for a fault it found in the peer; roster removal and
+/// shutdown close one too, and both abort this task rather than letting it dial again.
+fn pairing_proven(error: &quinn::ConnectionError) -> bool {
+    match error {
+        quinn::ConnectionError::LocallyClosed => false,
+        quinn::ConnectionError::ApplicationClosed(closed) => {
+            closed.error_code != CloseCode::ProtocolError.code()
+        }
+        _ => true,
     }
 }
 
