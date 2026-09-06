@@ -4,7 +4,9 @@
 
 use bytes::Bytes;
 use overlay_core::msgid::MessageId;
-use overlay_core::wire::{BatchEntry, BatchFlags, Chunk, ChunkFlags, Frame, Hello, RepairReq, RepairResp};
+use overlay_core::wire::{
+    BatchEntry, BatchFlags, Chunk, ChunkFlags, Frame, Hello, RepairReq, RepairResp,
+};
 
 /// The name of each `tests/vectors/v1/<name>.bin` and the frame it holds. The values are frozen:
 /// the corpus is what proves a later release still decodes this one byte for byte, so edit this

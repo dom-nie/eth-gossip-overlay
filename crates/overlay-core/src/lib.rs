@@ -16,6 +16,7 @@ pub mod seen;
 mod testlog;
 pub mod time;
 pub mod topic;
+pub mod wire;
 
 #[cfg(test)]
 mod tests {

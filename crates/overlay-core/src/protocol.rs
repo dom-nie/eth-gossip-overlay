@@ -1,10 +1,12 @@
 //! What both ends of an overlay connection have to agree on before anything else.
 //!
-//! Only the major lives here today. It travels in the ALPN, so a pair that disagrees on it
-//! fails to pair at the TLS layer instead of exchanging frames neither side understands.
-//! T-024 adds the minor, the feature bits and the frame and batch limits alongside it; those
-//! travel in HELLO and are negotiated down to what both ends support, so a release that adds
-//! a feature still pairs with one that has never heard of it (D29).
+//! The major travels in the ALPN, so a pair that disagrees on it fails to pair at the TLS layer
+//! instead of exchanging frames neither side understands. The minor, the feature bits and the two
+//! limits travel in HELLO and are negotiated down to what both ends support: a pair operates at
+//! `min(minor)` and at the intersection of the feature bits, and a sender never emits a frame
+//! type, a flag or a behaviour the peer did not advertise, nor exceeds the limits it named. That
+//! is what lets a release that adds a feature still pair with one that has never heard of it, and
+//! what makes a rolling upgrade a rolling upgrade rather than an outage (D29).
 //!
 //! There is deliberately no `PROTOCOL_VERSION` constant and no equality check on a version
 //! field anywhere. A fleet is upgraded host by host, and a pair that refused to talk until
@@ -19,6 +21,34 @@ pub const PROTOCOL_MAJOR: u8 = 1;
 pub fn protocol_alpn() -> Vec<u8> {
     format!("fleet-overlay/{PROTOCOL_MAJOR}").into_bytes()
 }
+
+/// The protocol minor. It changes when a release adds something a peer can use without being told
+/// about it first; anything a peer has to opt into is a feature bit instead.
+pub const PROTOCOL_MINOR: u16 = 0;
+
+/// The optional behaviours a release can advertise in HELLO. A bit is set only once both the code
+/// and the ticket that ships it are in, so a v1 binary that meets a v2 one is sent v1 frames.
+pub mod features {
+    /// Small-class batches over QUIC datagrams instead of streams (T-062).
+    pub const DATAGRAM_BATCHES: u64 = 1 << 0;
+    /// Large messages split into chunks with parity and striped over a region (T-073).
+    pub const STRIPING: u64 = 1 << 1;
+    /// Chunk and custody-column repair (T-082).
+    pub const REPAIR: u64 = 1 << 2;
+}
+
+/// What this build puts in HELLO. Zero in v1: it sends whole messages on streams, which every
+/// release can read, so there is nothing for a peer to opt into yet.
+pub const SUPPORTED_FEATURES: u64 = 0;
+
+/// The largest frame this build accepts on a stream, which is what it advertises in HELLO. A
+/// whole message plus the chunk header and the room a `REPAIR_RESP` needs around it.
+pub const MAX_FRAME_BYTES: u32 = (crate::wire::MAX_PAYLOAD_BYTES + 1024) as u32;
+
+/// The most entries this build accepts in one `BATCH`, which is what it advertises in HELLO. Far
+/// more than a datagram holds; the bound is against a peer that lies about its count, not against
+/// an honest batcher.
+pub const MAX_BATCH_ENTRIES: u16 = 1024;
 
 #[cfg(test)]
 mod tests {
