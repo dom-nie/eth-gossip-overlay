@@ -63,7 +63,7 @@ impl Clock for FakeClock {
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
     use super::*;
 
@@ -108,6 +108,28 @@ mod tests {
         clock.set(target);
 
         assert_eq!(clock.now(), target);
+    }
+
+    #[test]
+    fn fake_clock_advance_moves_the_wall_clock_alongside_the_instant() {
+        let clock = FakeClock::new();
+        let start = clock.wall();
+
+        clock.advance(Duration::from_nanos(1_500_000_007));
+
+        assert_eq!(
+            clock.wall().duration_since(start).unwrap(),
+            Duration::from_nanos(1_500_000_007)
+        );
+    }
+
+    #[test]
+    fn system_clock_wall_reads_the_real_time() {
+        let before = SystemTime::now();
+        let wall = SystemClock.wall();
+        let after = SystemTime::now();
+
+        assert!(before <= wall && wall <= after);
     }
 
     #[test]
