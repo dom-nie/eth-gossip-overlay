@@ -565,6 +565,7 @@ mod tests {
         inject: Arc<AtomicBool>,
         roster: watch::Receiver<Roster>,
         previous_seed: watch::Receiver<Option<FleetSeed>>,
+        limits: watch::Receiver<PublishRateLimit>,
         stats: Arc<Recorded>,
         reloader: Reloader,
     }
@@ -594,7 +595,7 @@ mod tests {
             let inject = Arc::new(AtomicBool::new(true));
             let (roster_tx, roster_rx) = watch::channel(Roster::from_yaml(roster).unwrap());
             let (seed_tx, previous_seed) = watch::channel(None);
-            let (limits_tx, _) = watch::channel(PublishRateLimit::default());
+            let (limits_tx, limits) = watch::channel(PublishRateLimit::default());
             let (sink, dispatch, log) = testing::subscriber(log_cfg, false, rust_log);
             let stats = Arc::new(Recorded::default());
             let reloader = Reloader::new(
@@ -616,6 +617,7 @@ mod tests {
                 inject,
                 roster: roster_rx,
                 previous_seed,
+                limits,
                 stats,
                 reloader,
             };
@@ -956,5 +958,26 @@ mod tests {
             .await
             .expect("no reload within a second of the signal");
         assert_eq!(stats.first().trigger, Trigger::Manual);
+    }
+
+    #[test]
+    fn reload_publishes_the_new_publish_rate_limits() {
+        let mut h = Fixture::new(CONFIG, &roster_yaml(3));
+        h.write_config(
+            "overlay:\n  roster_file: ROSTER\nbn:\n  publish_rate_limit:\n    small_per_s: 100\n    large_per_s: 20\ninject: true\n",
+        );
+
+        let report = h.reloader.reload(Trigger::Manual);
+
+        assert_eq!(
+            report.applied,
+            [
+                "bn.publish_rate_limit.large_per_s",
+                "bn.publish_rate_limit.small_per_s"
+            ]
+        );
+        assert!(report.error.is_none(), "{report:?}");
+        let limits = h.limits.borrow_and_update();
+        assert_eq!((limits.small_per_s, limits.large_per_s), (100, 20));
     }
 }
