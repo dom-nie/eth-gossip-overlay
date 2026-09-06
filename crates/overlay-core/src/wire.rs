@@ -693,18 +693,25 @@ pub enum ReadError {
     Io(#[from] std::io::Error),
 }
 
+/// One frame as it goes on a stream: the `u32` length prefix and the body in one buffer. A
+/// sender that has to queue a frame encodes it here once, whoever it is going to, and writes the
+/// bytes when the peer's turn comes (T-033).
+pub fn encode_stream(frame: &Frame) -> Bytes {
+    let mut out = BytesMut::new();
+    out.put_u32_le(0);
+    frame.encode(&mut out);
+    let len = (out.len() - 4) as u32;
+    out[..4].copy_from_slice(&len.to_le_bytes());
+    out.freeze()
+}
+
 /// Writes one frame with its `u32` length prefix. The prefix and the body go out in one write, so
 /// a reader never sees half a frame's worth of a partial write.
 pub async fn write_frame<W>(stream: &mut W, frame: &Frame) -> std::io::Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    let mut out = BytesMut::new();
-    out.put_u32_le(0);
-    frame.encode(&mut out);
-    let len = (out.len() - 4) as u32;
-    out[..4].copy_from_slice(&len.to_le_bytes());
-    stream.write_all(&out).await
+    stream.write_all(&encode_stream(frame)).await
 }
 
 /// Reads one frame. The length prefix is checked against `max_frame_bytes` before anything is

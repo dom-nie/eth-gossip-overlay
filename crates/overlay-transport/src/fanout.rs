@@ -15,12 +15,13 @@
 //! # Per-peer senders
 //!
 //! The loop awaits nothing but the lanes. Opening a stream and writing to it belong to a task per
-//! peer, reached with `try_send`, so one slow sibling delays nobody else (D17). The plain channel
-//! here is a placeholder: T-033 replaces it with the bounded, byte-and-age-aware lanes and the
-//! drop policy it owns.
+//! peer, reached through the bounded queues in [`crate::sender`], so one slow sibling delays
+//! nobody else (D17). The frame is encoded once here and every peer's queue holds the same
+//! bytes, because what goes to one peer is what goes to all of them.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use overlay_core::config;
 use overlay_core::fanout::Outbound;
@@ -28,17 +29,12 @@ use overlay_core::lanes::ClassLanes;
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
 use overlay_core::topic::table::TopicId;
 use overlay_core::topic::{Class, Topic};
-use overlay_core::wire::{Frame, write_frame};
-use tokio::sync::mpsc;
-use tokio::task::{AbortHandle, JoinHandle, JoinSet};
+use overlay_core::wire::{Frame, encode_stream};
+use tokio::task::JoinHandle;
 
 use crate::hello::{OwnTopics, lock};
-use crate::manager::{LivePeer, LiveSource};
+use crate::manager::LiveSource;
 use crate::router::{RoutePlan, route};
-
-/// Frames one peer's sender holds before the next is dropped. A placeholder for T-033, which
-/// bounds the lane by bytes and age instead and counts what it drops.
-const PEER_LANE_FRAMES: usize = 64;
 
 /// What a whole message costs on the wire besides its payload: the `type` and `flags` bytes and
 /// the chunk header (`msg_id`, `topic_id`, `k`, `m`, `index`, `total_len`, data length). The
@@ -91,15 +87,6 @@ impl TrafficStats for () {
     fn message(&self, _: Direction, _: Class, _: PeerLabels<'_>, _: usize) {}
 }
 
-/// One peer's sender: the channel the fanout loop pushes into and the task draining it.
-struct PeerSender {
-    frames: mpsc::Sender<Frame>,
-    /// The connection the task writes on. A peer that reconnects or is superseded (D15) gets a
-    /// new one, and the sender built for the old connection is of no use on it.
-    connection: usize,
-    task: AbortHandle,
-}
-
 /// The task that turns what the beacon node sent into frames on the overlay.
 pub struct Fanout {
     lanes: ClassLanes<Outbound>,
@@ -108,8 +95,6 @@ pub struct Fanout {
     cfg: config::Fanout,
     topics: Arc<Mutex<OwnTopics>>,
     stats: Arc<dyn TrafficStats>,
-    senders: HashMap<Hostname, PeerSender>,
-    tasks: JoinSet<()>,
     /// Peers already warned about a frame they would refuse. In v1 both ends run the same limit,
     /// so this is a guard rather than a path, and one line per peer per process is plenty.
     oversize_warned: HashSet<Hostname>,
@@ -134,8 +119,6 @@ impl Fanout {
             cfg,
             topics,
             stats,
-            senders: HashMap::new(),
-            tasks: JoinSet::new(),
             oversize_warned: HashSet::new(),
         };
         tokio::spawn(async move {
@@ -147,8 +130,8 @@ impl Fanout {
     }
 
     /// Routes one message and hands it to every target's sender. Nothing here waits: the live
-    /// view is a snapshot, the route is a pure function over it, and the frame goes out with
-    /// `try_send`.
+    /// view is a snapshot, the route is a pure function over it, and a push into a peer's queue
+    /// takes a lock and returns.
     fn send(&mut self, outbound: Outbound) {
         let view = self.live.live();
         let RoutePlan::Direct(targets) = route(
@@ -167,8 +150,13 @@ impl Fanout {
             );
             return;
         };
-        let frame = Frame::whole_message(outbound.id, topic_id.get(), outbound.payload.clone());
         let bytes = outbound.payload.len();
+        let frame = encode_stream(&Frame::whole_message(
+            outbound.id,
+            topic_id.get(),
+            outbound.payload,
+        ));
+        let now = Instant::now();
         for target in targets {
             // A peer can leave the live set between the plan and the send, and the send is what
             // finds out (§5.3).
@@ -189,14 +177,17 @@ impl Fanout {
                 region: &live.region,
                 site: live.site.as_deref(),
             };
-            if self.sender(&target, live).try_send(frame.clone()).is_err() {
-                tracing::debug!(peer = %target, "peer sender full or gone: message dropped");
+            if live
+                .sender
+                .push(outbound.class, frame.clone(), now)
+                .is_err()
+            {
+                tracing::debug!(peer = %target, "peer has no sender to queue the message on");
                 continue;
             }
             self.stats
                 .message(Direction::Out, outbound.class, labels, bytes);
         }
-        while self.tasks.try_join_next().is_some() {}
     }
 
     /// The id this host's peers know `topic` by. Never interns: an id nobody has been told about
@@ -205,30 +196,6 @@ impl Fanout {
     fn own_id(&self, topic: &Topic) -> Option<TopicId> {
         lock(&self.topics).table.get(topic)
     }
-
-    /// The channel for `peer`, started on first use and again whenever the connection under it
-    /// is replaced. A peer that goes away leaves its entry behind until it comes back, which
-    /// costs a closed channel per roster host at worst.
-    fn sender(&mut self, peer: &Hostname, live: &LivePeer) -> mpsc::Sender<Frame> {
-        let Self { senders, tasks, .. } = self;
-        let connection = live.connection.stable_id();
-        if let Some(held) = senders.get(peer)
-            && held.connection == connection
-        {
-            return held.frames.clone();
-        }
-        let (frames, queued) = mpsc::channel(PEER_LANE_FRAMES);
-        let task = tasks.spawn(write_frames(queued, live.connection.clone(), peer.clone()));
-        let sender = PeerSender {
-            frames: frames.clone(),
-            connection,
-            task,
-        };
-        if let Some(replaced) = senders.insert(peer.clone(), sender) {
-            replaced.task.abort();
-        }
-        frames
-    }
 }
 
 /// Whether a whole message of `payload_bytes` is within the frame limit the peer advertised in
@@ -236,28 +203,6 @@ impl Fanout {
 /// frame, so the header counts towards it.
 fn fits(payload_bytes: usize, peer_max_frame_bytes: u32) -> bool {
     payload_bytes + WHOLE_MESSAGE_HEADER_BYTES <= peer_max_frame_bytes as usize
-}
-
-/// One peer's writer: a stream per frame, which is what a whole message travels on (§7).
-async fn write_frames(
-    mut frames: mpsc::Receiver<Frame>,
-    connection: quinn::Connection,
-    peer: Hostname,
-) {
-    while let Some(frame) = frames.recv().await {
-        let mut stream = match connection.open_uni().await {
-            Ok(stream) => stream,
-            Err(error) => {
-                tracing::debug!(%peer, %error, "connection gone: nothing more to send on it");
-                return;
-            }
-        };
-        if let Err(error) = write_frame(&mut stream, &frame).await {
-            tracing::debug!(%peer, %error, "stream stopped taking the frame");
-            return;
-        }
-        let _ = stream.finish();
-    }
 }
 
 #[cfg(test)]
