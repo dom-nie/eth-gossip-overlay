@@ -270,3 +270,37 @@ fn chunk_header(total_len: u32, data_len: u32) -> Bytes {
     out.put_u32_le(data_len);
     out.freeze()
 }
+
+#[test]
+fn chunk_index_must_be_below_k_plus_m_and_k_at_least_one() {
+    assert_eq!(
+        Frame::decode(&mut striped(0, 2, 0)),
+        Err(DecodeError::Invalid("k"))
+    );
+    assert_eq!(
+        Frame::decode(&mut striped(4, 2, 6)),
+        Err(DecodeError::Invalid("index"))
+    );
+    assert!(matches!(
+        Frame::decode(&mut striped(4, 2, 5)),
+        Ok(Frame::Chunk { .. })
+    ));
+}
+
+fn striped(k: u16, m: u16, index: u16) -> Bytes {
+    let mut out = BytesMut::new();
+    Frame::Chunk {
+        flags: ChunkFlags::NONE,
+        chunk: Chunk {
+            msg_id: MessageId([0; 20]),
+            topic_id: 1,
+            k,
+            m,
+            index,
+            total_len: 2048,
+            data: Bytes::from_static(b"chunk"),
+        },
+    }
+    .encode(&mut out);
+    out.freeze()
+}
