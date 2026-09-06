@@ -511,6 +511,21 @@ mod tests {
         }
     }
 
+    /// Goodbye is read, not answered: the reason goes to the swarm loop, which logs it and
+    /// closes the connection.
+    #[test]
+    fn goodbye_is_reported_with_its_reason() {
+        let responder = Responder::new();
+
+        let farewell = responder.respond(Protocol::GoodbyeV1, &Goodbye(129).encode());
+
+        assert_eq!(farewell, Response::Goodbye(129));
+        assert_eq!(
+            responder.respond(Protocol::GoodbyeV1, &[1, 2, 3]),
+            Response::InvalidRequest
+        );
+    }
+
     /// A well-formed BlocksByRange v2 request (start slot, count, step) on a registered
     /// protocol the sidecar does not serve.
     #[test]

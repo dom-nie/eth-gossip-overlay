@@ -603,7 +603,7 @@ mod tests {
     use crate::node_key::NodeKey;
     use crate::spec::spec_watch;
     use crate::testutil::{
-        FakeBn, FakeBnEvent, IDLE_TIMEOUT, LOG, RpcAnswer, link_config, node_key, ok_json,
+        FakeBn, FakeBnEvent, IDLE_TIMEOUT, RpcAnswer, link_config, node_key, ok_json,
     };
 
     /// Long enough for a dial, a noise handshake and a gossipsub exchange on a loaded CI box,
@@ -1254,13 +1254,13 @@ mod tests {
         mirror.abort();
     }
 
-    /// The beacon node's farewell. The sidecar reads the reason and closes the connection
-    /// itself, which is the path this asserts through the log; T-013's backoff then brings
-    /// the link back to the same fake. The reason is this test's own, so its line in the
-    /// shared log is this test's line.
+    /// The beacon node's farewell. Lighthouse writes the goodbye and closes the connection
+    /// behind it, so whether the sidecar reads that last request before the stream goes with
+    /// the connection is a race no wire rule settles; what holds either way is that the link
+    /// sees the close and T-013's backoff brings it back to the same fake. What the sidecar
+    /// does with a goodbye it does read is `goodbye_is_reported_with_its_reason`.
     #[tokio::test(flavor = "multi_thread")]
     async fn goodbye_from_fake_bn_closes_and_the_link_reconnects() {
-        let log = &*LOG;
         let mut bn = FakeBn::start().await;
         let (mut harness, _answers) = connected(&mut bn).await;
         wait_for(&mut harness.link.events, |e| {
@@ -1271,17 +1271,17 @@ mod tests {
         bn.send_goodbye(GoodbyeReason::TooManyPeers).await;
 
         wait_for(&mut harness.link.events, |e| *e == BnEvent::Disconnected).await;
-        wait_for(&mut harness.link.events, |e| {
+        let back = wait_for(&mut harness.link.events, |e| {
             matches!(e, BnEvent::Connected { .. })
         })
         .await;
-        let text = log.text();
-        let farewell: Vec<&str> = text
-            .lines()
-            .filter(|line| line.contains(&bn.peer_id().to_string()) && line.contains("goodbye"))
-            .collect();
-        assert_eq!(farewell.len(), 1, "{text}");
-        assert!(farewell[0].contains("reason=129"), "{}", farewell[0]);
+        assert_eq!(
+            back,
+            BnEvent::Connected {
+                peer_id: bn.peer_id()
+            }
+        );
+        assert!(harness.link.connected.load(Ordering::Relaxed));
     }
 
     /// A protocol the sidecar registers so the negotiation succeeds and refuses so the beacon
