@@ -8,14 +8,17 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::Path;
+use std::time::Duration;
 
 use bytes::{BufMut, Bytes, BytesMut};
 use overlay_core::msgid::MessageId;
-use overlay_core::protocol::MAX_BATCH_ENTRIES;
+use overlay_core::protocol::{MAX_BATCH_ENTRIES, MAX_FRAME_BYTES};
 use overlay_core::wire::{
     BatchEntry, BatchFlags, Chunk, ChunkFlags, DecodeError, Frame, FrameType, Hello,
-    MAX_MISSING_INDICES, MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, RepairReq, RepairResp,
+    MAX_MISSING_INDICES, MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, Read, RepairReq, RepairResp,
+    read_frame, write_frame,
 };
 use proptest::prelude::*;
 
@@ -400,4 +403,34 @@ fn corpus() -> BTreeMap<String, Vec<u8>> {
         }
     }
     files
+}
+
+/// Every await here drives I/O that a broken codec would simply never finish. A bound turns that
+/// into a failure instead of a suite that hangs (DECISIONS section 7).
+async fn within<F: Future>(work: F) -> F::Output {
+    tokio::time::timeout(Duration::from_secs(5), work)
+        .await
+        .expect("timed out")
+}
+
+#[tokio::test]
+async fn stream_helpers_round_trip_two_frames_back_to_back() {
+    let (mut writer, mut reader) = tokio::io::duplex(64 * 1024);
+    let sent: Vec<Frame> = common::samples()
+        .into_iter()
+        .map(|(_, frame)| frame)
+        .take(2)
+        .collect();
+
+    for frame in &sent {
+        within(write_frame(&mut writer, frame))
+            .await
+            .expect("write");
+    }
+
+    for frame in sent {
+        let read = within(read_frame(&mut reader, MAX_FRAME_BYTES)).await;
+
+        assert!(matches!(read, Ok(Read::Frame(got)) if got == frame));
+    }
 }
