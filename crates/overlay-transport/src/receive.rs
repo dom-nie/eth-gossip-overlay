@@ -351,6 +351,79 @@ mod tests {
         snap::raw::Encoder::new().compress_vec(data).unwrap()
     }
 
+    /// The v1 flow end to end (§6.1): the beacon node forwards a block to its sidecar, the
+    /// sidecar routes it to the siblings whose beacon nodes are subscribed, and each of them
+    /// queues one copy for its own node. The origin publishes nothing back into the node the
+    /// message came from.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn message_from_a_bn_reaches_every_subscribed_peer_exactly_once() {
+        let block = topic("beacon_block");
+        let payload = payload(b"one block, three nodes");
+        let mut cluster = TestCluster::start(3).await;
+        for node in 0..3 {
+            cluster.start_sidecar(node, subscriptions(&[&block], &[]));
+        }
+        eventually("both siblings to subscribe", || {
+            cluster.live(0).subscribers(&block).len() == 2
+        })
+        .await;
+
+        assert!(cluster.from_bn(0, &block, &payload));
+
+        for node in [1, 2] {
+            eventually("the sibling to queue it", || {
+                cluster.published(node).len() == 1
+            })
+            .await;
+        }
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(cluster.published(1).len(), 1);
+        assert_eq!(cluster.published(2).len(), 1);
+        assert!(cluster.published(0).is_empty());
+        for sibling in [1, 2] {
+            let hostname = cluster.hostname(sibling);
+            assert_eq!(cluster.stats(0).messages(Direction::Out, &hostname), 1);
+            assert_eq!(
+                cluster.stats(0).bytes(Direction::Out, &hostname),
+                payload.len() as u64
+            );
+        }
+    }
+
+    /// A message goes only to peers whose beacon node is subscribed to its topic (§5.4). The
+    /// unsubscribed peer is connected and healthy; it is simply not sent anything, so the
+    /// overlay costs nothing for topics a host does not want.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unsubscribed_peer_receives_nothing() {
+        let block = topic("beacon_block");
+        let attestation = topic("beacon_attestation_3");
+        let payload = payload(b"a block only two of the three want");
+        let mut cluster = TestCluster::start(3).await;
+        cluster.start_sidecar(0, subscriptions(&[&block], &[]));
+        cluster.start_sidecar(1, subscriptions(&[&block], &[]));
+        cluster.start_sidecar(2, subscriptions(&[&attestation], &[]));
+        eventually("both siblings to say what they want", || {
+            cluster.live(0).subscribers(&block).len() == 1
+                && cluster.live(0).subscribers(&attestation).len() == 1
+        })
+        .await;
+
+        assert!(cluster.from_bn(0, &block, &payload));
+
+        eventually("the subscribed sibling to queue it", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert!(cluster.published(2).is_empty());
+        assert_eq!(
+            cluster
+                .stats(0)
+                .messages(Direction::Out, &cluster.hostname(2)),
+            0
+        );
+    }
+
     /// The property the whole design rests on (§3 principle 1, §5.5). A sidecar publishes what
     /// the overlay brings it into its own beacon node and sends it nowhere: only what a beacon
     /// node hands its sidecar enters the overlay, which is what bounds duplicates to the number
