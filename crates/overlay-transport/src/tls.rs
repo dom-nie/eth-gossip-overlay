@@ -263,6 +263,38 @@ impl AcceptorVerifier {
     }
 }
 
+/// The dialler's side of the pin check: the host it rang has one expected key, two while a
+/// seed rotation is in progress, and anything else fails the handshake.
+#[derive(Debug)]
+pub struct DialerVerifier {
+    pins: Arc<ArcSwap<PinTable>>,
+    peer: Hostname,
+}
+
+impl DialerVerifier {
+    /// One per dialled host, sharing the table with every other configuration so that a
+    /// roster reload reaches all of them at once.
+    pub fn new(pins: Arc<ArcSwap<PinTable>>, peer: Hostname) -> Self {
+        Self { pins, peer }
+    }
+
+    /// Whether the host that answered is the host that was dialled. A key from no seed at all
+    /// is the same answer as a sibling's key, because from here both are the wrong host.
+    pub fn check(&self, presented: &CertificateDer<'_>) -> Result<(), HandshakeFailure> {
+        let key = presented_key(presented);
+        let matches = key.is_some_and(|key| {
+            self.pins
+                .load()
+                .expected(&self.peer)
+                .any(|expected| expected == key)
+        });
+        matches.then_some(()).ok_or(HandshakeFailure {
+            role: Role::Dial,
+            reason: FailureReason::KeyMismatch,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
