@@ -337,4 +337,17 @@ mod tests {
         assert_eq!(failure.role.as_str(), "accept");
         assert_eq!(failure.reason.as_str(), "unknown_key");
     }
+    /// Same seed as the fleet, but a host nobody listed. The table is built from the roster,
+    /// so the seed alone earns nothing.
+    #[test]
+    fn acceptor_verifier_rejects_key_of_host_absent_from_roster() {
+        let seeds = seeds(0x11, None);
+        let verifier = AcceptorVerifier::new(pins(&roster(&["bn-a", "bn-b"]), &seeds));
+
+        let failure = verifier
+            .identify(&presented(&seeds.current, "bn-c"))
+            .unwrap_err();
+
+        assert_eq!(failure.reason.as_str(), "unknown_key");
+    }
 }
