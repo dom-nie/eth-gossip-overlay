@@ -68,4 +68,15 @@ mod tests {
 
         assert_eq!(ids, [TopicId::new(0), TopicId::new(1), TopicId::new(2)]);
     }
+
+    #[test]
+    fn intern_same_topic_twice_returns_same_id_and_is_new_false() {
+        let mut table = OwnTopicTable::new();
+
+        let first = table.intern(&column(7)).unwrap();
+        let second = table.intern(&column(7)).unwrap();
+
+        assert_eq!(first, (TopicId::new(0), true));
+        assert_eq!(second, (TopicId::new(0), false));
+    }
 }
