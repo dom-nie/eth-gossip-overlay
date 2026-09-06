@@ -29,6 +29,16 @@ The subject is a lowercase imperative summary under 72 characters. Changes from 
 
 Contributors certify the [Developer Certificate of Origin 1.1](https://developercertificate.org/) by adding `Signed-off-by: Name <email>` to each commit, which `git commit -s` does for you. There is no CLA.
 
+## Bumping Lighthouse
+
+`overlay-bn` compiles the `sigp/rust-libp2p` revision Lighthouse pins, so a Lighthouse release is a dependency bump plus a matrix run. In order:
+
+1. In the root `Cargo.toml`, move the `tag` on `lighthouse_network` and `types` to the new release and copy the `sigp/rust-libp2p` `rev` in the `[patch]` table from Lighthouse's own root `Cargo.toml` at that tag. Then `cargo update -p lighthouse_network -p types -p libp2p`.
+2. `cargo test -p overlay-bn drift` runs every drift test: the copied wire constants in `overlay_bn::gossip::wire`, `PINNED` against the tag, and the compatibility document against its generator. Fix whatever they flag; a moved constant is the point of the exercise.
+3. `scripts/lighthouse-matrix.sh <version>` downloads the release, starts a beacon node and runs `crates/overlay-bn/tests/matrix.rs` against it. Once T-019 is merged, add `--ten-minutes`.
+4. In `crates/overlay-bn/src/compat.rs`, update `PINNED`, `SUPPORTED` and `LAST_VERIFIED` together, regenerate the Lighthouse section of `COMPATIBILITY.md` with `UPDATE_COMPATIBILITY_MD=1 cargo test -p overlay-bn compatibility_md_matches_the_constant`, and add the version to the `version` list in `.github/workflows/lighthouse-matrix.yml`. The same test holds that list to `SUPPORTED`.
+5. `cargo deny check licenses advisories bans sources`, then prune `deny.toml`'s advisory ignore list of anything the new tree no longer pulls in.
+
 ## Pull request checklist
 
 The pull request template carries this list verbatim and a test keeps the two copies equal.
