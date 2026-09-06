@@ -144,6 +144,24 @@ mod tests {
     }
 
     #[test]
+    fn fake_clock_set_moves_the_wall_clock_by_the_same_step() {
+        let clock = FakeClock::new();
+        let start = clock.wall();
+
+        clock.set(clock.now() + Duration::from_secs(3600));
+        assert_eq!(
+            clock.wall().duration_since(start).unwrap(),
+            Duration::from_secs(3600)
+        );
+
+        clock.set(clock.now() - Duration::from_secs(600));
+        assert_eq!(
+            clock.wall().duration_since(start).unwrap(),
+            Duration::from_secs(3000)
+        );
+    }
+
+    #[test]
     fn fake_clock_advance_moves_the_wall_clock_alongside_the_instant() {
         let clock = FakeClock::new();
         let start = clock.wall();
