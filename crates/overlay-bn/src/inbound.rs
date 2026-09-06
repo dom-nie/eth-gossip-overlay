@@ -381,6 +381,33 @@ mod tests {
         assert_eq!(h.stats.total(), 2);
     }
 
+    /// One event per message per host (§12): the id is what joins this host's line to the same
+    /// message on every other host, so a second copy arriving would count this host twice in
+    /// the fleet-spread query.
+    #[tokio::test(start_paused = true)]
+    async fn duplicate_arrival_emits_nothing() {
+        let mut h = Harness::new();
+        // A payload no other test in this binary sends, so the id picks this test's lines out
+        // of the one log every test shares.
+        let msg = message(BLOCK, b"a block that only this test sends");
+        h.push(Class::Large, msg.clone());
+        h.push(Class::Large, msg.clone());
+        h.start();
+
+        tokio::time::timeout(WAIT, h.out.recv())
+            .await
+            .expect("the block reaches the fanout lane");
+        assert!(nothing_out(&mut h.out).await);
+
+        let id = core_id(&msg).to_string();
+        let events = LOG
+            .text()
+            .lines()
+            .filter(|line| line.contains("first_arrival") && line.contains(&id))
+            .count();
+        assert_eq!(events, 1);
+    }
+
     /// The id got into the cache from the overlay side, and the beacon node is now echoing
     /// the message the sidecar published into it: the normal dedup path (§5.5).
     #[tokio::test(start_paused = true)]
