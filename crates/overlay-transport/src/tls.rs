@@ -436,6 +436,7 @@ mod tests {
     use std::time::Duration;
 
     use arc_swap::ArcSwap;
+    use ed25519_dalek::SigningKey;
     use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
     use overlay_core::roster::{HostEntry, Hostname, Region, Roster};
     use rustls::client::danger::ServerCertVerifier;
@@ -592,5 +593,95 @@ mod tests {
         assert_eq!(during.hostname, host("bn-a"));
         assert_eq!(during.seed, SeedGeneration::Previous);
         assert_eq!(after.reason.as_str(), "unknown_key");
+    }
+    fn own_key(seeds: &Seeds, name: &str) -> SigningKey {
+        derive_tls_keypair(&seeds.current, &host(name))
+    }
+
+    fn loopback() -> std::net::SocketAddr {
+        "127.0.0.1:0".parse().unwrap()
+    }
+
+    /// An acceptor bound on an ephemeral loopback port, and a task that reports who the first
+    /// connection turned out to be.
+    fn acceptor(
+        pins: &Arc<ArcSwap<PinTable>>,
+        seeds: &Seeds,
+        name: &str,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<Option<PinEntry>>,
+    ) {
+        let endpoint = quinn::Endpoint::server(
+            server_config(pins.clone(), &own_key(seeds, name)).unwrap(),
+            loopback(),
+        )
+        .unwrap();
+        let addr = endpoint.local_addr().unwrap();
+        let pins = pins.clone();
+        let task = tokio::spawn(async move {
+            let connection = endpoint.accept().await?.await.ok()?;
+            peer_identity(&pins.load(), &connection)
+        });
+        (addr, task)
+    }
+
+    /// A sidecar from a fleet running the next protocol major, built here because the ALPN
+    /// this crate offers has one source and no knob.
+    fn dialler_of_another_major(
+        pins: &Arc<ArcSwap<PinTable>>,
+        own: &SigningKey,
+        peer: &str,
+    ) -> quinn::ClientConfig {
+        let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .unwrap()
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(DialerVerifier::new(pins.clone(), host(peer))))
+        .with_client_cert_resolver(Arc::new(
+            rustls::client::AlwaysResolvesClientRawPublicKeys::new(identity(own).unwrap()),
+        ));
+        tls.alpn_protocols = vec![b"fleet-overlay/2".to_vec()];
+        quinn::ClientConfig::new(Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap(),
+        ))
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn quinn_loopback_handshake_succeeds_with_matching_keys_and_fails_with_alpn_mismatch() {
+        let seeds = seeds(0x11, None);
+        let pins = pins(&roster(&["bn-a", "bn-b"]), &seeds);
+        let (addr, accepted) = acceptor(&pins, &seeds, "bn-a");
+        let dialler = quinn::Endpoint::client(loopback()).unwrap();
+        let key = own_key(&seeds, "bn-b");
+
+        let config = client_config(pins.clone(), &key, &host("bn-a")).unwrap();
+        let connection = dialler
+            .connect_with(config, addr, PLACEHOLDER_NAME)
+            .unwrap()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            peer_identity(&pins.load(), &connection).unwrap().hostname,
+            host("bn-a")
+        );
+        assert_eq!(accepted.await.unwrap().unwrap().hostname, host("bn-b"));
+
+        let (addr, _) = acceptor(&pins, &seeds, "bn-a");
+        let error = dialler
+            .connect_with(
+                dialler_of_another_major(&pins, &key, "bn-a"),
+                addr,
+                PLACEHOLDER_NAME,
+            )
+            .unwrap()
+            .await
+            .unwrap_err();
+
+        let failure = HandshakeFailure::from_connection_error(Role::Dial, &error);
+        assert_eq!(failure.reason.as_str(), "version");
     }
 }
