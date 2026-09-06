@@ -439,7 +439,7 @@ mod tests {
     /// redial at the 500 ms floor would pair again, read the same frame again and close again,
     /// for as long as both hosts are up.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_peer_closed_for_a_protocol_error_is_not_redialled_at_the_floor() {
+    async fn a_peer_whose_topic_add_conflicts_is_not_redialled_at_the_floor() {
         let mark = LOG.len();
         let mut cluster = Builder::new(&[NodeKind::Manager, NodeKind::ConflictingTopicAdd])
             .start()
