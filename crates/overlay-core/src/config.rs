@@ -554,6 +554,7 @@ bn:
   events_url: http://127.0.0.1:5052/eth/v1/events?topics=block
   libp2p_addr: /ip4/127.0.0.1/tcp/9000
   node_key_file: /var/lib/fleet-overlay/node.key   # per-host libp2p identity, created on first start
+  listen_addr: /ip4/127.0.0.1/tcp/7787            # where the beacon node dials the sidecar (MD-01); restart-required
   publish_rate_limit:
     small_per_s: 8000
     large_per_s: 300
@@ -784,6 +785,26 @@ log:
                 .contains("overlay.fanout.large.stripe_min_recipients"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn listen_addr_parses_and_defaults_to_localhost_7787() {
+        let default = Config::from_yaml("{}").unwrap();
+        let set = Config::from_yaml("bn: { listen_addr: \"/ip6/::1/tcp/9787\" }").unwrap();
+
+        assert_eq!(default.bn.listen_addr, "/ip4/127.0.0.1/tcp/7787");
+        assert_eq!(set.bn.listen_addr, "/ip6/::1/tcp/9787");
+
+        for doc in [
+            "bn: { listen_addr: /ip4/127.0.0.1/udp/7787/quic-v1 }",
+            "bn: { listen_addr: \"127.0.0.1:7787\" }",
+            "bn: { listen_addr: /ip4/300.0.0.1/tcp/7787 }",
+            "bn: { listen_addr: /ip4/127.0.0.1/tcp/70000 }",
+        ] {
+            let err = Config::from_yaml(doc).unwrap_err();
+
+            assert!(err.to_string().contains("bn.listen_addr"), "{doc}: {err}");
+        }
     }
 
     #[test]
