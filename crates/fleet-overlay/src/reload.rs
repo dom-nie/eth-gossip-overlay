@@ -19,6 +19,7 @@
 //! is honest about the file and costs one applier run.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,7 +29,9 @@ use overlay_core::identity::{FleetSeed, read_secret_file};
 use overlay_core::roster::Roster;
 use serde::Serialize;
 use serde_yaml_bw as yaml;
-use tokio::sync::watch;
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
 
 use crate::logging::{LogHandle, directive};
 
@@ -122,6 +125,63 @@ pub struct Deps {
     pub log: Arc<LogHandle>,
     /// Where the two reload counters live.
     pub stats: Arc<dyn ReloadStats>,
+}
+
+/// What one caller asks the reload task for: a trigger and somewhere to put the report.
+type Request = (Trigger, oneshot::Sender<ReloadReport>);
+
+/// How everything but the reload task itself asks for a reload. Cloneable, and every clone
+/// reaches the one [`Reloader`], so SIGHUP, the admin socket (T-042) and the roster file
+/// watcher (T-086) cannot run two reloads at once.
+#[derive(Clone)]
+pub struct ReloadHandle(mpsc::Sender<Request>);
+
+impl ReloadHandle {
+    /// Runs one reload and waits for its report. `None` means the task that owns the reloader
+    /// has ended, which happens when the process is shutting down.
+    pub async fn reload(&self, trigger: Trigger) -> Option<ReloadReport> {
+        let (reply, answer) = oneshot::channel();
+        self.0.send((trigger, reply)).await.ok()?;
+        answer.await.ok()
+    }
+}
+
+/// Starts the task that owns `reloader` and returns the handle every caller reaches it by.
+/// The task ends when the last handle is dropped.
+pub fn spawn(reloader: Reloader) -> (ReloadHandle, JoinHandle<()>) {
+    let (requests, receiver) = mpsc::channel(REQUEST_QUEUE);
+    (
+        ReloadHandle(requests),
+        tokio::spawn(run(reloader, receiver)),
+    )
+}
+
+/// Reloads are rare and a caller waits for its own report, so the queue only has to hold the
+/// handful of callers there are.
+const REQUEST_QUEUE: usize = 8;
+
+async fn run(mut reloader: Reloader, mut requests: mpsc::Receiver<Request>) {
+    while let Some((trigger, reply)) = requests.recv().await {
+        // A caller that stopped waiting still gets its reload; the report simply has nowhere
+        // to go.
+        let _ = reply.send(reloader.reload(trigger));
+    }
+}
+
+/// The SIGHUP loop the sidecar runs for the lifetime of the process: `systemctl reload
+/// fleet-overlay` sends the signal, and every one of them is a manual reload.
+///
+/// The handler is installed before the future is returned, so a signal that arrives between
+/// this call and the spawn is still delivered. Each report is logged by the reload itself.
+pub fn sighup_loop(handle: ReloadHandle) -> std::io::Result<impl Future<Output = ()> + Send> {
+    let mut hangups = signal(SignalKind::hangup())?;
+    Ok(async move {
+        while hangups.recv().await.is_some() {
+            if handle.reload(Trigger::Manual).await.is_none() {
+                return;
+            }
+        }
+    })
 }
 
 /// One reloadable key's consumer: it takes the new configuration and puts the key where the
