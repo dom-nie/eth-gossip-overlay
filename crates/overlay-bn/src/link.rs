@@ -1430,6 +1430,24 @@ mod tests {
         assert_eq!(next_answer(&mut answers).await, RpcAnswer::Pong(0));
     }
 
+    /// The one line T-045 writes to `/run/fleet-overlay/lighthouse.env`, which the Lighthouse
+    /// unit reads with `EnvironmentFile=-` and the operator appends to `ExecStart`.
+    #[test]
+    fn env_line_carries_both_flags() {
+        let peer_id = node_key(&tempfile::tempdir().unwrap()).peer_id();
+        let listen: Multiaddr = "/ip4/127.0.0.1/tcp/7787".parse().unwrap();
+
+        let line = lighthouse_env_line(&peer_id, &listen);
+
+        assert_eq!(
+            line,
+            format!(
+                "FLEET_OVERLAY_TRUSTED_PEER_ARGS=--trusted-peers {peer_id} \
+                 --libp2p-addresses /ip4/127.0.0.1/tcp/7787/p2p/{peer_id}"
+            )
+        );
+    }
+
     #[test]
     fn lane_for_takes_known_large_names_by_prefix_and_others_by_size() {
         let topic = |name: &str| format!("/eth2/6a95a1a9/{name}/ssz_snappy");
