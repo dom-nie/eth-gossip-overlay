@@ -396,4 +396,49 @@ mod tests {
 
         assert!(matches!(error, quinn::ConnectionError::TimedOut), "{error}");
     }
+
+    /// `[::]` has to answer a peer that knows only this host's IPv4 address, which is the whole
+    /// reason `set_only_v6(false)` runs before the bind. Linux is where the option is needed and
+    /// where the fleet runs, so the test is gated rather than written to whatever another
+    /// platform happens to default to.
+    #[cfg(target_os = "linux")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dual_stack_bind_accepts_ipv4_mapped_dial() {
+        let (seeds, pins) = fleet(&["bn-a", "bn-b"]);
+        let acceptor = endpoint(&config("[::]:0"), &pins, &seeds, "bn-a");
+        let port = acceptor.local_addr().unwrap().port();
+        let cfg = config("127.0.0.1:0");
+        let dialler = endpoint(&cfg, &pins, &seeds, "bn-b");
+
+        let accepted = tokio::spawn(async move {
+            acceptor
+                .accept()
+                .await
+                .expect("the endpoint is still open")
+                .await
+                .unwrap()
+        });
+
+        let connection = connect(
+            &cfg,
+            &dialler,
+            SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)),
+            dial_config(&pins, &seeds, "bn-b", "bn-a"),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            tls::peer_identity(&pins.load(), &connection)
+                .unwrap()
+                .hostname,
+            host("bn-a")
+        );
+        assert_eq!(
+            tls::peer_identity(&pins.load(), &accepted.await.unwrap())
+                .unwrap()
+                .hostname,
+            host("bn-b")
+        );
+    }
 }
