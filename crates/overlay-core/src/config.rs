@@ -162,6 +162,11 @@ pub struct Bn {
     pub libp2p_addr: String,
     /// `node_key_file`: the sidecar's own libp2p identity, per host, created on first start.
     pub node_key_file: PathBuf,
+    /// `listen_addr`: where the sidecar listens for the beacon node's own dial. Lighthouse
+    /// caps inbound connections before it knows who is connecting, so a sidecar that only
+    /// dialled would wait for peer churn on a busy node (MD-01). Restart-required: the
+    /// beacon node is given this address in its command line.
+    pub listen_addr: String,
     /// `publish_rate_limit`: ceilings on what the sidecar injects into the beacon node.
     pub publish_rate_limit: PublishRateLimit,
     /// `idontwant_on_publish`: tell the beacon node IDONTWANT for a message as it is published.
@@ -325,6 +330,7 @@ impl Default for Bn {
             events_url: url("http://127.0.0.1:5052/eth/v1/events?topics=block"),
             libp2p_addr: "/ip4/127.0.0.1/tcp/9000".to_owned(),
             node_key_file: PathBuf::from("/var/lib/fleet-overlay/node.key"),
+            listen_addr: "/ip4/127.0.0.1/tcp/7787".to_owned(),
             publish_rate_limit: PublishRateLimit::default(),
             idontwant_on_publish: true,
         }
@@ -483,6 +489,13 @@ impl Config {
                 ),
             ));
         }
+        let listen_addr = &self.bn.listen_addr;
+        if !is_ip_tcp_multiaddr(listen_addr) {
+            return Err(invalid(
+                "bn.listen_addr",
+                format!("{listen_addr} is not an /ip4 or /ip6 address with a /tcp port"),
+            ));
+        }
         let (fanout, limits) = (&self.overlay.fanout, &self.bn.publish_rate_limit);
         for (field, zero) in [
             (
@@ -502,6 +515,21 @@ impl Config {
             }
         }
         Ok(())
+    }
+}
+
+/// Whether `addr` is `/ip4|ip6/<address>/tcp/<port>` and nothing more, the only shape that
+/// fits in an ENR and in the beacon node's `--libp2p-addresses`. Matched as text because this
+/// crate has no multiaddr parser and one key does not warrant libp2p here.
+fn is_ip_tcp_multiaddr(addr: &str) -> bool {
+    match *addr.split('/').collect::<Vec<_>>().as_slice() {
+        ["", "ip4", ip, "tcp", port] => {
+            ip.parse::<Ipv4Addr>().is_ok() && port.parse::<u16>().is_ok()
+        }
+        ["", "ip6", ip, "tcp", port] => {
+            ip.parse::<Ipv6Addr>().is_ok() && port.parse::<u16>().is_ok()
+        }
+        _ => false,
     }
 }
 
