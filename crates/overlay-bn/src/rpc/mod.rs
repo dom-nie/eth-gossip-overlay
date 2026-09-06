@@ -384,4 +384,22 @@ mod tests {
             Response::Success(Ping(3).encode())
         );
     }
+
+    /// A well-formed BlocksByRange v2 request (start slot, count, step) on a registered
+    /// protocol the sidecar does not serve.
+    #[test]
+    fn unsupported_protocol_request_gets_resource_unavailable() {
+        let id = StreamProtocol::new("/eth2/beacon_chain/req/beacon_blocks_by_range/2/ssz_snappy");
+        let mut request = Vec::new();
+        for field in [0u64, 10, 1] {
+            request.extend_from_slice(&field.to_le_bytes());
+        }
+
+        let protocol = proto::classify(&id);
+        let response = Responder::new().respond(protocol, &request);
+
+        assert_eq!(protocol, Protocol::Unsupported);
+        assert_eq!(response, Response::ResourceUnavailable);
+        assert_eq!(proto::classify(&PING), Protocol::PingV1);
+    }
 }
