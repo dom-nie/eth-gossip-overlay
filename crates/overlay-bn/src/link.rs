@@ -206,6 +206,8 @@ impl BnLink {
     ) -> Self {
         let connected = Arc::new(AtomicBool::new(false));
         let (control, events) = mpsc::channel(CONTROL_CHANNEL_CAPACITY);
+        let mut responder = Responder::new();
+        responder.set_spec(&spec.borrow());
         let link = Link {
             swarm: build_swarm(&cfg.gossip, node_key, registry),
             backoff: Backoff::new(cfg.backoff_min, cfg.backoff_max),
@@ -217,7 +219,7 @@ impl BnLink {
             spec,
             sets,
             commands,
-            responder: Responder::new(),
+            responder,
             connected: connected.clone(),
             bn_peer: None,
             reconnect: None,
@@ -460,6 +462,7 @@ impl Link {
             tracing::warn!(%err, "connect probe failed");
         }
         if let Ok(snapshot) = spec {
+            self.responder.set_spec(&snapshot);
             self.spec.send_replace(snapshot);
         }
         self.emit(BnEvent::BnInfo {
@@ -1213,7 +1216,7 @@ mod tests {
         assert!(metadata.attnets.get(3).unwrap());
         assert!(!metadata.attnets.get(4).unwrap());
         assert!(metadata.syncnets.get(1).unwrap());
-        assert_eq!(metadata.custody_group_count, 0);
+        assert_eq!(metadata.custody_group_count, 4);
     }
 
     /// The whole path T-014 feeds: the beacon node subscribes, the mirror turns that into a
