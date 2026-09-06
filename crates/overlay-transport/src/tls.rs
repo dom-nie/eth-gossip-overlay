@@ -992,4 +992,28 @@ mod tests {
             FailureReason::UnknownKey
         );
     }
+    /// None of this shows up in a handshake test, and all of it is load bearing.
+    /// `requires_raw_public_keys` is what drives certificate-type negotiation: set it false
+    /// on the acceptor and rustls settles on X.509 with anyone who offers it, every sibling
+    /// fails with the wrong certificate type counted as `version`, and the module quietly
+    /// stops doing what its doc says.
+    #[test]
+    fn verifiers_ask_for_raw_ed25519_keys_and_mandatory_client_auth() {
+        let seeds = seeds(0x11, None);
+        let pins = pins(&roster(&["bn-a"]), &seeds);
+        let acceptor = AcceptorVerifier::new(pins.clone());
+        let dialler = DialerVerifier::new(pins, host("bn-a"));
+
+        assert!(ClientCertVerifier::requires_raw_public_keys(&acceptor));
+        assert!(ServerCertVerifier::requires_raw_public_keys(&dialler));
+        assert!(acceptor.client_auth_mandatory());
+        assert_eq!(
+            ClientCertVerifier::supported_verify_schemes(&acceptor),
+            vec![SignatureScheme::ED25519]
+        );
+        assert_eq!(
+            ServerCertVerifier::supported_verify_schemes(&dialler),
+            vec![SignatureScheme::ED25519]
+        );
+    }
 }
