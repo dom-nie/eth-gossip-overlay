@@ -5,6 +5,8 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+pub mod table;
+
 /// Payloads on a topic name the sidecar does not know travel as [`Class::Large`] from this size
 /// up. A constant rather than a config key: the class only picks the transport path, and a
 /// release is the place to correct a wrong guess for a new topic.
