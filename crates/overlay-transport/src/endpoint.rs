@@ -61,4 +61,22 @@ mod tests {
         assert_eq!(field(&transport, "keep_alive_interval"), "Some(250ms)");
         assert_eq!(field(&transport, "max_idle_timeout"), "Some(3000)");
     }
+
+    /// §5.3 asks for probing that starts at 1200 and climbs, which is what quinn does when
+    /// nothing sets otherwise. Nothing here does, so this pins the default: a release that
+    /// moved it would take the overlay's floor with it and no other test would notice.
+    #[test]
+    fn mtu_discovery_starts_at_1200() {
+        let transport = transport_config(&Overlay::default());
+
+        assert_eq!(field(&transport, "initial_mtu"), "1200");
+        assert!(
+            field(&transport, "mtu_discovery_config").starts_with("Some("),
+            "MTU discovery is off"
+        );
+        let upper: u16 = field(&transport, "upper_bound")
+            .parse()
+            .expect("the upper bound is a UDP payload size");
+        assert!(upper > 1200, "discovery probes down from {upper}, not up");
+    }
 }
