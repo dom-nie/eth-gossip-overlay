@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use overlay_core::config::{Config, PublishRateLimit};
-use overlay_core::identity::FleetSeed;
+use overlay_core::identity::{FleetSeed, read_secret_file};
 use overlay_core::roster::Roster;
 use serde::Serialize;
 use serde_yaml_bw as yaml;
@@ -133,13 +133,29 @@ impl Reloader {
     pub fn new(config_path: PathBuf, deps: Deps) -> Result<Self, ReloadError> {
         let (document, config) = read_config(&config_path)?;
         let inject = deps.inject;
-        let appliers: Vec<(&'static str, Applier)> = vec![(
-            "inject",
-            Box::new(move |cfg: &Config| {
-                inject.store(cfg.inject, Ordering::Relaxed);
-                Ok(())
-            }),
-        )];
+        let previous_seed = deps.previous_seed;
+        let appliers: Vec<(&'static str, Applier)> = vec![
+            (
+                "inject",
+                Box::new(move |cfg: &Config| {
+                    inject.store(cfg.inject, Ordering::Relaxed);
+                    Ok(())
+                }),
+            ),
+            (
+                "overlay.fleet_seed_previous_file",
+                Box::new(move |cfg: &Config| {
+                    let seed = match &cfg.overlay.fleet_seed_previous_file {
+                        Some(path) => Some(FleetSeed::from(
+                            *read_secret_file(path).map_err(|err| err.to_string())?,
+                        )),
+                        None => None,
+                    };
+                    previous_seed.send_replace(seed);
+                    Ok(())
+                }),
+            ),
+        ];
         Ok(Self {
             config_path,
             roster_path: config.overlay.roster_file.clone(),
