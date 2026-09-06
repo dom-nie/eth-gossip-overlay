@@ -150,7 +150,58 @@ impl Fanout {
     /// view is a snapshot, the route is a pure function over it, and the frame goes out with
     /// `try_send`.
     fn send(&mut self, outbound: Outbound) {
-        todo!("T-032: route the message and write one whole-message frame per target")
+        let view = self.live.live();
+        let RoutePlan::Direct(targets) = route(
+            &outbound.topic,
+            outbound.class,
+            &view,
+            &self.self_id,
+            &self.cfg,
+        ) else {
+            return;
+        };
+        let Some(topic_id) = self.own_id(&outbound.topic) else {
+            tracing::debug!(
+                topic = %outbound.topic,
+                "no id for this topic yet, so no peer could read a frame carrying it"
+            );
+            return;
+        };
+        let frame = Frame::whole_message(outbound.id, topic_id.get(), outbound.payload.clone());
+        let bytes = outbound.payload.len();
+        for target in targets {
+            // A peer can leave the live set between the plan and the send, and the send is what
+            // finds out (§5.3).
+            let Some(live) = view.get(&target) else {
+                continue;
+            };
+            let allowed = live.negotiated.peer_max_frame_bytes;
+            if bytes + WHOLE_MESSAGE_HEADER_BYTES > allowed as usize {
+                self.warn_oversize(&target, bytes, allowed);
+                continue;
+            }
+            let labels = PeerLabels {
+                hostname: &target,
+                region: &live.region,
+                site: live.site.as_deref(),
+            };
+            if self.sender(&target, live).try_send(frame.clone()).is_err() {
+                tracing::debug!(peer = %target, "peer sender full or gone: message dropped");
+                continue;
+            }
+            self.stats
+                .message(Direction::Out, outbound.class, labels, bytes);
+        }
+        while self.tasks.try_join_next().is_some() {}
+    }
+
+    /// One line the first time a peer would refuse a frame for its size. Both ends of a v1 pair
+    /// run the same limit, so this is a guard against a peer that advertised a smaller one
+    /// rather than a path anything travels (D29).
+    fn warn_oversize(&mut self, peer: &Hostname, bytes: usize, allowed: u32) {
+        if self.oversize_warned.insert(peer.clone()) {
+            tracing::warn!(%peer, bytes, allowed, "message is larger than the peer accepts");
+        }
     }
 
     /// The id this host's peers know `topic` by. Never interns: an id nobody has been told about
@@ -164,9 +215,7 @@ impl Fanout {
     /// is replaced. A peer that goes away leaves its entry behind until it comes back, which
     /// costs a closed channel per roster host at worst.
     fn sender(&mut self, peer: &Hostname, live: &LivePeer) -> mpsc::Sender<Frame> {
-        let Self {
-            senders, tasks, ..
-        } = self;
+        let Self { senders, tasks, .. } = self;
         let connection = live.connection.stable_id();
         if let Some(held) = senders.get(peer)
             && held.connection == connection
@@ -174,11 +223,7 @@ impl Fanout {
             return held.frames.clone();
         }
         let (frames, queued) = mpsc::channel(PEER_LANE_FRAMES);
-        let task = tasks.spawn(write_frames(
-            queued,
-            live.connection.clone(),
-            peer.clone(),
-        ));
+        let task = tasks.spawn(write_frames(queued, live.connection.clone(), peer.clone()));
         let sender = PeerSender {
             frames: frames.clone(),
             connection,

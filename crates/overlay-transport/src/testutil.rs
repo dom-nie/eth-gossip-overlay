@@ -46,19 +46,19 @@ use bytes::Bytes;
 use ed25519_dalek::SigningKey;
 use overlay_core::config::{self, Overlay};
 use overlay_core::fanout::Outbound;
+use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
 use overlay_core::lanes::{ClassLanes, LanePusher};
 use overlay_core::msgid;
 use overlay_core::pubqueue::{PublishItem, PublishSink};
-use overlay_core::seen::{SeenCache, SharedSeenCache};
-use overlay_core::time::SystemClock;
-use overlay_core::topic::{Class, SubscriptionSets};
-use overlay_core::wire::MAX_PAYLOAD_BYTES;
-use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
+use overlay_core::seen::{SeenCache, SharedSeenCache};
 use overlay_core::subs::{Bitmap, PeerState};
+use overlay_core::time::SystemClock;
 use overlay_core::topic::Topic;
 use overlay_core::topic::table::{PeerTopicTable, TopicId};
+use overlay_core::topic::{Class, SubscriptionSets};
 use overlay_core::wire::Frame;
+use overlay_core::wire::MAX_PAYLOAD_BYTES;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -152,7 +152,7 @@ pub struct CountingStats {
     connected: Mutex<PeerCounts>,
     in_roster: Mutex<PeerCounts>,
     bn_subscriptions: Mutex<Option<usize>>,
-    traffic: Mutex<HashMap<(Direction, Class, Hostname), (u64, u64)>>,
+    traffic: Mutex<Traffic>,
     unknown_topic_ids: Mutex<BTreeMap<Hostname, u64>>,
     unwanted_topics: Mutex<BTreeMap<Hostname, u64>>,
     invalid_payloads: Mutex<BTreeMap<Hostname, u64>>,
@@ -249,14 +249,27 @@ impl CountingStats {
 
     /// `first_seen_total{class, source="overlay"}`.
     pub fn first_seen(&self, class: Class) -> u64 {
-        self.first_seen.lock().unwrap().get(&class).copied().unwrap_or_default()
+        self.first_seen
+            .lock()
+            .unwrap()
+            .get(&class)
+            .copied()
+            .unwrap_or_default()
     }
 
     /// `duplicates_dropped_total{class, source="overlay"}`.
     pub fn duplicates(&self, class: Class) -> u64 {
-        self.duplicates.lock().unwrap().get(&class).copied().unwrap_or_default()
+        self.duplicates
+            .lock()
+            .unwrap()
+            .get(&class)
+            .copied()
+            .unwrap_or_default()
     }
 }
+
+/// `messages_total` and `bytes_total` for one direction, class and peer.
+type Traffic = HashMap<(Direction, Class, Hostname), (u64, u64)>;
 
 fn count<K: Ord + Clone>(counts: &Mutex<BTreeMap<K, u64>>, key: &K) -> u64 {
     counts.lock().unwrap().get(key).copied().unwrap_or_default()
@@ -977,7 +990,12 @@ impl<A: Admission> TestCluster<A> {
 
     /// Node `index`'s receiver for `peer`, while the pair is live.
     pub fn receiver(&self, index: usize, peer: &Hostname) -> Option<Arc<PeerReceiver>> {
-        self.sidecar(index).receivers.lock().unwrap().get(peer).cloned()
+        self.sidecar(index)
+            .receivers
+            .lock()
+            .unwrap()
+            .get(peer)
+            .cloned()
     }
 
     fn sidecar(&self, index: usize) -> &Sidecar {
@@ -1129,7 +1147,8 @@ pub fn topic(name: &str) -> Topic {
 /// for T-015's own-proposal column topics: interned and announced so their ids reach peers, and
 /// left out of the bitmap because the beacon node never asked for them (D06).
 pub fn subscriptions(advertised: &[&Topic], extra: &[&Topic]) -> SubscriptionSets {
-    let cloned = |set: &[&Topic]| -> Vec<Topic> { set.iter().map(|topic| (*topic).clone()).collect() };
+    let cloned =
+        |set: &[&Topic]| -> Vec<Topic> { set.iter().map(|topic| (*topic).clone()).collect() };
     SubscriptionSets {
         advertised: cloned(advertised).into_iter().collect(),
         local: cloned(advertised)

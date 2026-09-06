@@ -249,19 +249,86 @@ async fn read_frames<R: AsyncRead + Unpin>(stream: &mut R, ctx: &Ctx) -> StreamE
 impl Ctx {
     /// Sends one frame down the path its carrier and shape call for.
     fn frame(&self, frame: Frame) {
-        todo!("T-032: dispatch the frame and deliver its payloads")
+        match frame {
+            Frame::Chunk { chunk, .. } if chunk.is_whole() => {
+                self.deliver(chunk.topic_id, chunk.data, Some(chunk.msg_id));
+            }
+            Frame::Chunk { flags, chunk } => self.deps.stripes.chunk(&self.peer, flags, chunk),
+            // `RELAY` asks the receiver to re-fan the batch inside its own region, which is
+            // T-063's to act on. v1 delivers the entries locally and lets the flag be (D20).
+            Frame::Batch { entries, .. } => {
+                for entry in entries {
+                    self.deliver(entry.topic_id, entry.payload, None);
+                }
+            }
+            other => tracing::debug!(
+                peer = %self.peer,
+                frame = ?other.frame_type(),
+                "frame that does not belong on a data stream"
+            ),
+        }
     }
 
     /// One payload, from a whole message or from a batch entry. `header_id` is the id the frame
     /// claimed for it, which only a chunk header carries.
     fn deliver(&self, topic_id: u16, payload: Bytes, header_id: Option<MessageId>) {
-        todo!("T-032: resolve, gate, check, deduplicate and queue for publish")
+        let Some(topic) = self.topic(topic_id) else {
+            self.deps.stats.unknown_topic_id(&self.peer);
+            return;
+        };
+        let class = Class::of(topic.kind(), payload.len());
+        self.deps
+            .stats
+            .message(Direction::In, class, self.labels(), payload.len());
+        if !self.deps.sets.borrow().advertised.contains(&topic) {
+            self.deps.stats.unwanted_topic(&self.peer);
+            return;
+        }
+        let computed = msgid::compute(&topic.to_string(), &payload, wire::MAX_PAYLOAD_BYTES);
+        let refused = match (computed.branch, header_id) {
+            (Branch::Valid, Some(claimed)) if claimed != computed.id => {
+                Some("the id does not match the payload")
+            }
+            (Branch::Valid, _) => None,
+            (Branch::Invalid, _) => Some("the payload does not decompress"),
+            (Branch::TooLarge, _) => Some("the payload declares more than the maximum"),
+        };
+        if let Some(refused) = refused {
+            self.deps.stats.invalid_payload(&self.peer);
+            self.warn_invalid(&topic, refused);
+            return;
+        }
+        // Insert site 2 of 3 (D08), immediately before the enqueue. There is no second insert
+        // anywhere in this file, and a message dropped below is one this host is already
+        // holding for the seen cache's TTL.
+        if !self.deps.seen.insert(computed.id) {
+            self.deps.stats.duplicate(class);
+            return;
+        }
+        self.deps.stats.first_seen(class);
+        self.deps.publish.enqueue(PublishItem {
+            topic,
+            id: computed.id,
+            payload,
+            class,
+        });
+    }
+
+    /// One line per connection about payloads the beacon node would refuse. A peer sending a
+    /// stream of them costs one line, and its next connection gets a fresh one (D03).
+    fn warn_invalid(&self, topic: &Topic, refused: &str) {
+        if !self.warned_invalid.swap(true, Ordering::Relaxed) {
+            tracing::warn!(peer = %self.peer, %topic, "dropping a payload: {refused}");
+        }
     }
 
     /// The topic the peer means by `id`, read against the peer's own table and nobody else's
     /// (D13). The lock is held for the lookup and the clone, never across the hashing below.
     fn topic(&self, id: u16) -> Option<Topic> {
-        subs::state(&self.state).table.resolve(TopicId::new(id)).cloned()
+        subs::state(&self.state)
+            .table
+            .resolve(TopicId::new(id))
+            .cloned()
     }
 
     fn labels(&self) -> PeerLabels<'_> {
@@ -317,7 +384,9 @@ mod tests {
             "C was published a message it could only have got by a second hop"
         );
         assert_eq!(
-            cluster.stats(1).messages(Direction::Out, &cluster.hostname(2)),
+            cluster
+                .stats(1)
+                .messages(Direction::Out, &cluster.hostname(2)),
             0,
             "B sent C something after receiving from the overlay"
         );
