@@ -298,11 +298,14 @@ impl DialerVerifier {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use arc_swap::ArcSwap;
     use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
     use overlay_core::roster::{HostEntry, Hostname, Region, Roster};
-    use rustls::pki_types::CertificateDer;
+    use rustls::client::danger::ServerCertVerifier;
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::server::danger::ClientCertVerifier;
 
     use super::*;
 
@@ -394,5 +397,28 @@ mod tests {
 
         assert_eq!(failure.role.as_str(), "dial");
         assert_eq!(failure.reason.as_str(), "key_mismatch");
+    }
+    /// A raw public key has no validity period, so the only date in sight is the `now` rustls
+    /// hands the verifier, and both sides ignore it. A verifier that started refusing a key
+    /// at some wall-clock time would take an operator's whole fleet down on a date nobody
+    /// remembers setting.
+    #[test]
+    fn verifiers_accept_a_pinned_key_at_any_wall_clock_time() {
+        let seeds = seeds(0x11, None);
+        let pins = pins(&roster(&["bn-a"]), &seeds);
+        let key = presented(&seeds.current, "bn-a");
+        let name = ServerName::try_from(PLACEHOLDER_NAME).unwrap();
+
+        for now in [
+            UnixTime::since_unix_epoch(Duration::ZERO),
+            UnixTime::since_unix_epoch(Duration::from_secs(1 << 40)),
+        ] {
+            AcceptorVerifier::new(pins.clone())
+                .verify_client_cert(&key, &[], now)
+                .unwrap();
+            DialerVerifier::new(pins.clone(), host("bn-a"))
+                .verify_server_cert(&key, &[], &name, &[], now)
+                .unwrap();
+        }
     }
 }
