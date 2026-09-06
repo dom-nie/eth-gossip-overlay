@@ -325,4 +325,16 @@ mod tests {
         assert_eq!(entry.hostname, host("bn-a"));
         assert_eq!(entry.seed, SeedGeneration::Current);
     }
+    #[test]
+    fn acceptor_verifier_rejects_key_from_neither_seed_as_unknown_key() {
+        let seeds = seeds(0x11, Some(0x22));
+        let verifier = AcceptorVerifier::new(pins(&roster(&["bn-a", "bn-b"]), &seeds));
+
+        let failure = verifier
+            .identify(&presented(&FleetSeed::from([0x33; 32]), "bn-a"))
+            .unwrap_err();
+
+        assert_eq!(failure.role.as_str(), "accept");
+        assert_eq!(failure.reason.as_str(), "unknown_key");
+    }
 }
