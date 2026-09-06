@@ -2,7 +2,7 @@
 //! (D32).
 //!
 //! Logs and events share it: both go through one `EnvFilter`, one formatter and one
-//! [`tracing_appender::non_blocking`] writer onto stdout, which under systemd is the journal and
+//! [`tracing_appender::non_blocking()`] writer onto stdout, which under systemd is the journal and
 //! from there one Loki stream. Events are told apart by their `event` field, not by a second
 //! stream, so there is nothing extra for an operator to configure and no way for the two to
 //! drift apart.
