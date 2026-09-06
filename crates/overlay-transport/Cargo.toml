@@ -17,6 +17,7 @@ test-util = ["tokio/rt-multi-thread"]
 
 [dependencies]
 arc-swap.workspace = true
+bytes.workspace = true
 ed25519-dalek.workspace = true
 overlay-core.workspace = true
 quinn.workspace = true
@@ -29,7 +30,7 @@ tracing.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
-bytes.workspace = true
 mutants.workspace = true
+snap.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
 tracing-subscriber.workspace = true

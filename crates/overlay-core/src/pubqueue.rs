@@ -44,6 +44,17 @@ pub struct PublishItem {
     pub class: Class,
 }
 
+/// The queue as its ingress sites see it, so a site can push without linking the crate that
+/// owns the beacon node. `overlay-transport` must not depend on `overlay-bn`, because libp2p
+/// comes with it, and T-017's `PublishHandle` is the implementation on the other side of that
+/// line. One method, because pushing is all an ingress site does: whatever the queue makes of
+/// the item is the publisher's business and is counted there.
+pub trait PublishSink: Send + Sync {
+    /// Queues `item` and returns. Never waits: nothing on the overlay receive path may await
+    /// the beacon node (DX-N4), so a full lane drops an entry rather than holding a stream.
+    fn enqueue(&self, item: PublishItem);
+}
+
 /// Why the queue threw an entry away: the `reason` label of
 /// `publish_queue_drops_total{class, reason}`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

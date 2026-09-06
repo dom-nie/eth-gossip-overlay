@@ -23,20 +23,36 @@
 //! [`view`] is the other half: a [`LiveView`] whose peers a test decides the subscriptions of,
 //! for the routing questions (T-031) that read the view and never the network.
 //!
-//! Two simplifications a reader should know about. Every node shares one pin table and one
-//! roster channel, where real hosts each load their own, so [`TestCluster::set_roster`] reloads
-//! the whole cluster at once. And hostnames carry a per-cluster prefix, so a test that reads the
-//! captured log can tell its own peers' lines from another test's.
+//! [`TestCluster::start_sidecar`] adds the rest of the sidecar's overlay pipeline to a node: the
+//! fanout task (T-032), a receiver per live peer, the subscription exchange (T-027) and a
+//! stand-in for T-017's publisher. What a beacon node would hand the node goes in through
+//! [`TestCluster::from_bn`] and what would reach it comes back out of
+//! [`TestCluster::published`].
+//!
+//! Two simplifications a reader should know about. Every node shares one pin table, where real
+//! hosts each build their own from the roster they loaded, so a host is always pinnable even
+//! when [`TestCluster::set_roster_for`] has taken it out of somebody's roster. And hostnames
+//! carry a per-cluster prefix, so a test that reads the captured log can tell its own peers'
+//! lines from another test's.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
+use bytes::Bytes;
 use ed25519_dalek::SigningKey;
-use overlay_core::config::Overlay;
+use overlay_core::config::{self, Overlay};
+use overlay_core::fanout::Outbound;
+use overlay_core::lanes::{ClassLanes, LanePusher};
+use overlay_core::msgid;
+use overlay_core::pubqueue::{PublishItem, PublishSink};
+use overlay_core::seen::{SeenCache, SharedSeenCache};
+use overlay_core::time::SystemClock;
+use overlay_core::topic::{Class, SubscriptionSets};
+use overlay_core::wire::MAX_PAYLOAD_BYTES;
 use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::subs::{Bitmap, PeerState};
@@ -47,11 +63,13 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::endpoint::{self, EndpointError};
+use crate::fanout::{Direction, Fanout, PeerLabels, TrafficStats};
 use crate::hello::{HelloAdmission, Negotiated, OwnTopics, SelfHello};
 use crate::manager::{
-    Admission, CloseCode, ConnectionManager, Handle, LivePeer, LiveView, Local, ManagerStats,
-    PeerCounts, PeerEvent, PeerInfo,
+    Admission, CloseCode, ConnectionManager, Handle, LivePeer, LiveSource, LiveView, Local,
+    ManagerStats, PeerCounts, PeerEvent, PeerInfo,
 };
+use crate::receive::{Deps, NoStripes, PeerReceiver, ReceiveStats};
 use crate::subs::SubsStats;
 use crate::tls::{self, FailureReason, HandshakeFailure, PinTable, Role};
 
@@ -65,6 +83,16 @@ pub const SETTLE: Duration = Duration::from_millis(250);
 /// The one region every cluster host is in, so a test about declared regions has something to
 /// differ from.
 pub const REGION: &str = "eu";
+
+/// What a node's publish stand-in holds before it drops its oldest entry. Far below T-017's own
+/// bound, which a test would have to push four thousand messages through a live overlay to
+/// reach; [`TestCluster::start_sidecar_with`] takes a smaller one still.
+pub const PUBLISHED_MAX: usize = 1024;
+
+/// The seen cache every sidecar in a cluster runs, at §5.5's TTL and a capacity sized for a
+/// test rather than for a fleet.
+const SEEN_TTL: Duration = Duration::from_secs(60);
+const SEEN_CAPACITY: usize = 4096;
 
 /// Distinguishes one cluster's hostnames from another's, because the captured log is shared by
 /// every test in the binary.
@@ -124,6 +152,12 @@ pub struct CountingStats {
     connected: Mutex<PeerCounts>,
     in_roster: Mutex<PeerCounts>,
     bn_subscriptions: Mutex<Option<usize>>,
+    traffic: Mutex<HashMap<(Direction, Class, Hostname), (u64, u64)>>,
+    unknown_topic_ids: Mutex<BTreeMap<Hostname, u64>>,
+    unwanted_topics: Mutex<BTreeMap<Hostname, u64>>,
+    invalid_payloads: Mutex<BTreeMap<Hostname, u64>>,
+    first_seen: Mutex<HashMap<Class, u64>>,
+    duplicates: Mutex<HashMap<Class, u64>>,
 }
 
 impl CountingStats {
@@ -166,6 +200,62 @@ impl CountingStats {
     pub fn bn_subscriptions(&self) -> Option<usize> {
         *self.bn_subscriptions.lock().unwrap()
     }
+
+    /// `messages_total{direction, peer}` over every class.
+    pub fn messages(&self, direction: Direction, peer: &Hostname) -> u64 {
+        self.traffic(direction, peer).0
+    }
+
+    /// `bytes_total{direction, peer}` over every class.
+    pub fn bytes(&self, direction: Direction, peer: &Hostname) -> u64 {
+        self.traffic(direction, peer).1
+    }
+
+    /// `messages_total{direction, class, peer}`, which is what says how a payload was
+    /// classified.
+    pub fn messages_of(&self, direction: Direction, class: Class, peer: &Hostname) -> u64 {
+        self.traffic
+            .lock()
+            .unwrap()
+            .get(&(direction, class, peer.clone()))
+            .map_or(0, |(messages, _)| *messages)
+    }
+
+    fn traffic(&self, direction: Direction, peer: &Hostname) -> (u64, u64) {
+        self.traffic
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|((counted, _, hostname), _)| *counted == direction && hostname == peer)
+            .fold((0, 0), |(messages, bytes), (_, (m, b))| {
+                (messages + m, bytes + b)
+            })
+    }
+
+    /// `unknown_topic_id_total{peer}`.
+    pub fn unknown_topic_ids(&self, peer: &Hostname) -> u64 {
+        count(&self.unknown_topic_ids, peer)
+    }
+
+    /// `unwanted_topic_total{peer}`.
+    pub fn unwanted_topics(&self, peer: &Hostname) -> u64 {
+        count(&self.unwanted_topics, peer)
+    }
+
+    /// `invalid_payload_total{peer}`.
+    pub fn invalid_payloads(&self, peer: &Hostname) -> u64 {
+        count(&self.invalid_payloads, peer)
+    }
+
+    /// `first_seen_total{class, source="overlay"}`.
+    pub fn first_seen(&self, class: Class) -> u64 {
+        self.first_seen.lock().unwrap().get(&class).copied().unwrap_or_default()
+    }
+
+    /// `duplicates_dropped_total{class, source="overlay"}`.
+    pub fn duplicates(&self, class: Class) -> u64 {
+        self.duplicates.lock().unwrap().get(&class).copied().unwrap_or_default()
+    }
 }
 
 fn count<K: Ord + Clone>(counts: &Mutex<BTreeMap<K, u64>>, key: &K) -> u64 {
@@ -206,6 +296,39 @@ impl ManagerStats for CountingStats {
 
     fn peers_roster(&self, counts: &PeerCounts) {
         *self.in_roster.lock().unwrap() = counts.clone();
+    }
+}
+
+impl TrafficStats for CountingStats {
+    fn message(&self, direction: Direction, class: Class, peer: PeerLabels<'_>, bytes: usize) {
+        let mut traffic = self.traffic.lock().unwrap();
+        let counted = traffic
+            .entry((direction, class, peer.hostname.clone()))
+            .or_default();
+        counted.0 += 1;
+        counted.1 += bytes as u64;
+    }
+}
+
+impl ReceiveStats for CountingStats {
+    fn unknown_topic_id(&self, peer: &Hostname) {
+        add(&self.unknown_topic_ids, peer.clone());
+    }
+
+    fn unwanted_topic(&self, peer: &Hostname) {
+        add(&self.unwanted_topics, peer.clone());
+    }
+
+    fn invalid_payload(&self, peer: &Hostname) {
+        add(&self.invalid_payloads, peer.clone());
+    }
+
+    fn first_seen(&self, class: Class) {
+        *self.first_seen.lock().unwrap().entry(class).or_default() += 1;
+    }
+
+    fn duplicate(&self, class: Class) {
+        *self.duplicates.lock().unwrap().entry(class).or_default() += 1;
     }
 }
 
@@ -278,7 +401,6 @@ impl Builder {
         self,
         admission: impl Fn(&Node) -> Arc<A> + Send + Sync + 'static,
     ) -> TestCluster<A> {
-        let (roster, _) = watch::channel(Roster { hosts: Vec::new() });
         let prefix = format!("c{}", CLUSTERS.fetch_add(1, Ordering::Relaxed));
         // Every cluster runs mid-rotation so that a node can hold a key from either seed, which
         // is the only way to reach the previous-seed path from outside.
@@ -344,6 +466,7 @@ impl Builder {
             });
             nodes.push(Node {
                 self_hello,
+                roster: watch::channel(Roster { hosts: Vec::new() }).0,
                 topics: Arc::new(Mutex::new(OwnTopics::default())),
                 hostname,
                 key,
@@ -357,6 +480,7 @@ impl Builder {
                 stats: Arc::new(CountingStats::default()),
                 runtime,
                 sink,
+                sidecar: None,
             });
         }
 
@@ -365,7 +489,6 @@ impl Builder {
             seeds,
             pins,
             hosts,
-            roster,
             nodes,
             admission: Box::new(admission),
         };
@@ -415,7 +538,7 @@ async fn hold_connections(
 ) {
     let conflicting = kind == NodeKind::ConflictingTopicAdd;
     let announced = if conflicting {
-        vec![(TopicId::new(1), topic("beacon_block"))]
+        vec![(TopicId::new(1), topic("beacon_block").to_string())]
     } else {
         Vec::new()
     };
@@ -440,7 +563,7 @@ async fn hold_connections(
                 if conflicting {
                     let contradiction = Frame::TopicAdd {
                         id: 1,
-                        topic: topic("beacon_attestation_3"),
+                        topic: topic("beacon_attestation_3").to_string(),
                     };
                     let _ = peer.control.write_frame(&contradiction).await;
                 }
@@ -460,6 +583,9 @@ async fn hold_connections(
 
 struct Node {
     self_hello: SelfHello,
+    /// This node's own roster, as a host loads its own file. One channel per node so a test can
+    /// take one host out of another's roster and leave the pair with no connection.
+    roster: watch::Sender<Roster>,
     topics: Arc<Mutex<OwnTopics>>,
     hostname: Hostname,
     key: SigningKey,
@@ -470,6 +596,7 @@ struct Node {
     stats: Arc<CountingStats>,
     runtime: Option<tokio::runtime::Runtime>,
     sink: Option<JoinHandle<()>>,
+    sidecar: Option<Sidecar>,
 }
 
 /// A running overlay of `n` hosts on loopback.
@@ -478,7 +605,6 @@ pub struct TestCluster<A: Admission = HelloAdmission> {
     seeds: Seeds,
     pins: Arc<ArcSwap<PinTable>>,
     hosts: Vec<HostEntry>,
-    roster: watch::Sender<Roster>,
     nodes: Vec<Node>,
     admission: NodeAdmission<A>,
 }
@@ -597,15 +723,30 @@ impl<A: Admission> TestCluster<A> {
     /// Replaces the roster every node reads, and the pin table with it, the way a SIGHUP reload
     /// would (T-043).
     pub fn set_roster(&mut self, hosts: &[usize]) {
-        let roster = Roster {
+        let roster = self.roster_of(hosts);
+        self.pins
+            .store(Arc::new(PinTable::build(&roster, &self.seeds)));
+        for node in &self.nodes {
+            node.roster.send_replace(roster.clone());
+        }
+    }
+
+    /// Replaces one node's roster and leaves everyone else's alone, as a fleet mid-rollout has
+    /// it. A host missing from node `index`'s roster is one it never dials and refuses on the
+    /// way in, so the pair has no connection while both are up. The pin table is shared and
+    /// stays whole, which is what keeps the other pairs pairing.
+    pub fn set_roster_for(&mut self, index: usize, hosts: &[usize]) {
+        let roster = self.roster_of(hosts);
+        self.nodes[index].roster.send_replace(roster);
+    }
+
+    fn roster_of(&self, hosts: &[usize]) -> Roster {
+        Roster {
             hosts: hosts
                 .iter()
                 .map(|index| self.hosts[*index].clone())
                 .collect(),
-        };
-        self.pins
-            .store(Arc::new(PinTable::build(&roster, &self.seeds)));
-        self.roster.send_replace(roster);
+        }
     }
 
     /// Stops answering on node `index`'s socket without closing anything, which is what its
@@ -619,6 +760,9 @@ impl<A: Admission> TestCluster<A> {
     /// Stops node `index`'s manager and starts a new one on the same port, as a sidecar restart
     /// would.
     pub async fn restart(&mut self, index: usize) {
+        // The sidecar holds a live source, and through it the endpoint whose port has to come
+        // free. A restarted process starts a new one anyway.
+        self.nodes[index].sidecar = None;
         if let Some(manager) = self.nodes[index].manager.take() {
             manager.shutdown().await;
         }
@@ -715,6 +859,134 @@ impl<A: Admission> TestCluster<A> {
         .unwrap()
     }
 
+    /// The live set as node `index`'s fanout task reads it.
+    pub fn live_source(&self, index: usize) -> LiveSource {
+        self.nodes[index]
+            .manager
+            .as_ref()
+            .expect("node has a manager")
+            .live_source()
+    }
+
+    /// Starts node `index`'s overlay pipeline with the beacon node it would have standing in
+    /// for: `sets` is what its mirror reports (T-014), what reaches it arrives through
+    /// [`from_bn`](Self::from_bn), and what it would publish is [`published`](Self::published).
+    pub fn start_sidecar(&mut self, index: usize, sets: SubscriptionSets) {
+        self.start_sidecar_with(index, sets, PUBLISHED_MAX);
+    }
+
+    /// The same with a publish stand-in of `published_max` entries, for a test about what a
+    /// beacon node that has stopped draining costs (DX-N4).
+    pub fn start_sidecar_with(
+        &mut self,
+        index: usize,
+        sets: SubscriptionSets,
+        published_max: usize,
+    ) {
+        let events = self.take_events(index);
+        let live = self.live_source(index);
+        let node = &self.nodes[index];
+        let stats = node.stats.clone();
+        let published = Arc::new(PublishSpy::new(published_max));
+        let seen = SharedSeenCache::new(SeenCache::new(
+            SEEN_TTL,
+            SEEN_CAPACITY,
+            Arc::new(SystemClock),
+        ));
+        let (subscriptions, watching) = watch::channel(sets);
+        let deps = Deps {
+            seen: seen.clone(),
+            publish: published.clone(),
+            sets: watching.clone(),
+            stripes: Arc::new(NoStripes::new(stats.clone())),
+            stats: stats.clone(),
+        };
+        let receivers: Receivers = Arc::new(Mutex::new(BTreeMap::new()));
+        let (to_exchange, exchanged) = mpsc::channel(64);
+        let lanes = ClassLanes::new(Arc::new(()));
+        let to_fanout = lanes.pusher();
+        let tasks = vec![
+            crate::subs::spawn(exchanged, watching, node.topics.clone(), stats.clone()),
+            tokio::spawn(receive_peers(events, to_exchange, deps, receivers.clone())),
+            Fanout::spawn(
+                lanes,
+                live,
+                SelfIdentity {
+                    hostname: node.hostname.clone(),
+                    region: Region(REGION.to_owned()),
+                    site: None,
+                },
+                config::Fanout::default(),
+                node.topics.clone(),
+                stats,
+            ),
+        ];
+        self.nodes[index].sidecar = Some(Sidecar {
+            seen,
+            to_fanout,
+            published,
+            subscriptions,
+            receivers,
+            tasks,
+        });
+    }
+
+    /// What node `index`'s beacon node is subscribed to now, as a change the mirror reports.
+    pub fn subscribe(&self, index: usize, sets: SubscriptionSets) {
+        self.sidecar(index).subscriptions.send_replace(sets);
+    }
+
+    /// Hands node `index` a message as its beacon node would (T-016): the id is computed, the
+    /// seen cache is asked first, and a new message goes to the fanout task. `false` means the
+    /// sidecar had already seen it, which is what a beacon node echoing back what the overlay
+    /// just published looks like.
+    pub fn from_bn(&self, index: usize, topic: &Topic, payload: &[u8]) -> bool {
+        let sidecar = self.sidecar(index);
+        let payload = Bytes::copy_from_slice(payload);
+        let class = Class::of(topic.kind(), payload.len());
+        let id = msgid::compute(&topic.to_string(), &payload, MAX_PAYLOAD_BYTES).id;
+        if !sidecar.seen.insert(id) {
+            return false;
+        }
+        sidecar
+            .to_fanout
+            .push(
+                class,
+                Outbound {
+                    topic: topic.clone(),
+                    class,
+                    id,
+                    payload,
+                    received_at: Instant::now(),
+                },
+            )
+            .expect("the fanout lane has room");
+        true
+    }
+
+    /// What node `index` has queued for its beacon node, oldest first.
+    pub fn published(&self, index: usize) -> Vec<PublishItem> {
+        self.sidecar(index).published.published()
+    }
+
+    /// `publish_queue_drops_total` for node `index`: what its publish queue threw away because
+    /// nothing was draining it.
+    pub fn publish_drops(&self, index: usize) -> u64 {
+        self.sidecar(index).published.dropped()
+    }
+
+    /// Node `index`'s receiver for `peer`, while the pair is live.
+    pub fn receiver(&self, index: usize, peer: &Hostname) -> Option<Arc<PeerReceiver>> {
+        self.sidecar(index).receivers.lock().unwrap().get(peer).cloned()
+    }
+
+    fn sidecar(&self, index: usize) -> &Sidecar {
+        self.nodes[index]
+            .sidecar
+            .as_ref()
+            .unwrap_or_else(|| panic!("node {index} has no sidecar started"))
+    }
+
     fn start_manager(&mut self, index: usize) {
         let node = &self.nodes[index];
         let manager = ConnectionManager::spawn(
@@ -729,7 +1001,7 @@ impl<A: Admission> TestCluster<A> {
                 own_key: node.key.clone(),
             },
             node.endpoint.clone().unwrap(),
-            self.roster.subscribe(),
+            node.roster.subscribe(),
             (self.admission)(node),
             node.events.0.clone(),
             node.stats.clone(),
@@ -757,9 +1029,114 @@ impl<A: Admission> Drop for TestCluster<A> {
     }
 }
 
+/// One node's overlay pipeline, on top of the manager the cluster already runs for it.
+struct Sidecar {
+    /// The cache all three insert sites share, so what the overlay delivered is remembered
+    /// when the beacon node echoes it back (§5.5).
+    seen: SharedSeenCache,
+    to_fanout: LanePusher<Outbound>,
+    published: Arc<PublishSpy>,
+    subscriptions: watch::Sender<SubscriptionSets>,
+    receivers: Receivers,
+    tasks: Vec<JoinHandle<()>>,
+}
+
+impl Drop for Sidecar {
+    fn drop(&mut self) {
+        for task in &self.tasks {
+            task.abort();
+        }
+    }
+}
+
+/// One receiver per live peer, kept where a test can reach one.
+type Receivers = Arc<Mutex<BTreeMap<Hostname, Arc<PeerReceiver>>>>;
+
+/// The tee in front of T-027's exchange: a receiver per live peer, then the event on to the
+/// exchange, which owns the peer's control stream. T-045 wires the two the same way, because
+/// only one consumer can hold the manager's events and both halves need them.
+async fn receive_peers(
+    mut events: mpsc::Receiver<PeerEvent>,
+    exchange: mpsc::Sender<PeerEvent>,
+    deps: Deps,
+    receivers: Receivers,
+) {
+    while let Some(event) = events.recv().await {
+        match &event {
+            PeerEvent::Up(peer) => {
+                let receiver = Arc::new(PeerReceiver::spawn(peer, deps.clone()));
+                receivers
+                    .lock()
+                    .unwrap()
+                    .insert(peer.hostname.clone(), receiver);
+            }
+            PeerEvent::Down(peer, _) => {
+                receivers.lock().unwrap().remove(peer);
+            }
+        }
+        if exchange.send(event).await.is_err() {
+            return;
+        }
+    }
+}
+
+/// Stands in for T-017's publisher: what reaches it is what would reach the beacon node. It is
+/// bounded and drops its oldest entry like the real queue (DX-N4), so a test can wedge it
+/// without pushing four thousand messages through a live overlay.
+pub struct PublishSpy {
+    capacity: usize,
+    items: Mutex<VecDeque<PublishItem>>,
+    dropped: AtomicU64,
+}
+
+impl PublishSpy {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            items: Mutex::new(VecDeque::new()),
+            dropped: AtomicU64::new(0),
+        }
+    }
+
+    /// What is queued, oldest first.
+    pub fn published(&self) -> Vec<PublishItem> {
+        self.items.lock().unwrap().iter().cloned().collect()
+    }
+
+    /// How many entries were dropped to make room.
+    pub fn dropped(&self) -> u64 {
+        self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+impl PublishSink for PublishSpy {
+    fn enqueue(&self, item: PublishItem) {
+        let mut items = self.items.lock().unwrap();
+        while items.len() >= self.capacity {
+            items.pop_front();
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+        items.push_back(item);
+    }
+}
+
 /// A topic on the one fork digest the harness uses.
-fn topic(name: &str) -> String {
-    format!("/eth2/6a95a1a9/{name}/ssz_snappy")
+pub fn topic(name: &str) -> Topic {
+    Topic::parse(&format!("/eth2/6a95a1a9/{name}/ssz_snappy")).unwrap()
+}
+
+/// What the mirror reports for a beacon node subscribed to `advertised`, with `extra` standing
+/// for T-015's own-proposal column topics: interned and announced so their ids reach peers, and
+/// left out of the bitmap because the beacon node never asked for them (D06).
+pub fn subscriptions(advertised: &[&Topic], extra: &[&Topic]) -> SubscriptionSets {
+    let cloned = |set: &[&Topic]| -> Vec<Topic> { set.iter().map(|topic| (*topic).clone()).collect() };
+    SubscriptionSets {
+        advertised: cloned(advertised).into_iter().collect(),
+        local: cloned(advertised)
+            .into_iter()
+            .chain(cloned(extra))
+            .collect(),
+    }
 }
 
 /// Polls until `ready` holds, failing the test rather than hanging when it never does.

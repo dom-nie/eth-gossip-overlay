@@ -671,10 +671,28 @@ pub struct Handle {
     supervisor: JoinHandle<()>,
 }
 
+/// A snapshot of the live set for a task that is not the manager's owner. Cloneable, where
+/// [`Handle`] is not: shutdown is the owner's alone, and a sender that could stop the manager
+/// by mistake is worse than a second type.
+#[derive(Clone)]
+pub struct LiveSource(Arc<Shared>);
+
+impl LiveSource {
+    /// Who is connected right now.
+    pub fn live(&self) -> LiveView {
+        self.0.live()
+    }
+}
+
 impl Handle {
     /// Who is connected right now.
     pub fn live(&self) -> LiveView {
         self.shared.live()
+    }
+
+    /// The live set as the fanout task (T-032) reads it, once per message it routes.
+    pub fn live_source(&self) -> LiveSource {
+        LiveSource(self.shared.clone())
     }
 
     /// When the next dial to `peer` is due, for a peer that is neither live nor being dialled.

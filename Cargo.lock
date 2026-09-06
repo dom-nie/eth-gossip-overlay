@@ -4360,6 +4360,7 @@ dependencies = [
  "quinn",
  "rand 0.10.2",
  "rustls",
+ "snap",
  "socket2",
  "thiserror 2.0.20",
  "tokio",
