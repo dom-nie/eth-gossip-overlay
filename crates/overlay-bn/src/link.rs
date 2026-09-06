@@ -1284,6 +1284,22 @@ mod tests {
         assert!(harness.link.connected.load(Ordering::Relaxed));
     }
 
+    /// The same farewell as an ordinary request, which leaves Lighthouse's handler active and
+    /// its connection open, so the disconnect that follows can only be the sidecar's own.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn goodbye_request_makes_the_sidecar_close_the_connection() {
+        let mut bn = FakeBn::start().await;
+        let (mut harness, _answers) = connected(&mut bn).await;
+        wait_for(&mut harness.link.events, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+
+        bn.send_goodbye_request(GoodbyeReason::ClientShutdown).await;
+
+        wait_for(&mut harness.link.events, |e| *e == BnEvent::Disconnected).await;
+    }
+
     /// A protocol the sidecar registers so the negotiation succeeds and refuses so the beacon
     /// node gets a well-formed answer. Lighthouse reads the result code and reports it as an
     /// error for the request, not as a broken peer.

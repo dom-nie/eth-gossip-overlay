@@ -481,6 +481,13 @@ impl FakeBn {
         self.commands.send(Cmd::Goodbye(reason)).await.unwrap();
     }
 
+    /// Sends a goodbye as an ordinary request instead of through `RPC::shutdown`. Lighthouse's
+    /// handler stays active and keeps the connection, so whatever closes it afterwards is the
+    /// peer acting on the reason it read. `send_goodbye` is what a real peer manager does.
+    pub async fn send_goodbye_request(&self, reason: GoodbyeReason) {
+        self.request(RequestType::Goodbye(reason)).await;
+    }
+
     async fn request(&self, request: RequestType<MainnetEthSpec>) {
         self.commands
             .send(Cmd::Request(Box::new(request)))
