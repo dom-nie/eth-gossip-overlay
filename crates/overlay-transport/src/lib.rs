@@ -3,6 +3,7 @@
 pub mod endpoint;
 pub mod hello;
 pub mod manager;
+pub mod router;
 pub mod subs;
 pub mod tls;
 
