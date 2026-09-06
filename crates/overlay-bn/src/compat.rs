@@ -95,6 +95,23 @@ impl CompatStats for () {
     fn set_trusted(&self, _: Option<bool>) {}
 }
 
+/// What the last connect probe said about the beacon node, for the readers that need the
+/// values rather than the gauges: `fleet-overlayctl status` shows the version an operator is
+/// rolling out and the `trusted` flag the `OverlayNotTrustedByBn` alert watches (D09, T-042).
+///
+/// Every field is `None` until the beacon node has said, which is what `status` renders as
+/// `null`: an unknown trust flag and a beacon node that answered `false` are different answers
+/// and an operator has to be able to tell them apart.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BnInfo {
+    /// The beacon node's raw version string, as `overlay_bn_info{version}` carries it.
+    pub version: Option<String>,
+    /// Whether the beacon node lists the sidecar as a trusted peer.
+    pub trusted: Option<bool>,
+    /// The `overlay_bn_compat{state}` value that is currently 1.
+    pub state: Option<&'static str>,
+}
+
 /// The compatibility state of the beacon node the link is talking to, fed from
 /// [`BnEvent::BnInfo`] and the spec watch. Pure apart from the gauges and the log, so the
 /// decisions are testable without a runtime; [`spawn`](Self::spawn) is the task around it.
@@ -119,6 +136,8 @@ pub struct Watch {
     /// The absent peers endpoint is said once for the sidecar's lifetime: a beacon node that
     /// lacks it lacks it on every connect.
     trusted_unknown_logged: bool,
+    /// The same three values the gauges get, for the readers that need them as values (T-042).
+    info: watch::Sender<BnInfo>,
 }
 
 impl Watch {
@@ -131,7 +150,14 @@ impl Watch {
             mismatched: BTreeSet::new(),
             size_mismatch: false,
             trusted_unknown_logged: false,
+            info: watch::Sender::new(BnInfo::default()),
         }
+    }
+
+    /// Follows what the beacon node last said, which is where `fleet-overlayctl status` reads
+    /// the version and the trust flag (T-042).
+    pub fn info(&self) -> watch::Receiver<BnInfo> {
+        self.info.subscribe()
     }
 
     /// Takes what the connect probe found. A `None` version was a failed request the link
@@ -140,6 +166,7 @@ impl Watch {
         if let Some(raw) = version {
             self.version_state = Some(self.classify(&raw));
             self.stats.set_info(&raw);
+            self.info.send_modify(|info| info.version = Some(raw));
             self.publish_state();
         }
         if trusted.is_none() && !self.trusted_unknown_logged {
@@ -150,6 +177,7 @@ impl Watch {
             );
         }
         self.stats.set_trusted(trusted);
+        self.info.send_modify(|info| info.trusted = trusted);
     }
 
     /// Takes the spec the beacon node reported and holds its transmit size against the
@@ -206,18 +234,21 @@ impl Watch {
         };
         if let Some(state) = state {
             self.stats.set_compat(state);
+            self.info.send_modify(|info| info.state = Some(state));
         }
     }
 
-    /// Drives a watch from the link's `events` and its `spec` watch until either closes.
+    /// Drives a watch from the link's `events` and its `spec` watch until either closes, and
+    /// hands back what it publishes alongside the task, because the watch itself lives in it.
     /// The link's event channel has one consumer; T-045 fans it out to the mirror and this.
     pub fn spawn(
         mut events: mpsc::Receiver<BnEvent>,
         mut spec: watch::Receiver<SpecSnapshot>,
         stats: Arc<dyn CompatStats>,
-    ) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            let mut watch = Self::new(stats);
+    ) -> (JoinHandle<()>, watch::Receiver<BnInfo>) {
+        let mut watch = Self::new(stats);
+        let info = watch.info();
+        let task = tokio::spawn(async move {
             watch.on_spec(&spec.borrow_and_update());
             loop {
                 tokio::select! {
@@ -234,7 +265,8 @@ impl Watch {
                     },
                 }
             }
-        })
+        });
+        (task, info)
     }
 }
 
@@ -672,7 +704,7 @@ mod tests {
             commands_rx,
         );
         let stats = Arc::new(Recording::default());
-        let task = Watch::spawn(link.events, spec_rx, stats.clone());
+        let (task, _info) = Watch::spawn(link.events, spec_rx, stats.clone());
 
         let expected = Gauges {
             compat: Some(STATE_SIZE_MISMATCH),
