@@ -32,6 +32,24 @@ use tokio::sync::watch;
 
 use crate::logging::LogHandle;
 
+/// Every key that may change under a running sidecar (Appendix A), as the dotted paths of
+/// `config.yaml`. Anything else that changed is reported as needing a restart.
+///
+/// A changed path here runs the applier registered for it, and is otherwise reported applied
+/// and answered by [`Reloader::config`], which is where the ticket that ships its consumer
+/// reads it. Adding a key means adding its path here and one closure in [`Reloader::new`].
+pub const RELOADABLE: &[&str] = &[
+    "bn.publish_rate_limit.bytes_per_s",
+    "bn.publish_rate_limit.large_per_s",
+    "bn.publish_rate_limit.small_per_s",
+    "classes.large.repair_deadline_ms",
+    "inject",
+    "log.format",
+    "log.level",
+    "overlay.fanout.small.relay_min_remote_hosts",
+    "overlay.fleet_seed_previous_file",
+];
+
 /// What asked for a reload (D26). A human means what the files say; a tool that writes them
 /// may be broken, which is what the roster shrink guard protects against.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -219,6 +237,7 @@ impl Reloader {
                     Ok(()) => applied.push(path),
                     Err(reason) => report.error = Some(ReloadError::Config(reason)),
                 },
+                None if reloadable(&path) => applied.push(path),
                 None => report.restart_required.push(path),
             }
         }
@@ -339,6 +358,11 @@ fn walk(path: String, value: &yaml::Value, into: &mut BTreeMap<String, yaml::Val
             into.insert(path, value.clone());
         }
     }
+}
+
+/// Whether `path` names a key that may change under a running sidecar.
+fn reloadable(path: &str) -> bool {
+    RELOADABLE.iter().any(|key| covers(key, path))
 }
 
 /// Whether the applier registered on `key` owns `path`: the key itself, or anything under it,
