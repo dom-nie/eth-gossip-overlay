@@ -105,6 +105,9 @@ impl PeerTopicTable {
     /// Takes one binding a peer announced in a `TOPIC_ADD`.
     pub fn apply_add(&mut self, id: TopicId, topic: &str) -> Result<(), PeerTableError> {
         let parsed = Topic::parse(topic).map_err(|err| PeerTableError::Unparsable(id, err))?;
+        if self.by_id.contains_key(&id) {
+            return Err(PeerTableError::Conflict(id));
+        }
         self.by_id.insert(id, parsed.clone());
         self.by_topic.insert(parsed, id);
         Ok(())
@@ -126,6 +129,11 @@ impl PeerTopicTable {
 /// than a condition to recover from, so the connection closes; T-025 owns the close code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PeerTableError {
+    /// The peer bound an id it had already bound to another topic. Ids are the sender's own
+    /// and it never has to reuse one, so a redefinition means its table and this one have
+    /// drifted and nothing decoded against them can be trusted.
+    #[error("topic id {0} is already bound to another topic")]
+    Conflict(TopicId),
     /// The peer sent a string that is not a topic. `Topic::parse` is strict about shape, fork
     /// digest, encoding, name and index, so a beacon node's own topic always passes and
     /// anything that fails came from a peer that is not speaking this protocol.
