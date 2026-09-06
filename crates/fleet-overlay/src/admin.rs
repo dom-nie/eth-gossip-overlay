@@ -333,4 +333,19 @@ mod tests {
         assert_eq!(response.inject, Some(false));
         assert!(!h.inject.load(Ordering::Relaxed));
     }
+
+    #[tokio::test]
+    async fn inject_query_reports_current_value() {
+        let h = Fixture::start(LiveView::default()).await;
+
+        let first = h.send(&Request::Inject { value: None }).await;
+        h.send(&Request::Inject { value: Some(false) }).await;
+        let second = h.send(&Request::Inject { value: None }).await;
+
+        assert_eq!(first.inject, Some(true));
+        assert!(first.ok, "{first:?}");
+        assert_eq!(second.inject, Some(false));
+        // A query says what the flag is and never sets it: the first one left it alone.
+        assert!(!h.inject.load(Ordering::Relaxed));
+    }
 }
