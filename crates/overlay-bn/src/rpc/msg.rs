@@ -1,5 +1,83 @@
 //! The four request/response bodies the sidecar reads and writes, as fixed-size little-endian
-//! SSZ.
+//! SSZ. Every field is a `u64`, a `[u8; 32]` or a byte array, so each body is a fixed byte
+//! layout copied from `beacon_node/lighthouse_network/src/rpc/methods.rs`, and a body of any
+//! other length is malformed.
+
+/// A body that is not the fixed-size SSZ its protocol version calls for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Malformed;
+
+/// `StatusMessage`: the requester's view of its own chain. Version 1 stops at `head_slot`;
+/// version 2 adds `earliest_available_slot`, which is `None` after a v1 decode and written as
+/// 0 when a v2 encode has none, the way Lighthouse's `status_v2()` fills it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Status {
+    /// The fork digest of the requester's current fork.
+    pub fork_digest: [u8; 4],
+    /// The root of the requester's latest finalized block.
+    pub finalized_root: [u8; 32],
+    /// The epoch of that finalized block.
+    pub finalized_epoch: u64,
+    /// The requester's head block root.
+    pub head_root: [u8; 32],
+    /// The slot of the head block.
+    pub head_slot: u64,
+    /// The slot from which the requester has every block and blob or column; v2 only.
+    pub earliest_available_slot: Option<u64>,
+}
+
+impl Status {
+    /// The v1 body: four fields of 4, 32, 8, 32 and 8 bytes.
+    pub const V1_LEN: usize = 84;
+    /// The v2 body: v1 plus one `u64`.
+    pub const V2_LEN: usize = 92;
+
+    /// The body at protocol `version` 1 or 2.
+    pub fn encode(&self, version: u8) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::V2_LEN);
+        out.extend_from_slice(&self.fork_digest);
+        out.extend_from_slice(&self.finalized_root);
+        out.extend_from_slice(&self.finalized_epoch.to_le_bytes());
+        out.extend_from_slice(&self.head_root);
+        out.extend_from_slice(&self.head_slot.to_le_bytes());
+        if version >= 2 {
+            out.extend_from_slice(&self.earliest_available_slot.unwrap_or(0).to_le_bytes());
+        }
+        out
+    }
+
+    /// Reads a body sent on protocol `version` 1 or 2.
+    pub fn decode(bytes: &[u8], version: u8) -> Result<Self, Malformed> {
+        let expected = if version >= 2 {
+            Self::V2_LEN
+        } else {
+            Self::V1_LEN
+        };
+        if bytes.len() != expected {
+            return Err(Malformed);
+        }
+        Ok(Self {
+            fork_digest: array(&bytes[0..4]),
+            finalized_root: array(&bytes[4..36]),
+            finalized_epoch: u64_at(bytes, 36),
+            head_root: array(&bytes[44..76]),
+            head_slot: u64_at(bytes, 76),
+            earliest_available_slot: (version >= 2).then(|| u64_at(bytes, 84)),
+        })
+    }
+}
+
+/// A little-endian `u64` at `offset`; the caller has checked the length.
+fn u64_at(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(array(&bytes[offset..offset + 8]))
+}
+
+/// A fixed array from a slice of exactly that length; the caller has checked the length.
+fn array<const N: usize>(bytes: &[u8]) -> [u8; N] {
+    let mut out = [0; N];
+    out.copy_from_slice(bytes);
+    out
+}
 
 #[cfg(test)]
 mod tests {
