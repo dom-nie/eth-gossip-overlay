@@ -5,7 +5,7 @@
 use serde::Deserialize;
 use tokio::sync::watch;
 
-/// The six `/eth/v1/config/spec` values the sidecar reads. Lighthouse serialises every number
+/// The seven `/eth/v1/config/spec` values the sidecar reads. Lighthouse serialises every number
 /// as a quoted decimal string, so each field parses one; a key the BN does not send, an older
 /// fork, keeps that field's [`MAINNET`](Self::MAINNET) value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
@@ -23,6 +23,11 @@ pub struct SpecSnapshot {
     /// `NUMBER_OF_CUSTODY_GROUPS`: how many groups the columns are assigned to for custody.
     #[serde(deserialize_with = "quoted")]
     pub number_of_custody_groups: u64,
+    /// `CUSTODY_REQUIREMENT`: the fewest custody groups a node may claim. With
+    /// [`number_of_custody_groups`](Self::number_of_custody_groups) it bounds the count the
+    /// sidecar may report in its `MetaData` (T-019).
+    #[serde(deserialize_with = "quoted")]
+    pub custody_requirement: u64,
     /// `MAX_PAYLOAD_SIZE`: the largest gossip message the beacon node accepts. The gossipsub
     /// link's limit must agree with it.
     #[serde(deserialize_with = "quoted")]
@@ -37,7 +42,8 @@ pub struct SpecSnapshot {
 
 impl SpecSnapshot {
     /// Mainnet as the pinned Lighthouse v8.2.2 ships it. `DATA_COLUMN_SIDECAR_SUBNET_COUNT`,
-    /// `NUMBER_OF_CUSTODY_GROUPS`, `MAX_PAYLOAD_SIZE` and `SECONDS_PER_SLOT` come from
+    /// `NUMBER_OF_CUSTODY_GROUPS`, `CUSTODY_REQUIREMENT`, `MAX_PAYLOAD_SIZE` and
+    /// `SECONDS_PER_SLOT` come from
     /// `common/eth2_network_config/built_in_network_configs/mainnet/config.yaml`,
     /// `NUMBER_OF_COLUMNS` from `consensus/types/presets/mainnet/fulu.yaml` and
     /// `SLOTS_PER_EPOCH` from `consensus/types/presets/mainnet/phase0.yaml`.
@@ -45,6 +51,7 @@ impl SpecSnapshot {
         data_column_sidecar_subnet_count: 128,
         number_of_columns: 128,
         number_of_custody_groups: 128,
+        custody_requirement: 4,
         max_payload_size: 10_485_760,
         seconds_per_slot: 12,
         slots_per_epoch: 32,
