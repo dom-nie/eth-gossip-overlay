@@ -879,7 +879,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::testutil::{Builder, NodeKind, TestCluster, WAIT, eventually};
+    use crate::testutil::{Builder, NodeKind, REGION, TestCluster, WAIT, eventually};
 
     fn host(name: &str) -> Hostname {
         Hostname(name.to_owned())
@@ -1070,6 +1070,68 @@ mod tests {
             matches!(&closed, quinn::ConnectionError::ApplicationClosed(frame)
                 if frame.error_code == CloseCode::Superseded.code()),
             "{closed:?}"
+        );
+    }
+
+    fn admitted(pinned: &PinEntry, region: &str, connection: quinn::Connection) -> PeerInfo {
+        PeerInfo {
+            hostname: pinned.hostname.clone(),
+            region: Region(region.to_owned()),
+            site: None,
+            instance_id: 0,
+            connection,
+        }
+    }
+
+    /// Admits the first connection it is offered and refuses every one after it, standing in
+    /// for the HELLO that does not check out once T-025 lands.
+    #[derive(Default)]
+    struct AdmitOnce {
+        seen: Mutex<usize>,
+    }
+
+    impl Admission for AdmitOnce {
+        fn admit(
+            &self,
+            connection: quinn::Connection,
+            _role: Role,
+            pinned: &PinEntry,
+        ) -> impl Future<Output = Result<PeerInfo, AdmitError>> + Send {
+            let first = {
+                let mut seen = self.seen.lock().unwrap();
+                *seen += 1;
+                *seen == 1
+            };
+            std::future::ready(if first {
+                Ok(admitted(pinned, REGION, connection))
+            } else {
+                Err(AdmitError {
+                    reason: FailureReason::Hostname,
+                })
+            })
+        }
+    }
+
+    /// The other half of D15: a newcomer that cannot pass admission takes nothing. The peer
+    /// keeps the connection it had, because dropping a working one for a suspect one is how a
+    /// pair goes dark.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn second_connection_failing_admission_leaves_the_first_live() {
+        let mut cluster = Builder::new(&[NodeKind::Sink, NodeKind::Manager])
+            .start_with(AdmitOnce::default())
+            .await;
+        let host = cluster.hostname(0);
+        let _first = cluster.dial(0, 1).await.unwrap();
+        let PeerEvent::Up(before) = cluster.next_event(1).await else {
+            panic!("the first connection did not come up")
+        };
+
+        let _second = cluster.dial(0, 1).await.unwrap();
+
+        assert!(cluster.try_next_event(1).await.is_none());
+        assert_eq!(
+            cluster.live(1).get(&host).unwrap().connection.stable_id(),
+            before.connection.stable_id()
         );
     }
 }
