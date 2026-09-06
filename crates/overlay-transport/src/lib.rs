@@ -12,6 +12,9 @@ pub mod tls;
 pub mod testutil;
 
 #[cfg(test)]
+mod testlog;
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn crate_compiles() {}

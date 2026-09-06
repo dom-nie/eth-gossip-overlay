@@ -879,6 +879,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use crate::testlog::LOG;
     use crate::testutil::{Builder, NodeKind, REGION, TestCluster, WAIT, eventually};
 
     fn host(name: &str) -> Hostname {
@@ -1191,5 +1192,36 @@ mod tests {
             .collect();
 
         assert_eq!(ordered, expected);
+    }
+
+    /// A roster host presenting a key the seed does not derive for it, which is what a
+    /// mistyped address or an impostor looks like from the dial side. Every attempt is counted
+    /// so the rate can be alerted on, and one line is logged for the whole backoff cycle so a
+    /// fleet-wide misconfiguration does not fill the journal (D14).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn handshake_failure_warn_is_logged_once_per_backoff_cycle_while_the_counter_counts_every_attempt()
+     {
+        let mark = LOG.len();
+        let cluster = Builder::new(&[NodeKind::Manager, NodeKind::WrongKey])
+            .start()
+            .await;
+        let peer = cluster.hostname(1);
+
+        eventually("three refused dials", || {
+            cluster
+                .stats(0)
+                .handshake_failures(Role::Dial, FailureReason::KeyMismatch)
+                >= 3
+        })
+        .await;
+
+        let warned = LOG
+            .since(mark)
+            .lines()
+            .filter(|line| {
+                line.contains("cannot pair with a roster host") && line.contains(&peer.0)
+            })
+            .count();
+        assert_eq!(warned, 1);
     }
 }
