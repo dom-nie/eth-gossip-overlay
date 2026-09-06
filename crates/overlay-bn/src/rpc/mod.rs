@@ -363,4 +363,25 @@ mod tests {
         assert_eq!(none.metadata().custody_group_count, Some(0));
         assert_eq!(all.metadata().attnets, [0; 8]);
     }
+
+    #[test]
+    fn seq_number_increments_only_when_metadata_changes() {
+        let mut responder = Responder::new();
+        let set = topics(&["beacon_attestation_3"]);
+
+        responder.set_subscriptions(&set);
+        responder.set_subscriptions(&set);
+        let after_repeat = responder.metadata().seq_number;
+        responder.set_subscriptions(&topics(&["beacon_attestation_3", "sync_committee_1"]));
+        let after_change = responder.metadata().seq_number;
+        responder.set_subscriptions(&BTreeSet::new());
+
+        assert_eq!(after_repeat, 1);
+        assert_eq!(after_change, 2);
+        assert_eq!(responder.metadata().seq_number, 3);
+        assert_eq!(
+            responder.respond(Protocol::PingV1, &Ping(0).encode()),
+            Response::Success(Ping(3).encode())
+        );
+    }
 }
