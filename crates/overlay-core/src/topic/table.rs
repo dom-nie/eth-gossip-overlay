@@ -1,8 +1,9 @@
 //! Topic strings to the 16-bit ids that carry them on the wire.
 
 use std::collections::HashMap;
+use std::fmt;
 
-use crate::topic::Topic;
+use crate::topic::{Topic, TopicError};
 
 /// A topic's id in one table. Two bytes instead of the fifty a topic string takes, which is what
 /// keeps a batch entry or a chunk header small (§5.4). An id means nothing on its own: it is
@@ -19,6 +20,12 @@ impl TopicId {
     /// The two bytes that go on the wire.
     pub fn get(self) -> u16 {
         self.0
+    }
+}
+
+impl fmt::Display for TopicId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -49,6 +56,81 @@ impl OwnTopicTable {
         self.ids.insert(topic.clone(), id);
         Ok((id, true))
     }
+
+    /// Every binding this host has made, as HELLO carries it. A peer that applies this knows
+    /// every id this host can put on a frame at the moment the HELLO went out.
+    pub fn snapshot(&self) -> Vec<(TopicId, String)> {
+        self.entries_from(0)
+            .map(|(id, topic)| (id, topic.to_owned()))
+            .collect()
+    }
+
+    /// The bindings from `start` on, in id order. Ids are handed out in order and never
+    /// reused, so an index into `topics` is also a count of what a peer has been told.
+    fn entries_from(&self, start: usize) -> impl Iterator<Item = (TopicId, &str)> {
+        self.topics
+            .iter()
+            .enumerate()
+            .skip(start)
+            .map(|(index, topic)| (TopicId(index as u16), topic.as_str()))
+    }
+}
+
+/// The ids one peer has assigned, and the only table that peer's frames are decoded with.
+#[derive(Clone, Debug, Default)]
+pub struct PeerTopicTable {
+    by_id: HashMap<TopicId, Topic>,
+    /// The reverse direction, which the router needs to ask whether a peer has an id for a
+    /// topic at all before anything is sent on it.
+    by_topic: HashMap<Topic, TopicId>,
+}
+
+impl PeerTopicTable {
+    /// An empty table, which is what a connection holds until the peer's HELLO arrives.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Takes the whole table a peer announced in its HELLO.
+    pub fn apply_snapshot<S: AsRef<str>>(
+        &mut self,
+        entries: impl IntoIterator<Item = (TopicId, S)>,
+    ) -> Result<(), PeerTableError> {
+        for (id, topic) in entries {
+            self.apply_add(id, topic.as_ref())?;
+        }
+        Ok(())
+    }
+
+    /// Takes one binding a peer announced in a `TOPIC_ADD`.
+    pub fn apply_add(&mut self, id: TopicId, topic: &str) -> Result<(), PeerTableError> {
+        let parsed = Topic::parse(topic).map_err(|err| PeerTableError::Unparsable(id, err))?;
+        self.by_id.insert(id, parsed.clone());
+        self.by_topic.insert(parsed, id);
+        Ok(())
+    }
+
+    /// The topic `id` stands for. `None` means the peer has not announced it, and the frame
+    /// that carried it is dropped and counted as `unknown_topic_id_total`.
+    pub fn resolve(&self, id: TopicId) -> Option<&Topic> {
+        self.by_id.get(&id)
+    }
+
+    /// The id this peer uses for `topic`, if it has one.
+    pub fn id_of(&self, topic: &Topic) -> Option<TopicId> {
+        self.by_topic.get(topic).copied()
+    }
+}
+
+/// Why a peer's topic announcement is refused. Both are the peer breaking the protocol rather
+/// than a condition to recover from, so the connection closes; T-025 owns the close code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum PeerTableError {
+    /// The peer sent a string that is not a topic. `Topic::parse` is strict about shape, fork
+    /// digest, encoding, name and index, so a beacon node's own topic always passes and
+    /// anything that fails came from a peer that is not speaking this protocol.
+    #[error("topic id {0} names a string that is not a topic: {1}")]
+    Unparsable(TopicId, TopicError),
 }
 
 /// The table has no id left to assign.
