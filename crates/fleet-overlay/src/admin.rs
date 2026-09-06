@@ -300,7 +300,7 @@ mod tests {
     use overlay_core::config::Log;
     use overlay_core::identity::FleetSeed;
     use overlay_core::roster::{Hostname, Region, Roster, SelfIdentity};
-    use overlay_core::topic::{Class, SubscriptionSets};
+    use overlay_core::topic::{Class, SubscriptionSets, Topic};
     use overlay_transport::hello::Negotiated;
     use overlay_transport::manager::{LivePeer, LiveSource, LiveView};
     use overlay_transport::sender::{
@@ -318,7 +318,7 @@ mod tests {
     use super::*;
     use crate::logging::testing;
     use crate::reload::{Deps, Reloader};
-    use overlay_bn::compat::BnInfo;
+    use overlay_bn::compat::{self, BnInfo};
 
     /// Every await in this file is bounded: a socket that never answers has to fail the test
     /// rather than hang the suite.
@@ -326,6 +326,11 @@ mod tests {
 
     /// A config document with the roster path filled in by [`Fixture::start`].
     const CONFIG: &str = "overlay:\n  roster_file: ROSTER\ninject: true\n";
+
+    /// A topic on one fork digest, for the subscription count.
+    fn topic(name: &str) -> Topic {
+        Topic::parse(&format!("/eth2/6a95a1a9/{name}/ssz_snappy")).unwrap()
+    }
 
     /// `n` hosts named `bn-1` upwards, all in one region.
     fn roster_yaml(n: usize) -> String {
@@ -344,6 +349,9 @@ mod tests {
         _dir: TempDir,
         socket: PathBuf,
         inject: Arc<AtomicBool>,
+        bn_connected: Arc<AtomicBool>,
+        bn: watch::Sender<BnInfo>,
+        subscriptions: watch::Sender<SubscriptionSets>,
         _reload_task: JoinHandle<()>,
         _server: JoinHandle<()>,
     }
@@ -380,8 +388,9 @@ mod tests {
             )
             .unwrap();
             let (reload, reload_task) = crate::reload::spawn(reloader);
-            let (_bn, bn_rx) = watch::channel(BnInfo::default());
-            let (_subscriptions, subscriptions_rx) = watch::channel(SubscriptionSets::default());
+            let bn_connected = Arc::new(AtomicBool::new(true));
+            let (bn, bn_rx) = watch::channel(BnInfo::default());
+            let (subscriptions, subscriptions_rx) = watch::channel(SubscriptionSets::default());
             let state = State {
                 self_id: SelfIdentity {
                     hostname: Hostname("bn-1".to_owned()),
@@ -390,7 +399,7 @@ mod tests {
                 },
                 inject: inject.clone(),
                 live: LiveSource::fixed(live),
-                bn_connected: Arc::new(AtomicBool::new(true)),
+                bn_connected: bn_connected.clone(),
                 bn: bn_rx,
                 subscriptions: subscriptions_rx,
                 roster: roster_rx,
@@ -401,9 +410,21 @@ mod tests {
                 _dir: dir,
                 socket,
                 inject,
+                bn_connected,
+                bn,
+                subscriptions,
                 _reload_task: reload_task,
                 _server: server,
             }
+        }
+
+        /// The `bn` section of a fresh `status` answer.
+        async fn bn_section(&self) -> Bn {
+            self.send(&Request::Status)
+                .await
+                .status
+                .expect("a status")
+                .bn
         }
 
         /// One request over a connection of its own, as `fleet-overlayctl` makes it.
@@ -585,5 +606,43 @@ mod tests {
             "{:?}",
             second.connected_for_ms
         );
+    }
+
+    /// `trusted` has three answers and an operator has to be able to tell them apart: the
+    /// beacon node says yes, says no, or has not said, which is `null` on the wire and what the
+    /// `OverlayNotTrustedByBn` alert waits out (D09).
+    #[tokio::test]
+    async fn status_reports_bn_version_and_trust() {
+        let h = Fixture::start(LiveView::default()).await;
+        let version = "Lighthouse/v8.2.2-e423a66/x86_64-linux";
+        h.subscriptions.send_replace(SubscriptionSets {
+            advertised: [topic("beacon_block"), topic("beacon_aggregate_and_proof")]
+                .into_iter()
+                .collect(),
+            local: [topic("beacon_block")].into_iter().collect(),
+        });
+
+        let unknown = h.bn_section().await;
+        let raw = h.send_line(r#"{"cmd":"status"}"#).await;
+        h.bn.send_replace(BnInfo {
+            version: Some(version.to_owned()),
+            trusted: Some(true),
+            state: Some(compat::STATE_SUPPORTED),
+        });
+        let trusted = h.bn_section().await;
+        h.bn.send_modify(|info| info.trusted = Some(false));
+        let untrusted = h.bn_section().await;
+        h.bn_connected.store(false, Ordering::Relaxed);
+        let gone = h.bn_section().await;
+
+        assert_eq!((unknown.version, unknown.trusted), (None, None));
+        assert!(raw.contains(r#""trusted":null"#), "{raw}");
+        assert_eq!(trusted.version.as_deref(), Some(version));
+        assert_eq!(trusted.trusted, Some(true));
+        assert_eq!(untrusted.trusted, Some(false));
+        // The advertised set is what the beacon node itself is subscribed to (§12).
+        assert_eq!(trusted.subscriptions, 2);
+        assert!(trusted.connected);
+        assert!(!gone.connected);
     }
 }
