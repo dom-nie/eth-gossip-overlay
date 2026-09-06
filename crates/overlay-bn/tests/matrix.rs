@@ -3,7 +3,7 @@
 //! `LIGHTHOUSE_HTTP` (the beacon API origin), `LIGHTHOUSE_P2P` (`/ip4/127.0.0.1/tcp/<port>`)
 //! and `SIDECAR_NODE_KEY` (the node key whose peer id the beacon node was given as
 //! `--trusted-peers`); the ten-minute test also reads `LIGHTHOUSE_LOG` and runs only under
-//! `MATRIX_TEN_MINUTES=1`, which T-019 turns on.
+//! `MATRIX_TEN_MINUTES=1`, which the nightly job sets.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -264,14 +264,15 @@ async fn matrix_trusted_peer_survives_one_invalid_message_and_a_period_of_duplic
     assert_eq!(peer["connection_status"]["status"], "connected", "{peer}");
 }
 
-/// D09's nightly assertion, gated on T-019: ten minutes connected, `sync_status: Synced` in
+/// D09's nightly assertion: ten minutes connected, `sync_status: Synced` in
 /// `/lighthouse/peers`, and no peer-manager warning naming the sidecar in the beacon node's
-/// log. Until `MATRIX_TEN_MINUTES=1` the test returns at once.
+/// log. It is what the sidecar's answer to Status buys, and it takes ten minutes, so a run
+/// without `--ten-minutes` (`MATRIX_TEN_MINUTES=1`) returns at once.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a Lighthouse beacon node: scripts/lighthouse-matrix.sh --ten-minutes"]
 async fn matrix_bn_link_stays_synced_ten_minutes_without_peer_manager_warnings() {
     if std::env::var("MATRIX_TEN_MINUTES").as_deref() != Ok("1") {
-        println!("MATRIX_TEN_MINUTES is not 1; skipping until T-019 turns this on");
+        println!("MATRIX_TEN_MINUTES is not 1; run with --ten-minutes for this one");
         return;
     }
     let env = env();
