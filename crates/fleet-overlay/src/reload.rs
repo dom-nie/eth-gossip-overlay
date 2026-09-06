@@ -220,6 +220,18 @@ impl Reloader {
                     Ok(())
                 }),
             ),
+            (
+                // One applier for the whole section: the publisher takes the three ceilings
+                // together, so a file that changes two of them still rebuilds its buckets once.
+                "bn.publish_rate_limit",
+                {
+                    let limits = deps.limits;
+                    Box::new(move |cfg: &Config| {
+                        limits.send_replace(cfg.bn.publish_rate_limit.clone());
+                        Ok(())
+                    })
+                },
+            ),
             ("log.level", {
                 let log = deps.log.clone();
                 Box::new(move |cfg: &Config| {
