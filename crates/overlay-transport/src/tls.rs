@@ -39,11 +39,15 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use ed25519_dalek::SigningKey;
 use overlay_core::identity::{Seeds, expected_tls_public_key};
+use overlay_core::protocol::protocol_alpn;
 use overlay_core::roster::{Hostname, Roster};
+use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
+use rustls::client::AlwaysResolvesClientRawPublicKeys;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{
     CertificateDer, PrivatePkcs8KeyDer, ServerName, SubjectPublicKeyInfoDer, UnixTime,
 };
+use rustls::server::AlwaysResolvesServerRawPublicKeys;
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::sign::CertifiedKey;
 use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
@@ -78,6 +82,10 @@ pub enum TlsError {
     /// to present as a raw public key.
     #[error("overlay TLS: the crypto provider does not expose a public key")]
     NoPublicKey,
+    /// The provider has no TLS 1.3 initial cipher suite, without which QUIC cannot start a
+    /// connection at all.
+    #[error("overlay TLS: {0}")]
+    Quic(#[from] quinn::crypto::rustls::NoInitialCipherSuite),
 }
 
 /// This host's overlay identity: the seed-derived key, ready for rustls to sign the handshake
@@ -192,6 +200,17 @@ impl Role {
     }
 }
 
+impl Role {
+    /// What a rejected key is called from this side: the acceptor was shown a key belonging
+    /// to nobody, the dialler a key belonging to somebody other than its peer.
+    fn pin_failure(self) -> FailureReason {
+        match self {
+            Self::Dial => FailureReason::KeyMismatch,
+            Self::Accept => FailureReason::UnknownKey,
+        }
+    }
+}
+
 impl fmt::Display for Role {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
@@ -246,6 +265,37 @@ pub struct HandshakeFailure {
     pub role: Role,
     /// What went wrong.
     pub reason: FailureReason,
+}
+
+impl HandshakeFailure {
+    /// What T-023 counts when a connection never came up. A rejected key arrives as
+    /// `certificate_unknown`, whether this host sent that alert or received it; a dialler
+    /// cannot tell its own rejection from the peer's, and counting both as a mismatch is the
+    /// honest answer, since either way the two do not agree on who the other is.
+    ///
+    /// An ALPN that does not match arrives as `no_application_protocol` and means a peer on
+    /// another protocol major (D29). Everything else the TLS layer refuses is counted with
+    /// it: a pair that cannot finish a handshake has nothing finer left to disagree about.
+    pub fn from_connection_error(role: Role, error: &quinn::ConnectionError) -> Self {
+        let rejected_the_key = |code| {
+            code == quinn::TransportErrorCode::crypto(u8::from(
+                rustls::AlertDescription::CertificateUnknown,
+            ))
+        };
+        let reason = match error {
+            quinn::ConnectionError::TimedOut => FailureReason::Timeout,
+            quinn::ConnectionError::TransportError(error) if rejected_the_key(error.code) => {
+                role.pin_failure()
+            }
+            quinn::ConnectionError::ConnectionClosed(close)
+                if rejected_the_key(close.error_code) =>
+            {
+                role.pin_failure()
+            }
+            _ => FailureReason::Version,
+        };
+        Self { role, reason }
+    }
 }
 
 /// The acceptor's side of the pin check: an inbound connection is from whoever holds the key,
@@ -428,6 +478,64 @@ impl ServerCertVerifier for DialerVerifier {
     fn requires_raw_public_keys(&self) -> bool {
         true
     }
+}
+
+/// The crypto provider the overlay uses, named rather than taken from the process default:
+/// another crate linked into the same binary may have registered a different one, and which
+/// of them answered would then come down to link order.
+fn provider() -> Arc<rustls::crypto::CryptoProvider> {
+    Arc::new(rustls::crypto::ring::default_provider())
+}
+
+/// What this host dials `peer` with. TLS 1.3 only, because that is all QUIC has; the peer's
+/// key is checked against the pin table and the name in SNI is a placeholder nobody reads.
+pub fn client_config(
+    pins: Arc<ArcSwap<PinTable>>,
+    own_key: &SigningKey,
+    peer: &Hostname,
+) -> Result<quinn::ClientConfig, TlsError> {
+    let mut tls = rustls::ClientConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(DialerVerifier::new(pins, peer.clone())))
+        .with_client_cert_resolver(Arc::new(AlwaysResolvesClientRawPublicKeys::new(identity(
+            own_key,
+        )?)));
+    tls.alpn_protocols = vec![protocol_alpn()];
+    Ok(quinn::ClientConfig::new(Arc::new(
+        QuicClientConfig::try_from(tls)?,
+    )))
+}
+
+/// What this host accepts on. Client authentication is mandatory: an anonymous connection has
+/// no key to pin, and pinning is the only thing standing between an open UDP port and a
+/// trusted path into a beacon node.
+pub fn server_config(
+    pins: Arc<ArcSwap<PinTable>>,
+    own_key: &SigningKey,
+) -> Result<quinn::ServerConfig, TlsError> {
+    let mut tls = rustls::ServerConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_client_cert_verifier(Arc::new(AcceptorVerifier::new(pins)))
+        .with_cert_resolver(Arc::new(AlwaysResolvesServerRawPublicKeys::new(identity(
+            own_key,
+        )?)));
+    tls.alpn_protocols = vec![protocol_alpn()];
+    Ok(quinn::ServerConfig::with_crypto(Arc::new(
+        QuicServerConfig::try_from(tls)?,
+    )))
+}
+
+/// Who a live connection is with. The verifier already looked this key up to let the
+/// handshake finish; reading it back off the connection is how T-023 learns the hostname
+/// without the verifier having to smuggle it out.
+pub fn peer_identity(pins: &PinTable, connection: &quinn::Connection) -> Option<PinEntry> {
+    let presented = connection
+        .peer_identity()?
+        .downcast::<Vec<CertificateDer<'static>>>()
+        .ok()?;
+    let key = presented_key(presented.first()?)?;
+    pins.lookup(&key).cloned()
 }
 
 #[cfg(test)]
