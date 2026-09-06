@@ -230,4 +230,30 @@ mod tests {
 
         assert_eq!(response, Response::Success(request));
     }
+
+    #[test]
+    fn status_v2_echoes_earliest_available_slot_and_v1_omits_it() {
+        let status = Status {
+            earliest_available_slot: Some(9),
+            ..status()
+        };
+        let responder = Responder::new();
+
+        let v2 = responder.respond(Protocol::StatusV2, &status.encode(2));
+        let v1 = responder.respond(Protocol::StatusV1, &status.encode(1));
+
+        assert_eq!(v2, Response::Success(status.encode(2)));
+        assert_eq!(v1, Response::Success(status.encode(1)));
+        assert_eq!(status.encode(1).len(), Status::V1_LEN);
+        assert_eq!(
+            Status::decode(&status.encode(1), 1)
+                .unwrap()
+                .earliest_available_slot,
+            None
+        );
+        assert_eq!(
+            responder.respond(Protocol::StatusV1, &status.encode(2)),
+            Response::InvalidRequest
+        );
+    }
 }
