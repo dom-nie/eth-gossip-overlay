@@ -542,9 +542,14 @@ pub fn server_config(
     )))
 }
 
-/// Who a live connection is with. The verifier already looked this key up to let the
-/// handshake finish; reading it back off the connection is how T-023 learns the hostname
-/// without the verifier having to smuggle it out.
+/// Who a live connection is with, according to the table as it stands now. This is how T-023
+/// learns the hostname without the verifier having to smuggle it out of the handshake.
+///
+/// `None` is an admission decision and not a missing convenience: either the peer presented
+/// nothing pinnable, or its key has left the table since the handshake, which is what a
+/// roster reload landing mid-connection looks like. The caller closes such a connection and
+/// counts it. Carrying on with an unnamed peer would give it everything pinning exists to
+/// withhold, and there is nothing to check its HELLO against either.
 pub fn peer_identity(pins: &PinTable, connection: &quinn::Connection) -> Option<PinEntry> {
     let presented = connection
         .peer_identity()?
