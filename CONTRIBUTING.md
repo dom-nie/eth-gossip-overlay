@@ -17,6 +17,30 @@ lychee --offline --no-progress --exclude-path target '**/*.md'   # internal link
 
 `cargo install cargo-deny lychee --locked` provides the last two. CI runs the same checks.
 
+## Mutation testing
+
+A passing test proves the code ran. It does not prove the test would fail if the code were wrong, and two defects of that kind have already reached review here. `cargo-mutants` changes one thing in the code at a time, reruns the suite, and reports every change the suite did not notice.
+
+```sh
+cargo install cargo-mutants --locked                # once
+cargo mutants -p overlay-core                       # about four minutes
+cargo mutants -p overlay-transport                  # about a minute and a half
+cargo mutants -p overlay-core --list                # what would run, without running it
+cargo mutants -p overlay-core -f seen.rs            # one file, while you work on it
+```
+
+`.cargo/mutants.toml` holds the settings. Test code is skipped for you: anything under `#[cfg(test)]`, `#[test]` or `#[tokio::test]` is never mutated, and neither are integration test targets. A nightly workflow runs both crates and fails on a survivor; it does not run on pull requests, because the suite runs once per mutant.
+
+A surviving mutant is one of three things, and each has an answer.
+
+- It is a missing test. Write it, named after the behaviour it checks like every other test here, never after the mutant. A test that kills a mutant while asserting nothing a reader would recognise as behaviour is worse than the survivor.
+- It is equivalent, changing nothing anyone can observe. Skip it.
+- Its only possible test would assert an implementation detail, a log line's wording, or a branch no public entry point can reach. Skip it.
+
+A skip carries its reason, always. Put `#[cfg_attr(test, mutants::skip)]` on the item with a comment above saying why; the attribute comes from the `mutants` dev-dependency and compiles to nothing. When the mutant is on an expression that cannot carry an attribute, add a regex to `exclude_re` in `.cargo/mutants.toml` with the same comment. A bare skip is not a way to make the run quiet, and `overlay-bn` and `fleet-overlay` are not configured yet.
+
+A mutant that reveals a real bug rather than a missing test is a bug report, and gets fixed on its own branch.
+
 ## Formatting and lints
 
 Run `cargo fmt --all` before committing. Clippy runs with `-D warnings`, and three lints are on across the workspace: `missing_docs`, `clippy::unwrap_used` and `clippy::expect_used`. Tests may unwrap; non-test code that has to unwrap says in a comment why it cannot fail. Doc comments say what and why, not how, and never restate the code.
