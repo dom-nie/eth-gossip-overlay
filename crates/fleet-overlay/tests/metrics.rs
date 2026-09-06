@@ -63,8 +63,8 @@ async fn request(addr: SocketAddr, path: &str) -> (String, String) {
 }
 
 /// Every metric in the §12 table, with the `overlay_` prefix the table's heading states.
-/// `bn_echo_dropped_total` is deliberately absent: gossipsub's own duplicate counter under
-/// `overlay_gossipsub_` measures the echo effect (CL-N4).
+/// The BN echo counter CL-N4 struck out is deliberately absent, name and all: gossipsub's own
+/// duplicate counter under `overlay_gossipsub_` is what measures the echo effect.
 const SECTION_12: &[&str] = &[
     "overlay_bn_compat",
     "overlay_bn_connected",
@@ -744,7 +744,8 @@ static LOG: LazyLock<Log> = LazyLock::new(|| {
     log
 });
 
-/// What the subscriber has written so far.
+/// What the subscriber has written so far. A poisoned lock means another test already failed,
+/// which the unwraps here report by panicking.
 #[derive(Clone, Default)]
 struct Log(Arc<Mutex<Vec<u8>>>);
 
