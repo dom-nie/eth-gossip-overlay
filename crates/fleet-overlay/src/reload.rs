@@ -417,12 +417,13 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use overlay_core::config::{Log, LogFormat, LogLevel, PublishRateLimit};
     use overlay_core::identity::{FleetSeed, write_secret_file};
     use overlay_core::roster::{Hostname, Roster};
     use tempfile::TempDir;
-    use tokio::sync::watch;
+    use tokio::sync::{Notify, watch};
 
     use tracing::Dispatch;
 
@@ -444,14 +445,18 @@ mod tests {
         text
     }
 
-    /// Every report the reloader finished, which is what T-041 binds the two counters to.
+    /// Every report the reloader finished, which is what T-041 binds the two counters to, and
+    /// a permit per report so a test can wait for one without polling.
     #[derive(Default)]
-    struct Recorded(Mutex<Vec<ReloadReport>>);
+    struct Recorded {
+        reports: Mutex<Vec<ReloadReport>>,
+        reloaded: Notify,
+    }
 
     impl Recorded {
         /// Reloads that ended in an error, the `outcome="error"` series.
         fn errors(&self) -> usize {
-            self.0
+            self.reports
                 .lock()
                 .unwrap()
                 .iter()
@@ -461,7 +466,7 @@ mod tests {
 
         /// Reloads that ended clean, the `outcome="ok"` series.
         fn ok(&self) -> usize {
-            self.0
+            self.reports
                 .lock()
                 .unwrap()
                 .iter()
@@ -471,18 +476,23 @@ mod tests {
 
         /// Rosters the shrink guard refused, `roster_reload_rejected_total`.
         fn rejected(&self) -> usize {
-            self.0
+            self.reports
                 .lock()
                 .unwrap()
                 .iter()
                 .filter(|r| matches!(r.error, Some(ReloadError::RosterShrinkRejected { .. })))
                 .count()
         }
+
+        fn first(&self) -> ReloadReport {
+            self.reports.lock().unwrap()[0].clone()
+        }
     }
 
     impl ReloadStats for Recorded {
         fn reloaded(&self, report: &ReloadReport) {
-            self.0.lock().unwrap().push(report.clone());
+            self.reports.lock().unwrap().push(report.clone());
+            self.reloaded.notify_one();
         }
     }
 
@@ -871,5 +881,20 @@ mod tests {
                 .any(|message| message.contains("the environment still lets this through")),
             "{messages:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn sighup_triggers_a_manual_reload_through_the_handle() {
+        let h = Fixture::new(CONFIG, &roster_yaml(3));
+        let stats = h.stats.clone();
+        let (handle, _task) = spawn(h.reloader);
+        tokio::spawn(sighup_loop(handle).unwrap());
+
+        nix::sys::signal::raise(nix::sys::signal::Signal::SIGHUP).unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), stats.reloaded.notified())
+            .await
+            .expect("no reload within a second of the signal");
+        assert_eq!(stats.first().trigger, Trigger::Manual);
     }
 }
