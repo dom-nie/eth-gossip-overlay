@@ -37,8 +37,8 @@ use tokio::task::JoinHandle;
 
 use crate::endpoint::{self, EndpointError};
 use crate::manager::{
-    Admission, CloseCode, ConnectionManager, Handle, IdentityAdmission, LiveView, ManagerStats,
-    PeerCounts, PeerEvent, Tls,
+    Admission, CloseCode, ConnectionManager, Handle, IdentityAdmission, LiveView, Local,
+    ManagerStats, PeerCounts, PeerEvent,
 };
 use crate::tls::{self, FailureReason, HandshakeFailure, PinTable, Role};
 
@@ -218,11 +218,8 @@ impl Builder {
                     .unwrap()
             });
             let _guard = runtime.as_ref().map(tokio::runtime::Runtime::enter);
-            let endpoint = endpoint::bind(
-                &self.cfg,
-                tls::server_config(pins.clone(), &key).unwrap(),
-            )
-            .unwrap();
+            let endpoint =
+                endpoint::bind(&self.cfg, tls::server_config(pins.clone(), &key).unwrap()).unwrap();
             let addr = endpoint.local_addr().unwrap();
             let sink = (kind != NodeKind::Manager).then(|| match &runtime {
                 Some(runtime) => runtime.spawn(hold_connections(endpoint.clone())),
@@ -379,7 +376,10 @@ impl<A: Admission> TestCluster<A> {
     /// would (T-043).
     pub fn set_roster(&mut self, hosts: &[usize]) {
         let roster = Roster {
-            hosts: hosts.iter().map(|index| self.hosts[*index].clone()).collect(),
+            hosts: hosts
+                .iter()
+                .map(|index| self.hosts[*index].clone())
+                .collect(),
         };
         self.pins
             .store(Arc::new(PinTable::build(&roster, &self.seeds)));
@@ -432,18 +432,18 @@ impl<A: Admission> TestCluster<A> {
     fn start_manager(&mut self, index: usize) {
         let node = &self.nodes[index];
         let manager = ConnectionManager::spawn(
-            self.cfg.clone(),
-            node.endpoint.clone().unwrap(),
-            SelfIdentity {
-                hostname: node.hostname.clone(),
-                region: Region(REGION.to_owned()),
-                site: None,
-            },
-            self.roster.subscribe(),
-            Tls {
+            Local {
+                cfg: self.cfg.clone(),
+                self_id: SelfIdentity {
+                    hostname: node.hostname.clone(),
+                    region: Region(REGION.to_owned()),
+                    site: None,
+                },
                 pins: self.pins.clone(),
                 own_key: node.key.clone(),
             },
+            node.endpoint.clone().unwrap(),
+            self.roster.subscribe(),
             self.admission.clone(),
             node.events.0.clone(),
             node.stats.clone(),
