@@ -20,6 +20,9 @@
 //! Admission is pluggable through [`Builder::start_with`], so a test can decide what a
 //! connection turns into without waiting for T-025's HELLO.
 //!
+//! [`view`] is the other half: a [`LiveView`] whose peers a test decides the subscriptions of,
+//! for the routing questions (T-031) that read the view and never the network.
+//!
 //! Two simplifications a reader should know about. Every node shares one pin table and one
 //! roster channel, where real hosts each load their own, so [`TestCluster::set_roster`] reloads
 //! the whole cluster at once. And hostnames carry a per-cluster prefix, so a test that reads the
@@ -36,16 +39,18 @@ use ed25519_dalek::SigningKey;
 use overlay_core::config::Overlay;
 use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
-use overlay_core::topic::table::TopicId;
+use overlay_core::subs::{Bitmap, PeerState};
+use overlay_core::topic::Topic;
+use overlay_core::topic::table::{PeerTopicTable, TopicId};
 use overlay_core::wire::Frame;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::endpoint::{self, EndpointError};
-use crate::hello::{HelloAdmission, OwnTopics, SelfHello};
+use crate::hello::{HelloAdmission, Negotiated, OwnTopics, SelfHello};
 use crate::manager::{
-    Admission, CloseCode, ConnectionManager, Handle, LiveView, Local, ManagerStats, PeerCounts,
-    PeerEvent, PeerInfo,
+    Admission, CloseCode, ConnectionManager, Handle, LivePeer, LiveView, Local, ManagerStats,
+    PeerCounts, PeerEvent, PeerInfo,
 };
 use crate::subs::SubsStats;
 use crate::tls::{self, FailureReason, HandshakeFailure, PinTable, Role};
@@ -767,4 +772,52 @@ pub async fn eventually(what: &str, mut ready: impl FnMut() -> bool) {
     tokio::time::timeout(WAIT, poll)
         .await
         .unwrap_or_else(|_| panic!("{what} did not happen within {WAIT:?}"));
+}
+
+/// A peer's state as its `SUBS` and `TOPIC_ADD`s would have left it: `bindings` are the topic
+/// ids the peer announced, `bits` the ids its beacon node is subscribed to. The two are
+/// separate because a peer that has announced a topic without setting its bit is the ordinary
+/// way a beacon node stops wanting one.
+pub fn peer_state(bindings: &[(u16, &Topic)], bits: &[u16]) -> PeerState {
+    let mut table = PeerTopicTable::new();
+    for (id, topic) in bindings {
+        table
+            .apply_add(TopicId::new(*id), &topic.to_string())
+            .unwrap();
+    }
+    let mut bitmap = Bitmap::new();
+    for bit in bits {
+        bitmap.set(TopicId::new(*bit));
+    }
+    PeerState { table, bitmap }
+}
+
+/// A live view of peers a test has decided the subscriptions of. They share one connection,
+/// because nothing about a subscription or a routing question reads it.
+pub fn view(connection: &quinn::Connection, peers: Vec<(Hostname, PeerState)>) -> LiveView {
+    LiveView(
+        peers
+            .into_iter()
+            .map(|(hostname, state)| {
+                (
+                    hostname,
+                    LivePeer {
+                        region: Region(REGION.to_owned()),
+                        site: None,
+                        rtt: Duration::ZERO,
+                        instance_id: 0,
+                        software_version: "test".to_owned(),
+                        negotiated: Negotiated {
+                            minor: 0,
+                            features: 0,
+                            peer_max_frame_bytes: 0,
+                            peer_max_batch_entries: 0,
+                        },
+                        connection: connection.clone(),
+                        state: Arc::new(Mutex::new(state)),
+                    },
+                )
+            })
+            .collect(),
+    )
 }

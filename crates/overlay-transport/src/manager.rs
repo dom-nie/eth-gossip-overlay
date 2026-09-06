@@ -212,7 +212,7 @@ pub struct LivePeer {
 /// connected" (§5.3), so this is a snapshot and never a subscription: a peer can leave it
 /// between the read and the send, and the send is what finds out.
 #[derive(Clone, Debug, Default)]
-pub struct LiveView(BTreeMap<Hostname, LivePeer>);
+pub struct LiveView(pub(crate) BTreeMap<Hostname, LivePeer>);
 
 impl LiveView {
     /// The peer, if it is live.
@@ -967,12 +967,11 @@ mod tests {
     use std::collections::BTreeSet;
     use std::net::{IpAddr, Ipv4Addr};
 
-    use overlay_core::subs::Bitmap;
-    use overlay_core::topic::table::{PeerTopicTable, TopicId};
-
     use super::*;
     use crate::testlog::LOG;
-    use crate::testutil::{Builder, NodeKind, REGION, TestCluster, WAIT, eventually};
+    use crate::testutil::{
+        Builder, NodeKind, REGION, TestCluster, WAIT, eventually, peer_state, view,
+    };
 
     fn host(name: &str) -> Hostname {
         Hostname(name.to_owned())
@@ -1338,51 +1337,6 @@ mod tests {
             .collect();
 
         assert_eq!(ordered, expected);
-    }
-
-    /// A peer's state as its `SUBS` and `TOPIC_ADD`s would have left it.
-    fn peer_state(bindings: &[(u16, &Topic)], bits: &[u16]) -> PeerState {
-        let mut table = PeerTopicTable::new();
-        for (id, topic) in bindings {
-            table
-                .apply_add(TopicId::new(*id), &topic.to_string())
-                .unwrap();
-        }
-        let mut bitmap = Bitmap::new();
-        for bit in bits {
-            bitmap.set(TopicId::new(*bit));
-        }
-        PeerState { table, bitmap }
-    }
-
-    /// A live view of peers a test has decided the subscriptions of. They share one connection,
-    /// because nothing about a subscription question reads it.
-    fn view(connection: &quinn::Connection, peers: Vec<(Hostname, PeerState)>) -> LiveView {
-        LiveView(
-            peers
-                .into_iter()
-                .map(|(hostname, state)| {
-                    (
-                        hostname,
-                        LivePeer {
-                            region: Region(REGION.to_owned()),
-                            site: None,
-                            rtt: Duration::ZERO,
-                            instance_id: 0,
-                            software_version: "test".to_owned(),
-                            negotiated: Negotiated {
-                                minor: 0,
-                                features: 0,
-                                peer_max_frame_bytes: 0,
-                                peer_max_batch_entries: 0,
-                            },
-                            connection: connection.clone(),
-                            state: Arc::new(Mutex::new(state)),
-                        },
-                    )
-                })
-                .collect(),
-        )
     }
 
     fn topic(name: &str) -> Topic {
