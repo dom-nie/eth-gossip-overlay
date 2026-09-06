@@ -212,17 +212,29 @@ impl Reloader {
 
     /// Runs the applier of every changed key that has one, and records the rest.
     fn apply_config(&mut self, document: yaml::Value, config: Config, report: &mut ReloadReport) {
+        let mut applied = Vec::new();
         for path in changed_paths(&self.document, &document) {
             match self.appliers.iter_mut().find(|(key, _)| covers(key, &path)) {
                 Some((_, apply)) => match apply(&config) {
-                    Ok(()) => report.applied.push(path),
+                    Ok(()) => applied.push(path),
                     Err(reason) => report.error = Some(ReloadError::Config(reason)),
                 },
                 None => report.restart_required.push(path),
             }
         }
+        // Only what took effect is copied onto the configuration in force: a key that needs a
+        // restart, or whose applier refused it, must keep answering with the value the running
+        // process is using.
+        let mut effective = self.document.clone();
+        for path in &applied {
+            copy_path(&mut effective, &document, path);
+        }
+        match config_of(&effective) {
+            Ok(config) => self.config = config,
+            Err(error) => report.error = Some(error),
+        }
         self.document = document;
-        self.config = config;
+        report.applied.extend(applied);
     }
 }
 
@@ -244,12 +256,49 @@ impl Reloader {
 /// The document at `path` and the [`Config`] it parses into, validated before anything is
 /// diffed so a file the sidecar cannot run with is refused whole.
 fn read_config(path: &Path) -> Result<(yaml::Value, Config), ReloadError> {
-    let config = Config::load(path).map_err(|err| ReloadError::Config(err.to_string()))?;
-    let text = std::fs::read_to_string(path)
-        .map_err(|err| ReloadError::Config(format!("{}: {err}", path.display())))?;
-    let document = yaml::from_str(&text)
-        .map_err(|err| ReloadError::Config(format!("{}: {err}", path.display())))?;
+    let text = std::fs::read_to_string(path).map_err(|err| in_file(path, &err))?;
+    let document = yaml::from_str(&text).map_err(|err| in_file(path, &err))?;
+    let config = Config::from_yaml(&text).map_err(|err| in_file(path, &err))?;
     Ok((document, config))
+}
+
+/// The typed configuration a document holds, which is how the merged document becomes the
+/// configuration in force.
+fn config_of(document: &yaml::Value) -> Result<Config, ReloadError> {
+    let text = yaml::to_string(document).map_err(|err| ReloadError::Config(err.to_string()))?;
+    Config::from_yaml(&text).map_err(|err| ReloadError::Config(err.to_string()))
+}
+
+/// A configuration error under the file it came from, because a reload reads two files and the
+/// operator has to know which one to fix.
+fn in_file(path: &Path, error: &dyn std::fmt::Display) -> ReloadError {
+    ReloadError::Config(format!("{}: {error}", path.display()))
+}
+
+/// Copies `path`'s value from `from` into `into`, removing it where `from` does not have it.
+/// Missing parents are created: a key an operator adds to a section the file never had needs
+/// the section too.
+fn copy_path(into: &mut yaml::Value, from: &yaml::Value, path: &str) {
+    let value = path.split('.').try_fold(from, |node, key| node.get(key));
+    let mut node = into;
+    let mut keys = path.split('.').peekable();
+    while let Some(key) = keys.next() {
+        let Some(map) = node.as_mapping_mut() else {
+            return;
+        };
+        if keys.peek().is_none() {
+            match value {
+                Some(value) => map.set(key, value.clone()),
+                None => {
+                    map.remove(key);
+                }
+            }
+            return;
+        }
+        node = map
+            .entry(yaml::Value::String(key.to_owned(), None))
+            .or_insert(yaml::Value::Mapping(yaml::Mapping::new()));
+    }
 }
 
 /// Every dotted path whose value differs between the two documents, in file-independent order
