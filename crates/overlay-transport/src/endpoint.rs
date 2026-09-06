@@ -1,6 +1,31 @@
 //! The one QUIC endpoint a sidecar owns: what it binds and what every connection through it
 //! agrees to.
 
+use std::time::Duration;
+
+use overlay_core::config::Overlay;
+use quinn::{IdleTimeout, VarInt};
+
+/// The parameters every overlay connection runs under, dialled or accepted. One function
+/// because there is one place to change: T-076 adds the inbound stream limits, the receive
+/// windows and the initial congestion window here once there is a benchmark to move them
+/// against, and everything it does not set is quinn's default on purpose.
+pub fn transport_config(cfg: &Overlay) -> quinn::TransportConfig {
+    let mut transport = quinn::TransportConfig::default();
+    transport
+        .keep_alive_interval(Some(cfg.keepalive))
+        .max_idle_timeout(Some(idle_timeout(cfg.idle_timeout)));
+    transport
+}
+
+/// `idle_timeout_ms` as the variable-length integer QUIC carries it in. A value too large to
+/// encode saturates rather than failing the bind: an operator who asks for a timeout of 146
+/// million years and one who asks for 49 days want the same thing, and neither is a reason to
+/// refuse to start.
+fn idle_timeout(idle: Duration) -> IdleTimeout {
+    IdleTimeout::try_from(idle).unwrap_or_else(|_| IdleTimeout::from(VarInt::MAX))
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
