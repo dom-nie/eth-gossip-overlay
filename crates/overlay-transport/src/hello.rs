@@ -431,10 +431,25 @@ mod tests {
 
     use super::*;
     use crate::manager::PeerEvent;
-    use crate::testutil::{Builder, CountingStats, NodeKind, REGION, WAIT};
+    use crate::testutil::{Builder, CountingStats, NodeKind, REGION, TestCluster, WAIT};
 
     /// A fork digest, as a topic string carries one.
     const DIGEST: [u8; 4] = [0x6a, 0x95, 0xa1, 0xa9];
+
+    /// The next `Up` for `peer` on node `index`, stepping over the events its other peers cause.
+    async fn next_up<A: Admission>(
+        cluster: &mut TestCluster<A>,
+        index: usize,
+        peer: &Hostname,
+    ) -> PeerInfo {
+        loop {
+            if let PeerEvent::Up(up) = cluster.next_event(index).await
+                && up.hostname == *peer
+            {
+                return up;
+            }
+        }
+    }
 
     /// One length-prefixed frame's worth of bytes, whatever they are, as the codec would put on
     /// a stream.
@@ -852,5 +867,23 @@ mod tests {
             "{event:?}"
         );
         assert_eq!(cluster.live(1).len(), 1);
+    }
+
+    /// The id is what tells a restarted peer from one whose path changed (D15), so it has to be
+    /// the same on every connection a process makes and different after it comes back.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn instance_id_is_one_per_process_and_changes_on_restart() {
+        assert_eq!(InstanceId::this_process(), InstanceId::this_process());
+        let mut cluster = TestCluster::start(3).await;
+        let dialler = cluster.hostname(0);
+
+        let at_one = next_up(&mut cluster, 1, &dialler).await;
+        let at_two = next_up(&mut cluster, 2, &dialler).await;
+        assert_eq!(at_one.instance_id, at_two.instance_id);
+
+        cluster.restart(0).await;
+
+        let after = next_up(&mut cluster, 1, &dialler).await;
+        assert_ne!(after.instance_id, at_one.instance_id);
     }
 }
