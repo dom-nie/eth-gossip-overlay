@@ -232,7 +232,7 @@ mod tests {
     use libp2p::identity::{Keypair, ed25519};
     use serde_json::json;
     use url::Url;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
@@ -543,6 +543,34 @@ mod tests {
 
         assert!(matches!(err, BnHttpError::Body { .. }), "{err:?}");
         assert!(err.to_string().contains("twelve"), "{err}");
+    }
+
+    /// Lighthouse's handler (`beacon_node/http_api/src/lib.rs`, POST lighthouse/add_peer)
+    /// takes `api_types::AdminPeer`, a single `enr` string, and answers 404 on a beacon node
+    /// that is not Lighthouse or has the endpoint off.
+    #[tokio::test]
+    async fn add_peer_posts_the_enr_and_maps_404_to_status() {
+        let text = "enr:-Ku4QHqVeJ8PPICcWk1vSn_XcSkjOkNiTg6Fmii5j6vUQgvzMc9L1goFnLKgXqBJspJjIsbFXUn4";
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/lighthouse/add_peer"))
+            .and(body_json(json!({"enr": text})))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let gone = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/lighthouse/add_peer"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&gone)
+            .await;
+
+        client(&server).add_peer(text).await.unwrap();
+        let err = client(&gone).add_peer(text).await.unwrap_err();
+
+        server.verify().await;
+        assert!(matches!(err, BnHttpError::Status(404)), "{err:?}");
     }
 
     #[tokio::test]
