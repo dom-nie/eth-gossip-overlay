@@ -26,7 +26,7 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::debug;
 
-use crate::reload::ReloadHandle;
+use crate::reload::{ReloadHandle, ReloadReport, Trigger};
 
 /// The longest line the socket reads. A request is a few dozen bytes and the bound is only
 /// against a client that never sends a newline, so it is generous rather than tight.
@@ -49,6 +49,8 @@ pub enum Request {
     Status,
     /// The roster in force, as the sidecar reads it.
     Roster,
+    /// Re-read `config.yaml` and `roster.yaml`, exactly as SIGHUP does (D26).
+    Reload,
 }
 
 /// What `status` answers: this host, then one entry per live peer in hostname order.
@@ -153,6 +155,10 @@ pub struct Response {
     /// The roster in force, from `roster`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub roster: Option<Vec<Host>>,
+    /// What the reload did. Its own `error` field is the reload's, and is not the same thing
+    /// as `ok`: a reload that ran and refused a roster is a report, not a failed command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reload: Option<ReloadReport>,
 }
 
 impl Response {
@@ -187,6 +193,15 @@ impl Response {
         Self {
             ok: true,
             roster: Some(hosts),
+            ..Self::default()
+        }
+    }
+
+    /// What one reload did.
+    fn reload(report: ReloadReport) -> Self {
+        Self {
+            ok: true,
+            reload: Some(report),
             ..Self::default()
         }
     }
@@ -311,6 +326,12 @@ async fn answer(request: Request, state: &State) -> Response {
                 })
                 .collect(),
         ),
+        // The reload task is gone only while the process is shutting down, which is the one
+        // case where the sidecar could not run the command at all.
+        Request::Reload => match state.reload.reload(Trigger::Manual).await {
+            Some(report) => Response::reload(report),
+            None => Response::failed("the sidecar is shutting down"),
+        },
     }
 }
 

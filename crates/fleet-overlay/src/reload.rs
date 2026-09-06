@@ -54,7 +54,7 @@ use overlay_core::config::{Config, PublishRateLimit};
 use overlay_core::identity::{FleetSeed, Seeds, read_secret_file};
 use overlay_core::roster::Roster;
 use overlay_transport::tls::PinTable;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_yaml_bw as yaml;
 use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -82,7 +82,7 @@ pub const RELOADABLE: &[&str] = &[
 
 /// What asked for a reload (D26). A human means what the files say; a tool that writes them
 /// may be broken, which is what the roster shrink guard protects against.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Trigger {
     /// SIGHUP or `fleet-overlayctl roster reload`.
@@ -102,8 +102,8 @@ impl Trigger {
 }
 
 /// What one reload did, returned to whoever asked for it and serialized verbatim by T-042's
-/// admin socket.
-#[derive(Clone, Debug, Serialize)]
+/// admin socket, which is also where `fleet-overlayctl` reads it back.
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ReloadReport {
     /// What asked for this reload.
     pub trigger: Trigger,
@@ -118,7 +118,7 @@ pub struct ReloadReport {
 }
 
 /// Why a reload kept the previous values.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, thiserror::Error)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize, thiserror::Error)]
 pub enum ReloadError {
     /// `config.yaml` could not be read, does not parse, or holds a value the sidecar cannot
     /// run with. Also how an applier reports a file it could not read.
