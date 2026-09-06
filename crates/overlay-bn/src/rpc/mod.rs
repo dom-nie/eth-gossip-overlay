@@ -8,12 +8,13 @@
 //! context bytes (`ProtocolId::has_context_bytes` in `rpc/protocol.rs`).
 
 use std::collections::BTreeSet;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 
 use libp2p::StreamProtocol;
-use libp2p::futures::{AsyncWrite, AsyncWriteExt};
+use libp2p::futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::request_response::Codec;
 use overlay_core::topic::{Topic, TopicKind};
+use snap::read::FrameDecoder;
 
 use crate::rpc::msg::{Malformed, MetaData, Ping, Status};
 use crate::rpc::proto::Protocol;
@@ -95,6 +96,12 @@ impl Responder {
     }
 }
 
+/// What the codec reads off an inbound stream: the negotiated protocol and the request body,
+/// or the reason the body was refused. A refusal is a value rather than an `io::Error` so the
+/// behaviour still hands the loop a channel to answer `InvalidRequest` on, which is what
+/// Lighthouse's outbound codec expects instead of a stream that dies.
+pub type Request = (Protocol, Result<Vec<u8>, Malformed>);
+
 /// What the sidecar sends back for one request. `Goodbye` is the peer's own farewell; nothing
 /// is written for it and the loop closes the connection.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -111,6 +118,19 @@ pub enum Response {
 
 /// `syncnets` is SSZ `Bitvector[4]`; a set bit past that fails Lighthouse's decode.
 const SYNCNETS_BITS: u8 = 4;
+
+/// The largest request body the sidecar accepts, uncompressed: a Status v2. Everything else
+/// it serves is smaller, and nothing it serves is variable length.
+pub const MAX_REQUEST_LEN: usize = Status::V2_LEN;
+
+/// Under 128, so a legal length prefix is a single varint byte with the high bit clear and
+/// [`body`] can refuse every other prefix by comparing one byte.
+const _: () = assert!(MAX_REQUEST_LEN < 0x80);
+
+/// What is read from an inbound stream before the rest is refused: the length prefix plus
+/// `snap::raw::max_compress_len(MAX_REQUEST_LEN)`, which is `32 + n + n / 6` and is the bound
+/// Lighthouse's inbound codec puts on the framed bytes of a request that long.
+const MAX_REQUEST_BYTES: u64 = 1 + 32 + MAX_REQUEST_LEN as u64 + MAX_REQUEST_LEN as u64 / 6;
 
 /// The result byte of a success chunk (`RpcResponse::as_u8` in `rpc/methods.rs`).
 pub const SUCCESS: u8 = 0;
@@ -129,19 +149,24 @@ pub struct Eth2Codec;
 
 impl Codec for Eth2Codec {
     type Protocol = StreamProtocol;
-    type Request = Vec<u8>;
+    type Request = Request;
     type Response = Response;
 
-    async fn read_request<T>(&mut self, _: &StreamProtocol, _: &mut T) -> io::Result<Vec<u8>>
+    /// The stream is read to its end, which the requester closes after writing the request
+    /// (`upgrade_outbound` in `rpc/outbound.rs` sends and then closes), bounded by
+    /// [`MAX_REQUEST_BYTES`] so a peer that writes forever is cut off rather than followed.
+    async fn read_request<T>(&mut self, id: &StreamProtocol, io: &mut T) -> io::Result<Request>
     where
-        T: libp2p::futures::AsyncRead + Unpin + Send,
+        T: AsyncRead + Unpin + Send,
     {
-        Err(io::ErrorKind::Unsupported.into())
+        let mut raw = Vec::new();
+        io.take(MAX_REQUEST_BYTES).read_to_end(&mut raw).await?;
+        Ok((proto::classify(id), body(&raw)))
     }
 
     async fn read_response<T>(&mut self, _: &StreamProtocol, _: &mut T) -> io::Result<Response>
     where
-        T: libp2p::futures::AsyncRead + Unpin + Send,
+        T: AsyncRead + Unpin + Send,
     {
         Err(io::ErrorKind::Unsupported.into())
     }
@@ -150,7 +175,7 @@ impl Codec for Eth2Codec {
         &mut self,
         _: &StreamProtocol,
         _: &mut T,
-        _: Vec<u8>,
+        _: Request,
     ) -> io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
@@ -179,6 +204,24 @@ impl Codec for Eth2Codec {
         };
         io.write_all(&chunk(code, &payload)?).await
     }
+}
+
+/// The body of a request: `<varint uncompressed length><snappy framed ssz>`, the framing
+/// `SSZSnappyInboundCodec::decode` reads. An empty stream is an empty body, which is how
+/// Lighthouse sends a `MetaData` request, whose length prefix it omits entirely. A prefix
+/// past the largest legal request is refused before the frame decoder sees a byte.
+fn body(raw: &[u8]) -> Result<Vec<u8>, Malformed> {
+    let Some((&len, framed)) = raw.split_first() else {
+        return Ok(Vec::new());
+    };
+    if usize::from(len) > MAX_REQUEST_LEN {
+        return Err(Malformed);
+    }
+    let mut out = vec![0; usize::from(len)];
+    FrameDecoder::new(framed)
+        .read_exact(&mut out)
+        .map_err(|_| Malformed)?;
+    Ok(out)
 }
 
 /// `<code><varint len(payload)><snappy framed payload>`. An error chunk's payload is the
@@ -415,19 +458,27 @@ mod tests {
             (_, Err(Malformed)) => Response::InvalidRequest,
         };
 
+        let short = request(&status[..Status::V1_LEN]);
         assert_eq!(read(&STATUS_V2, &good), (Protocol::StatusV2, Ok(status)));
-        assert_eq!(read(&METADATA_V2, &[]), (Protocol::MetaDataV2, Ok(Vec::new())));
+        assert_eq!(
+            read(&METADATA_V2, &[]),
+            (Protocol::MetaDataV2, Ok(Vec::new()))
+        );
         for bytes in [
             // The frame runs out before the prefix is satisfied.
             good[..good.len() - 4].to_vec(),
             // The prefix promises a v2 body and the frame carries a v1 one.
-            [varint(Status::V2_LEN), request(&good[..Status::V1_LEN])].concat(),
+            [varint(Status::V2_LEN), short[1..].to_vec()].concat(),
             // One byte past the largest legal request, and a prefix promising megabytes.
             [varint(Status::V2_LEN + 1), good[1..].to_vec()].concat(),
             varint(1 << 20),
             Vec::new(),
         ] {
-            assert_eq!(answer(&STATUS_V2, &bytes), Response::InvalidRequest, "{bytes:02x?}");
+            assert_eq!(
+                answer(&STATUS_V2, &bytes),
+                Response::InvalidRequest,
+                "{bytes:02x?}"
+            );
         }
 
         proptest!(|(bytes in proptest::collection::vec(any::<u8>(), 0..256))| {
