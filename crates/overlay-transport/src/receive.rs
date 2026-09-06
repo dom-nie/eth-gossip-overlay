@@ -424,6 +424,102 @@ mod tests {
         );
     }
 
+    /// Two beacon nodes that both got a message from public gossip hand it to their sidecars,
+    /// and both route it to the third (§5.5). The copies carry the same id, so the second one
+    /// is dropped at the seen cache and the beacon node is offered the message once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn same_message_from_two_origins_is_published_once() {
+        let block = topic("beacon_block");
+        let payload = payload(b"a block two nodes received first");
+        let mut cluster = TestCluster::start(3).await;
+        for node in 0..3 {
+            cluster.start_sidecar(node, subscriptions(&[&block], &[]));
+        }
+        eventually("the mesh to subscribe", || {
+            cluster.live(2).subscribers(&block).len() == 2
+        })
+        .await;
+
+        assert!(cluster.from_bn(0, &block, &payload));
+        assert!(cluster.from_bn(1, &block, &payload));
+
+        eventually("both copies to reach the third node", || {
+            cluster
+                .stats(2)
+                .messages(Direction::In, &cluster.hostname(0))
+                == 1
+                && cluster
+                    .stats(2)
+                    .messages(Direction::In, &cluster.hostname(1))
+                    == 1
+        })
+        .await;
+        assert_eq!(cluster.published(2).len(), 1);
+        assert_eq!(cluster.stats(2).duplicates(Class::Large), 1);
+        assert_eq!(cluster.stats(2).first_seen(Class::Large), 1);
+    }
+
+    /// A beacon node forwards back what its sidecar published into it, because it validated the
+    /// message and does not know where it came from. The seen cache holds the id from the
+    /// receive path (D08), so the echo stops at the sidecar and never goes back out to the peer
+    /// that sent it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bn_echo_of_an_overlay_message_is_dropped() {
+        let block = topic("beacon_block");
+        let payload = payload(b"a block that comes straight back");
+        let mut cluster = TestCluster::start(2).await;
+        for node in 0..2 {
+            cluster.start_sidecar(node, subscriptions(&[&block], &[]));
+        }
+        eventually("the pair to subscribe", || {
+            cluster.live(0).subscribers(&block).len() == 1
+        })
+        .await;
+        assert!(cluster.from_bn(0, &block, &payload));
+        eventually("the sibling to queue it", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+
+        assert!(!cluster.from_bn(1, &block, &payload));
+
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            cluster
+                .stats(1)
+                .messages(Direction::Out, &cluster.hostname(0)),
+            0
+        );
+        assert!(cluster.published(0).is_empty());
+    }
+
+    /// The overlay carries the gossipsub wire form and never looks inside it (§7), so what the
+    /// beacon node at the far end is offered is byte for byte what the near one produced.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn payload_bytes_are_identical_end_to_end() {
+        let block = topic("beacon_block");
+        let every_byte: Vec<u8> = (0..=255).cycle().take(8192).collect();
+        let payload = payload(&every_byte);
+        let mut cluster = TestCluster::start(2).await;
+        for node in 0..2 {
+            cluster.start_sidecar(node, subscriptions(&[&block], &[]));
+        }
+        eventually("the pair to subscribe", || {
+            cluster.live(0).subscribers(&block).len() == 1
+        })
+        .await;
+
+        assert!(cluster.from_bn(0, &block, &payload));
+
+        eventually("the sibling to queue it", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        let published = cluster.published(1);
+        assert_eq!(published[0].payload, payload);
+        assert_eq!(published[0].topic, block);
+    }
+
     /// The property the whole design rests on (§3 principle 1, §5.5). A sidecar publishes what
     /// the overlay brings it into its own beacon node and sends it nowhere: only what a beacon
     /// node hands its sidecar enters the overlay, which is what bounds duplicates to the number
