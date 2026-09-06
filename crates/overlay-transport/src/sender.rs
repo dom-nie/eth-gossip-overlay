@@ -168,6 +168,13 @@ impl LargeLedger {
     fn push(&self, queues: &Queues, queued: Queued) {
         let mut registry = self.registry();
         let mut lane = queues.lane(Class::Large);
+        while lane.bytes + queued.frame.len() > LARGE_LANE_BYTES {
+            let Some(dropped) = lane.pop() else { break };
+            registry.queued -= dropped.frame.len();
+            queues
+                .stats
+                .queue_drop(&queues.peer, Class::Large, DropReason::Full);
+        }
         registry.queued += queued.frame.len();
         lane.push(queued);
     }
