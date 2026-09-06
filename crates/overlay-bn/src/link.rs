@@ -22,7 +22,7 @@ use libp2p::core::upgrade::Version;
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub::{self, IdentTopic, MessageAcceptance, MessageId, PublishError};
 use libp2p::request_response::{self, ProtocolSupport, ResponseChannel};
-use libp2p::swarm::{ConnectionError, NetworkBehaviour, Swarm, SwarmEvent};
+use libp2p::swarm::{ConnectionError, ConnectionId, NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, multiaddr, noise, tcp, yamux};
 use overlay_core::backoff::Backoff;
 use overlay_core::config::Bn;
@@ -237,6 +237,7 @@ impl BnLink {
             connected: connected.clone(),
             listen: listen_tx,
             bn_peer: None,
+            known_bn: None,
             reconnect: None,
             probe: None,
         };
@@ -275,6 +276,9 @@ struct Link {
     backoff: Backoff,
     /// The beacon node this link is connected to, while it is.
     bn_peer: Option<PeerId>,
+    /// What the last identity fetch said the beacon node's peer id is. An inbound connection
+    /// is only the beacon node's if it comes from this id.
+    known_bn: Option<PeerId>,
     reconnect: Pending<Result<PeerId, BnHttpError>>,
     probe: Pending<Probe>,
 }
@@ -329,6 +333,7 @@ impl Link {
                 return self.retry_later();
             }
         };
+        self.known_bn = Some(peer_id);
         let addr = match self.cfg.libp2p_addr.clone().with_p2p(peer_id) {
             Ok(addr) => addr,
             Err(addr) => {
@@ -344,7 +349,11 @@ impl Link {
 
     fn on_swarm_event(&mut self, event: SwarmEvent<LinkBehaviourEvent>) {
         match event {
-            SwarmEvent::ConnectionEstablished { peer_id, .. } => self.on_connected(peer_id),
+            SwarmEvent::ConnectionEstablished {
+                peer_id,
+                connection_id,
+                ..
+            } => self.on_connected(peer_id, connection_id),
             SwarmEvent::ConnectionClosed {
                 peer_id,
                 num_established: 0,
@@ -432,8 +441,19 @@ impl Link {
     }
 
     /// Makes the beacon node the explicit peer, reports it, and starts the HTTP probe, which
-    /// runs beside the swarm rather than in front of it.
-    fn on_connected(&mut self, peer_id: PeerId) {
+    /// runs beside the swarm rather than in front of it. Which side opened the connection does
+    /// not matter: the beacon node dials the sidecar whenever its own inbound cap leaves the
+    /// sidecar's dial no room (MD-01), and that connection carries the same gossipsub.
+    ///
+    /// Anyone else is closed at once. The listen port is on localhost, so this is a
+    /// misconfiguration rather than an attack, but a stray peer must not become the explicit
+    /// peer or be mistaken for the beacon node going away later.
+    fn on_connected(&mut self, peer_id: PeerId, connection_id: ConnectionId) {
+        if self.known_bn != Some(peer_id) {
+            tracing::warn!(%peer_id, "closing a connection from a peer that is not the beacon node");
+            self.swarm.close_connection(connection_id);
+            return;
+        }
         self.swarm
             .behaviour_mut()
             .gossip
@@ -451,8 +471,13 @@ impl Link {
 
     /// The explicit peer is removed before the redial so gossipsub does not dial it too, with
     /// no address, on its own schedule. A probe still running is for a connection that is
-    /// gone; the next connect starts another.
+    /// gone; the next connect starts another. A close from anyone else is a stray connection
+    /// ending and says nothing about the beacon node, so it neither reports a disconnect nor
+    /// disturbs the backoff.
     fn on_closed(&mut self, peer_id: PeerId, cause: Option<ConnectionError>) {
+        if self.bn_peer != Some(peer_id) {
+            return;
+        }
         tracing::warn!(%peer_id, ?cause, "connection to the beacon node closed");
         self.swarm
             .behaviour_mut()
@@ -950,7 +975,12 @@ mod tests {
         assert!(!harness.link.connected.load(Ordering::Relaxed));
         let id = stray.peer_id().to_string();
         let text = log.text();
-        let lines: Vec<&str> = text.lines().filter(|line| line.contains(&id)).collect();
+        // libp2p's own swarm announces every local peer id at info level, so the link's own
+        // target is what tells this test's line from that one.
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains(&id) && line.contains("overlay_bn::link"))
+            .collect();
         assert_eq!(lines.len(), 1, "{text}");
         assert!(lines[0].contains("WARN"), "{}", lines[0]);
     }
