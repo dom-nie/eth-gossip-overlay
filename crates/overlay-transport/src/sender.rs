@@ -173,13 +173,15 @@ impl Registry {
         let Some((queues, _)) = oldest else {
             return false;
         };
-        let Some(dropped) = queues.lane(Class::Large).pop() else {
+        let mut lane = queues.lane(Class::Large);
+        let Some(dropped) = lane.pop() else {
             return false;
         };
         self.queued -= dropped.frame.len();
         queues
             .stats
             .queue_drop(&queues.peer, Class::Large, DropReason::Full);
+        queues.depth(Class::Large, &lane);
         true
     }
 }
@@ -228,6 +230,7 @@ impl LargeLedger {
         }
         registry.queued += queued.frame.len();
         lane.push(queued);
+        queues.depth(Class::Large, &lane);
         drop(lane);
         while registry.queued > self.cap && registry.evict_oldest() {}
     }
@@ -238,6 +241,7 @@ impl LargeLedger {
         let mut lane = queues.lane(Class::Large);
         let queued = lane.pop()?;
         registry.queued -= queued.frame.len();
+        queues.depth(Class::Large, &lane);
         Some(queued)
     }
 }
@@ -276,6 +280,13 @@ impl Queues {
         lane.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Sets `peer_queue_depth` for one lane, in both units the gauge carries. Called with the
+    /// lane still locked, so what it reports is what the lane held at that moment.
+    fn depth(&self, class: Class, lane: &Lane) {
+        self.stats
+            .queue_depth(&self.peer, class, lane.frames.len(), lane.bytes);
+    }
+
     /// Whether this peer's task has stopped, so a push has nowhere to go.
     fn gone(&self) -> bool {
         self.closed.load(Ordering::Relaxed) || self.task.get().is_some_and(AbortHandle::is_finished)
@@ -294,6 +305,7 @@ impl Queues {
                         .queue_drop(&self.peer, Class::Small, DropReason::Full);
                 }
                 lane.push(queued);
+                self.depth(Class::Small, &lane);
             }
             Class::Large => self.ledger.push(self, queued),
         }
@@ -311,7 +323,10 @@ impl Queues {
             self.stats
                 .queue_drop(&self.peer, Class::Large, DropReason::Stale);
         }
-        Some(self.lane(Class::Small).pop()?.frame)
+        let mut lane = self.lane(Class::Small);
+        let queued = lane.pop()?;
+        self.depth(Class::Small, &lane);
+        Some(queued.frame)
     }
 }
 
