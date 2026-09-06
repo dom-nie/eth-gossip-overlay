@@ -210,4 +210,17 @@ mod tests {
         assert_eq!(refused, Err(PeerTableError::Conflict(TopicId::new(3))));
         assert_eq!(peer.resolve(TopicId::new(3)), Some(&column(0)));
     }
+
+    #[test]
+    fn apply_add_identical_to_existing_is_ok_idempotent() {
+        let mut peer = PeerTopicTable::new();
+        let text = column(5).to_string();
+        peer.apply_add(TopicId::new(1), &text).unwrap();
+
+        let again = peer.apply_add(TopicId::new(1), &text);
+
+        assert_eq!(again, Ok(()));
+        assert_eq!(peer.resolve(TopicId::new(1)), Some(&column(5)));
+        assert_eq!(peer.id_of(&column(5)), Some(TopicId::new(1)));
+    }
 }
