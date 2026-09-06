@@ -1249,6 +1249,12 @@ impl SendSpy {
         Self::with_permits(0)
     }
 
+    /// A transport that takes `frames` and then stalls, for a test that has to see a sender
+    /// part way through its queue.
+    pub fn taking(frames: usize) -> Self {
+        Self::with_permits(frames)
+    }
+
     fn with_permits(permits: usize) -> Self {
         Self(Arc::new(SpyState {
             permits: tokio::sync::Semaphore::new(permits),

@@ -151,26 +151,28 @@ struct Registry {
 }
 
 impl Registry {
-    /// Drops the frame that has waited longest anywhere in the fleet, and says whether there
-    /// was one. A scan of every lane rather than a heap: it runs only when the process is at
-    /// its budget, and a few hundred lanes is a few hundred comparisons.
+    /// The lane holding the frame that has waited longest anywhere in the fleet. A scan of
+    /// every lane rather than a heap: it runs only when the process is at its budget, and a few
+    /// hundred lanes is a few hundred comparisons.
+    fn oldest_lane(&self) -> Option<Arc<Queues>> {
+        self.lanes
+            .iter()
+            .filter_map(|weak| {
+                let queues = weak.upgrade()?;
+                let front = queues.lane(Class::Large).frames.front()?.enqueued_at;
+                Some((queues, front))
+            })
+            .min_by_key(|(_, front)| *front)
+            .map(|(queues, _)| queues)
+    }
+
+    /// Drops that frame, and says whether there was one.
+    // mutants::skip: the `-> true` mutant spins the caller forever, because the loop asks this
+    // to free bytes and takes the answer for it; a hang is the one outcome no test can tell
+    // from a slow suite (MD-02). The scan it delegates to is mutated and under test.
+    #[cfg_attr(test, mutants::skip)]
     fn evict_oldest(&mut self) -> bool {
-        let mut oldest: Option<(Arc<Queues>, Instant)> = None;
-        for weak in &self.lanes {
-            let Some(queues) = weak.upgrade() else {
-                continue;
-            };
-            let front = queues
-                .lane(Class::Large)
-                .frames
-                .front()
-                .map(|queued| queued.enqueued_at);
-            let Some(front) = front else { continue };
-            if oldest.as_ref().is_none_or(|(_, best)| front < *best) {
-                oldest = Some((queues, front));
-            }
-        }
-        let Some((queues, _)) = oldest else {
+        let Some(queues) = self.oldest_lane() else {
             return false;
         };
         let mut lane = queues.lane(Class::Large);
@@ -344,10 +346,10 @@ impl Queues {
     /// The next frame to write: from the large lane while it has one that is still worth
     /// sending at `now`, then from the small lane. Large first, because a block waiting behind
     /// a second of attestations is a block that arrives after the slot it belongs to (D17).
-    fn next(&self, now: Instant) -> Option<Bytes> {
+    fn next(&self, now: Instant) -> Option<Queued> {
         while let Some(queued) = self.ledger.pop(self) {
             if now.saturating_duration_since(queued.enqueued_at) <= LARGE_STALE_AFTER {
-                return Some(queued.frame);
+                return Some(queued);
             }
             self.stats
                 .queue_drop(&self.peer, Class::Large, DropReason::Stale);
@@ -355,7 +357,7 @@ impl Queues {
         let mut lane = self.lane(Class::Small);
         let queued = lane.pop()?;
         self.depth(Class::Small, &lane);
-        Some(queued.frame)
+        Some(queued)
     }
 }
 
@@ -408,6 +410,10 @@ impl SenderHandle {
 }
 
 impl std::fmt::Debug for SenderHandle {
+    // mutants::skip: `LivePeer` derives `Debug` and this is what lets it. Nothing in the sidecar
+    // renders a handle, so no test can tell one rendering from another as behaviour, and a test
+    // written to kill the mutant would be asserting a format string nobody reads.
+    #[cfg_attr(test, mutants::skip)]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SenderHandle")
             .field("peer", &self.0.peer)
@@ -438,11 +444,11 @@ async fn drain<T: Transport>(queues: Arc<Queues>, transport: T) {
         // The runtime's clock rather than the system's, so a test can put a frame past the age
         // bound without waiting three seconds for it.
         let now = tokio::time::Instant::now().into_std();
-        let Some(frame) = queues.next(now) else {
+        let Some(queued) = queues.next(now) else {
             queues.waiting.notified().await;
             continue;
         };
-        if let Err(error) = transport.send(frame).await {
+        if let Err(error) = transport.send(queued.frame).await {
             tracing::debug!(peer = %queues.peer, %error, "connection carries no more frames");
             return;
         }
@@ -506,6 +512,88 @@ mod tests {
             stats: stats.clone(),
         };
         PeerSender::spawn(peer, link.clone(), deps)
+    }
+
+    /// The four bounds are the decision, not an implementation detail: D17 and §5.7 name these
+    /// numbers, and what an operator reads off `peer_queue_depth` means what it means because
+    /// of them.
+    #[test]
+    fn the_bounds_are_the_numbers_the_design_names() {
+        assert_eq!(SMALL_LANE_FRAMES, 600);
+        assert_eq!(LARGE_LANE_BYTES, 1024 * 1024);
+        assert_eq!(LARGE_STALE_AFTER, Duration::from_secs(3));
+        assert_eq!(LARGE_QUEUED_BYTES_MAX, 64 * 1024 * 1024);
+    }
+
+    /// The `reason` label of `peer_queue_drops_total`, which an alert and a dashboard are keyed
+    /// on (§12), so the strings are pinned rather than derived.
+    #[test]
+    fn drop_reasons_are_the_labels_they_are_counted_under() {
+        assert_eq!(DropReason::Full.as_str(), "full");
+        assert_eq!(DropReason::Stale.as_str(), "stale");
+        assert_eq!(DropReason::PeerDown.as_str(), "peer_down");
+    }
+
+    /// A frame the per-peer bound threw away is not still charged to the process budget. One
+    /// peer overflowing its own lane must not squeeze every other peer out of the ledger.
+    #[tokio::test]
+    async fn a_frame_the_lane_evicted_is_given_back_to_the_process_budget() {
+        let size = LARGE_LANE_BYTES / 4;
+        // Room for the peer's whole lane and half as much again, so a ledger that kept the
+        // bytes of evicted frames would be over budget while the lane itself is not.
+        let ledger = Arc::new(LargeLedger::new(LARGE_LANE_BYTES + 2 * size));
+        let stats = Arc::new(CountingStats::default());
+        let link = SendSpy::stalled();
+        let sender = sender_on(&ledger, &stats, peer(), &link);
+        let now = Instant::now();
+
+        for n in 0..8 {
+            sender.push(Class::Large, frame_of(n, size), now).unwrap();
+        }
+
+        // Four frames fill the lane, so the four before them went and nothing else did.
+        assert_eq!(
+            stats.queue_drops(&peer(), Class::Large, DropReason::Full),
+            4
+        );
+        link.release();
+        eventually("what the lane kept to go out", || link.sent().len() == 4).await;
+        assert_eq!(numbers(&link), vec![4, 5, 6, 7]);
+    }
+
+    /// The budget is on what is queued, not on what has been through. Here the sender has
+    /// written one frame and is blocked writing a second, so the ledger owes the process only
+    /// what is still in the lane, and the cap falls where that says rather than where the
+    /// traffic since the peer connected would say.
+    #[tokio::test]
+    async fn the_budget_counts_what_is_queued_and_not_what_has_gone() {
+        let size = LARGE_LANE_BYTES / 4;
+        let ledger = Arc::new(LargeLedger::new(3 * size));
+        let stats = Arc::new(CountingStats::default());
+        let link = SendSpy::taking(1);
+        let sender = sender_on(&ledger, &stats, peer(), &link);
+        let now = Instant::now();
+        for n in 0..3 {
+            sender.push(Class::Large, frame_of(n, size), now).unwrap();
+        }
+        // One frame written and one held in the write that follows it, which is the state the
+        // lane's own depth reports and the point of the test.
+        eventually("the sender to take what it can", || {
+            stats.queue_depth(&peer(), Class::Large) == (1, size)
+        })
+        .await;
+
+        for n in 3..6 {
+            sender.push(Class::Large, frame_of(n, size), now).unwrap();
+        }
+
+        assert_eq!(
+            stats.queue_drops(&peer(), Class::Large, DropReason::Full),
+            1
+        );
+        link.release();
+        eventually("the rest to go out", || link.sent().len() == 5).await;
+        assert_eq!(numbers(&link), vec![0, 1, 3, 4, 5]);
     }
 
     /// The small lane is bounded by frames, and what goes when it is full is the oldest one: an
