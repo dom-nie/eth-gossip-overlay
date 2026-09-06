@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use fleet_overlay::metrics::{Metrics, serve};
+use overlay_core::topic::Class;
 use prometheus::Registry;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -262,4 +263,30 @@ async fn unknown_path_returns_404() {
 
     assert!(status.contains("404"), "{status}");
     assert!(!body.contains("overlay_build_info"), "{body}");
+}
+
+#[test]
+fn histogram_buckets_cover_1ms_to_2s() {
+    let registry = Registry::new();
+    let metrics = Metrics::new(&registry).unwrap();
+    metrics.reconstructed(Class::Large, 0.5);
+
+    let families = registry.gather();
+    let histogram = families
+        .iter()
+        .find(|family| family.name() == "overlay_reconstruct_seconds")
+        .unwrap_or_else(|| panic!("the histogram has no series"));
+    let bounds: Vec<f64> = histogram.get_metric()[0]
+        .get_histogram()
+        .get_bucket()
+        .iter()
+        .map(prometheus::proto::Bucket::upper_bound)
+        .collect();
+
+    assert_eq!(bounds.first().copied(), Some(0.001), "{bounds:?}");
+    assert!(bounds.last().copied().unwrap_or_default() >= 2.0, "{bounds:?}");
+    let ratio = bounds[1] / bounds[0];
+    for pair in bounds.windows(2) {
+        assert!((pair[1] / pair[0] - ratio).abs() < 1e-9, "{bounds:?}");
+    }
 }
