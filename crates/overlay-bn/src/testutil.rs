@@ -16,6 +16,25 @@
 //! // The other way round: subscribe the link, bn.wait_for(Subscribed), then bn.publish(..).
 //! ```
 //!
+//! Beside its gossipsub the fake runs Lighthouse's real `RPC` behaviour, so a test drives the
+//! sidecar's req/resp side with the beacon node's own codec, framing and handler:
+//!
+//! ```ignore
+//! let mut responses = bn.responses();
+//! bn.send_status(status).await;               // also send_ping, request_metadata,
+//! bn.request_blocks_by_range(0, 4).await;     // request_blocks_by_range, send_goodbye
+//! match responses.recv().await.unwrap() {
+//!     RpcAnswer::Status(status) => ..,        // Pong(seq), MetaData(..)
+//!     RpcAnswer::Error(text) => ..,           // an error chunk, named by its result code
+//!     _ => ..,
+//! }
+//! // Nothing the sidecar sends of its own accord; test 20 asserts this stays empty.
+//! assert!(bn.inbound_requests().try_recv().is_err());
+//! ```
+//!
+//! The RPC handler keeps a connection alive, so the fake runs Lighthouse's own 10 s idle
+//! timeout ([`IDLE_TIMEOUT`]) rather than the `Duration::MAX` it needed before it had one.
+//!
 //! The two-swarm helpers at the bottom ([`connected_pair`], [`subscribe_both`],
 //! [`next_message`]) join two of the sidecar's own behaviours over the memory transport, for
 //! tests that need the protocol code and no beacon node at all.
@@ -32,15 +51,21 @@ use libp2p::gossipsub::{
     self, AllowAllSubscriptionFilter, IdentTopic, Message, MessageAcceptance, MessageAuthenticity,
     MessageId, MetricsConfig, PublishError, TopicHash, ValidationMode,
 };
-use libp2p::swarm::{Swarm, SwarmEvent};
+use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, noise, yamux};
+use lighthouse_network::rpc::methods::{
+    MetaData, MetadataRequest, OldBlocksByRangeRequest, Ping as RpcPing, RpcSuccessResponse,
+};
+use lighthouse_network::rpc::{
+    GoodbyeReason, Protocol, RPC, RPCMessage, RPCReceived, RequestType, StatusMessage,
+};
 use lighthouse_network::types::SnappyTransform;
 use prometheus_client::registry::Registry;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use types::ChainSpec;
+use types::{ChainSpec, ForkContext, Hash256, MainnetEthSpec, Slot};
 use url::Url;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -105,6 +130,8 @@ pub struct FakeBn {
     commands: mpsc::Sender<Cmd>,
     received: Option<mpsc::Receiver<Received>>,
     events: mpsc::Receiver<FakeBnEvent>,
+    answers: Option<mpsc::Receiver<RpcAnswer>>,
+    inbound: Option<mpsc::Receiver<Protocol>>,
     responses: Responses,
     /// The fork's gossipsub metrics under `gossipsub_`, as Lighthouse registers them; only
     /// a fake from [`start_with_metrics`](Self::start_with_metrics) has one.
@@ -180,7 +207,30 @@ pub enum FakeBnEvent {
     },
 }
 
-type LighthouseBehaviour = gossipsub::Behaviour<SnappyTransform, AllowAllSubscriptionFilter>;
+type LighthouseGossip = gossipsub::Behaviour<SnappyTransform, AllowAllSubscriptionFilter>;
+
+/// The beacon node's two behaviours: gossipsub as `service/mod.rs` builds it, and the real
+/// `RPC`, whose handler is what keeps a quiet connection alive past [`IDLE_TIMEOUT`].
+#[derive(NetworkBehaviour)]
+struct FakeBnBehaviour {
+    gossip: LighthouseGossip,
+    rpc: RPC<u64, MainnetEthSpec>,
+}
+
+/// What the fake got back for a request it sent.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RpcAnswer {
+    /// The peer's Status, at the version Lighthouse negotiated.
+    Status(StatusMessage),
+    /// The metadata sequence number a Ping was answered with.
+    Pong(u64),
+    /// The peer's metadata.
+    MetaData(Arc<MetaData<MainnetEthSpec>>),
+    /// An error chunk or a handler failure, as the text Lighthouse would log. Lighthouse keeps
+    /// the handler's error type crate-private, so this is the only shape available; the result
+    /// code is in the text (`RpcErrorResponse`'s `Display`, e.g. "Resource unavailable").
+    Error(String),
+}
 
 enum Cmd {
     Subscribe(String),
@@ -195,6 +245,18 @@ enum Cmd {
         topic: String,
         reply: oneshot::Sender<Vec<PeerId>>,
     },
+    /// Send this request to the connected peer; the answer lands on `answers`.
+    Request(Box<RequestType<MainnetEthSpec>>),
+    /// Say goodbye and close the connection, the way Lighthouse's peer manager does.
+    Goodbye(GoodbyeReason),
+}
+
+/// Where a swarm task puts what it sees.
+struct Sinks {
+    received: mpsc::Sender<Received>,
+    events: mpsc::Sender<FakeBnEvent>,
+    answers: mpsc::Sender<RpcAnswer>,
+    inbound: mpsc::Sender<Protocol>,
 }
 
 /// A peer of the fake that is not trusted: an ordinary gossipsub node the fake grafts into its
@@ -267,7 +329,18 @@ impl FakeBn {
         let (commands, command_rx) = mpsc::channel(64);
         let (received_tx, received) = mpsc::channel(8192);
         let (events_tx, events) = mpsc::channel(64);
-        let task = tokio::spawn(drive(swarm, command_rx, received_tx, events_tx));
+        let (answers_tx, answers) = mpsc::channel(64);
+        let (inbound_tx, inbound) = mpsc::channel(64);
+        let task = tokio::spawn(drive(
+            swarm,
+            command_rx,
+            Sinks {
+                received: received_tx,
+                events: events_tx,
+                answers: answers_tx,
+                inbound: inbound_tx,
+            },
+        ));
         let bn = Self {
             task,
             peer_id,
@@ -276,6 +349,8 @@ impl FakeBn {
             commands,
             received: Some(received),
             events,
+            answers: Some(answers),
+            inbound: Some(inbound),
             responses: Responses::default(),
             metrics,
         };
@@ -357,6 +432,59 @@ impl FakeBn {
         self.received.take().expect("received() is taken once")
     }
 
+    /// The answers to the requests the fake sends, in order. Taken once per fake.
+    pub fn responses(&mut self) -> mpsc::Receiver<RpcAnswer> {
+        self.answers.take().expect("responses() is taken once")
+    }
+
+    /// Every request the peer sends the fake, by protocol. The sidecar sends none. Taken once
+    /// per fake.
+    pub fn inbound_requests(&mut self) -> mpsc::Receiver<Protocol> {
+        self.inbound
+            .take()
+            .expect("inbound_requests() is taken once")
+    }
+
+    /// Sends a Status the way the peer manager does on every new peer.
+    pub async fn send_status(&self, status: StatusMessage) {
+        self.request(RequestType::Status(status)).await;
+    }
+
+    /// Sends a Ping carrying the fake's own metadata sequence number.
+    pub async fn send_ping(&self, seq_number: u64) {
+        self.request(RequestType::Ping(RpcPing { data: seq_number }))
+            .await;
+    }
+
+    /// Asks for the peer's metadata. Lighthouse's outbound upgrade offers v3, v2 and v1 in
+    /// that order and multistream-select takes the first the peer supports, so a peer that
+    /// registers all three always answers v3.
+    pub async fn request_metadata(&self) {
+        self.request(RequestType::MetaData(MetadataRequest::new_v3()))
+            .await;
+    }
+
+    /// Asks for `count` blocks from `start_slot`, a protocol the sidecar registers and
+    /// refuses.
+    pub async fn request_blocks_by_range(&self, start_slot: u64, count: u64) {
+        self.request(RequestType::BlocksByRange(OldBlocksByRangeRequest::new(
+            start_slot, count, 1,
+        )))
+        .await;
+    }
+
+    /// Says goodbye and closes the connection, as `RPC::shutdown` does on the real node.
+    pub async fn send_goodbye(&self, reason: GoodbyeReason) {
+        self.commands.send(Cmd::Goodbye(reason)).await.unwrap();
+    }
+
+    async fn request(&self, request: RequestType<MainnetEthSpec>) {
+        self.commands
+            .send(Cmd::Request(Box::new(request)))
+            .await
+            .unwrap();
+    }
+
     /// Skips the fake's events until one satisfies `wanted`.
     pub async fn wait_for(&mut self, wanted: impl FnMut(&FakeBnEvent) -> bool) -> FakeBnEvent {
         wait_for(&mut self.events, wanted).await
@@ -384,6 +512,7 @@ impl FakeBn {
         self.commands.send(Cmd::Public(peer_id)).await.unwrap();
         swarm
             .behaviour_mut()
+            .gossip
             .subscribe(&IdentTopic::new(topic))
             .unwrap();
         swarm
@@ -392,11 +521,22 @@ impl FakeBn {
         let (commands, command_rx) = mpsc::channel(64);
         let (received_tx, _received) = mpsc::channel(64);
         let (events_tx, events) = mpsc::channel(64);
+        let (answers_tx, _answers) = mpsc::channel(1);
+        let (inbound_tx, _inbound) = mpsc::channel(1);
         let mut public = PublicPeer {
             peer_id,
             commands,
             events,
-            _task: tokio::spawn(drive(swarm, command_rx, received_tx, events_tx)),
+            _task: tokio::spawn(drive(
+                swarm,
+                command_rx,
+                Sinks {
+                    received: received_tx,
+                    events: events_tx,
+                    answers: answers_tx,
+                    inbound: inbound_tx,
+                },
+            )),
         };
         self.wait_for(|e| {
             matches!(e, FakeBnEvent::Subscribed { peer, topic: t } if *peer == peer_id && t == topic)
@@ -485,58 +625,94 @@ fn tcp_port(addr: &Multiaddr) -> u16 {
 /// `try_send`, so a test that never reads loses messages rather than stalling the fake.
 /// Every peer that connects becomes an explicit peer, the way `--trusted-peers` does it on
 /// the real node, except the ones a `Cmd::Public` named.
-async fn drive(
-    mut swarm: Swarm<LighthouseBehaviour>,
-    mut commands: mpsc::Receiver<Cmd>,
-    received: mpsc::Sender<Received>,
-    events: mpsc::Sender<FakeBnEvent>,
-) {
+async fn drive(mut swarm: Swarm<FakeBnBehaviour>, mut commands: mpsc::Receiver<Cmd>, sinks: Sinks) {
     let mut public = HashSet::new();
+    // Who requests go to: the sidecar, the only non-public peer a test connects to the fake.
+    let mut peer = None;
+    let mut next_request = 0;
     loop {
         tokio::select! {
             event = swarm.select_next_some() => match event {
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                     if !public.contains(&peer_id) {
-                        swarm.behaviour_mut().add_explicit_peer(&peer_id);
+                        swarm.behaviour_mut().gossip.add_explicit_peer(&peer_id);
+                        peer = Some(peer_id);
                     }
-                    let _ = events.try_send(FakeBnEvent::Connected(peer_id));
+                    let _ = sinks.events.try_send(FakeBnEvent::Connected(peer_id));
                 }
                 SwarmEvent::ConnectionClosed { peer_id, num_established: 0, .. } => {
-                    let _ = events.try_send(FakeBnEvent::Disconnected(peer_id));
+                    let _ = sinks.events.try_send(FakeBnEvent::Disconnected(peer_id));
                 }
-                SwarmEvent::Behaviour(gossipsub::Event::Subscribed { peer_id, topic, .. }) => {
-                    let _ = events.try_send(FakeBnEvent::Subscribed {
+                SwarmEvent::Behaviour(FakeBnBehaviourEvent::Gossip(
+                    gossipsub::Event::Subscribed { peer_id, topic, .. },
+                )) => {
+                    let _ = sinks.events.try_send(FakeBnEvent::Subscribed {
                         peer: peer_id,
                         topic: topic.into_string(),
                     });
                 }
-                SwarmEvent::Behaviour(gossipsub::Event::Message {
+                SwarmEvent::Behaviour(FakeBnBehaviourEvent::Gossip(gossipsub::Event::Message {
                     propagation_source,
                     message_id,
                     message,
-                }) => {
-                    swarm.behaviour_mut().report_message_validation_result(
+                })) => {
+                    swarm.behaviour_mut().gossip.report_message_validation_result(
                         &message_id,
                         &propagation_source,
                         MessageAcceptance::Accept,
                     );
-                    let _ = received.try_send((message.topic.into_string(), message.data, message_id));
+                    let _ = sinks.received.try_send((
+                        message.topic.into_string(),
+                        message.data,
+                        message_id,
+                    ));
+                }
+                SwarmEvent::Behaviour(FakeBnBehaviourEvent::Rpc(RPCMessage { message, .. })) => {
+                    match message {
+                        Ok(RPCReceived::Request(_, request)) => {
+                            let protocol = request.versioned_protocol().protocol();
+                            let _ = sinks.inbound.try_send(protocol);
+                        }
+                        Ok(RPCReceived::Response(_, response)) => {
+                            let _ = sinks.answers.try_send(answer(response));
+                        }
+                        Ok(RPCReceived::EndOfStream(..)) => {}
+                        Err(err) => {
+                            let _ = sinks.answers.try_send(RpcAnswer::Error(format!("{err:?}")));
+                        }
+                    }
                 }
                 _ => {}
             },
             command = commands.recv() => match command {
                 Some(Cmd::Subscribe(topic)) => {
-                    swarm.behaviour_mut().subscribe(&IdentTopic::new(topic)).unwrap();
+                    let gossip = &mut swarm.behaviour_mut().gossip;
+                    gossip.subscribe(&IdentTopic::new(topic)).unwrap();
                 }
                 Some(Cmd::Publish { topic, data, reply }) => {
-                    let _ = reply.send(swarm.behaviour_mut().publish(IdentTopic::new(topic), data));
+                    let gossip = &mut swarm.behaviour_mut().gossip;
+                    let _ = reply.send(gossip.publish(IdentTopic::new(topic), data));
                 }
                 Some(Cmd::Public(peer_id)) => {
                     public.insert(peer_id);
                 }
                 Some(Cmd::MeshPeers { topic, reply }) => {
-                    let mesh = swarm.behaviour().mesh_peers(&TopicHash::from_raw(topic)).copied().collect();
+                    let hash = TopicHash::from_raw(topic);
+                    let mesh = swarm.behaviour().gossip.mesh_peers(&hash).copied().collect();
                     let _ = reply.send(mesh);
+                }
+                Some(Cmd::Request(request)) => {
+                    next_request += 1;
+                    if let Some(peer) = peer {
+                        let rpc = &mut swarm.behaviour_mut().rpc;
+                        rpc.send_request(peer, next_request, *request);
+                    }
+                }
+                Some(Cmd::Goodbye(reason)) => {
+                    next_request += 1;
+                    if let Some(peer) = peer {
+                        swarm.behaviour_mut().rpc.shutdown(peer, next_request, reason);
+                    }
                 }
                 None => return,
             },
@@ -544,14 +720,26 @@ async fn drive(
     }
 }
 
+/// The three responses the sidecar ever sends; anything else is kept as text.
+fn answer(response: RpcSuccessResponse<MainnetEthSpec>) -> RpcAnswer {
+    match response {
+        RpcSuccessResponse::Status(status) => RpcAnswer::Status(status),
+        RpcSuccessResponse::Pong(ping) => RpcAnswer::Pong(ping.data),
+        RpcSuccessResponse::MetaData(metadata) => RpcAnswer::MetaData(metadata),
+        other => RpcAnswer::Error(format!("{other:?}")),
+    }
+}
+
+/// Lighthouse's own idle connection timeout (`service/mod.rs:498`). What holds a quiet link
+/// open past it is the RPC handler's keep-alive (`rpc/handler.rs`, `connection_keep_alive` is
+/// true unless the handler is deactivated); gossipsub's keeps alive only mesh peers, and an
+/// explicit peer is never grafted.
+pub const IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Lighthouse's swarm as `service/mod.rs` builds it for a node without QUIC or mplex: its
-/// `build_transport` (TCP nodelay, noise, yamux, 10 s for the dial and upgrade). Not its 10 s
-/// idle connection timeout (`service/mod.rs:498`): on the real node the RPC behaviour's
-/// handler keeps a connection alive (`rpc/handler.rs` `connection_keep_alive` is true unless
-/// deactivated) while gossipsub's keeps alive only mesh peers, and the fake has no RPC
-/// behaviour, so copying the timeout would drop a quiet link after 10 s where a real beacon
-/// node would not.
-fn lighthouse_swarm(metrics: Option<&mut Registry>) -> Swarm<LighthouseBehaviour> {
+/// `build_transport` (TCP nodelay, noise, yamux, 10 s for the dial and upgrade), its
+/// [`IDLE_TIMEOUT`], and both behaviours it runs on the wire the sidecar sees.
+fn lighthouse_swarm(metrics: Option<&mut Registry>) -> Swarm<FakeBnBehaviour> {
     SwarmBuilder::with_new_identity()
         .with_tokio()
         .with_other_transport(|keypair| {
@@ -562,17 +750,30 @@ fn lighthouse_swarm(metrics: Option<&mut Registry>) -> Swarm<LighthouseBehaviour
             )?)
         })
         .unwrap()
-        .with_behaviour(|_| lighthouse_behaviour(metrics))
+        .with_behaviour(|_| FakeBnBehaviour {
+            gossip: lighthouse_behaviour(metrics),
+            rpc: RPC::new(fork_context(), false, None, None, 0),
+        })
         .unwrap()
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::MAX))
+        .with_swarm_config(|c| c.with_idle_connection_timeout(IDLE_TIMEOUT))
         .build()
+}
+
+/// Mainnet at slot 0. The sidecar never reads a fork digest of its own, so the current fork
+/// only decides which protocols the fake offers on its own inbound side.
+fn fork_context() -> Arc<ForkContext> {
+    Arc::new(ForkContext::new::<MainnetEthSpec>(
+        Slot::new(0),
+        Hash256::ZERO,
+        &ChainSpec::mainnet(),
+    ))
 }
 
 /// The behaviour as `service/mod.rs:341-350` constructs it, minus the whitelist filter (every
 /// topic a test uses is one the beacon node would allow) and the peer scoring (trusted peers
 /// are exempt from it anyway). `metrics` attaches the fork's metrics under `gossipsub_`, the
 /// prefix the beacon node uses.
-fn lighthouse_behaviour(metrics: Option<&mut Registry>) -> LighthouseBehaviour {
+fn lighthouse_behaviour(metrics: Option<&mut Registry>) -> LighthouseGossip {
     let spec = ChainSpec::mainnet();
     let behaviour = gossipsub::Behaviour::new_with_subscription_filter_and_transform(
         MessageAuthenticity::Anonymous,

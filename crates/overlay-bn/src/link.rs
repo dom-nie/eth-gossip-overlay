@@ -485,6 +485,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
+    use lighthouse_network::rpc::StatusMessage;
+    use lighthouse_network::rpc::methods::StatusMessageV2;
     use overlay_core::lanes::{ClassLanes, LaneStats, SMALL_LANE_CAPACITY};
     use overlay_core::msgid;
     use overlay_core::topic::{Class, TopicKind};
@@ -493,6 +495,7 @@ mod tests {
     use proptest::strategy::ValueTree;
     use proptest::test_runner::TestRunner;
     use serde_json::json;
+    use types::{Epoch, Hash256, Slot};
     use wiremock::{MockServer, ResponseTemplate};
 
     use super::*;
@@ -500,7 +503,7 @@ mod tests {
     use crate::gossip::wire;
     use crate::node_key::NodeKey;
     use crate::spec::spec_watch;
-    use crate::testutil::{FakeBn, FakeBnEvent, link_config, node_key, ok_json};
+    use crate::testutil::{FakeBn, FakeBnEvent, RpcAnswer, link_config, node_key, ok_json};
 
     /// Long enough for a dial, a noise handshake and a gossipsub exchange on a loaded CI box,
     /// short enough that a test which waits in vain still ends inside its 5 s budget.
@@ -1004,6 +1007,51 @@ mod tests {
             assert_eq!(bn_id.0, expected.id.0, "{topic} payload {payload:02x?}");
             assert_eq!(sidecar_id, bn_id, "{topic}");
         }
+    }
+
+    /// A beacon node's view of its own chain, as its peer manager sends it on every new peer.
+    fn bn_status() -> StatusMessage {
+        StatusMessage::V2(StatusMessageV2 {
+            fork_digest: [1, 2, 3, 4],
+            finalized_root: Hash256::repeat_byte(0xaa),
+            finalized_epoch: Epoch::new(7),
+            head_root: Hash256::repeat_byte(0xbb),
+            head_slot: Slot::new(250),
+            earliest_available_slot: Slot::new(9),
+        })
+    }
+
+    async fn next_answer(answers: &mut mpsc::Receiver<RpcAnswer>) -> RpcAnswer {
+        tokio::time::timeout(WAIT, answers.recv())
+            .await
+            .expect("the beacon node's request went unanswered")
+            .expect("the fake ended")
+    }
+
+    /// A connected link, and the fake's end of the RPC.
+    async fn connected(bn: &mut FakeBn) -> (Harness, mpsc::Receiver<RpcAnswer>) {
+        let answers = bn.responses();
+        let harness = spawn(link_config(bn), bn);
+        bn.wait_for(|e| matches!(e, FakeBnEvent::Connected(_)))
+            .await;
+        (harness, answers)
+    }
+
+    /// Lighthouse offers status v2 first, so that is what is negotiated, and the echo comes
+    /// back through its own outbound codec: the fields it sent, `earliest_available_slot`
+    /// included.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fake_bn_status_request_is_answered_with_its_own_fields() {
+        let mut bn = FakeBn::start().await;
+        let (harness, mut answers) = connected(&mut bn).await;
+
+        bn.send_status(bn_status()).await;
+
+        assert_eq!(
+            next_answer(&mut answers).await,
+            RpcAnswer::Status(bn_status())
+        );
+        drop(harness);
     }
 
     #[test]
