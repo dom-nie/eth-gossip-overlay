@@ -173,10 +173,12 @@ pub fn ok_json(body: serde_json::Value) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(body)
 }
 
-/// A link config pointed at `bn`, with a backoff fast enough for a test to see a reconnect.
+/// A link config pointed at `bn`, with a backoff fast enough for a test to see a reconnect and
+/// an ephemeral listen port, so tests run in parallel without agreeing on one.
 pub fn link_config(bn: &FakeBn) -> LinkConfig {
     LinkConfig {
         libp2p_addr: bn.addr(),
+        listen_addr: "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         backoff_min: Duration::from_millis(10),
         backoff_max: Duration::from_millis(100),
         gossip: BnLinkConfig {
@@ -252,6 +254,9 @@ enum Cmd {
     Request(Box<RequestType<MainnetEthSpec>>),
     /// Say goodbye and close the connection, the way Lighthouse's peer manager does.
     Goodbye(GoodbyeReason),
+    /// Dial this address, the way the beacon node dials a peer it was handed as an ENR or in
+    /// `--libp2p-addresses`.
+    Dial(Multiaddr),
 }
 
 /// Where a swarm task puts what it sees.
@@ -495,6 +500,12 @@ impl FakeBn {
             .unwrap();
     }
 
+    /// Dials `addr`, the way the beacon node dials a sidecar it was given as an ENR or in
+    /// `--libp2p-addresses`. The connection it opens is inbound at the sidecar.
+    pub async fn dial(&self, addr: Multiaddr) {
+        self.commands.send(Cmd::Dial(addr)).await.unwrap();
+    }
+
     /// Skips the fake's events until one satisfies `wanted`.
     pub async fn wait_for(&mut self, wanted: impl FnMut(&FakeBnEvent) -> bool) -> FakeBnEvent {
         wait_for(&mut self.events, wanted).await
@@ -717,6 +728,9 @@ async fn drive(mut swarm: Swarm<FakeBnBehaviour>, mut commands: mpsc::Receiver<C
                         let rpc = &mut swarm.behaviour_mut().rpc;
                         rpc.send_request(peer, next_request, *request);
                     }
+                }
+                Some(Cmd::Dial(addr)) => {
+                    swarm.dial(addr).unwrap();
                 }
                 Some(Cmd::Goodbye(reason)) => {
                     next_request += 1;

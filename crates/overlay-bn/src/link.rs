@@ -628,6 +628,7 @@ mod tests {
 
     /// A running link and the test's ends of its channels.
     struct Harness {
+        peer_id: PeerId,
         link: BnLink,
         commands: mpsc::Sender<BnCommand>,
         spec: watch::Receiver<SpecSnapshot>,
@@ -710,6 +711,7 @@ mod tests {
             commands_rx,
         );
         Harness {
+            peer_id: node_key.peer_id(),
             link,
             commands,
             spec,
@@ -717,6 +719,32 @@ mod tests {
             lanes,
             stats,
         }
+    }
+
+    /// The address the link bound, with the link's peer id on it, which is what a beacon node
+    /// reads out of the sidecar's ENR.
+    async fn listen_addr(harness: &Harness) -> Multiaddr {
+        let mut listen = harness.link.listen.clone();
+        let addr = tokio::time::timeout(WAIT, listen.wait_for(Option::is_some))
+            .await
+            .expect("the link never reported a listen address")
+            .unwrap()
+            .clone()
+            .expect("a listen address");
+        addr.with_p2p(harness.peer_id).unwrap()
+    }
+
+    /// Waits until the link has asked for the beacon node's identity `n` times. The next
+    /// request is only armed once the previous answer has been handled, so `n` of them mean
+    /// `n - 1` answers are in: that is how a test knows the link knows who the beacon node is.
+    async fn identity_requests_reach(bn: &FakeBn, n: usize) {
+        tokio::time::timeout(WAIT, async {
+            while identity_requests(bn.http()).await < n {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the link never asked for the beacon node's identity often enough");
     }
 
     async fn next_event(control: &mut mpsc::Receiver<BnEvent>) -> BnEvent {
@@ -802,6 +830,29 @@ mod tests {
         );
         assert!(!harness.link.task.is_finished());
         drop(harness.commands);
+    }
+
+    /// The other direction, which is what MD-01 rests on: the link's own dial can never
+    /// succeed, and the beacon node dialling its listen address is what connects them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn link_listens_before_dialling_and_accepts_the_bn() {
+        let bn = FakeBn::start().await;
+        let cfg = LinkConfig {
+            libp2p_addr: closed_port(),
+            ..link_config(&bn)
+        };
+        let mut harness = spawn(cfg, &bn);
+        let addr = listen_addr(&harness).await;
+        identity_requests_reach(&bn, 2).await;
+
+        bn.dial(addr).await;
+
+        assert_eq!(
+            next_event(&mut harness.link.events).await,
+            BnEvent::Connected {
+                peer_id: bn.peer_id()
+            }
+        );
     }
 
     /// The sidecar never subscribes here, so it has no mesh for the topic, and the publish
