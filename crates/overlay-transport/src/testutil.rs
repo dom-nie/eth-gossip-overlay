@@ -35,13 +35,12 @@ use ed25519_dalek::SigningKey;
 use overlay_core::config::Overlay;
 use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
+use overlay_core::topic::table::TopicId;
+use overlay_core::wire::Frame;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::endpoint::{self, EndpointError};
-use overlay_core::topic::table::TopicId;
-use overlay_core::wire::Frame;
-
 use crate::hello::{HelloAdmission, OwnTopics, SelfHello};
 use crate::manager::{
     Admission, CloseCode, ConnectionManager, Handle, LiveView, Local, ManagerStats, PeerCounts,
@@ -421,7 +420,7 @@ async fn hold_connections(
     while let Some(incoming) = endpoint.accept().await {
         if let Ok(connection) = incoming.await {
             if let Some(pinned) = tls::peer_identity(&pins.load(), &connection)
-                && let Ok(peer) = crate::hello::perform(
+                && let Ok(mut peer) = crate::hello::perform(
                     connection.clone(),
                     Role::Accept,
                     &self_hello,
@@ -432,7 +431,6 @@ async fn hold_connections(
                 )
                 .await
             {
-                let mut peer = peer;
                 if conflicting {
                     let contradiction = Frame::TopicAdd {
                         id: 1,

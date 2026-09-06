@@ -798,11 +798,11 @@ async fn dial_loop<A: Admission>(peer: Hostname, shared: Arc<Shared>, admission:
         match dial_once(&peer, &entry, &shared, &admission).await {
             Ok(connection) => {
                 let error = connection.closed().await;
-                // Admission, not the QUIC connect. In TLS 1.3 a dial can resolve before the
-                // acceptor has judged its key, but admission cannot: HELLO is a round trip, and
-                // an acceptor that is about to reject the key never answers one. So a peer that
-                // reached here paired, and the floor is where its next dial belongs, unless how
-                // the connection ended says the pairing is worth nothing.
+                // What proves a pairing is admission and not the QUIC connect: in TLS 1.3 a
+                // dial can resolve before the acceptor has judged its key, but HELLO is a round
+                // trip that an acceptor about to reject one never answers. So a peer that
+                // reached here paired, and the floor is where its next dial belongs unless the
+                // way the connection ended takes that proof back.
                 if pairing_proven(&error) {
                     backoff.reset();
                     warned = false;
