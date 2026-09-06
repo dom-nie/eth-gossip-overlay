@@ -417,6 +417,8 @@ mod tests {
     use super::*;
     use crate::bn_http::BnClient;
     use crate::link::BnLink;
+    use overlay_core::topic::SubscriptionSets;
+
     use crate::spec::spec_watch;
     use crate::testutil::{FakeBn, LOG, link_config, node_key, ok_json};
 
@@ -657,6 +659,7 @@ mod tests {
             .await;
         let (commands, commands_rx) = mpsc::channel(64);
         let (spec_tx, spec_rx) = spec_watch();
+        let (_sets, sets) = watch::channel(SubscriptionSets::default());
         let lanes = ClassLanes::new(Arc::new(()));
         let link = BnLink::spawn(
             link_config(&bn),
@@ -665,6 +668,7 @@ mod tests {
             &mut Registry::default(),
             lanes.pusher(),
             spec_tx,
+            sets,
             commands_rx,
         );
         let stats = Arc::new(Recording::default());

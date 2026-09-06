@@ -339,6 +339,7 @@ mod tests {
     fn mirrored_link(bn: &FakeBn) -> watch::Receiver<SubscriptionSets> {
         let (commands, commands_rx) = mpsc::channel(64);
         let (spec, spec_rx) = spec_watch();
+        let (sets, watch) = watch::channel(SubscriptionSets::default());
         let lanes = ClassLanes::new(Arc::new(()));
         let link = BnLink::spawn(
             link_config(bn),
@@ -347,9 +348,9 @@ mod tests {
             &mut Registry::default(),
             lanes.pusher(),
             spec,
+            watch.clone(),
             commands_rx,
         );
-        let (sets, watch) = watch::channel(SubscriptionSets::default());
         run(link.events, commands, sets, spec_rx);
         watch
     }

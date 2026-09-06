@@ -8,7 +8,8 @@
 //! let mut bn = FakeBn::start().await;
 //! let cfg = LinkConfig { libp2p_addr: bn.addr(), ..with a 10 ms backoff };
 //! let client = BnClient::new(bn.http_addr(), Duration::from_secs(2));
-//! let mut link = BnLink::spawn(cfg, &node_key, client, &mut registry, lanes.pusher(), spec_tx, commands_rx);
+//! let args = (lanes.pusher(), spec_tx, sets_rx, commands_rx);
+//! let mut link = BnLink::spawn(cfg, &node_key, client, &mut registry, args.0, args.1, args.2, args.3);
 //! // BnEvent::Connected { peer_id: bn.peer_id() } arrives on `link.events`.
 //! bn.subscribe(TOPIC).await;
 //! // BnEvent::Subscribed { .. } arrives; a publish from the link now reaches the fake:

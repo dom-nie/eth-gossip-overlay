@@ -180,9 +180,10 @@ mod tests {
     use overlay_core::msgid::{self, MessageId};
     use overlay_core::seen::{SeenCache, SharedSeenCache};
     use overlay_core::time::FakeClock;
-    use overlay_core::topic::{Class, Topic, UNKNOWN_LARGE_THRESHOLD_BYTES};
+    use overlay_core::topic::{Class, SubscriptionSets, Topic, UNKNOWN_LARGE_THRESHOLD_BYTES};
     use prometheus_client::registry::Registry;
     use tokio::sync::mpsc;
+    use tokio::sync::watch;
 
     use super::*;
     use crate::bn_http::BnClient;
@@ -521,6 +522,7 @@ mod tests {
         let mut bn = FakeBn::start().await;
         let (commands, commands_rx) = mpsc::channel(64);
         let (spec, _) = spec_watch();
+        let (_sets, sets) = watch::channel(SubscriptionSets::default());
         let lanes = ClassLanes::new(Arc::new(()));
         let mut link = BnLink::spawn(
             link_config(&bn),
@@ -529,6 +531,7 @@ mod tests {
             &mut Registry::default(),
             lanes.pusher(),
             spec,
+            sets,
             commands_rx,
         );
         let clock = FakeClock::new();

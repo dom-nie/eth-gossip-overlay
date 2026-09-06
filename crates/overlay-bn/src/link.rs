@@ -21,12 +21,13 @@ use std::time::Duration;
 use libp2p::core::upgrade::Version;
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub::{self, IdentTopic, MessageAcceptance, MessageId, PublishError};
-use libp2p::swarm::{ConnectionError, Swarm, SwarmEvent};
+use libp2p::request_response::{self, ProtocolSupport, ResponseChannel};
+use libp2p::swarm::{ConnectionError, NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, multiaddr, noise, tcp, yamux};
 use overlay_core::backoff::Backoff;
 use overlay_core::config::Bn;
 use overlay_core::lanes::LanePusher;
-use overlay_core::topic::{Class, UNKNOWN_LARGE_THRESHOLD_BYTES};
+use overlay_core::topic::{Class, SubscriptionSets, UNKNOWN_LARGE_THRESHOLD_BYTES};
 use prometheus_client::registry::Registry;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -35,6 +36,8 @@ use tokio::task::JoinHandle;
 use crate::bn_http::{BnClient, BnHttpError, PeerInfo};
 use crate::gossip::{BnLinkConfig, GossipBehaviour, build_behaviour};
 use crate::node_key::NodeKey;
+use crate::rpc::msg::Malformed;
+use crate::rpc::{Eth2Codec, Request, Responder, Response, proto};
 use crate::spec::SpecSnapshot;
 
 /// The first delay before redialling a beacon node that went away; §5.3 uses the same
@@ -46,6 +49,12 @@ pub const BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// `.timeout(..)`, a `TransportTimeout` around the whole dial future): the TCP connect, the
 /// noise handshake and the yamux negotiation share it.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long an inbound req/resp stream has to be read and answered, the fork's default.
+/// Lighthouse gives a request 15 s to arrive (`REQUEST_TIMEOUT` in `rpc/protocol.rs`); one
+/// that has not arrived in ten is not coming, and the sidecar's answers are a few bytes it
+/// already holds.
+const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Slots in the control channel. On connect Lighthouse sends its whole subscription set in
 /// one RPC, up to `max_topics_at_any_fork * 2` topics (`service/mod.rs:336-338`, hundreds
@@ -176,7 +185,9 @@ pub struct BnLink {
 
 impl BnLink {
     /// Builds the swarm under the node key and starts the task. The first dial happens at
-    /// once; every later one waits for the backoff. `registry` receives gossipsub's metrics.
+    /// once; every later one waits for the backoff. `registry` receives gossipsub's metrics,
+    /// and `sets` is T-014's mirror: every change to the beacon node's own subscriptions is
+    /// what the sidecar's `MetaData` answers report.
     pub fn spawn(
         cfg: LinkConfig,
         node_key: &NodeKey,
@@ -184,6 +195,7 @@ impl BnLink {
         registry: &mut Registry,
         lanes: LanePusher<BnMessage>,
         spec: watch::Sender<SpecSnapshot>,
+        sets: watch::Receiver<SubscriptionSets>,
         commands: mpsc::Receiver<BnCommand>,
     ) -> Self {
         let connected = Arc::new(AtomicBool::new(false));
@@ -197,7 +209,9 @@ impl BnLink {
             control,
             lanes,
             spec,
+            sets,
             commands,
+            responder: Responder::new(),
             connected: connected.clone(),
             bn_peer: None,
             reconnect: None,
@@ -222,14 +236,16 @@ type Probe = (
 );
 
 struct Link {
-    swarm: Swarm<GossipBehaviour>,
+    swarm: Swarm<LinkBehaviour>,
     cfg: LinkConfig,
     bn_client: BnClient,
     own_peer_id: PeerId,
     control: mpsc::Sender<BnEvent>,
     lanes: LanePusher<BnMessage>,
     spec: watch::Sender<SpecSnapshot>,
+    sets: watch::Receiver<SubscriptionSets>,
     commands: mpsc::Receiver<BnCommand>,
+    responder: Responder,
     connected: Arc<AtomicBool>,
     backoff: Backoff,
     /// The beacon node this link is connected to, while it is.
@@ -255,6 +271,10 @@ impl Link {
                 probe = armed(&mut self.probe) => {
                     self.probe = None;
                     self.on_probe(probe);
+                }
+                () = changed(&mut self.sets) => {
+                    let sets = self.sets.borrow_and_update();
+                    self.responder.set_subscriptions(&sets.advertised);
                 }
             }
         }
@@ -297,7 +317,7 @@ impl Link {
         }
     }
 
-    fn on_swarm_event(&mut self, event: SwarmEvent<gossipsub::Event>) {
+    fn on_swarm_event(&mut self, event: SwarmEvent<LinkBehaviourEvent>) {
         match event {
             SwarmEvent::ConnectionEstablished { peer_id, .. } => self.on_connected(peer_id),
             SwarmEvent::ConnectionClosed {
@@ -310,11 +330,11 @@ impl Link {
                 tracing::warn!(%error, "dial to the beacon node failed");
                 self.retry_later();
             }
-            SwarmEvent::Behaviour(gossipsub::Event::Message {
+            SwarmEvent::Behaviour(LinkBehaviourEvent::Gossip(gossipsub::Event::Message {
                 propagation_source,
                 message_id,
                 message,
-            }) => {
+            })) => {
                 let topic = message.topic.into_string();
                 let class = lane_for(&topic, message.data.len());
                 // A dropped message is counted, and for the large lane logged, by the pusher.
@@ -328,26 +348,70 @@ impl Link {
                     },
                 );
             }
-            SwarmEvent::Behaviour(gossipsub::Event::Subscribed { peer_id, topic, .. }) => {
+            SwarmEvent::Behaviour(LinkBehaviourEvent::Gossip(gossipsub::Event::Subscribed {
+                peer_id,
+                topic,
+                ..
+            })) => {
                 self.emit(BnEvent::Subscribed {
                     peer: peer_id,
                     topic: topic.into_string(),
                 });
             }
-            SwarmEvent::Behaviour(gossipsub::Event::Unsubscribed { peer_id, topic }) => {
+            SwarmEvent::Behaviour(LinkBehaviourEvent::Gossip(gossipsub::Event::Unsubscribed {
+                peer_id,
+                topic,
+            })) => {
                 self.emit(BnEvent::Unsubscribed {
                     peer: peer_id,
                     topic: topic.into_string(),
                 });
             }
+            SwarmEvent::Behaviour(LinkBehaviourEvent::Rpc(request_response::Event::Message {
+                peer,
+                message:
+                    request_response::Message::Request {
+                        request, channel, ..
+                    },
+                ..
+            })) => self.on_rpc_request(peer, request, channel),
             _ => {}
+        }
+    }
+
+    /// Answers one request from the responder's own state. A Goodbye is the beacon node's
+    /// farewell: there is no chunk to write, so the channel is dropped and the connection
+    /// closed, which T-013's reconnect picks up. A refused send is a stream the peer has
+    /// already gone from.
+    fn on_rpc_request(
+        &mut self,
+        peer: PeerId,
+        (protocol, body): Request,
+        channel: ResponseChannel<Response>,
+    ) {
+        let response = match body {
+            Ok(body) => self.responder.respond(protocol, &body),
+            Err(Malformed) => Response::InvalidRequest,
+        };
+        if let Response::Goodbye(reason) = response {
+            tracing::info!(%peer, reason, "the beacon node said goodbye");
+            let _ = self.swarm.disconnect_peer_id(peer);
+        } else {
+            let _ = self
+                .swarm
+                .behaviour_mut()
+                .rpc
+                .send_response(channel, response);
         }
     }
 
     /// Makes the beacon node the explicit peer, reports it, and starts the HTTP probe, which
     /// runs beside the swarm rather than in front of it.
     fn on_connected(&mut self, peer_id: PeerId) {
-        self.swarm.behaviour_mut().add_explicit_peer(&peer_id);
+        self.swarm
+            .behaviour_mut()
+            .gossip
+            .add_explicit_peer(&peer_id);
         self.bn_peer = Some(peer_id);
         self.connected.store(true, Ordering::Relaxed);
         self.backoff.reset();
@@ -364,7 +428,10 @@ impl Link {
     /// gone; the next connect starts another.
     fn on_closed(&mut self, peer_id: PeerId, cause: Option<ConnectionError>) {
         tracing::warn!(%peer_id, ?cause, "connection to the beacon node closed");
-        self.swarm.behaviour_mut().remove_explicit_peer(&peer_id);
+        self.swarm
+            .behaviour_mut()
+            .gossip
+            .remove_explicit_peer(&peer_id);
         if self.bn_peer.take().is_some() {
             self.connected.store(false, Ordering::Relaxed);
             self.probe = None;
@@ -396,7 +463,7 @@ impl Link {
     }
 
     fn on_command(&mut self, command: BnCommand) {
-        let gossip = self.swarm.behaviour_mut();
+        let gossip = &mut self.swarm.behaviour_mut().gossip;
         match command {
             BnCommand::Subscribe(topic) => {
                 if let Err(err) = gossip.subscribe(&IdentTopic::new(topic)) {
@@ -443,6 +510,14 @@ fn lane_for(topic: &str, payload_len: usize) -> Class {
     }
 }
 
+/// The next change to the beacon node's subscriptions. Once the sender is gone this never
+/// completes again, so a mirror that stopped leaves the arm quiet instead of spinning the loop.
+async fn changed(sets: &mut watch::Receiver<SubscriptionSets>) {
+    if sets.changed().await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
 /// Polls the future in `slot` and stays pending while there is none, so an unarmed timer is
 /// an arm of the `select!` that never fires.
 async fn armed<T>(slot: &mut Pending<T>) -> T {
@@ -450,6 +525,17 @@ async fn armed<T>(slot: &mut Pending<T>) -> T {
         Some(future) => future.await,
         None => std::future::pending().await,
     }
+}
+
+/// The behaviours the beacon node talks to: gossipsub, and the request/response protocols its
+/// peer manager needs answered (§5.2). Every protocol id the sidecar knows is registered
+/// [`ProtocolSupport::Inbound`], so there is no path that opens an outbound stream.
+#[derive(NetworkBehaviour)]
+struct LinkBehaviour {
+    /// Gossipsub, built to match the beacon node's on everything the wire depends on.
+    gossip: GossipBehaviour,
+    /// The eth2 req/resp protocols, answered from the sidecar's own state.
+    rpc: request_response::Behaviour<Eth2Codec>,
 }
 
 /// The swarm under the node key, with Lighthouse's transport chain and no idle timeout: a
@@ -463,7 +549,7 @@ fn build_swarm(
     cfg: &BnLinkConfig,
     node_key: &NodeKey,
     registry: &mut Registry,
-) -> Swarm<GossipBehaviour> {
+) -> Swarm<LinkBehaviour> {
     let Ok(builder) = SwarmBuilder::with_existing_identity(node_key.keypair())
         .with_tokio()
         .with_other_transport(|keypair| {
@@ -473,7 +559,14 @@ fn build_swarm(
                 .multiplex(yamux::Config::default())
                 .timeout(DIAL_TIMEOUT)
         });
-    let Ok(builder) = builder.with_behaviour(|_| build_behaviour(cfg, registry));
+    let Ok(builder) = builder.with_behaviour(|_| LinkBehaviour {
+        gossip: build_behaviour(cfg, registry),
+        rpc: request_response::Behaviour::with_codec(
+            Eth2Codec,
+            proto::all().map(|id| (id, ProtocolSupport::Inbound)),
+            request_response::Config::default().with_request_timeout(RPC_REQUEST_TIMEOUT),
+        ),
+    });
     builder
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::MAX))
         .build()
@@ -518,6 +611,7 @@ mod tests {
         link: BnLink,
         commands: mpsc::Sender<BnCommand>,
         spec: watch::Receiver<SpecSnapshot>,
+        sets: watch::Sender<SubscriptionSets>,
         lanes: ClassLanes<BnMessage>,
         stats: Arc<Counts>,
     }
@@ -568,6 +662,7 @@ mod tests {
     fn spawn_with_key(cfg: LinkConfig, bn: &FakeBn, node_key: &NodeKey) -> Harness {
         let (commands, commands_rx) = mpsc::channel(64);
         let (spec_tx, spec) = spec_watch();
+        let (sets, sets_rx) = watch::channel(SubscriptionSets::default());
         let stats = Arc::new(Counts::default());
         let lanes = ClassLanes::new(stats.clone());
         let link = BnLink::spawn(
@@ -577,12 +672,14 @@ mod tests {
             &mut Registry::default(),
             lanes.pusher(),
             spec_tx,
+            sets_rx,
             commands_rx,
         );
         Harness {
             link,
             commands,
             spec,
+            sets,
             lanes,
             stats,
         }

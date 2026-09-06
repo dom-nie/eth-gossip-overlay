@@ -22,9 +22,9 @@ use std::time::Duration;
 use libp2p::PeerId;
 use libp2p::gossipsub::{MessageId, PublishError};
 use overlay_core::lanes::ClassLanes;
-use overlay_core::topic::Class;
+use overlay_core::topic::{Class, SubscriptionSets};
 use prometheus_client::registry::Registry;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::bn_http::BnClient;
 use crate::link::{BnCommand, BnEvent, BnLink, BnMessage};
@@ -47,6 +47,7 @@ struct Sidecar {
 async fn connected_sidecar(bn: &FakeBn) -> Sidecar {
     let (commands, commands_rx) = mpsc::channel(64);
     let (spec_tx, _spec) = spec_watch();
+    let (_sets, sets) = watch::channel(SubscriptionSets::default());
     let lanes = ClassLanes::new(Arc::new(()));
     let key = node_key(&tempfile::tempdir().unwrap());
     let link = BnLink::spawn(
@@ -56,6 +57,7 @@ async fn connected_sidecar(bn: &FakeBn) -> Sidecar {
         &mut Registry::default(),
         lanes.pusher(),
         spec_tx,
+        sets,
         commands_rx,
     );
     let mut sidecar = Sidecar {

@@ -267,9 +267,10 @@ mod tests {
     use overlay_core::pubqueue::PublishItem;
     use overlay_core::ratelimit::PublishLimits;
     use overlay_core::time::FakeClock;
-    use overlay_core::topic::{Class, Topic};
+    use overlay_core::topic::{Class, SubscriptionSets, Topic};
     use prometheus_client::registry::Registry;
     use tokio::sync::mpsc;
+    use tokio::sync::watch;
     use tokio::task::JoinHandle;
 
     use super::*;
@@ -655,6 +656,7 @@ mod tests {
         let mut bn = FakeBn::start().await;
         let (commands, commands_rx) = mpsc::channel(64);
         let (spec, _) = spec_watch();
+        let (_sets, sets) = watch::channel(SubscriptionSets::default());
         let lanes = ClassLanes::new(Arc::new(()));
         let mut link = BnLink::spawn(
             link_config(&bn),
@@ -663,6 +665,7 @@ mod tests {
             &mut Registry::default(),
             lanes.pusher(),
             spec,
+            sets,
             commands_rx,
         );
         let mut received = bn.received();

@@ -21,8 +21,9 @@ use overlay_bn::link::{
 use overlay_bn::node_key::NodeKey;
 use overlay_bn::spec::spec_watch;
 use overlay_core::lanes::ClassLanes;
+use overlay_core::topic::SubscriptionSets;
 use prometheus_client::registry::Registry;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 
 /// The ticket's bound on connect, trusted and the first mirrored subscription.
 const CONNECT: Duration = Duration::from_secs(60);
@@ -59,6 +60,7 @@ struct Sidecar {
 fn spawn(env: &Env) -> Sidecar {
     let (commands, commands_rx) = mpsc::channel(64);
     let (spec_tx, _spec) = spec_watch();
+    let (_sets, sets) = watch::channel(SubscriptionSets::default());
     let lanes = ClassLanes::new(Arc::new(()));
     let identity = format!("{}/eth/v1/node/identity", env.http)
         .parse()
@@ -77,6 +79,7 @@ fn spawn(env: &Env) -> Sidecar {
         &mut Registry::default(),
         lanes.pusher(),
         spec_tx,
+        sets,
         commands_rx,
     );
     Sidecar {
