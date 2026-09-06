@@ -879,7 +879,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::testutil::TestCluster;
+    use crate::testutil::{Builder, NodeKind, TestCluster};
 
     fn host(name: &str) -> Hostname {
         Hostname(name.to_owned())
@@ -932,5 +932,23 @@ mod tests {
 
         assert_eq!(cluster.stats(1).dials(&lower), 0);
         assert!(cluster.stats(0).dials(&higher) >= 1);
+    }
+
+    /// A host that dies leaves the live set on the keepalive timeout, with nothing said and
+    /// no reload involved (§9). Its runtime is shut down rather than its endpoint dropped,
+    /// because an endpoint dropped on a live runtime closes its connections politely on the
+    /// way out and the peer would be told rather than left waiting.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_removed_from_live_after_idle_timeout_when_it_vanishes() {
+        let mut cluster = Builder::new(&[NodeKind::Manager, NodeKind::Vanishing])
+            .start()
+            .await;
+        let peer = cluster.hostname(1);
+        assert!(matches!(cluster.next_event(0).await, PeerEvent::Up(up) if up.hostname == peer));
+
+        cluster.vanish(1);
+
+        assert!(matches!(cluster.next_event(0).await, PeerEvent::Down(down, None) if down == peer));
+        assert!(cluster.live(0).is_empty());
     }
 }
