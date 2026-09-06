@@ -382,6 +382,31 @@ mod tests {
         assert_eq!(peer.id_of(&column(9)), None);
     }
 
+    #[test]
+    fn errors_name_the_id_or_the_limit_they_are_about() {
+        let mut peer = PeerTopicTable::new();
+        peer.apply_add(TopicId::new(9), &column(0).to_string())
+            .unwrap();
+
+        let conflict = peer
+            .apply_add(TopicId::new(9), &column(1).to_string())
+            .unwrap_err();
+        let unparsable = peer.apply_add(TopicId::new(4), "beacon_block").unwrap_err();
+
+        assert_eq!(
+            conflict.to_string(),
+            "topic id 9 is already bound to another topic"
+        );
+        assert_eq!(
+            unparsable.to_string(),
+            "topic id 4 names a string that is not a topic: expected /eth2/<fork_digest>/<name>/ssz_snappy"
+        );
+        assert_eq!(
+            TableFull.to_string(),
+            "topic table is full at 65535 entries"
+        );
+    }
+
     /// 65,535 written out rather than [`CAPACITY`]: a test that names the constant follows it
     /// wherever it goes and so cannot see the ceiling move.
     #[test]
