@@ -151,10 +151,74 @@ fn directive(level: LogLevel) -> &'static str {
     }
 }
 
+/// An in-memory subscriber for the tests in this crate that read back what the log stream
+/// rendered. It lives beside the code it builds rather than in this module's own tests,
+/// because T-043's reload tests need a [`LogHandle`] whose output they can inspect too.
 #[cfg(test)]
-mod tests {
+pub(crate) mod testing {
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
+
+    use overlay_core::config::Log;
+    use serde_json::{Map, Value};
+    use tracing::Dispatch;
+    use tracing_subscriber::fmt::MakeWriter;
+
+    use super::{LogHandle, build};
+
+    /// What the subscriber under test wrote, kept in memory so a test can read it back.
+    #[derive(Clone, Default)]
+    pub(crate) struct Sink(Arc<Mutex<Vec<u8>>>);
+
+    impl Sink {
+        pub(crate) fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+
+        /// One JSON object per line, which fails the test if any line is not JSON.
+        pub(crate) fn objects(&self) -> Vec<Map<String, Value>> {
+            self.text()
+                .lines()
+                .map(|line| serde_json::from_str(line).expect("a JSON line"))
+                .collect()
+        }
+    }
+
+    impl Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for Sink {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// A subscriber built exactly as [`init`](super::init) builds the real one, writing to
+    /// memory and taking the terminal and `RUST_LOG` answers as arguments rather than reading
+    /// the process.
+    pub(crate) fn subscriber(
+        cfg: &Log,
+        is_tty: bool,
+        rust_log: Option<&str>,
+    ) -> (Sink, Dispatch, LogHandle) {
+        let sink = Sink::default();
+        let (dispatch, handle) =
+            build(cfg, sink.clone(), is_tty, rust_log.map(str::to_owned), None);
+        (sink, dispatch, handle)
+    }
+}
+
+#[cfg(test)]
+mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use overlay_core::config::Log;
@@ -163,8 +227,8 @@ mod tests {
     use overlay_core::roster::{Hostname, Region, SelfIdentity};
     use overlay_core::topic::{Class, Topic};
     use serde_json::{Map, Value};
-    use tracing_subscriber::fmt::MakeWriter;
 
+    use super::testing::Sink;
     use super::*;
 
     /// A moment with a nanosecond part, so a truncating conversion cannot pass.
@@ -191,54 +255,14 @@ mod tests {
     /// The field only an arrival from the overlay carries.
     const ORIGIN_PEER: &str = "origin_peer";
 
-    /// What the subscriber under test wrote, kept in memory so a test can read it back.
-    #[derive(Clone, Default)]
-    struct Sink(Arc<Mutex<Vec<u8>>>);
-
-    impl Sink {
-        fn text(&self) -> String {
-            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-        }
-
-        /// One JSON object per line, which fails the test if any line is not JSON.
-        fn objects(&self) -> Vec<Map<String, Value>> {
-            self.text()
-                .lines()
-                .map(|line| serde_json::from_str(line).expect("a JSON line"))
-                .collect()
-        }
-    }
-
-    impl Write for Sink {
-        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            self.0.lock().unwrap().write(buf)
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> MakeWriter<'a> for Sink {
-        type Writer = Self;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    /// Runs `body` against a subscriber built exactly as [`init`] builds the real one, writing
-    /// to memory instead of stdout and taking the terminal and `RUST_LOG` answers as arguments
-    /// rather than reading the process.
+    /// Runs `body` under an in-memory subscriber and returns what it wrote.
     fn capture(
         cfg: &Log,
         is_tty: bool,
         rust_log: Option<&str>,
         body: impl FnOnce(&LogHandle),
     ) -> Sink {
-        let sink = Sink::default();
-        let (dispatch, handle) =
-            build(cfg, sink.clone(), is_tty, rust_log.map(str::to_owned), None);
+        let (sink, dispatch, handle) = testing::subscriber(cfg, is_tty, rust_log);
         tracing::dispatcher::with_default(&dispatch, || body(&handle));
         sink
     }

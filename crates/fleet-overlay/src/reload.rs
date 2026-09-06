@@ -3,6 +3,261 @@
 //! One [`Reloader`] owns the current configuration and roster and applies what may change at
 //! runtime; everything else reaches it through a [`ReloadHandle`], so SIGHUP, `fleet-overlayctl
 //! roster reload` (T-042) and the roster file watcher (T-086) all run the same code.
+//!
+//! # What changed is read off the two documents
+//!
+//! A reload diffs the old and the new `config.yaml` as YAML documents flattened into dotted
+//! paths, not as two serialized [`Config`] values. The documents already are the key paths an
+//! operator edits, so nothing has to be derived and the report names what they actually
+//! changed in the file; a [`Config`] would have to serialize back to the file's spelling
+//! first, which the `_ms` keys alone make a second implementation to keep in step. The typed
+//! [`Config`] is still parsed and validated first, so a file that does not fit the schema is
+//! refused before any path is reported.
+//!
+//! The one consequence: adding or removing a key whose value equals the default reads as a
+//! change, because the documents differ even though the effective configuration does not. That
+//! is honest about the file and costs one applier run.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use overlay_core::config::{Config, PublishRateLimit};
+use overlay_core::identity::FleetSeed;
+use overlay_core::roster::Roster;
+use serde::Serialize;
+use serde_yaml_bw as yaml;
+use tokio::sync::watch;
+
+use crate::logging::LogHandle;
+
+/// What asked for a reload (D26). A human means what the files say; a tool that writes them
+/// may be broken, which is what the roster shrink guard protects against.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Trigger {
+    /// SIGHUP or `fleet-overlayctl roster reload`.
+    Manual,
+    /// The roster file watcher (T-086).
+    Automatic,
+}
+
+/// What one reload did, returned to whoever asked for it and serialized verbatim by T-042's
+/// admin socket.
+#[derive(Debug, Serialize)]
+pub struct ReloadReport {
+    /// What asked for this reload.
+    pub trigger: Trigger,
+    /// The keys that took effect, and `roster` when the roster itself changed.
+    pub applied: Vec<String>,
+    /// Keys that changed in the file but only take effect on a restart.
+    pub restart_required: Vec<String>,
+    /// Why the reload did not finish, if it did not. The previous values stay in force.
+    pub error: Option<ReloadError>,
+}
+
+/// Why a reload kept the previous values.
+#[derive(Debug, PartialEq, Eq, Serialize, thiserror::Error)]
+pub enum ReloadError {
+    /// `config.yaml` could not be read, does not parse, or holds a value the sidecar cannot
+    /// run with. Also how an applier reports a file it could not read.
+    #[error("config: {0}")]
+    Config(String),
+    /// `roster.yaml` could not be read or does not parse.
+    #[error("roster: {0}")]
+    Roster(String),
+    /// An automatic reload would have removed more than half of the hosts, which is likelier
+    /// to be a broken discovery tool than a halved fleet.
+    #[error("roster shrinks from {before} to {after} hosts, more than half: rejected")]
+    RosterShrinkRejected {
+        /// Hosts in the roster in force.
+        before: usize,
+        /// Hosts the refused file would have left.
+        after: usize,
+    },
+}
+
+/// Where reloads count. T-041 binds this to `config_reload_total{outcome}` and
+/// `roster_reload_rejected_total`; `()` counts nothing.
+pub trait ReloadStats: Send + Sync {
+    /// A reload finished. The report says whether it ended in an error and which one, which is
+    /// all the two counters need.
+    fn reloaded(&self, report: &ReloadReport);
+}
+
+impl ReloadStats for () {
+    fn reloaded(&self, _: &ReloadReport) {}
+}
+
+/// Everything a reload writes into, from the parts of the sidecar that own the running values.
+pub struct Deps {
+    /// The kill switch every publish is checked against (T-017).
+    pub inject: Arc<AtomicBool>,
+    /// The roster the connection manager (T-023) and the pin table (T-021) follow.
+    pub roster: watch::Sender<Roster>,
+    /// The outgoing seed while a rotation is in progress (DX-N2).
+    pub previous_seed: watch::Sender<Option<FleetSeed>>,
+    /// The ceilings the publisher rebuilds its token buckets from (DX-N3).
+    pub limits: watch::Sender<PublishRateLimit>,
+    /// The running subscriber, whose level and format are reloadable (D32).
+    pub log: Arc<LogHandle>,
+    /// Where the two reload counters live.
+    pub stats: Arc<dyn ReloadStats>,
+}
+
+/// One reloadable key's consumer: it takes the new configuration and puts the key where the
+/// running sidecar reads it, or says why it could not.
+type Applier = Box<dyn FnMut(&Config) -> Result<(), String> + Send>;
+
+/// The current configuration and roster, and the appliers that carry a change into the running
+/// sidecar. Owned by one task; [`ReloadHandle`] is how everything else reaches it.
+pub struct Reloader {
+    config_path: PathBuf,
+    document: yaml::Value,
+    config: Config,
+    appliers: Vec<(&'static str, Applier)>,
+    stats: Arc<dyn ReloadStats>,
+}
+
+impl Reloader {
+    /// Reads `config_path` for the document the first reload is diffed against, and registers
+    /// an applier for every reloadable key this release consumes.
+    ///
+    /// The file is read here rather than taken as a parsed [`Config`] because the diff needs
+    /// the document as written, and re-reading it is how the two can never disagree.
+    pub fn new(config_path: PathBuf, deps: Deps) -> Result<Self, ReloadError> {
+        let (document, config) = read_config(&config_path)?;
+        let inject = deps.inject;
+        let appliers: Vec<(&'static str, Applier)> = vec![(
+            "inject",
+            Box::new(move |cfg: &Config| {
+                inject.store(cfg.inject, Ordering::Relaxed);
+                Ok(())
+            }),
+        )];
+        Ok(Self {
+            config_path,
+            document,
+            config,
+            appliers,
+            stats: deps.stats,
+        })
+    }
+
+    /// The configuration in force: the file as last read, minus the keys that only take effect
+    /// on a restart.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Re-reads both files and applies what may change at runtime, keeping the previous values
+    /// for anything it cannot.
+    pub fn reload(&mut self, trigger: Trigger) -> ReloadReport {
+        let mut report = ReloadReport {
+            trigger,
+            applied: Vec::new(),
+            restart_required: Vec::new(),
+            error: None,
+        };
+        match read_config(&self.config_path) {
+            Ok((document, config)) => self.apply_config(document, config, &mut report),
+            Err(error) => report.error = Some(error),
+        }
+        self.stats.reloaded(&report);
+        match &report.error {
+            None => tracing::info!(
+                trigger = ?report.trigger,
+                applied = ?report.applied,
+                restart_required = ?report.restart_required,
+                "reloaded"
+            ),
+            Some(error) => tracing::warn!(
+                %error,
+                trigger = ?report.trigger,
+                applied = ?report.applied,
+                restart_required = ?report.restart_required,
+                "reloaded with an error, previous values kept"
+            ),
+        }
+        report
+    }
+
+    /// Runs the applier of every changed key that has one, and records the rest.
+    fn apply_config(&mut self, document: yaml::Value, config: Config, report: &mut ReloadReport) {
+        for path in changed_paths(&self.document, &document) {
+            match self.appliers.iter_mut().find(|(key, _)| covers(key, &path)) {
+                Some((_, apply)) => match apply(&config) {
+                    Ok(()) => report.applied.push(path),
+                    Err(reason) => report.error = Some(ReloadError::Config(reason)),
+                },
+                None => report.restart_required.push(path),
+            }
+        }
+        self.document = document;
+        self.config = config;
+    }
+}
+
+/// The document at `path` and the [`Config`] it parses into, validated before anything is
+/// diffed so a file the sidecar cannot run with is refused whole.
+fn read_config(path: &Path) -> Result<(yaml::Value, Config), ReloadError> {
+    let config = Config::load(path).map_err(|err| ReloadError::Config(err.to_string()))?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|err| ReloadError::Config(format!("{}: {err}", path.display())))?;
+    let document = yaml::from_str(&text)
+        .map_err(|err| ReloadError::Config(format!("{}: {err}", path.display())))?;
+    Ok((document, config))
+}
+
+/// Every dotted path whose value differs between the two documents, in file-independent order
+/// so a report and a log line read the same way twice.
+fn changed_paths(old: &yaml::Value, new: &yaml::Value) -> Vec<String> {
+    let (old, new) = (flatten(old), flatten(new));
+    old.keys()
+        .chain(new.keys())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .filter(|path| old.get(*path) != new.get(*path))
+        .cloned()
+        .collect()
+}
+
+/// A document as the dotted paths of its leaves. A mapping under a non-string key, and an empty
+/// mapping, are leaves themselves: neither is a configuration key.
+fn flatten(document: &yaml::Value) -> BTreeMap<String, yaml::Value> {
+    let mut leaves = BTreeMap::new();
+    walk(String::new(), document, &mut leaves);
+    leaves
+}
+
+fn walk(path: String, value: &yaml::Value, into: &mut BTreeMap<String, yaml::Value>) {
+    match value.as_mapping() {
+        Some(map) if !map.is_empty() && map.keys().all(|key| key.as_str().is_some()) => {
+            for (key, value) in map {
+                let key = key.as_str().unwrap_or_default();
+                let child = if path.is_empty() {
+                    key.to_owned()
+                } else {
+                    format!("{path}.{key}")
+                };
+                walk(child, value, into);
+            }
+        }
+        _ => {
+            into.insert(path, value.clone());
+        }
+    }
+}
+
+/// Whether the applier registered on `key` owns `path`: the key itself, or anything under it,
+/// so one closure covers a whole section such as `bn.publish_rate_limit`.
+fn covers(key: &str, path: &str) -> bool {
+    path == key
+        || path
+            .strip_prefix(key)
+            .is_some_and(|rest| rest.starts_with('.'))
+}
 
 #[cfg(test)]
 mod tests {
@@ -12,7 +267,6 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use overlay_core::config::{Log, PublishRateLimit};
-    use overlay_core::identity::FleetSeed;
     use overlay_core::roster::Roster;
     use tempfile::TempDir;
     use tokio::sync::watch;
@@ -41,9 +295,6 @@ mod tests {
         config_path: PathBuf,
         roster_path: PathBuf,
         inject: Arc<AtomicBool>,
-        roster: watch::Receiver<Roster>,
-        previous_seed: watch::Receiver<Option<FleetSeed>>,
-        limits: watch::Receiver<PublishRateLimit>,
         reloader: Reloader,
     }
 
@@ -59,9 +310,9 @@ mod tests {
             )
             .unwrap();
             let inject = Arc::new(AtomicBool::new(true));
-            let (roster_tx, roster_rx) = watch::channel(Roster::from_yaml(roster).unwrap());
-            let (seed_tx, previous_seed) = watch::channel(None);
-            let (limits_tx, limits) = watch::channel(PublishRateLimit::default());
+            let (roster_tx, _) = watch::channel(Roster::from_yaml(roster).unwrap());
+            let (seed_tx, _) = watch::channel(None);
+            let (limits_tx, _) = watch::channel(PublishRateLimit::default());
             let (_, _, log) = testing::subscriber(&Log::default(), false, None);
             let reloader = Reloader::new(
                 config_path.clone(),
@@ -80,9 +331,6 @@ mod tests {
                 config_path,
                 roster_path,
                 inject,
-                roster: roster_rx,
-                previous_seed,
-                limits,
                 reloader,
             }
         }

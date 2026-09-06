@@ -16,6 +16,9 @@ overlay-core.workspace = true
 overlay-transport.workspace = true
 prometheus = { workspace = true, features = ["process"] }
 prometheus-client.workspace = true
+serde = { workspace = true }
+serde_yaml_bw.workspace = true
+thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync"] }
 tracing.workspace = true
 tracing-appender.workspace = true
