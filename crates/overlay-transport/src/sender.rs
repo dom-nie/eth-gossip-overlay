@@ -40,6 +40,12 @@ pub const LARGE_LANE_BYTES: usize = 1024 * 1024;
 /// `classes.large.stale_after_ms` mirroring the small class (D17).
 pub const LARGE_STALE_AFTER: Duration = Duration::from_secs(3);
 
+/// Large bytes queued across every peer before the oldest frame anywhere goes. Sixty-four peers
+/// at the per-peer bound: a handful of slow siblings can each hold a full lane, and a fleet that
+/// stalls all at once costs a bounded 64 MiB instead of growing until the cgroup kills the
+/// sidecar (§5.7).
+pub const LARGE_QUEUED_BYTES_MAX: usize = 64 * 1024 * 1024;
+
 /// Why a frame never went out: the `reason` label of
 /// `peer_queue_drops_total{peer, class, reason}` (§12).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -133,6 +139,7 @@ impl Lane {
 
 /// The process-wide budget for queued large bytes, shared by every peer's large lane.
 pub struct LargeLedger {
+    cap: usize,
     registry: Mutex<Registry>,
 }
 
@@ -144,9 +151,12 @@ struct Registry {
 }
 
 impl LargeLedger {
-    /// An empty ledger.
-    pub fn new() -> Self {
+    /// An empty ledger holding `cap` bytes across every peer. The sidecar passes
+    /// [`LARGE_QUEUED_BYTES_MAX`]; a test passes less, so the eviction is reachable without
+    /// queueing 64 MiB of frames.
+    pub fn new(cap: usize) -> Self {
         Self {
+            cap,
             registry: Mutex::new(Registry::default()),
         }
     }
@@ -380,6 +390,16 @@ mod tests {
             Self::with_permits(tokio::sync::Semaphore::MAX_PERMITS)
         }
 
+        /// A transport that writes nothing until [`release`](Self::release), which is a peer
+        /// whose congestion window has closed.
+        fn stalled() -> Self {
+            Self::with_permits(0)
+        }
+
+        fn release(&self) {
+            self.0.permits.add_permits(tokio::sync::Semaphore::MAX_PERMITS);
+        }
+
         fn with_permits(permits: usize) -> Self {
             Self(Arc::new(LinkState {
                 permits: tokio::sync::Semaphore::new(permits),
@@ -418,17 +438,32 @@ mod tests {
     }
 
     fn peer() -> Hostname {
-        Hostname("bn-01".to_owned())
+        host("bn-01")
+    }
+
+    fn host(name: &str) -> Hostname {
+        Hostname(name.to_owned())
     }
 
     /// A sender on `link`, with the counters a test reads its drops and depths from.
     fn sender(link: &Link) -> (SenderHandle, Arc<CountingStats>) {
         let stats = Arc::new(CountingStats::default());
+        let ledger = Arc::new(LargeLedger::new(LARGE_QUEUED_BYTES_MAX));
+        (sender_on(&ledger, &stats, peer(), link), stats)
+    }
+
+    /// One more sender under the same ledger and counters, for the bounds that span peers.
+    fn sender_on(
+        ledger: &Arc<LargeLedger>,
+        stats: &Arc<CountingStats>,
+        peer: Hostname,
+        link: &Link,
+    ) -> SenderHandle {
         let deps = Deps {
-            ledger: Arc::new(LargeLedger::new()),
+            ledger: ledger.clone(),
             stats: stats.clone(),
         };
-        (PeerSender::spawn(peer(), link.clone(), deps), stats)
+        PeerSender::spawn(peer, link.clone(), deps)
     }
 
     /// The small lane is bounded by frames, and what goes when it is full is the oldest one: an
@@ -502,5 +537,38 @@ mod tests {
             stats.queue_drops(&peer(), Class::Large, DropReason::Stale),
             1
         );
+    }
+
+    /// One peer's lane is not the bound that matters when a hundred of them are slow at once:
+    /// the process holds 64 MiB across every large lane, and the frame that goes to make room
+    /// is the oldest anywhere, not the oldest on the lane being pushed to (D17).
+    #[tokio::test(start_paused = true)]
+    async fn process_wide_large_cap_evicts_the_oldest_frame_across_peers() {
+        let size = LARGE_LANE_BYTES / 4;
+        let ledger = Arc::new(LargeLedger::new(2 * size));
+        let stats = Arc::new(CountingStats::default());
+        let (slow, fast) = (host("bn-01"), host("bn-02"));
+        let (slow_link, fast_link) = (Link::stalled(), Link::stalled());
+        let slow_sender = sender_on(&ledger, &stats, slow.clone(), &slow_link);
+        let fast_sender = sender_on(&ledger, &stats, fast.clone(), &fast_link);
+        let start = tokio::time::Instant::now().into_std();
+
+        slow_sender
+            .push(Class::Large, frame_of(0, size), start)
+            .unwrap();
+        fast_sender
+            .push(Class::Large, frame_of(1, size), start + Duration::from_millis(1))
+            .unwrap();
+        fast_sender
+            .push(Class::Large, frame_of(2, size), start + Duration::from_millis(2))
+            .unwrap();
+
+        assert_eq!(stats.queue_drops(&slow, Class::Large, DropReason::Full), 1);
+        assert_eq!(stats.queue_drops(&fast, Class::Large, DropReason::Full), 0);
+        slow_link.release();
+        fast_link.release();
+        eventually("what is left to go out", || fast_link.sent().len() == 2).await;
+        assert_eq!(fast_link.numbers(), vec![1, 2]);
+        assert!(slow_link.sent().is_empty());
     }
 }
