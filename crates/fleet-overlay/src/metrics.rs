@@ -38,7 +38,7 @@ use hyper::body::{Body, Bytes, Frame, Incoming, SizeHint};
 use hyper::header::CONTENT_TYPE;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::{Request, Response, StatusCode};
+use hyper::{Method, Request, Response, StatusCode};
 use prometheus::core::Collector;
 use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
@@ -474,15 +474,23 @@ pub async fn serve(
     Ok((bound, task))
 }
 
+/// The only path the endpoint answers. Everything else is a 404, so a browser pointed at the
+/// port learns nothing about the host.
+const METRICS_PATH: &str = "/metrics";
+
 /// What Prometheus reads: the text format both encoders write, served under the 0.0.4 content
 /// type that Prometheus accepts for either.
 const TEXT_FORMAT: &str = "text/plain; version=0.0.4";
 
 fn respond(
-    _req: &Request<Incoming>,
+    req: &Request<Incoming>,
     main: &Registry,
     gossipsub: &Mutex<prometheus_client::registry::Registry>,
 ) -> Response<OneShot> {
+    if req.method() != Method::GET || req.uri().path() != METRICS_PATH {
+        return not_found();
+    }
+
     match exposition(main, gossipsub) {
         Ok(body) => Response::builder()
             .header(CONTENT_TYPE, TEXT_FORMAT)
@@ -498,6 +506,12 @@ fn respond(
         // `Response::builder` only fails on a header this function does not build from input.
         Response::new(OneShot::from(String::new()))
     })
+}
+
+fn not_found() -> Response<OneShot> {
+    let mut response = Response::new(OneShot::from(String::new()));
+    *response.status_mut() = StatusCode::NOT_FOUND;
+    response
 }
 
 /// Both registries in one body. Gossipsub's metrics come from `prometheus_client`, whose
