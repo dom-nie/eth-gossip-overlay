@@ -918,4 +918,19 @@ mod tests {
             assert_eq!(cluster.live(node).len(), 2);
         }
     }
+
+    /// The tie-break has to hold on the wire and not only in [`should_dial`]: the higher
+    /// hostname of a pair never starts a dial, however long it waits to be dialled.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn higher_host_never_dials() {
+        let mut cluster = TestCluster::start(2).await;
+        let (lower, higher) = (cluster.hostname(0), cluster.hostname(1));
+
+        for node in 0..2 {
+            assert!(matches!(cluster.next_event(node).await, PeerEvent::Up(_)));
+        }
+
+        assert_eq!(cluster.stats(1).dials(&lower), 0);
+        assert!(cluster.stats(0).dials(&higher) >= 1);
+    }
 }
