@@ -191,7 +191,29 @@ impl PeerReceiver {
     /// Nothing in v1 calls it, because nothing in v1 fans out what it receives; T-063 charges
     /// `kind = Relay` and T-073 `kind = Chunk`.
     pub fn charge(&self, kind: FanoutKind, bytes: usize, now: Instant) -> Charge {
-        todo!("T-032: charge the peer's budget, count the refusal and close on a long one")
+        let charge = self.budget(kind, bytes, now);
+        if charge != Charge::Allowed {
+            self.stats.fanout_suppressed(&self.peer, kind);
+        }
+        if charge == Charge::CloseRateExceeded {
+            tracing::warn!(
+                peer = %self.peer,
+                kind = kind.as_str(),
+                "closing a peer that has been over its fan-out budget for too long"
+            );
+            CloseCode::RateExceeded.close(&self.connection);
+        }
+        charge
+    }
+
+    /// The budget, recovering the guard from a poisoned lock: nothing between the lock and its
+    /// release can panic, so the bucket is whole, and refusing to charge afterwards would let a
+    /// peer past the one bound that stops it.
+    fn budget(&self, kind: FanoutKind, bytes: usize, now: Instant) -> Charge {
+        self.budget
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .charge(kind, bytes, now)
     }
 }
 
