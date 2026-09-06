@@ -375,8 +375,10 @@ async fn hold_connections(
     pins: Arc<ArcSwap<PinTable>>,
     self_hello: SelfHello,
 ) {
+    // The connection keeps the peer's side of it alive; the answer keeps the control stream
+    // open, which is what a peer that had a manager of its own would do with it.
     let mut held = Vec::new();
-    let mut paired = Vec::new();
+    let mut answered = Vec::new();
     while let Some(incoming) = endpoint.accept().await {
         if let Ok(connection) = incoming.await {
             if let Some(pinned) = tls::peer_identity(&pins.load(), &connection)
@@ -391,7 +393,7 @@ async fn hold_connections(
                 )
                 .await
             {
-                paired.push(peer);
+                answered.push(peer);
             }
             held.push(connection);
         }
