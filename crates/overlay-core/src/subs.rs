@@ -20,6 +20,8 @@
 //! the beacon node never asked for those columns and a sibling that sent them would be sending
 //! traffic nobody wants (D06).
 
+use bytes::Bytes;
+
 use crate::topic::table::TopicId;
 
 /// One bit per topic id, dense from id 0. A fleet across a fork transition interns a few
@@ -62,6 +64,33 @@ impl Bitmap {
                 .map(TopicId::new)
         })
     }
+
+    /// The bytes a `SUBS` frame carries: the words little-endian, with the trailing zero bytes
+    /// left off. The frame's own length prefix is what says how many came, so a host that
+    /// subscribes to eight topics sends one byte and not the width of its widest id.
+    pub fn encode(&self) -> Bytes {
+        let mut out: Vec<u8> = self.0.iter().flat_map(|word| word.to_le_bytes()).collect();
+        while out.last() == Some(&0) {
+            out.pop();
+        }
+        Bytes::from(out)
+    }
+
+    /// The bitmap a peer sent. Any length decodes: the bytes are its bits and a partial trailing
+    /// word is zero-filled, so this host never has to agree with the peer about how wide a
+    /// bitmap is.
+    pub fn decode(bytes: &[u8]) -> Self {
+        Self(
+            bytes
+                .chunks(size_of::<u64>())
+                .map(|chunk| {
+                    let mut word = [0u8; size_of::<u64>()];
+                    word[..chunk.len()].copy_from_slice(chunk);
+                    u64::from_le_bytes(word)
+                })
+                .collect(),
+        )
+    }
 }
 
 /// The word holding `id`'s bit, and which bit of it.
@@ -77,7 +106,6 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::topic::table::TopicId;
 
     fn bitmap(ids: impl IntoIterator<Item = u16>) -> Bitmap {
         let mut bitmap = Bitmap::new();
