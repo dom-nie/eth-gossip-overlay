@@ -261,6 +261,18 @@ pub enum LogFormat {
     Text,
 }
 
+impl LogFormat {
+    /// Which of the two renderings this asks for, `Auto` decided by whether stdout is a
+    /// terminal: a person reading along gets text, a log shipper gets JSON.
+    pub fn resolve(self, is_tty: bool) -> Self {
+        match self {
+            Self::Auto if is_tty => Self::Text,
+            Self::Auto => Self::Json,
+            decided => decided,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
