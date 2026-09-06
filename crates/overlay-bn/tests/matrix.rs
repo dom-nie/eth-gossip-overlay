@@ -2,8 +2,9 @@
 //! release by `scripts/lighthouse-matrix.sh`. Every test is ignored: it needs
 //! `LIGHTHOUSE_HTTP` (the beacon API origin), `LIGHTHOUSE_P2P` (`/ip4/127.0.0.1/tcp/<port>`)
 //! and `SIDECAR_NODE_KEY` (the node key whose peer id the beacon node was given as
-//! `--trusted-peers`); the ten-minute test also reads `LIGHTHOUSE_LOG` and runs only under
-//! `MATRIX_TEN_MINUTES=1`, which the nightly job sets.
+//! `--trusted-peers`); the ten-minute test also reads `LIGHTHOUSE_LOG`, the beacon node's
+//! debug-level file log, and runs only under `MATRIX_TEN_MINUTES=1`, which the nightly job
+//! sets.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

@@ -101,7 +101,10 @@ curl -fsS -m 2 "http://127.0.0.1:$http_port/eth/v1/node/version"; echo
 export LIGHTHOUSE_HTTP=http://127.0.0.1:$http_port
 export LIGHTHOUSE_P2P=/ip4/127.0.0.1/tcp/$p2p_port
 export SIDECAR_NODE_KEY=$work/node.key
-export LIGHTHOUSE_LOG=$work/lighthouse.log
+# The beacon node's own file log, not its stdout: the file logger runs at debug level, where
+# the peer manager records what it does with a peer (metadata refused, goodbye sent), while
+# stdout is at info and never names a peer at all.
+export LIGHTHOUSE_LOG=$work/datadir/beacon/logs/beacon.log
 status=0
 # One test at a time: they share the node key, and the beacon node allows one connection per peer.
 cargo test --manifest-path "$root/Cargo.toml" -p overlay-bn --test matrix -- --ignored --nocapture --test-threads=1 || status=$?
