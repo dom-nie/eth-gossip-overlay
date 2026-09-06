@@ -355,8 +355,9 @@ impl Link {
         self.arm_reconnect(delay);
     }
 
-    /// A registration that failed is a warning and nothing more: the beacon node may be an
-    /// older one without the endpoint, and the sidecar's own dial is still the fast path.
+    /// The dial, once the beacon node's peer id is known and it has been given the sidecar's
+    /// ENR. A registration that failed is a warning and nothing more: the beacon node may be
+    /// an older one without the endpoint, and the sidecar's own dial is still the fast path.
     fn on_identity(&mut self, (identity, registered): Reconnect) {
         match registered {
             Some(Err(err)) => {
@@ -377,6 +378,12 @@ impl Link {
             }
         };
         self.known_bn = Some(peer_id);
+        // The beacon node got there first: it dialled while this step was in flight. Dialling
+        // back is refused by the swarm, and rearming would leave the link fetching the
+        // identity for as long as that connection lives. The close arms the next one.
+        if self.bn_peer.is_some() {
+            return;
+        }
         let addr = match self.cfg.libp2p_addr.clone().with_p2p(peer_id) {
             Ok(addr) => addr,
             Err(addr) => {
