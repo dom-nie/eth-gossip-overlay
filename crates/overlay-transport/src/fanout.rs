@@ -26,8 +26,8 @@ use overlay_core::config;
 use overlay_core::fanout::Outbound;
 use overlay_core::lanes::ClassLanes;
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
-use overlay_core::topic::Class;
 use overlay_core::topic::table::TopicId;
+use overlay_core::topic::{Class, Topic};
 use overlay_core::wire::{Frame, write_frame};
 use tokio::sync::mpsc;
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
@@ -202,7 +202,7 @@ impl Fanout {
     /// The id this host's peers know `topic` by. Never interns: an id nobody has been told about
     /// is useless on a frame, so a message on a topic that has not been announced waits for the
     /// announcement instead (D12).
-    fn own_id(&self, topic: &overlay_core::topic::Topic) -> Option<TopicId> {
+    fn own_id(&self, topic: &Topic) -> Option<TopicId> {
         lock(&self.topics).table.get(topic)
     }
 
@@ -245,14 +245,13 @@ async fn write_frames(
     peer: Hostname,
 ) {
     while let Some(frame) = frames.recv().await {
-        let stream = match connection.open_uni().await {
+        let mut stream = match connection.open_uni().await {
             Ok(stream) => stream,
             Err(error) => {
                 tracing::debug!(%peer, %error, "connection gone: nothing more to send on it");
                 return;
             }
         };
-        let mut stream = stream;
         if let Err(error) = write_frame(&mut stream, &frame).await {
             tracing::debug!(%peer, %error, "stream stopped taking the frame");
             return;

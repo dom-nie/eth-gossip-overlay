@@ -269,6 +269,8 @@ enum StreamEnd {
     Timeout,
 }
 
+/// One stream from the peer's first byte to whatever ends it, and the one place a stalled
+/// stream is given up on.
 async fn read_stream(mut stream: quinn::RecvStream, ctx: Arc<Ctx>) {
     match read_frames(&mut stream, &ctx).await {
         StreamEnd::Timeout => {
