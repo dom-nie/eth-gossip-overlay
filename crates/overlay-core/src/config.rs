@@ -695,6 +695,14 @@ log:
     }
 
     #[test]
+    fn auto_log_format_resolves_to_json_off_a_tty_and_text_on_one() {
+        assert_eq!(LogFormat::Auto.resolve(false), LogFormat::Json);
+        assert_eq!(LogFormat::Auto.resolve(true), LogFormat::Text);
+        assert_eq!(LogFormat::Json.resolve(true), LogFormat::Json);
+        assert_eq!(LogFormat::Text.resolve(false), LogFormat::Text);
+    }
+
+    #[test]
     fn log_enums_are_closed_sets() {
         let ok = Config::from_yaml("log: { format: json, level: debug }").unwrap();
         assert_eq!(ok.log.format, LogFormat::Json);
