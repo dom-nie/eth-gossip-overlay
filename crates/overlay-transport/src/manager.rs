@@ -1330,4 +1330,58 @@ mod tests {
             ]
         );
     }
+
+    /// The other side of a removal: a host that dialled this one has no dial task to abandon,
+    /// so its slot is the only thing the reload can act on. Without that pass an expelled host
+    /// would keep its way in until it disconnected of its own accord.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn roster_reload_closes_a_removed_host_that_dialled_this_one() {
+        let mut cluster = TestCluster::start(2).await;
+        let dialler = cluster.hostname(0);
+        assert!(matches!(cluster.next_event(1).await, PeerEvent::Up(up) if up.hostname == dialler));
+
+        cluster.set_roster(&[1]);
+
+        let event = cluster.next_event(1).await;
+        assert!(
+            matches!(&event, PeerEvent::Down(down, Some(CloseCode::RosterRemoved))
+                if *down == dialler),
+            "{event:?}"
+        );
+        assert!(cluster.live(1).is_empty());
+    }
+
+    /// The two gauges §12 compares for overlay health: how many peers the roster has and how
+    /// many of them are up, both under the labels the alert groups by.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gauges_report_the_roster_and_the_peers_connected_to_it() {
+        let mut cluster = TestCluster::start(3).await;
+        for _ in 0..2 {
+            assert!(matches!(cluster.next_event(0).await, PeerEvent::Up(_)));
+        }
+        let group = (Region(REGION.to_owned()), None);
+
+        eventually("both peers to reach the connected gauge", || {
+            cluster.stats(0).connected_gauge().get(&group) == Some(&2)
+        })
+        .await;
+
+        assert_eq!(cluster.stats(0).roster_gauge().get(&group), Some(&2));
+    }
+
+    /// A host a rotation has not restarted yet still holds the outgoing seed's key, and it
+    /// pairs as itself. The counter is how an operator watches a fleet converge before removing
+    /// the previous seed file (DX-N2).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peer_admitted_on_the_previous_seed_is_counted() {
+        let mut cluster = Builder::new(&[NodeKind::Manager, NodeKind::PreviousSeedKey])
+            .start()
+            .await;
+        let peer = cluster.hostname(1);
+
+        assert!(matches!(cluster.next_event(0).await, PeerEvent::Up(up) if up.hostname == peer));
+
+        assert_eq!(cluster.stats(0).previous_seed(&peer), 1);
+        assert_eq!(cluster.stats(0).previous_seed(&cluster.hostname(0)), 0);
+    }
 }

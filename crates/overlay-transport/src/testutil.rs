@@ -79,6 +79,9 @@ pub enum NodeKind {
     /// A sink presenting a key the pin table does not hold for its hostname, so a dialler
     /// refuses it the way it would refuse an impostor on a roster address.
     WrongKey,
+    /// A sink whose key derives from the outgoing seed rather than the one in force, as a host
+    /// that a rotation has not restarted yet still presents (DX-N2).
+    PreviousSeedKey,
     /// A sink with a pin table of its own that is always empty, so it takes the packets of
     /// every dial and refuses the key behind them. A dialler's `connect()` resolves before the
     /// refusal reaches it, which is the one case where a resolved dial is not a peer.
@@ -92,6 +95,8 @@ pub struct CountingStats {
     previous_seed: Mutex<BTreeMap<Hostname, u64>>,
     region_mismatches: Mutex<BTreeMap<Hostname, u64>>,
     dials: Mutex<BTreeMap<Hostname, u64>>,
+    connected: Mutex<PeerCounts>,
+    in_roster: Mutex<PeerCounts>,
 }
 
 impl CountingStats {
@@ -113,6 +118,16 @@ impl CountingStats {
     /// How many dials to `peer` this host started.
     pub fn dials(&self, peer: &Hostname) -> u64 {
         count(&self.dials, peer)
+    }
+
+    /// `peers_connected{region,site}` as it was last set.
+    pub fn connected_gauge(&self) -> PeerCounts {
+        self.connected.lock().unwrap().clone()
+    }
+
+    /// `peers_roster{region,site}` as it was last set.
+    pub fn roster_gauge(&self) -> PeerCounts {
+        self.in_roster.lock().unwrap().clone()
     }
 }
 
@@ -144,9 +159,13 @@ impl ManagerStats for CountingStats {
         add(&self.dials, peer.clone());
     }
 
-    // No test reads the gauges, and a gauge that is only ever set has nothing to assert on.
-    fn peers_connected(&self, _: &PeerCounts) {}
-    fn peers_roster(&self, _: &PeerCounts) {}
+    fn peers_connected(&self, counts: &PeerCounts) {
+        *self.connected.lock().unwrap() = counts.clone();
+    }
+
+    fn peers_roster(&self, counts: &PeerCounts) {
+        *self.in_roster.lock().unwrap() = counts.clone();
+    }
 }
 
 /// How a cluster is put together before it starts.
@@ -206,9 +225,11 @@ impl Builder {
         admission: A,
     ) -> TestCluster<A> {
         let prefix = format!("c{}", CLUSTERS.fetch_add(1, Ordering::Relaxed));
+        // Every cluster runs mid-rotation so that a node can hold a key from either seed, which
+        // is the only way to reach the previous-seed path from outside.
         let seeds = Seeds {
             current: FleetSeed::from([0x11; 32]),
-            previous: None,
+            previous: Some(FleetSeed::from([0x22; 32])),
         };
         let pins = Arc::new(ArcSwap::from_pointee(PinTable::default()));
 
@@ -216,10 +237,13 @@ impl Builder {
         let mut nodes = Vec::new();
         for (index, kind) in self.kinds.iter().copied().enumerate() {
             let hostname = Hostname(format!("{prefix}-bn-{index:02}"));
-            let key = match kind {
+            let key = match (kind, &seeds.previous) {
                 // Any key the fleet seed does not derive will do; a fixed one keeps the test
                 // deterministic.
-                NodeKind::WrongKey => SigningKey::from_bytes(&[0x42; 32]),
+                (NodeKind::WrongKey, _) => SigningKey::from_bytes(&[0x42; 32]),
+                (NodeKind::PreviousSeedKey, Some(previous)) => {
+                    derive_tls_keypair(previous, &hostname)
+                }
                 _ => derive_tls_keypair(&seeds.current, &hostname),
             };
             let runtime = (kind == NodeKind::Vanishing).then(|| {
