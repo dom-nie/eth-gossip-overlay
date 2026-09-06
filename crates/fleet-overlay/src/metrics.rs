@@ -1,6 +1,7 @@
 //! Every metric Architecture.md §12 names, in one place, with the producer crates reaching
-//! them through the stats traits they defined rather than through `prometheus`. Only this
-//! crate links the metrics client.
+//! them through the stats traits they defined rather than through `prometheus`. This is the
+//! only crate that links `prometheus`; `overlay-bn` links `prometheus_client` for the one
+//! registry it hands to gossipsub, which [`serve`] appends to the scrape.
 //!
 //! # The names here are a contract
 //!
