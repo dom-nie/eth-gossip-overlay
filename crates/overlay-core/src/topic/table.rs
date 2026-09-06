@@ -105,8 +105,12 @@ impl PeerTopicTable {
     /// Takes one binding a peer announced in a `TOPIC_ADD`.
     pub fn apply_add(&mut self, id: TopicId, topic: &str) -> Result<(), PeerTableError> {
         let parsed = Topic::parse(topic).map_err(|err| PeerTableError::Unparsable(id, err))?;
-        if self.by_id.contains_key(&id) {
-            return Err(PeerTableError::Conflict(id));
+        if let Some(held) = self.by_id.get(&id) {
+            return if *held == parsed {
+                Ok(())
+            } else {
+                Err(PeerTableError::Conflict(id))
+            };
         }
         self.by_id.insert(id, parsed.clone());
         self.by_topic.insert(parsed, id);
