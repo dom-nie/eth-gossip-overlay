@@ -189,4 +189,28 @@ mod tests {
             RoutePlan::Nothing
         );
     }
+
+    /// The order is part of the answer, not an accident of how the peers connected. T-072 turns
+    /// this list into a stripe by rotating it, so two origins with the same live view have to
+    /// produce the same list for their chunks to deduplicate on arrival (§5.4).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn targets_are_sorted_by_hostname() {
+        let connection = connection().await;
+        let block = topic("beacon_block");
+        let names = ["bn-c", "bn-a", "bn-b"];
+        let live = view(
+            &connection,
+            names
+                .iter()
+                .map(|name| (host(name), peer_state(&[(1, &block)], &[1])))
+                .collect(),
+        );
+
+        let plan = route(&block, Class::Large, &live, &me(), &Fanout::default());
+
+        assert_eq!(
+            plan,
+            RoutePlan::Direct(vec![host("bn-a"), host("bn-b"), host("bn-c")])
+        );
+    }
 }
