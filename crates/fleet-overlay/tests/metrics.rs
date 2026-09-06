@@ -451,7 +451,7 @@ fn publish_stats_counts_publishes_suppressions_and_errors() {
 }
 
 #[test]
-fn compat_stats_keeps_one_series_per_bn_gauge() {
+fn compat_stats_keeps_one_state_at_one_and_one_version_series() {
     let registry = Registry::new();
     let metrics = Metrics::new(&registry).unwrap();
 
@@ -468,15 +468,23 @@ fn compat_stats_keeps_one_series_per_bn_gauge() {
         sample(&registry, "overlay_bn_info", &[("version", "v8.3.0")]),
         Some(1.0)
     );
-    assert_eq!(series(&registry, "overlay_bn_compat"), 1);
-    assert_eq!(
-        sample(
-            &registry,
-            "overlay_bn_compat",
-            &[("state", compat::STATE_SUPPORTED)]
-        ),
-        Some(1.0)
-    );
+    // Every state stays on the scrape with one of them at 1, so an alert can say
+    // `overlay_bn_compat{state="unsupported"} == 1` without absent() gymnastics and a state
+    // going quiet reads differently from a dead scrape.
+    assert_eq!(series(&registry, "overlay_bn_compat"), 4);
+    for state in [
+        compat::STATE_SUPPORTED,
+        compat::STATE_UNTESTED,
+        compat::STATE_UNSUPPORTED,
+        compat::STATE_SIZE_MISMATCH,
+    ] {
+        let expected = f64::from(u8::from(state == compat::STATE_SUPPORTED));
+        assert_eq!(
+            sample(&registry, "overlay_bn_compat", &[("state", state)]),
+            Some(expected),
+            "{state}"
+        );
+    }
     assert_eq!(sample(&registry, "overlay_bn_trusted", &[]), Some(1.0));
 
     CompatStats::set_trusted(&metrics, None);
