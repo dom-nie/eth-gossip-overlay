@@ -146,8 +146,8 @@ impl Negotiated {
 /// one and never race with the frame they follow.
 #[derive(Debug)]
 pub struct ControlStream {
-    send: quinn::SendStream,
-    recv: quinn::RecvStream,
+    send: ControlSend,
+    recv: ControlRecv,
 }
 
 impl ControlStream {
@@ -161,17 +161,51 @@ impl ControlStream {
             Role::Dial => connection.open_bi().await?,
             Role::Accept => connection.accept_bi().await?,
         };
-        Ok(Self { send, recv })
+        Ok(Self {
+            send: ControlSend(send),
+            recv: ControlRecv(recv),
+        })
     }
 
     /// Sends one frame with its length prefix.
     pub async fn write_frame(&mut self, frame: &Frame) -> std::io::Result<()> {
-        write_frame(&mut self.send, frame).await
+        self.send.write_frame(frame).await
     }
 
     /// Reads one frame, refusing a length prefix past what this host advertised in its own HELLO.
     pub async fn read_frame(&mut self) -> Result<Read, overlay_core::wire::ReadError> {
-        overlay_core::wire::read_frame(&mut self.recv, MAX_FRAME_BYTES).await
+        self.recv.read_frame().await
+    }
+
+    /// The two directions, which T-027 gives to two futures of one task: waiting for a
+    /// subscription change and waiting for a frame are separate waits, and one task doing both
+    /// through a `select!` on this whole stream would abandon a half-read frame every time a
+    /// change arrived. Splitting also makes the rule visible: exactly one [`ControlRecv`]
+    /// exists per connection, so there can be no second reader.
+    pub fn split(self) -> (ControlSend, ControlRecv) {
+        (self.send, self.recv)
+    }
+}
+
+/// The writing half of a control stream.
+#[derive(Debug)]
+pub struct ControlSend(quinn::SendStream);
+
+impl ControlSend {
+    /// Sends one frame with its length prefix.
+    pub async fn write_frame(&mut self, frame: &Frame) -> std::io::Result<()> {
+        write_frame(&mut self.0, frame).await
+    }
+}
+
+/// The reading half of a control stream.
+#[derive(Debug)]
+pub struct ControlRecv(quinn::RecvStream);
+
+impl ControlRecv {
+    /// Reads one frame, refusing a length prefix past what this host advertised in its own HELLO.
+    pub async fn read_frame(&mut self) -> Result<Read, overlay_core::wire::ReadError> {
+        overlay_core::wire::read_frame(&mut self.0, MAX_FRAME_BYTES).await
     }
 }
 
@@ -373,7 +407,7 @@ pub struct OwnTopics {
 /// The topic state, recovering the guard from a poisoned lock: nothing between a lock and its
 /// release can panic, so the table itself is whole and refusing every connection after some
 /// other task died would take the overlay down for an unrelated reason.
-fn lock(topics: &Mutex<OwnTopics>) -> std::sync::MutexGuard<'_, OwnTopics> {
+pub(crate) fn lock(topics: &Mutex<OwnTopics>) -> std::sync::MutexGuard<'_, OwnTopics> {
     topics
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())

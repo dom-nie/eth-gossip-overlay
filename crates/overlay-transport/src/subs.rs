@@ -1,9 +1,210 @@
 //! Telling every live peer what this host's beacon node wants, and keeping what each of them
 //! says it wants.
+//!
+//! One task per live peer owns that peer's control stream, the stream HELLO travelled on
+//! (T-025). It is the only reader of it anywhere: a second one would take frames out of the
+//! order they were sent in, and the order is the whole reason a `SUBS` may name ids a
+//! `TOPIC_ADD` bound moments earlier. The same task writes what this host owes the peer, so a
+//! peer that stops reading holds up nothing but its own frames.
+//!
+//! # What each side does
+//!
+//! Outbound, on every change the mirror reports (T-014) and once when a peer comes up: intern
+//! the local subscription set, send the `TOPIC_ADD`s that peer has not been told, then the
+//! bitmap over the advertised set. In that order, because a bit means nothing until the id it
+//! stands for has a topic.
+//!
+//! Inbound: `SUBS` replaces the peer's bitmap and `TOPIC_ADD` extends its table, both under one
+//! short lock per frame, so a route plan reading the live view never waits on the network. A
+//! `TOPIC_ADD` the peer's table refuses closes the connection with
+//! [`CloseCode::ProtocolError`]: an id bound twice means this host's copy of the peer's table
+//! and the peer's own have drifted, and nothing decoded against it afterwards can be trusted.
 
-use std::sync::{Mutex, MutexGuard};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, MutexGuard};
 
-use overlay_core::subs::PeerState;
+use overlay_core::roster::Hostname;
+use overlay_core::subs::{self, Bitmap, PeerState};
+use overlay_core::topic::SubscriptionSets;
+use overlay_core::topic::table::{OwnTopicTable, TopicId, on_changed};
+use overlay_core::wire::{Frame, Read};
+use tokio::sync::{mpsc, watch};
+use tokio::task::{AbortHandle, JoinHandle, JoinSet};
+
+use crate::hello::{ControlRecv, ControlSend, OwnTopics};
+use crate::manager::{CloseCode, ManagerStats, PeerEvent, PeerInfo};
+
+/// The one gauge this path owns, until T-041's registry exists. `()` counts nothing.
+pub trait SubsStats: ManagerStats {
+    /// `bn_subscriptions`: how many topics this host's beacon node is subscribed to, which is
+    /// the size of the advertised set and so the number of bits every `SUBS` this host sends
+    /// carries (§12).
+    fn bn_subscriptions(&self, topics: usize);
+}
+
+impl SubsStats for () {
+    fn bn_subscriptions(&self, _: usize) {}
+}
+
+/// Starts the exchange, which owns the manager's peer events from here on: it is the consumer
+/// [`ConnectionManager::spawn`](crate::manager::ConnectionManager::spawn) sends them to, and the
+/// only thing that ever reads a control stream.
+pub fn spawn(
+    events: mpsc::Receiver<PeerEvent>,
+    sets: watch::Receiver<SubscriptionSets>,
+    topics: Arc<Mutex<OwnTopics>>,
+    stats: Arc<dyn SubsStats>,
+) -> JoinHandle<()> {
+    tokio::spawn(run(events, sets, topics, stats))
+}
+
+/// One task per live peer, started on [`PeerEvent::Up`] and stopped on
+/// [`PeerEvent::Down`]. Aborting is enough to stop one: everything it holds belongs to a
+/// connection that is already gone.
+async fn run(
+    mut events: mpsc::Receiver<PeerEvent>,
+    mut sets: watch::Receiver<SubscriptionSets>,
+    topics: Arc<Mutex<OwnTopics>>,
+    stats: Arc<dyn SubsStats>,
+) {
+    let mut peers: HashMap<Hostname, AbortHandle> = HashMap::new();
+    let mut tasks = JoinSet::new();
+    stats.bn_subscriptions(sets.borrow_and_update().advertised.len());
+    loop {
+        tokio::select! {
+            event = events.recv() => match event {
+                Some(PeerEvent::Up(info)) => {
+                    let hostname = info.hostname.clone();
+                    let task = tasks.spawn(peer(info, sets.clone(), topics.clone(), stats.clone()));
+                    if let Some(replaced) = peers.insert(hostname, task) {
+                        replaced.abort();
+                    }
+                }
+                Some(PeerEvent::Down(hostname, _)) => {
+                    if let Some(task) = peers.remove(&hostname) {
+                        task.abort();
+                    }
+                }
+                None => break,
+            },
+            changed = sets.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                stats.bn_subscriptions(sets.borrow_and_update().advertised.len());
+            }
+        }
+        while tasks.try_join_next().is_some() {}
+    }
+    tasks.shutdown().await;
+}
+
+/// One peer, for as long as its connection lasts. The two halves of the control stream are two
+/// futures of one task rather than two tasks: either direction ending means the connection is
+/// over, and a `select!` here says so without a channel between them.
+async fn peer(
+    info: PeerInfo,
+    sets: watch::Receiver<SubscriptionSets>,
+    topics: Arc<Mutex<OwnTopics>>,
+    stats: Arc<dyn SubsStats>,
+) {
+    let PeerInfo {
+        hostname,
+        connection,
+        control,
+        state,
+        ..
+    } = info;
+    let (send, recv) = control.split();
+    tokio::select! {
+        () = announce(&hostname, send, sets, &topics) => {}
+        () = read(&hostname, recv, &state, &connection, stats.as_ref()) => {}
+    }
+}
+
+/// Sends what the peer is owed now, and again on every change the mirror reports. It ends when
+/// the mirror is gone or the peer stopped taking frames, either of which leaves nothing to say.
+async fn announce(
+    peer: &Hostname,
+    mut send: ControlSend,
+    mut sets: watch::Receiver<SubscriptionSets>,
+    topics: &Mutex<OwnTopics>,
+) {
+    loop {
+        // The borrow ends before the first write: it is a read lock on the mirror's value, and
+        // holding one across a network write would stall the mirror behind a slow peer.
+        let frames = owed(peer, &sets.borrow_and_update(), topics);
+        for frame in frames {
+            if let Err(error) = send.write_frame(&frame).await {
+                tracing::debug!(%peer, %error, "control stream stopped taking frames");
+                return;
+            }
+        }
+        if sets.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+/// The frames `peer` is owed for the subscription set as it stands: the bindings it has not been
+/// told, then the bitmap those ids are read against. Built under one lock and with nothing
+/// awaited, so the mirror's next change is never held up by a peer's flow control.
+fn owed(peer: &Hostname, sets: &SubscriptionSets, topics: &Mutex<OwnTopics>) -> Vec<Frame> {
+    let mut own = crate::hello::lock(topics);
+    let OwnTopics { table, announcer } = &mut *own;
+    let mut frames = match on_changed(sets, [peer], table, announcer) {
+        Ok(owed) => owed.into_iter().flat_map(|(_, frames)| frames).collect(),
+        Err(error) => {
+            tracing::error!(%peer, %error, "cannot announce topics this host has no id left for");
+            Vec::new()
+        }
+    };
+    frames.push(subs_frame(sets, table));
+    frames
+}
+
+/// The bitmap frame: `advertised` and never `local`, because the extra column topics T-015
+/// subscribes to are ones this beacon node publishes and does not want (D06).
+fn subs_frame(sets: &SubscriptionSets, table: &OwnTopicTable) -> Frame {
+    Frame::Subs {
+        bitmap: subs::advertised(sets, table).encode(),
+    }
+}
+
+/// Reads the peer's control stream until the connection ends or the peer breaks the protocol.
+async fn read(
+    peer: &Hostname,
+    mut recv: ControlRecv,
+    peer_state: &Mutex<PeerState>,
+    connection: &quinn::Connection,
+    stats: &dyn SubsStats,
+) {
+    loop {
+        match recv.read_frame().await {
+            Ok(Read::Frame(Frame::Subs { bitmap })) => {
+                state(peer_state).bitmap = Bitmap::decode(&bitmap);
+            }
+            Ok(Read::Frame(Frame::TopicAdd { id, topic })) => {
+                let applied = state(peer_state).table.apply_add(TopicId::new(id), &topic);
+                if let Err(error) = applied {
+                    tracing::warn!(%peer, %error, "closing a peer whose topic table contradicts itself");
+                    CloseCode::ProtocolError.close(connection);
+                    return;
+                }
+            }
+            // A frame that belongs on another carrier. Nothing here can act on it, and a
+            // release that gives it a meaning on this stream will be a later minor (D29).
+            Ok(Read::Frame(other)) => {
+                tracing::debug!(%peer, frame = ?other.frame_type(), "frame that does not belong on a control stream");
+            }
+            Ok(Read::Unknown(_)) => stats.unknown_frame_type(peer),
+            Err(error) => {
+                tracing::debug!(%peer, %error, "control stream ended");
+                return;
+            }
+        }
+    }
+}
 
 /// A peer's state, recovering the guard from a poisoned lock rather than propagating the panic.
 /// Nothing between a lock and its release can panic, so the state is whole; refusing to answer
@@ -24,7 +225,6 @@ mod tests {
     use overlay_core::wire::{Frame, Read};
     use tokio::sync::watch;
 
-    use super::*;
     use crate::hello;
     use crate::manager::PeerInfo;
     use crate::testutil::{Builder, NodeKind, TestCluster, WAIT};

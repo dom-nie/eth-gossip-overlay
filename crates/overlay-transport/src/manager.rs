@@ -132,7 +132,7 @@ impl CloseCode {
         }
     }
 
-    fn close(self, connection: &quinn::Connection) {
+    pub(crate) fn close(self, connection: &quinn::Connection) {
         connection.close(self.code(), self.reason());
     }
 }
