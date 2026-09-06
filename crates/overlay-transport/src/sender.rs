@@ -348,6 +348,17 @@ impl SenderHandle {
         self.0.push(class, frame, now);
         Ok(())
     }
+
+    /// Stops the peer's task and refuses every later push. The manager calls it where the peer
+    /// leaves the live set, which is the one place that knows it has.
+    pub fn stop(&self) {
+        if self.0.closed.swap(true, Ordering::Relaxed) {
+            return;
+        }
+        if let Some(task) = self.0.task.get() {
+            task.abort();
+        }
+    }
 }
 
 impl std::fmt::Debug for SenderHandle {
@@ -712,5 +723,36 @@ mod tests {
         eventually("the lanes to drain", || link.sent().len() == 3).await;
         assert_eq!(stats.queue_depth(&peer(), Class::Small), (0, 0));
         assert_eq!(stats.queue_depth(&peer(), Class::Large), (0, 0));
+    }
+
+    /// A peer that has gone takes its queue with it: the frames waiting for it are counted
+    /// where an operator can see what the disconnection cost, rather than disappearing with
+    /// the task (D15).
+    #[tokio::test]
+    async fn sender_task_exits_on_down_and_pending_frames_of_both_lanes_are_counted_peer_down() {
+        let link = Link::stalled();
+        let (sender, stats) = sender(&link);
+        let now = Instant::now();
+        sender.push(Class::Small, frame(0), now).unwrap();
+        sender.push(Class::Small, frame(1), now).unwrap();
+        sender.push(Class::Large, frame(2), now).unwrap();
+
+        sender.stop();
+
+        assert_eq!(
+            stats.queue_drops(&peer(), Class::Small, DropReason::PeerDown),
+            2
+        );
+        assert_eq!(
+            stats.queue_drops(&peer(), Class::Large, DropReason::PeerDown),
+            1
+        );
+        assert_eq!(sender.push(Class::Small, frame(3), now), Err(Dropped));
+        link.release();
+        eventually("the task to end", || {
+            sender.0.task.get().is_some_and(AbortHandle::is_finished)
+        })
+        .await;
+        assert!(link.sent().is_empty());
     }
 }
