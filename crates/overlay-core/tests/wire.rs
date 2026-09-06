@@ -7,8 +7,8 @@ use bytes::{Bytes, BytesMut};
 use overlay_core::msgid::MessageId;
 use overlay_core::protocol::MAX_BATCH_ENTRIES;
 use overlay_core::wire::{
-    BatchEntry, BatchFlags, Chunk, ChunkFlags, DecodeError, Frame, Hello, MAX_MISSING_INDICES,
-    MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, RepairReq, RepairResp,
+    BatchEntry, BatchFlags, Chunk, ChunkFlags, DecodeError, Frame, FrameType, Hello,
+    MAX_MISSING_INDICES, MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, RepairReq, RepairResp,
 };
 use proptest::prelude::*;
 
@@ -160,5 +160,17 @@ fn truncated_input_is_truncated_error_for_every_variant() {
                 full.len()
             );
         }
+    }
+}
+
+#[test]
+fn unknown_and_reserved_frame_types_are_unknown_type() {
+    for type_byte in [0u8, FrameType::Have.id(), 9, 255] {
+        let mut buf = Bytes::from(vec![type_byte, 0, 1, 2, 3]);
+
+        assert_eq!(
+            Frame::decode(&mut buf),
+            Err(DecodeError::UnknownType(type_byte))
+        );
     }
 }
