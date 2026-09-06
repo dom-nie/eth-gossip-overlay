@@ -34,6 +34,10 @@ struct Cli {
     #[arg(long, default_value = DEFAULT_SOCKET, global = true)]
     socket: PathBuf,
 
+    /// Print the sidecar's answer as it came, one JSON object, for jq and scripts.
+    #[arg(long, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -107,8 +111,12 @@ fn main() -> ExitCode {
         } => Request::Reload,
     };
     match ask(&cli.socket, &request) {
-        Ok(response) => {
-            render(&response);
+        Ok((line, response)) => {
+            if cli.json {
+                println!("{}", line.trim_end());
+            } else {
+                render(&response);
+            }
             exit_code(&response)
         }
         Err(Failure::Connect(err)) => {
@@ -122,8 +130,9 @@ fn main() -> ExitCode {
     }
 }
 
-/// One request and its answer.
-fn ask(socket: &Path, request: &Request) -> Result<Response, Failure> {
+/// One request, the line that came back and what it says. The line itself is what `--json`
+/// prints, so a script reads the sidecar's own object rather than a re-serialized one.
+fn ask(socket: &Path, request: &Request) -> Result<(String, Response), Failure> {
     let mut stream = UnixStream::connect(socket).map_err(Failure::Connect)?;
     let line = serde_json::to_string(request).map_err(broken)?;
     writeln!(stream, "{line}").map_err(broken)?;
@@ -131,7 +140,9 @@ fn ask(socket: &Path, request: &Request) -> Result<Response, Failure> {
     BufReader::new(&stream)
         .read_line(&mut answer)
         .map_err(broken)?;
-    serde_json::from_str(&answer).map_err(|err| Failure::Broken(format!("{err}: {answer:?}")))
+    let response = serde_json::from_str(&answer)
+        .map_err(|err| Failure::Broken(format!("{err}: {answer:?}")))?;
+    Ok((answer, response))
 }
 
 fn broken(err: impl std::fmt::Display) -> Failure {
