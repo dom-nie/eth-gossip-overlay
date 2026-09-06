@@ -182,7 +182,8 @@ fn array<const N: usize>(bytes: &[u8]) -> [u8; N] {
 mod tests {
     use lighthouse_network::rpc::GoodbyeReason;
     use lighthouse_network::rpc::methods::{
-        MetaDataV2, MetaDataV3, Ping as LighthousePing, StatusMessageV1, StatusMessageV2,
+        MetaDataV1, MetaDataV2, MetaDataV3, Ping as LighthousePing, StatusMessageV1,
+        StatusMessageV2,
     };
     use ssz::{Decode, Encode};
     use types::{Epoch, Hash256, MainnetEthSpec, Slot};
@@ -236,7 +237,7 @@ mod tests {
     }
 
     /// Bit 3 of attnets and bit 1 of syncnets: byte i/8, bit i%8, as `Bitvector` lays them
-    /// out.
+    /// out. Version 1 is answered by the sidecar too, so it is checked here as well.
     #[test]
     fn metadata_v2_and_v3_round_trip_against_lighthouse_ssz() {
         let metadata = MetaData {
@@ -245,6 +246,20 @@ mod tests {
             syncnets: 0b10,
             custody_group_count: Some(8),
         };
+
+        let v1 = metadata.encode(1);
+        let theirs = MetaDataV1::<MainnetEthSpec>::from_ssz_bytes(&v1).unwrap();
+        assert_eq!(v1.len(), MetaData::V1_LEN);
+        assert_eq!(theirs.seq_number, 5);
+        assert!(theirs.attnets.get(3).unwrap());
+        assert_eq!(
+            MetaData::decode(&theirs.as_ssz_bytes(), 1).unwrap(),
+            MetaData {
+                syncnets: 0,
+                custody_group_count: None,
+                ..metadata.clone()
+            }
+        );
 
         let v2 = metadata.encode(2);
         let theirs = MetaDataV2::<MainnetEthSpec>::from_ssz_bytes(&v2).unwrap();
