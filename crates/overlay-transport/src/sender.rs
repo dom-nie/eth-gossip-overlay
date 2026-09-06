@@ -116,6 +116,17 @@ struct Queued {
     enqueued_at: Instant,
 }
 
+/// What one lane holds, in both units `peer_queue_depth{unit}` carries. The gauge and
+/// [`SenderHandle::depth`] are the two readers, and both take it from [`Lane::depth`], so
+/// `fleet-overlayctl status` and the dashboard cannot disagree about a peer (T-042).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Depth {
+    /// Whole frames waiting.
+    pub frames: usize,
+    /// What they add up to, which is what the lane's byte bound is against.
+    pub bytes: usize,
+}
+
 /// One lane of one peer: the frames and the bytes they add up to, which the byte bound and the
 /// `unit="bytes"` gauge both read.
 #[derive(Default)]
@@ -125,6 +136,13 @@ struct Lane {
 }
 
 impl Lane {
+    fn depth(&self) -> Depth {
+        Depth {
+            frames: self.frames.len(),
+            bytes: self.bytes,
+        }
+    }
+
     fn push(&mut self, queued: Queued) {
         self.bytes += queued.frame.len();
         self.frames.push_back(queued);
@@ -298,8 +316,9 @@ impl Queues {
     /// Sets `peer_queue_depth` for one lane, in both units the gauge carries. Called with the
     /// lane still locked, so what it reports is what the lane held at that moment.
     fn depth(&self, class: Class, lane: &Lane) {
+        let depth = lane.depth();
         self.stats
-            .queue_depth(&self.peer, class, lane.frames.len(), lane.bytes);
+            .queue_depth(&self.peer, class, depth.frames, depth.bytes);
     }
 
     /// Whether this peer's task has stopped, so a push has nowhere to go.
@@ -378,6 +397,13 @@ impl SenderHandle {
         }
         self.0.push(class, frame, now);
         Ok(())
+    }
+
+    /// What `class`'s lane holds now, the numbers `peer_queue_depth` last reported for it.
+    /// `fleet-overlayctl status` shows them per peer, so an operator can see which sibling is
+    /// behind before the drops start (T-042).
+    pub fn depth(&self, class: Class) -> Depth {
+        self.0.lane(class).depth()
     }
 
     /// A handle with no task behind it, for a live view a test builds by hand: every push is
