@@ -697,12 +697,32 @@ pub struct Handle {
 /// [`Handle`] is not: shutdown is the owner's alone, and a sender that could stop the manager
 /// by mistake is worse than a second type.
 #[derive(Clone)]
-pub struct LiveSource(Arc<Shared>);
+pub struct LiveSource(Source);
+
+#[derive(Clone)]
+enum Source {
+    /// A manager's table, read afresh on every call.
+    Manager(Arc<Shared>),
+    /// A set of peers a test decided, for the send paths that read the live view and would
+    /// otherwise need a hundred hosts on loopback to be asked a question about a hundred peers.
+    #[cfg(any(test, feature = "test-util"))]
+    Fixed(LiveView),
+}
 
 impl LiveSource {
     /// Who is connected right now.
     pub fn live(&self) -> LiveView {
-        self.0.live()
+        match &self.0 {
+            Source::Manager(shared) => shared.live(),
+            #[cfg(any(test, feature = "test-util"))]
+            Source::Fixed(view) => view.clone(),
+        }
+    }
+
+    /// A source that always answers `view`.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn fixed(view: LiveView) -> Self {
+        Self(Source::Fixed(view))
     }
 }
 
@@ -714,7 +734,7 @@ impl Handle {
 
     /// The live set as the fanout task (T-032) reads it, once per message it routes.
     pub fn live_source(&self) -> LiveSource {
-        LiveSource(self.shared.clone())
+        LiveSource(Source::Manager(self.shared.clone()))
     }
 
     /// When the next dial to `peer` is due, for a peer that is neither live nor being dialled.

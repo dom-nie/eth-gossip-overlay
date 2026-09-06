@@ -262,10 +262,18 @@ async fn write_frames(
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use bytes::{Bytes, BytesMut};
     use overlay_core::msgid::MessageId;
+    use overlay_core::subs::PeerState;
 
     use super::*;
+    use crate::manager::LiveSource;
+    use crate::sender::{LARGE_QUEUED_BYTES_MAX, LargeLedger, PeerSender};
+    use crate::testutil::{
+        Builder, NodeKind, REGION, SendSpy, WAIT, peer_state, topic, view, within,
+    };
 
     /// The label an alert and a dashboard are keyed on (§12), so the strings are pinned rather
     /// than derived.
@@ -296,5 +304,82 @@ mod tests {
             limit as usize - WHOLE_MESSAGE_HEADER_BYTES + 1,
             limit
         ));
+    }
+
+    /// The invariant the module is shaped around (§5.7): a message that goes to a hundred peers
+    /// with one of them stalled is done for the other ninety-nine at once. The loop hands each
+    /// peer's queue a frame and waits for none of them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fanout_to_100_fake_peers_with_one_stalled_completes_in_under_100_ms() {
+        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare])
+            .start()
+            .await;
+        let connection = tokio::time::timeout(WAIT, cluster.connected_pair(0, 1))
+            .await
+            .expect("the pair to connect")
+            .0;
+        let block = topic("beacon_block");
+        let peers: Vec<(Hostname, PeerState)> = (0..100)
+            .map(|n| {
+                (
+                    Hostname(format!("bn-{n:03}")),
+                    peer_state(&[(1, &block)], &[1]),
+                )
+            })
+            .collect();
+        let links: Vec<SendSpy> = (0..peers.len())
+            .map(|n| {
+                if n == 0 {
+                    SendSpy::stalled()
+                } else {
+                    SendSpy::open()
+                }
+            })
+            .collect();
+        let deps = crate::sender::Deps {
+            ledger: Arc::new(LargeLedger::new(LARGE_QUEUED_BYTES_MAX)),
+            stats: Arc::new(()),
+        };
+        let mut live = view(&connection, peers);
+        for ((hostname, peer), link) in live.0.iter_mut().zip(&links) {
+            peer.sender = PeerSender::spawn(hostname.clone(), link.clone(), deps.clone());
+        }
+        let topics = Arc::new(Mutex::new(OwnTopics::default()));
+        lock(&topics).table.intern(&block).expect("a fresh table");
+        let lanes = ClassLanes::new(Arc::new(()));
+        let pusher = lanes.pusher();
+        let _fanout = Fanout::spawn(
+            lanes,
+            LiveSource::fixed(live),
+            SelfIdentity {
+                hostname: Hostname("bn-me".to_owned()),
+                region: Region(REGION.to_owned()),
+                site: None,
+            },
+            config::Fanout::default(),
+            topics,
+            Arc::new(()),
+        );
+
+        pusher
+            .push(
+                Class::Large,
+                Outbound {
+                    topic: block.clone(),
+                    class: Class::Large,
+                    id: MessageId([7; 20]),
+                    payload: Bytes::from(vec![0; 128 * 1024]),
+                    received_at: Instant::now(),
+                },
+            )
+            .expect("the fanout lane has room");
+
+        within(
+            Duration::from_millis(100),
+            "every peer but the stalled one",
+            || links[1..].iter().all(|link| link.sent().len() == 1),
+        )
+        .await;
+        assert!(links[0].sent().is_empty());
     }
 }

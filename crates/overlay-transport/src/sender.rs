@@ -454,7 +454,7 @@ mod tests {
     use overlay_core::roster::Hostname;
 
     use super::*;
-    use crate::testutil::{CountingStats, eventually};
+    use crate::testutil::{CountingStats, SendSpy, eventually, within};
 
     /// A frame numbered `n`, so a test can tell which ones survived and in what order.
     fn frame(n: usize) -> Bytes {
@@ -468,74 +468,15 @@ mod tests {
         Bytes::from(frame)
     }
 
+    /// The numbers of the frames a spy was given, in order.
+    fn numbers(link: &SendSpy) -> Vec<usize> {
+        link.sent().iter().map(number).collect()
+    }
+
     fn number(frame: &Bytes) -> usize {
         let mut bytes = [0; size_of::<usize>()];
         bytes.copy_from_slice(&frame[..size_of::<usize>()]);
         usize::from_le_bytes(bytes)
-    }
-
-    /// A transport a test holds and lets go: `send` waits for a permit, so a sender built on
-    /// [`Link::stalled`] queues everything and writes nothing until the test says otherwise.
-    #[derive(Clone)]
-    struct Link(Arc<LinkState>);
-
-    struct LinkState {
-        permits: tokio::sync::Semaphore,
-        sent: Mutex<Vec<Bytes>>,
-    }
-
-    impl Link {
-        fn open() -> Self {
-            Self::with_permits(tokio::sync::Semaphore::MAX_PERMITS)
-        }
-
-        /// A transport that writes nothing until [`release`](Self::release), which is a peer
-        /// whose congestion window has closed.
-        fn stalled() -> Self {
-            Self::with_permits(0)
-        }
-
-        fn release(&self) {
-            self.0
-                .permits
-                .add_permits(tokio::sync::Semaphore::MAX_PERMITS);
-        }
-
-        fn with_permits(permits: usize) -> Self {
-            Self(Arc::new(LinkState {
-                permits: tokio::sync::Semaphore::new(permits),
-                sent: Mutex::new(Vec::new()),
-            }))
-        }
-
-        fn sent(&self) -> Vec<Bytes> {
-            self.0
-                .sent
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone()
-        }
-
-        fn numbers(&self) -> Vec<usize> {
-            self.sent().iter().map(number).collect()
-        }
-    }
-
-    impl Transport for Link {
-        async fn send(&self, frame: Bytes) -> std::io::Result<()> {
-            self.0
-                .permits
-                .acquire()
-                .await
-                .map_err(std::io::Error::other)?
-                .forget();
-            self.0
-                .sent
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .push(frame);
-            Ok(())
-        }
     }
 
     fn peer() -> Hostname {
@@ -547,24 +488,10 @@ mod tests {
     }
 
     /// A sender on `link`, with the counters a test reads its drops and depths from.
-    fn sender(link: &Link) -> (SenderHandle, Arc<CountingStats>) {
+    fn sender(link: &SendSpy) -> (SenderHandle, Arc<CountingStats>) {
         let stats = Arc::new(CountingStats::default());
         let ledger = Arc::new(LargeLedger::new(LARGE_QUEUED_BYTES_MAX));
         (sender_on(&ledger, &stats, peer(), link), stats)
-    }
-
-    /// Waits for `ready` and fails rather than hanging, and never later than `bound`: the two
-    /// tests about a stalled peer assert wall-clock times, so this one polls the real clock
-    /// tightly enough that the polling is not what they measure.
-    async fn within(bound: Duration, what: &str, mut ready: impl FnMut() -> bool) {
-        let poll = async {
-            while !ready() {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-            }
-        };
-        tokio::time::timeout(bound, poll)
-            .await
-            .unwrap_or_else(|_| panic!("{what} did not happen within {bound:?}"));
     }
 
     /// One more sender under the same ledger and counters, for the bounds that span peers.
@@ -572,7 +499,7 @@ mod tests {
         ledger: &Arc<LargeLedger>,
         stats: &Arc<CountingStats>,
         peer: Hostname,
-        link: &Link,
+        link: &SendSpy,
     ) -> SenderHandle {
         let deps = Deps {
             ledger: ledger.clone(),
@@ -586,7 +513,7 @@ mod tests {
     /// arrived (D17).
     #[tokio::test]
     async fn small_lane_drops_the_oldest_frame_when_full_and_counts_full() {
-        let link = Link::open();
+        let link = SendSpy::open();
         let (sender, stats) = sender(&link);
         let now = Instant::now();
 
@@ -604,7 +531,7 @@ mod tests {
             link.sent().len() == SMALL_LANE_FRAMES
         })
         .await;
-        assert_eq!(link.numbers(), (1..=SMALL_LANE_FRAMES).collect::<Vec<_>>());
+        assert_eq!(numbers(&link), (1..=SMALL_LANE_FRAMES).collect::<Vec<_>>());
     }
 
     /// The large lane is bounded by bytes rather than frames, because one block is worth six
@@ -612,7 +539,7 @@ mod tests {
     /// does (D17).
     #[tokio::test]
     async fn large_lane_drops_the_oldest_when_bytes_exceed_1mib_and_counts_full() {
-        let link = Link::open();
+        let link = SendSpy::open();
         let (sender, stats) = sender(&link);
         let now = Instant::now();
         let quarter = LARGE_LANE_BYTES / 4;
@@ -628,14 +555,14 @@ mod tests {
             1
         );
         eventually("the lane to drain", || link.sent().len() == 4).await;
-        assert_eq!(link.numbers(), vec![1, 2, 3, 4]);
+        assert_eq!(numbers(&link), vec![1, 2, 3, 4]);
     }
 
     /// The age bound is read at dequeue and not at push, because what matters is how old the
     /// frame is when it would go on the wire (D17). The frame behind it is younger and goes.
     #[tokio::test(start_paused = true)]
     async fn large_frame_older_than_3s_at_dequeue_is_dropped_and_counted_stale() {
-        let link = Link::open();
+        let link = SendSpy::open();
         let (sender, stats) = sender(&link);
         let start = tokio::time::Instant::now().into_std();
 
@@ -650,7 +577,7 @@ mod tests {
                 == 2
         })
         .await;
-        assert_eq!(link.numbers(), vec![1]);
+        assert_eq!(numbers(&link), vec![1]);
         assert_eq!(
             stats.queue_drops(&peer(), Class::Large, DropReason::Stale),
             1
@@ -666,7 +593,7 @@ mod tests {
         let ledger = Arc::new(LargeLedger::new(2 * size));
         let stats = Arc::new(CountingStats::default());
         let (slow, fast) = (host("bn-01"), host("bn-02"));
-        let (slow_link, fast_link) = (Link::stalled(), Link::stalled());
+        let (slow_link, fast_link) = (SendSpy::stalled(), SendSpy::stalled());
         let slow_sender = sender_on(&ledger, &stats, slow.clone(), &slow_link);
         let fast_sender = sender_on(&ledger, &stats, fast.clone(), &fast_link);
         let start = tokio::time::Instant::now().into_std();
@@ -694,7 +621,7 @@ mod tests {
         slow_link.release();
         fast_link.release();
         eventually("what is left to go out", || fast_link.sent().len() == 2).await;
-        assert_eq!(fast_link.numbers(), vec![1, 2]);
+        assert_eq!(numbers(&fast_link), vec![1, 2]);
         assert!(slow_link.sent().is_empty());
     }
 
@@ -705,7 +632,7 @@ mod tests {
     async fn a_stalled_peer_does_not_delay_delivery_to_a_fast_peer() {
         let ledger = Arc::new(LargeLedger::new(LARGE_QUEUED_BYTES_MAX));
         let stats = Arc::new(CountingStats::default());
-        let (stalled_link, fast_link) = (Link::stalled(), Link::open());
+        let (stalled_link, fast_link) = (SendSpy::stalled(), SendSpy::open());
         let stalled = sender_on(&ledger, &stats, host("bn-01"), &stalled_link);
         let fast = sender_on(&ledger, &stats, host("bn-02"), &fast_link);
         let now = Instant::now();
@@ -729,7 +656,7 @@ mod tests {
     /// going second.
     #[tokio::test]
     async fn large_lane_is_drained_before_small_when_both_are_pending() {
-        let link = Link::stalled();
+        let link = SendSpy::stalled();
         let (sender, _) = sender(&link);
         let now = Instant::now();
 
@@ -739,14 +666,14 @@ mod tests {
         link.release();
 
         eventually("all three to go out", || link.sent().len() == 3).await;
-        assert_eq!(link.numbers(), vec![1, 0, 2]);
+        assert_eq!(numbers(&link), vec![1, 0, 2]);
     }
 
     /// `peer_queue_depth` is how a slow sibling is spotted in production (§12), so it has to
     /// follow both lanes in both units, and come back down as the queue drains.
     #[tokio::test]
     async fn depth_gauges_track_frames_and_bytes() {
-        let link = Link::stalled();
+        let link = SendSpy::stalled();
         let (sender, stats) = sender(&link);
         let now = Instant::now();
 
@@ -768,7 +695,7 @@ mod tests {
     /// the task (D15).
     #[tokio::test]
     async fn sender_task_exits_on_down_and_pending_frames_of_both_lanes_are_counted_peer_down() {
-        let link = Link::stalled();
+        let link = SendSpy::stalled();
         let (sender, stats) = sender(&link);
         let now = Instant::now();
         sender.push(Class::Small, frame(0), now).unwrap();

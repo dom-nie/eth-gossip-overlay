@@ -73,7 +73,7 @@ use crate::manager::{
 };
 use crate::receive::{Deps, NoStripes, PeerReceiver, ReceiveStats};
 use crate::sender::{
-    self, DropReason, LARGE_QUEUED_BYTES_MAX, LargeLedger, SenderHandle, SenderStats,
+    self, DropReason, LARGE_QUEUED_BYTES_MAX, LargeLedger, SenderHandle, SenderStats, Transport,
 };
 use crate::subs::SubsStats;
 use crate::tls::{self, FailureReason, HandshakeFailure, PinTable, Role};
@@ -1227,6 +1227,61 @@ impl PublishSink for PublishSpy {
     }
 }
 
+/// A peer's transport as a test holds it: every frame it is given is recorded, and a spy that
+/// starts [`stalled`](SendSpy::stalled) writes nothing until the test lets it go, which is what
+/// a peer whose congestion window has closed does to its sender.
+#[derive(Clone)]
+pub struct SendSpy(Arc<SpyState>);
+
+struct SpyState {
+    permits: tokio::sync::Semaphore,
+    sent: Mutex<Vec<Bytes>>,
+}
+
+impl SendSpy {
+    /// A transport that takes everything at once.
+    pub fn open() -> Self {
+        Self::with_permits(tokio::sync::Semaphore::MAX_PERMITS)
+    }
+
+    /// A transport that takes nothing until [`release`](Self::release).
+    pub fn stalled() -> Self {
+        Self::with_permits(0)
+    }
+
+    fn with_permits(permits: usize) -> Self {
+        Self(Arc::new(SpyState {
+            permits: tokio::sync::Semaphore::new(permits),
+            sent: Mutex::new(Vec::new()),
+        }))
+    }
+
+    /// Lets the sender write everything it has been holding, and everything after it.
+    pub fn release(&self) {
+        self.0
+            .permits
+            .add_permits(tokio::sync::Semaphore::MAX_PERMITS);
+    }
+
+    /// The frames written so far, in the order they went.
+    pub fn sent(&self) -> Vec<Bytes> {
+        self.0.sent.lock().unwrap().clone()
+    }
+}
+
+impl Transport for SendSpy {
+    async fn send(&self, frame: Bytes) -> std::io::Result<()> {
+        self.0
+            .permits
+            .acquire()
+            .await
+            .map_err(std::io::Error::other)?
+            .forget();
+        self.0.sent.lock().unwrap().push(frame);
+        Ok(())
+    }
+}
+
 /// A topic on the one fork digest the harness uses.
 pub fn topic(name: &str) -> Topic {
     Topic::parse(&format!("/eth2/6a95a1a9/{name}/ssz_snappy")).unwrap()
@@ -1248,15 +1303,25 @@ pub fn subscriptions(advertised: &[&Topic], extra: &[&Topic]) -> SubscriptionSet
 }
 
 /// Polls until `ready` holds, failing the test rather than hanging when it never does.
-pub async fn eventually(what: &str, mut ready: impl FnMut() -> bool) {
-    let poll = async {
+pub async fn eventually(what: &str, ready: impl FnMut() -> bool) {
+    poll(WAIT, Duration::from_millis(10), what, ready).await;
+}
+
+/// The same under a bound the test is asserting rather than guarding: it polls tightly enough
+/// that the polling is not what a wall-clock claim measures.
+pub async fn within(bound: Duration, what: &str, ready: impl FnMut() -> bool) {
+    poll(bound, Duration::from_millis(1), what, ready).await;
+}
+
+async fn poll(bound: Duration, every: Duration, what: &str, mut ready: impl FnMut() -> bool) {
+    let polling = async {
         while !ready() {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(every).await;
         }
     };
-    tokio::time::timeout(WAIT, poll)
+    tokio::time::timeout(bound, polling)
         .await
-        .unwrap_or_else(|_| panic!("{what} did not happen within {WAIT:?}"));
+        .unwrap_or_else(|_| panic!("{what} did not happen within {bound:?}"));
 }
 
 /// A peer's state as its `SUBS` and `TOPIC_ADD`s would have left it: `bindings` are the topic
