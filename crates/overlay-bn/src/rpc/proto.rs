@@ -101,3 +101,51 @@ pub fn classify(id: &StreamProtocol) -> Protocol {
         .find(|(known, _)| known == id)
         .map_or(Protocol::Unsupported, |(_, protocol)| *protocol)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use lighthouse_network::rpc::RequestType;
+    use lighthouse_network::rpc::methods::Ping;
+    use strum::IntoEnumIterator;
+    use types::MainnetEthSpec;
+
+    use super::*;
+
+    /// `SupportedProtocol` and `ProtocolId` live in a module Lighthouse keeps private, so the
+    /// enum is reached through a value (`RequestType::versioned_protocol` returns one) and
+    /// strum's `EnumIter` on it yields every variant.
+    fn every_variant<T: IntoEnumIterator>(_: &T) -> T::Iterator {
+        T::iter()
+    }
+
+    /// Both directions: every variant Lighthouse has is in the table, and nothing else is.
+    /// The prefix and encoding segment are checked against a `ProtocolId` Lighthouse renders
+    /// itself, the names and versions come from the enum.
+    #[test]
+    fn registered_protocol_list_matches_lighthouse_supported_protocols() {
+        let ping = RequestType::<MainnetEthSpec>::Ping(Ping { data: 0 });
+        let ping_ids = ping.supported_protocols();
+        let rendered: Vec<&str> = ping_ids.iter().map(AsRef::as_ref).collect();
+        assert_eq!(rendered, ["/eth2/beacon_chain/req/ping/1/ssz_snappy"]);
+
+        let lighthouse: BTreeSet<String> = every_variant(&ping.versioned_protocol())
+            .map(|variant| {
+                format!(
+                    "/eth2/beacon_chain/req/{}/{}/ssz_snappy",
+                    variant.protocol(),
+                    variant.version_string()
+                )
+            })
+            .collect();
+        let ours: BTreeSet<String> = all().map(|id| id.as_ref().to_owned()).collect();
+
+        assert_eq!(ours, lighthouse);
+        assert_eq!(
+            all().count(),
+            lighthouse.len(),
+            "a duplicate id in the table"
+        );
+    }
+}
