@@ -716,3 +716,16 @@ fn sender_stats_reports_queue_depth_in_both_units() {
         Some(1.0)
     );
 }
+
+/// The process collector is Linux-only in the prometheus crate, so this is the one test the
+/// workspace's other platforms skip rather than fake.
+#[cfg(target_os = "linux")]
+#[test]
+fn process_collector_exports_resident_memory() {
+    let registry = Registry::new();
+    Metrics::new(&registry).unwrap();
+
+    let rss = sample(&registry, "process_resident_memory_bytes", &[]);
+
+    assert!(rss.unwrap_or_default() > 0.0, "{rss:?}");
+}
