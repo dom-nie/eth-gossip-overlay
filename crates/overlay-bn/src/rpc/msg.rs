@@ -67,6 +67,63 @@ impl Status {
     }
 }
 
+/// `MetaData`: what the sidecar tells the beacon node about itself. The bitfields are SSZ
+/// `Bitvector[64]` and `Bitvector[4]`: subnet `i` is bit `i % 8` of byte `i / 8`. Version 1
+/// stops after `attnets`, version 2 adds `syncnets`, version 3 the custody group count, which
+/// is `None` after a v1 or v2 decode and written as 0 when a v3 encode has none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MetaData {
+    /// Bumped whenever the rest changes, so the beacon node knows to ask again.
+    pub seq_number: u64,
+    /// The attestation subnets the sidecar is subscribed to.
+    pub attnets: [u8; 8],
+    /// The sync committee subnets, in the low four bits.
+    pub syncnets: u8,
+    /// How many custody groups the sidecar claims; v3 only.
+    pub custody_group_count: Option<u64>,
+}
+
+impl MetaData {
+    /// The v1 body: `seq_number` and `attnets`.
+    pub const V1_LEN: usize = 16;
+    /// The v2 body: v1 plus one byte of `syncnets`.
+    pub const V2_LEN: usize = 17;
+    /// The v3 body: v2 plus one `u64`.
+    pub const V3_LEN: usize = 25;
+
+    /// The body at protocol `version` 1, 2 or 3.
+    pub fn encode(&self, version: u8) -> Vec<u8> {
+        let mut out = Vec::with_capacity(Self::V3_LEN);
+        out.extend_from_slice(&self.seq_number.to_le_bytes());
+        out.extend_from_slice(&self.attnets);
+        if version >= 2 {
+            out.push(self.syncnets);
+        }
+        if version >= 3 {
+            out.extend_from_slice(&self.custody_group_count.unwrap_or(0).to_le_bytes());
+        }
+        out
+    }
+
+    /// Reads a body sent on protocol `version` 1, 2 or 3.
+    pub fn decode(bytes: &[u8], version: u8) -> Result<Self, Malformed> {
+        let expected = match version {
+            0 | 1 => Self::V1_LEN,
+            2 => Self::V2_LEN,
+            _ => Self::V3_LEN,
+        };
+        if bytes.len() != expected {
+            return Err(Malformed);
+        }
+        Ok(Self {
+            seq_number: u64_at(bytes, 0),
+            attnets: array(&bytes[8..16]),
+            syncnets: bytes.get(16).copied().unwrap_or(0),
+            custody_group_count: (version >= 3).then(|| u64_at(bytes, 17)),
+        })
+    }
+}
+
 /// A little-endian `u64` at `offset`; the caller has checked the length.
 fn u64_at(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(array(&bytes[offset..offset + 8]))
