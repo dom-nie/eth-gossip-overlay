@@ -495,6 +495,7 @@ impl Shared {
                 state: info.state.clone(),
             };
             if let Some(Slot::Live(old)) = peers.insert(info.hostname.clone(), Slot::Live(live)) {
+                old.sender.stop();
                 CloseCode::Superseded.close(&old.connection);
                 if old.instance_id == info.instance_id {
                     tracing::info!(peer = %info.hostname, "path changed");
