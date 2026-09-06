@@ -879,7 +879,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::testutil::{Builder, NodeKind, TestCluster, eventually};
+    use crate::testutil::{Builder, NodeKind, TestCluster, WAIT, eventually};
 
     fn host(name: &str) -> Hostname {
         Hostname(name.to_owned())
@@ -1033,5 +1033,43 @@ mod tests {
         drop(refused);
         assert!(cluster.try_next_event(1).await.is_none());
         assert!(cluster.live(1).is_empty());
+    }
+
+    /// Newer wins, once it has passed admission (D15). A peer that restarted or moved is live
+    /// on its new connection straight away instead of waiting out the old one's idle timeout,
+    /// and the old connection is told what happened to it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn second_connection_from_same_peer_supersedes_the_first_after_admission() {
+        let mut cluster = Builder::new(&[NodeKind::Sink, NodeKind::Manager])
+            .start()
+            .await;
+        let peer = cluster.hostname(0);
+        let first = cluster.dial(0, 1).await.unwrap();
+        let PeerEvent::Up(before) = cluster.next_event(1).await else {
+            panic!("the first connection did not come up")
+        };
+
+        let _second = cluster.dial(0, 1).await.unwrap();
+
+        let down = cluster.next_event(1).await;
+        assert!(
+            matches!(&down, PeerEvent::Down(host, Some(CloseCode::Superseded)) if *host == peer),
+            "{down:?}"
+        );
+        let PeerEvent::Up(after) = cluster.next_event(1).await else {
+            panic!("the second connection did not come up")
+        };
+        assert_ne!(before.connection.stable_id(), after.connection.stable_id());
+        assert_eq!(
+            cluster.live(1).get(&peer).unwrap().connection.stable_id(),
+            after.connection.stable_id()
+        );
+
+        let closed = tokio::time::timeout(WAIT, first.closed()).await.unwrap();
+        assert!(
+            matches!(&closed, quinn::ConnectionError::ApplicationClosed(frame)
+                if frame.error_code == CloseCode::Superseded.code()),
+            "{closed:?}"
+        );
     }
 }
