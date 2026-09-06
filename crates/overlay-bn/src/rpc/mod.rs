@@ -168,13 +168,23 @@ fn varint(mut value: usize) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use libp2p::StreamProtocol;
     use libp2p::futures::executor::block_on;
     use libp2p::request_response::Codec;
+    use overlay_core::topic::Topic;
 
     use super::*;
     use crate::rpc::msg::{Ping, Status};
     use crate::rpc::proto::Protocol;
+
+    fn topics(names: &[&str]) -> BTreeSet<Topic> {
+        names
+            .iter()
+            .map(|name| Topic::parse(&format!("/eth2/6a95a1a9/{name}/ssz_snappy")).unwrap())
+            .collect()
+    }
 
     const PING: StreamProtocol = StreamProtocol::new("/eth2/beacon_chain/req/ping/1/ssz_snappy");
 
@@ -271,6 +281,29 @@ mod tests {
         assert_eq!(
             responder.respond(Protocol::PingV1, &[1, 2, 3]),
             Response::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn metadata_attnets_and_syncnets_follow_the_advertised_set() {
+        let mut responder = Responder::new();
+
+        responder.set_subscriptions(&topics(&["beacon_attestation_3", "sync_committee_1"]));
+
+        let expected = MetaData {
+            seq_number: 1,
+            attnets: [0b1000, 0, 0, 0, 0, 0, 0, 0],
+            syncnets: 0b10,
+            custody_group_count: Some(0),
+        };
+        assert_eq!(responder.metadata(), &expected);
+        assert_eq!(
+            responder.respond(Protocol::MetaDataV2, &[]),
+            Response::Success(expected.encode(2))
+        );
+        assert_eq!(
+            responder.respond(Protocol::MetaDataV3, &[]),
+            Response::Success(expected.encode(3))
         );
     }
 }
