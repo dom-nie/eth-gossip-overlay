@@ -1,7 +1,125 @@
 //! The handful of eth2 req/resp protocols the beacon node's peer manager needs answered
 //! (§5.2 "Minimal req/resp", CL-N1).
+//!
+//! The wire format is Lighthouse's `SSZSnappyInboundCodec`
+//! (`beacon_node/lighthouse_network/src/rpc/codec.rs`): a request is the uncompressed SSZ
+//! length as an unsigned LEB128 varint followed by the SSZ in snappy's framing format, and a
+//! response chunk is a result byte in front of the same. The protocols answered here carry no
+//! context bytes (`ProtocolId::has_context_bytes` in `rpc/protocol.rs`).
+
+use std::io::{self, Write};
+
+use libp2p::StreamProtocol;
+use libp2p::futures::{AsyncWrite, AsyncWriteExt};
+use libp2p::request_response::Codec;
 
 pub mod msg;
+
+/// What the sidecar sends back for one request. `Goodbye` is the peer's own farewell; nothing
+/// is written for it and the loop closes the connection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Response {
+    /// A success chunk carrying the SSZ body.
+    Success(Vec<u8>),
+    /// Result code 1: the body did not decode.
+    InvalidRequest,
+    /// Result code 3: a protocol the sidecar registers but does not serve.
+    ResourceUnavailable,
+    /// The peer sent Goodbye with this reason; there is no response to write.
+    Goodbye(u64),
+}
+
+/// The result byte of a success chunk (`RpcResponse::as_u8` in `rpc/methods.rs`).
+pub const SUCCESS: u8 = 0;
+/// The result byte of an `InvalidRequest` error chunk (`RpcErrorResponse::as_u8`).
+pub const INVALID_REQUEST: u8 = 1;
+/// The result byte of a `ServerError` error chunk; listed so the codes read as a set.
+pub const SERVER_ERROR: u8 = 2;
+/// The result byte of a `ResourceUnavailable` error chunk.
+pub const RESOURCE_UNAVAILABLE: u8 = 3;
+
+/// One codec for every protocol id: the `Codec` trait hands it the negotiated protocol. Inbound
+/// only; the outbound half refuses, which is what keeps the sidecar from ever asking the beacon
+/// node for anything.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Eth2Codec;
+
+impl Codec for Eth2Codec {
+    type Protocol = StreamProtocol;
+    type Request = Vec<u8>;
+    type Response = Response;
+
+    async fn read_request<T>(&mut self, _: &StreamProtocol, _: &mut T) -> io::Result<Vec<u8>>
+    where
+        T: libp2p::futures::AsyncRead + Unpin + Send,
+    {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    async fn read_response<T>(&mut self, _: &StreamProtocol, _: &mut T) -> io::Result<Response>
+    where
+        T: libp2p::futures::AsyncRead + Unpin + Send,
+    {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    async fn write_request<T>(
+        &mut self,
+        _: &StreamProtocol,
+        _: &mut T,
+        _: Vec<u8>,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    /// Exactly one chunk; the behaviour closes the write side after it, which is the stream
+    /// end Lighthouse expects after a single response.
+    async fn write_response<T>(
+        &mut self,
+        _: &StreamProtocol,
+        io: &mut T,
+        response: Response,
+    ) -> io::Result<()>
+    where
+        T: AsyncWrite + Unpin + Send,
+    {
+        let (code, payload) = match response {
+            Response::Success(payload) => (SUCCESS, payload),
+            Response::InvalidRequest => (INVALID_REQUEST, b"invalid request".to_vec()),
+            Response::ResourceUnavailable => {
+                (RESOURCE_UNAVAILABLE, b"resource unavailable".to_vec())
+            }
+            Response::Goodbye(_) => return Ok(()),
+        };
+        io.write_all(&chunk(code, &payload)?).await
+    }
+}
+
+/// `<code><varint len(payload)><snappy framed payload>`. An error chunk's payload is the
+/// message as raw bytes, which is how Lighthouse reads its SSZ byte list.
+fn chunk(code: u8, payload: &[u8]) -> io::Result<Vec<u8>> {
+    let mut out = vec![code];
+    out.extend_from_slice(&varint(payload.len()));
+    let mut encoder = snap::write::FrameEncoder::new(Vec::new());
+    encoder.write_all(payload)?;
+    encoder.flush()?;
+    out.extend_from_slice(encoder.get_ref());
+    Ok(out)
+}
+
+/// Unsigned LEB128, the length prefix `unsigned_varint` writes for Lighthouse.
+fn varint(mut value: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2);
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+    out
+}
 
 #[cfg(test)]
 mod tests {

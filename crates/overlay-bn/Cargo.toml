@@ -13,6 +13,7 @@ prometheus-client.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
+snap.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
 tracing.workspace = true
@@ -24,7 +25,6 @@ lighthouse_network.workspace = true
 proptest.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-snap.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "time"] }
 tracing-subscriber.workspace = true
