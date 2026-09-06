@@ -4,6 +4,7 @@
 pub mod backoff;
 pub mod budget;
 pub mod config;
+pub mod events;
 pub mod fanout;
 pub mod identity;
 pub mod lanes;
