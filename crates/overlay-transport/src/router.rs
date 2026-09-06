@@ -5,7 +5,7 @@
 //! (T-032) matches on one thing however the class ends up being carried.
 //!
 //! v1 has one plan to make: the whole message to every live peer whose beacon node is
-//! subscribed to the topic (§5.4), in hostname order. T-072 adds the stripe a
+//! subscribed to the topic (§5.4), in hostname order, this host aside. T-072 adds the stripe a
 //! large message takes over a region and T-063 the relays a small-class batch crosses a region
 //! through, both as variants of this enum, so neither has to touch what already calls it.
 //!
@@ -37,11 +37,12 @@ pub fn route(
     topic: &Topic,
     _class: Class,
     view: &LiveView,
-    _self_id: &SelfIdentity,
+    self_id: &SelfIdentity,
     _cfg: &Fanout,
 ) -> RoutePlan {
     RoutePlan::Direct(
         view.iter()
+            .filter(|(hostname, _)| **hostname != self_id.hostname)
             .filter(|(_, peer)| subs::state(&peer.state).subscribed(topic))
             .map(|(hostname, _)| hostname.clone())
             .collect(),
