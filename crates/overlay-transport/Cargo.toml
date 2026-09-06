@@ -9,14 +9,22 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# `TestCluster` and the counting stats, for the tests in other crates that need a live overlay
+# (T-051's fleet harness, T-032's fanout tests). A test that can make a peer vanish needs a
+# runtime it can shut down under one, which is the only thing this adds to tokio.
+test-util = ["tokio/rt-multi-thread"]
+
 [dependencies]
 arc-swap.workspace = true
 ed25519-dalek.workspace = true
 overlay-core.workspace = true
 quinn.workspace = true
+rand.workspace = true
 rustls.workspace = true
 socket2.workspace = true
 thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing.workspace = true
 zeroize.workspace = true
 
@@ -24,3 +32,4 @@ zeroize.workspace = true
 bytes.workspace = true
 mutants.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
+tracing-subscriber.workspace = true

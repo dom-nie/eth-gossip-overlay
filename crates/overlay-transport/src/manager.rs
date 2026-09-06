@@ -11,7 +11,10 @@ pub fn should_dial(me: &Hostname, peer: &Hostname) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
+    use crate::testutil::TestCluster;
 
     fn host(name: &str) -> Hostname {
         Hostname(name.to_owned())
@@ -25,5 +28,29 @@ mod tests {
         assert!(should_dial(&host("bn-a"), &host("bn-b")));
         assert!(!should_dial(&host("bn-b"), &host("bn-a")));
         assert!(!should_dial(&host("bn-a"), &host("bn-a")));
+    }
+
+    /// The whole mesh from three hosts' points of view: three connections, each host holding
+    /// one to each of the other two. A second `Up` for a peer already up would mean the
+    /// tie-break let both ends dial, which is what the set catches.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn three_hosts_form_exactly_three_connections() {
+        let mut cluster = TestCluster::start(3).await;
+
+        for node in 0..3 {
+            let mut up = BTreeSet::new();
+            while up.len() < 2 {
+                match cluster.next_event(node).await {
+                    PeerEvent::Up(peer) => {
+                        assert!(up.insert(peer.hostname.clone()), "{peer:?} came up twice");
+                    }
+                    event => panic!("node {node} reported {event:?}"),
+                }
+            }
+        }
+
+        for node in 0..3 {
+            assert_eq!(cluster.live(node).len(), 2);
+        }
     }
 }
