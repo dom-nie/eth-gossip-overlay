@@ -711,14 +711,14 @@ mod tests {
     }
 
     /// An acceptor bound on an ephemeral loopback port, and a task that reports who the first
-    /// connection turned out to be.
+    /// connection turned out to be, or what it was counted as.
     fn acceptor(
         pins: &Arc<ArcSwap<PinTable>>,
         seeds: &Seeds,
         name: &str,
     ) -> (
         std::net::SocketAddr,
-        tokio::task::JoinHandle<Option<PinEntry>>,
+        tokio::task::JoinHandle<Result<PinEntry, HandshakeFailure>>,
     ) {
         let endpoint = quinn::Endpoint::server(
             server_config(pins.clone(), &own_key(seeds, name)).unwrap(),
@@ -728,8 +728,18 @@ mod tests {
         let addr = endpoint.local_addr().unwrap();
         let pins = pins.clone();
         let task = tokio::spawn(async move {
-            let connection = endpoint.accept().await?.await.ok()?;
-            peer_identity(&pins.load(), &connection)
+            let unknown = HandshakeFailure {
+                role: Role::Accept,
+                reason: FailureReason::UnknownKey,
+            };
+            let incoming = endpoint.accept().await.expect("the endpoint is still open");
+            match incoming.await {
+                Ok(connection) => peer_identity(&pins.load(), &connection).ok_or(unknown),
+                Err(error) => Err(HandshakeFailure::from_connection_error(
+                    Role::Accept,
+                    &error,
+                )),
+            }
         });
         (addr, task)
     }
@@ -791,5 +801,50 @@ mod tests {
 
         let failure = HandshakeFailure::from_connection_error(Role::Dial, &error);
         assert_eq!(failure.reason.as_str(), "version");
+    }
+    /// The half of the classification test 8 cannot reach. Worth doing on a real handshake
+    /// rather than on the verifier, because TLS 1.3 lets the dialler finish before the
+    /// acceptor has looked at its key: a dial that resolves is not yet a peer, and the
+    /// rejection turns up on `closed()` afterwards.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pin_rejections_are_counted_by_the_role_that_saw_them() {
+        let seeds = seeds(0x11, None);
+        let pins = pins(&roster(&["bn-a", "bn-b"]), &seeds);
+        let dialler = quinn::Endpoint::client(loopback()).unwrap();
+
+        let (addr, _) = acceptor(&pins, &seeds, "bn-a");
+        let expecting_the_wrong_host =
+            client_config(pins.clone(), &own_key(&seeds, "bn-b"), &host("bn-b")).unwrap();
+        let refused = dialler
+            .connect_with(expecting_the_wrong_host, addr, PLACEHOLDER_NAME)
+            .unwrap()
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            HandshakeFailure::from_connection_error(Role::Dial, &refused).reason,
+            FailureReason::KeyMismatch
+        );
+
+        let (addr, accepted) = acceptor(&pins, &seeds, "bn-a");
+        let stranger = derive_tls_keypair(&FleetSeed::from([0x99; 32]), &host("bn-b"));
+        let connection = dialler
+            .connect_with(
+                client_config(pins.clone(), &stranger, &host("bn-a")).unwrap(),
+                addr,
+                PLACEHOLDER_NAME,
+            )
+            .unwrap()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            accepted.await.unwrap().unwrap_err().reason,
+            FailureReason::UnknownKey
+        );
+        assert_eq!(
+            HandshakeFailure::from_connection_error(Role::Dial, &connection.closed().await).reason,
+            FailureReason::KeyMismatch
+        );
     }
 }
