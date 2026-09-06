@@ -45,6 +45,10 @@ pub struct InstanceId;
 
 impl InstanceId {
     /// This process's id, the same for every connection it ever makes.
+    // The suite cannot tell a random draw from a constant: it runs in one process, and what the
+    // fleet relies on is two processes differing. Tests 11 and 12 cover the comparison that
+    // reads the id, with the harness drawing one per node the way a process draws one per start.
+    #[cfg_attr(test, mutants::skip)]
     pub fn this_process() -> u64 {
         static ID: OnceLock<u64> = OnceLock::new();
         *ID.get_or_init(rand::random)
@@ -928,5 +932,25 @@ mod tests {
         };
         assert_eq!(said("path changed"), 1, "{lines}");
         assert_eq!(said("peer restarted"), 1, "{lines}");
+    }
+
+    /// What a sender asks before it uses anything optional. Mutation testing found this
+    /// unchecked: with v1 advertising no features, no exchange can produce an intersection that
+    /// holds a bit, so the answer for a bit that is in one has to be asserted directly.
+    #[test]
+    fn allows_only_the_bits_both_ends_advertised() {
+        use overlay_core::protocol::features;
+
+        let negotiated = Negotiated {
+            minor: 0,
+            features: features::DATAGRAM_BATCHES | features::REPAIR,
+            peer_max_frame_bytes: MAX_FRAME_BYTES,
+            peer_max_batch_entries: MAX_BATCH_ENTRIES,
+        };
+
+        assert!(negotiated.allows(features::DATAGRAM_BATCHES));
+        assert!(negotiated.allows(features::REPAIR));
+        assert!(!negotiated.allows(features::STRIPING));
+        assert!(!negotiated.allows(features::DATAGRAM_BATCHES | features::STRIPING));
     }
 }
