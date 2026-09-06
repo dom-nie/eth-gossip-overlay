@@ -413,24 +413,20 @@ mod tests {
         );
     }
 
+    /// 16 KiB written out rather than [`UNKNOWN_LARGE_THRESHOLD_BYTES`]: a test that names the
+    /// constant follows it wherever it goes and so cannot see the threshold move.
     #[test]
     fn unknown_below_threshold_is_small() {
         let other = TopicKind::Other("light_client_finality_update".to_owned());
 
-        assert_eq!(
-            Class::of(&other, UNKNOWN_LARGE_THRESHOLD_BYTES - 1),
-            Class::Small
-        );
+        assert_eq!(Class::of(&other, 16 * 1024 - 1), Class::Small);
     }
 
     #[test]
     fn unknown_at_threshold_is_large() {
         let other = TopicKind::Other("light_client_finality_update".to_owned());
 
-        assert_eq!(
-            Class::of(&other, UNKNOWN_LARGE_THRESHOLD_BYTES),
-            Class::Large
-        );
+        assert_eq!(Class::of(&other, 16 * 1024), Class::Large);
     }
 
     #[test]

@@ -828,6 +828,8 @@ log:
             "bn: { listen_addr: \"127.0.0.1:7787\" }",
             "bn: { listen_addr: /ip4/300.0.0.1/tcp/7787 }",
             "bn: { listen_addr: /ip4/127.0.0.1/tcp/70000 }",
+            "bn: { listen_addr: \"/ip6/gg::1/tcp/9787\" }",
+            "bn: { listen_addr: \"/ip6/::1/tcp/70000\" }",
         ] {
             let err = Config::from_yaml(doc).unwrap_err();
 
