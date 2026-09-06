@@ -876,6 +876,49 @@ mod tests {
         );
     }
 
+    /// A connection the sidecar did not open is not a special case: the connect probe runs on
+    /// it and gossip flows over it. That the beacon node was also made the explicit peer is
+    /// not observable from outside the swarm, so what this shows is everything else
+    /// `on_connected` does happening for an inbound connection.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn inbound_connection_from_the_bn_is_handled_like_a_dialled_one() {
+        let mut bn = FakeBn::start().await;
+        let cfg = LinkConfig {
+            libp2p_addr: closed_port(),
+            ..link_config(&bn)
+        };
+        let mut harness = spawn(cfg, &bn);
+        let addr = listen_addr(&harness).await;
+        identity_requests_reach(&bn, 2).await;
+        bn.dial(addr).await;
+        wait_for(&mut harness.link.events, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+
+        let info = wait_for(&mut harness.link.events, |e| {
+            matches!(e, BnEvent::BnInfo { .. })
+        })
+        .await;
+        subscribe_link(&harness, &mut bn, &[BLOCK_TOPIC]).await;
+        let block_id = bn.publish(BLOCK_TOPIC, b"a block").await.unwrap();
+
+        assert!(
+            matches!(
+                info,
+                BnEvent::BnInfo {
+                    version: Some(_),
+                    ..
+                }
+            ),
+            "{info:?}"
+        );
+        assert_eq!(
+            recv_from(&mut harness.lanes, Class::Large).await.id,
+            block_id
+        );
+    }
+
     /// The sidecar never subscribes here, so it has no mesh for the topic, and the publish
     /// still reaches the fake. Whether that is explicit-peer forwarding or gossipsub's fanout
     /// fill cannot be separated while the beacon node is the sidecar's only peer: a
