@@ -750,4 +750,17 @@ mod tests {
             (1, 1, 1)
         );
     }
+
+    #[test]
+    fn manual_reload_of_the_same_shrinking_roster_applies() {
+        let mut h = Fixture::new(CONFIG, &roster_yaml(10));
+        h.write_roster(&roster_yaml(4));
+
+        let report = h.reloader.reload(Trigger::Manual);
+
+        assert_eq!(report.applied, ["roster"]);
+        assert!(report.error.is_none(), "{report:?}");
+        assert_eq!(h.roster.borrow_and_update().hosts.len(), 4);
+        assert_eq!(h.stats.rejected(), 0);
+    }
 }
