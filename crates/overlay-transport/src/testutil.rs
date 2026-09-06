@@ -22,8 +22,8 @@
 //! captured log can tell its own peers' lines from another test's.
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -56,6 +56,13 @@ pub const REGION: &str = "eu";
 /// Distinguishes one cluster's hostnames from another's, because the captured log is shared by
 /// every test in the binary.
 static CLUSTERS: AtomicU64 = AtomicU64::new(0);
+
+/// Ports the harness hands out, taken from below every platform's ephemeral range rather than
+/// from `:0`. A restarted node has to bind the port it had, and with `:0` the operating system
+/// is free to hand that port to another test in the moment between the close and the rebind,
+/// which it does often enough to matter.
+static NEXT_PORT: AtomicU32 = AtomicU32::new(0);
+const PORT_RANGE: std::ops::Range<u32> = 20_000..30_000;
 
 /// What a host in the cluster runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,9 +225,7 @@ impl Builder {
                     .unwrap()
             });
             let _guard = runtime.as_ref().map(tokio::runtime::Runtime::enter);
-            let endpoint =
-                endpoint::bind(&self.cfg, tls::server_config(pins.clone(), &key).unwrap()).unwrap();
-            let addr = endpoint.local_addr().unwrap();
+            let (endpoint, addr) = bind_reserved(&self.cfg, &pins, &key);
             let sink = (kind != NodeKind::Manager).then(|| match &runtime {
                 Some(runtime) => runtime.spawn(hold_connections(endpoint.clone())),
                 None => tokio::spawn(hold_connections(endpoint.clone())),
@@ -266,6 +271,28 @@ impl Builder {
         }
         cluster
     }
+}
+
+/// Binds an endpoint on a port of the harness's own, so the cluster keeps it for as long as the
+/// test binary runs.
+fn bind_reserved(
+    cfg: &Overlay,
+    pins: &Arc<ArcSwap<PinTable>>,
+    key: &SigningKey,
+) -> (quinn::Endpoint, SocketAddr) {
+    for _ in 0..PORT_RANGE.len() {
+        let port =
+            PORT_RANGE.start + NEXT_PORT.fetch_add(1, Ordering::Relaxed) % PORT_RANGE.len() as u32;
+        let cfg = Overlay {
+            listen: SocketAddr::from((Ipv4Addr::LOCALHOST, port as u16)),
+            ..cfg.clone()
+        };
+        if let Ok(endpoint) = endpoint::bind(&cfg, tls::server_config(pins.clone(), key).unwrap()) {
+            let addr = endpoint.local_addr().unwrap();
+            return (endpoint, addr);
+        }
+    }
+    panic!("no free port in {PORT_RANGE:?}")
 }
 
 /// Accepts everything and lets nothing go, so the peer's connection stays up until the endpoint
@@ -400,6 +427,10 @@ impl<A: Admission> TestCluster<A> {
         if let Some(manager) = self.nodes[index].manager.take() {
             manager.shutdown().await;
         }
+        // Every `Up` still queued carries a connection, and a connection holds the endpoint's
+        // socket open. A router would have taken them; a test that only watches the other side
+        // has to drop them here or the port never comes free.
+        while self.nodes[index].events.1.try_recv().is_ok() {}
         self.nodes[index].endpoint = None;
         let cfg = Overlay {
             listen: self.hosts[index].addr,
@@ -417,7 +448,7 @@ impl<A: Admission> TestCluster<A> {
                     tracing::debug!(%error, "port not free yet");
                     tokio::time::sleep(Duration::from_millis(10)).await;
                 }
-                Err(error) => panic!("node {index} could not rebind {cfg:?}: {error}"),
+                Err(error) => panic!("node {index} could not rebind {}: {error}", cfg.listen),
             }
         };
         self.nodes[index].endpoint = Some(endpoint);
