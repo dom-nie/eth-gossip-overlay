@@ -675,4 +675,38 @@ mod tests {
         assert!(!peer.negotiated.allows(features::DATAGRAM_BATCHES));
         assert!(!peer.negotiated.allows(features::REPAIR));
     }
+
+    /// The limits in [`Negotiated`] are the peer's own, not this host's and not the smaller of
+    /// the two: they are what a sender is held to when it builds a frame for that peer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_limits_are_recorded_in_negotiated() {
+        let cluster = Builder::new(&[NodeKind::Bare; 2]).start().await;
+        let lower = cluster.hostname(0);
+        let acceptor = cluster.self_hello(1);
+        let (dialling, accepting) = cluster.connected_pair(0, 1).await;
+        let (mut send, _recv) = dialling.open_bi().await.unwrap();
+        let modest = Hello {
+            max_frame_bytes: 65_536,
+            max_batch_entries: 32,
+            ..peer_hello(&lower)
+        };
+        write_frame(&mut send, &Frame::Hello(modest)).await.unwrap();
+
+        let peer = perform(
+            accepting,
+            Role::Accept,
+            &acceptor,
+            &lower,
+            Vec::new(),
+            WAIT,
+            &(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(peer.negotiated.peer_max_frame_bytes, 65_536);
+        assert_eq!(peer.negotiated.peer_max_batch_entries, 32);
+        assert!(peer.negotiated.peer_max_frame_bytes < MAX_FRAME_BYTES);
+        assert!(peer.negotiated.peer_max_batch_entries < MAX_BATCH_ENTRIES);
+    }
 }
