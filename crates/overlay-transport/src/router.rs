@@ -1,4 +1,52 @@
 //! Which peers a message goes to, and how.
+//!
+//! Every sender works that out from its own live view, because no node is special and there is
+//! nothing to ask (§3). The answer is an enum and not a list of hosts so that the send path
+//! (T-032) matches on one thing however the class ends up being carried.
+//!
+//! v1 has one plan to make: the whole message to every live peer whose beacon node is
+//! subscribed to the topic (§5.4), in hostname order. T-072 adds the stripe a
+//! large message takes over a region and T-063 the relays a small-class batch crosses a region
+//! through, both as variants of this enum, so neither has to touch what already calls it.
+//!
+//! The class and the fan-out settings are what those two will read. v1 reads neither: a small
+//! message and a large one on the same topic get the same plan.
+
+use overlay_core::config::Fanout;
+use overlay_core::roster::{Hostname, SelfIdentity};
+use overlay_core::topic::{Class, Topic};
+
+use crate::manager::LiveView;
+use crate::subs;
+
+/// What a sender does with one message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RoutePlan {
+    /// The whole message to each of these hosts, in hostname order.
+    Direct(Vec<Hostname>),
+}
+
+/// The plan for a message on `topic`, from the live set as it stood when `view` was taken. Pure:
+/// it reads its arguments and nothing else, so the hard part of routing is a function a test can
+/// ask a question of.
+///
+/// The recipients come off the view here rather than from [`LiveView::subscribers`], which
+/// hands back borrowed names: cloning those into the plan would cost a second `Vec` on the path
+/// every message takes.
+pub fn route(
+    topic: &Topic,
+    _class: Class,
+    view: &LiveView,
+    _self_id: &SelfIdentity,
+    _cfg: &Fanout,
+) -> RoutePlan {
+    RoutePlan::Direct(
+        view.iter()
+            .filter(|(_, peer)| subs::state(&peer.state).subscribed(topic))
+            .map(|(hostname, _)| hostname.clone())
+            .collect(),
+    )
+}
 
 #[cfg(test)]
 mod tests {
@@ -32,7 +80,9 @@ mod tests {
     ///
     /// [`LivePeer`]: crate::manager::LivePeer
     async fn connection() -> quinn::Connection {
-        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare]).start().await;
+        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare])
+            .start()
+            .await;
         tokio::time::timeout(WAIT, cluster.connected_pair(0, 1))
             .await
             .unwrap()
