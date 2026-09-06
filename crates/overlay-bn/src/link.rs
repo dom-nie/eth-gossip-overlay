@@ -1297,6 +1297,23 @@ mod tests {
         drop(harness);
     }
 
+    /// The behaviour is registered inbound only, so there is no path that opens an outbound
+    /// stream. Two seconds of a live link, with one request answered so the link is doing
+    /// something, and the beacon node is asked for nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sidecar_never_initiates_a_request() {
+        let mut bn = FakeBn::start().await;
+        let mut inbound = bn.inbound_requests();
+        let (harness, mut answers) = connected(&mut bn).await;
+        bn.send_status(bn_status()).await;
+        next_answer(&mut answers).await;
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        assert_eq!(inbound.try_recv().ok(), None);
+        assert!(harness.link.connected.load(Ordering::Relaxed));
+    }
+
     #[test]
     fn lane_for_takes_known_large_names_by_prefix_and_others_by_size() {
         let topic = |name: &str| format!("/eth2/6a95a1a9/{name}/ssz_snappy");
