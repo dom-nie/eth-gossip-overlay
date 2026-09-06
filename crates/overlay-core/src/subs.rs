@@ -1,4 +1,74 @@
 //! The subscription bitmap a sidecar advertises, and what it keeps of every peer's.
+//!
+//! A message goes only to peers whose beacon node is subscribed to its topic (§5.4), so every
+//! host has to know what every other host wants. Saying it as topic strings would cost a few
+//! kilobytes per peer per change; saying it as one bit per topic costs the few dozen bytes a
+//! `SUBS` frame carries.
+//!
+//! # Whose ids the bits are
+//!
+//! The bitmap is indexed by the **sender's** own topic ids (D13), the same ids its frames carry,
+//! because those are the only ids it can assign. Asking whether peer `P` wants topic `T` is
+//! therefore two steps: look `T` up in `P`'s table to get `P`'s id for it, then test that bit in
+//! `P`'s bitmap. `T` almost certainly has a different id here, and that difference never has to
+//! be reconciled because neither id is ever read against the other's table.
+//!
+//! # What goes in it
+//!
+//! Only [`SubscriptionSets::advertised`], never `local`. The extra data column topics T-015
+//! subscribes to are interned and announced so that an own proposal's chunks have ids (D12), but
+//! the beacon node never asked for those columns and a sibling that sent them would be sending
+//! traffic nobody wants (D06).
+
+use crate::topic::table::TopicId;
+
+/// One bit per topic id, dense from id 0. A fleet across a fork transition interns a few
+/// hundred topics, so the whole thing is a handful of words and a `Vec<u64>` beats anything
+/// cleverer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Bitmap(Vec<u64>);
+
+impl Bitmap {
+    /// A bitmap with nothing set, which is what a sidecar advertises while its beacon node is
+    /// down (§9).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the bit for `id`, growing to reach it.
+    pub fn set(&mut self, id: TopicId) {
+        let (word, bit) = position(id);
+        if self.0.len() <= word {
+            self.0.resize(word + 1, 0);
+        }
+        self.0[word] |= 1 << bit;
+    }
+
+    /// Whether the bit for `id` is set. An id past the end is not set, which is what a peer
+    /// whose set is smaller than this host's looks like.
+    pub fn test(&self, id: TopicId) -> bool {
+        let (word, bit) = position(id);
+        self.0.get(word).is_some_and(|word| word & (1 << bit) != 0)
+    }
+
+    /// Every id whose bit is set, in ascending order.
+    pub fn iter_set(&self) -> impl Iterator<Item = TopicId> + '_ {
+        self.0.iter().enumerate().flat_map(|(word, bits)| {
+            (0..u64::BITS as usize)
+                .filter(move |bit| bits & (1 << bit) != 0)
+                // An id is a `u16`, so a bit past that range belongs to no topic any table can
+                // name and there is nothing to report for it.
+                .filter_map(move |bit| u16::try_from(word * u64::BITS as usize + bit).ok())
+                .map(TopicId::new)
+        })
+    }
+}
+
+/// The word holding `id`'s bit, and which bit of it.
+fn position(id: TopicId) -> (usize, u32) {
+    let id = u32::from(id.get());
+    ((id / u64::BITS) as usize, id % u64::BITS)
+}
 
 #[cfg(test)]
 mod tests {
