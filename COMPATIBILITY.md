@@ -15,7 +15,7 @@ The design leans on six Lighthouse behaviours that no specification promises. Ea
 
 | Assumption | Test |
 |---|---|
-| A trusted peer is admitted whenever the beacon node is under its inbound cap, is dialled by the beacon node through `--libp2p-addresses` at startup and through `add_peer` on demand under the outbound cap, and is never pruned once connected (MD-01) | under the cap and never pruned: `matrix_trusted_peer_is_admitted_under_the_inbound_cap_and_never_pruned` (matrix); the beacon node dialling: T-020's test 10 |
+| A trusted peer is admitted whenever the beacon node is under its inbound cap, is dialled by the beacon node through `--libp2p-addresses` at startup and through `add_peer` on demand under the outbound cap, and is never pruned once connected (MD-01) | under the cap and never pruned: `matrix_trusted_peer_is_admitted_under_the_inbound_cap_and_never_pruned` (matrix); the beacon node dialling a sidecar it has no inbound room for: `matrix_bn_dials_the_listening_sidecar_when_its_inbound_cap_is_full` (matrix); the startup flag: `matrix_bn_startup_flags_dial_the_listening_sidecar` (matrix) |
 | A trusted peer is neither disconnected nor banned after one invalid message and after a period of duplicates only | `matrix_trusted_peer_survives_one_invalid_message_and_a_period_of_duplicates_only` (matrix) |
 | The beacon node forwards a validated message to an explicit peer that is subscribed but not in its mesh | `bn_forwards_validated_message_to_a_subscribed_explicit_peer_outside_its_mesh` |
 | The beacon node's `publish` reaches an explicit peer on a topic the beacon node is not subscribed to, and only if that peer is | `bn_publish_reaches_explicit_peer_on_a_topic_the_bn_is_not_subscribed_to_and_needs_the_sidecar_subscription` |
