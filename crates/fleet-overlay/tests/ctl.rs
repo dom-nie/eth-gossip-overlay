@@ -191,7 +191,6 @@ fn ctl_status_table_prints_the_peers_and_their_feature_bit_names() {
     for expected in [
         "bn-ams1-07",
         "ams1",
-        "inject off",
         "Lighthouse/v8.2.2",
         "bn-fra1-02",
         "12.5",

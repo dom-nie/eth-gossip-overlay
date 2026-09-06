@@ -2260,6 +2260,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "assert_cmd",
+ "bytes",
  "clap",
  "http-body-util",
  "hyper",
