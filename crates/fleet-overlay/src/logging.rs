@@ -264,4 +264,16 @@ mod tests {
         assert_eq!(lines[1]["source"], "bn");
         assert!(!lines[1].contains_key("origin_peer"), "{:?}", lines[1]);
     }
+
+    #[test]
+    fn small_class_emits_nothing() {
+        let node = node();
+        let attestation = Topic::parse("/eth2/00000000/beacon_attestation_3/ssz_snappy").unwrap();
+
+        let sink = capture(&Log::default(), false, None, |_| {
+            emit_first_arrival(&arrival(&attestation, &node, Class::Small, Source::Bn));
+        });
+
+        assert!(sink.text().is_empty(), "{}", sink.text());
+    }
 }
