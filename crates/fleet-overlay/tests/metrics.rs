@@ -4,9 +4,46 @@
 //! is the only thing that notices a rename on either side.
 
 use std::collections::BTreeSet;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use fleet_overlay::metrics::Metrics;
+use fleet_overlay::metrics::{Metrics, serve};
 use prometheus::Registry;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
+use tokio::time::timeout;
+
+/// Every await in this file is bounded: a test that hangs tells nobody anything.
+const PATIENCE: Duration = Duration::from_secs(5);
+
+/// The gossipsub half of the scrape, empty unless a test fills it.
+fn no_gossipsub() -> Arc<Mutex<prometheus_client::registry::Registry>> {
+    Arc::new(Mutex::new(prometheus_client::registry::Registry::default()))
+}
+
+/// One request over a fresh connection, returned as (status line, body).
+async fn request(addr: SocketAddr, path: &str) -> (String, String) {
+    let mut stream = timeout(PATIENCE, TcpStream::connect(addr))
+        .await
+        .unwrap()
+        .unwrap();
+    let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    timeout(PATIENCE, stream.write_all(req.as_bytes()))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut raw = Vec::new();
+    timeout(PATIENCE, stream.read_to_end(&mut raw))
+        .await
+        .unwrap()
+        .unwrap();
+
+    let raw = String::from_utf8(raw).unwrap();
+    let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+    let status = head.lines().next().unwrap().to_owned();
+    (status, body.to_owned())
+}
 
 /// Every metric in the §12 table, with the `overlay_` prefix the table's heading states.
 /// `bn_echo_dropped_total` is deliberately absent: gossipsub's own duplicate counter under
@@ -135,4 +172,29 @@ fn label_names_match_spec_for_each_metric() {
         actual.sort();
         assert_eq!(actual, *expected, "{metric}");
     }
+}
+
+#[tokio::test]
+async fn scrape_lines_carry_only_overlay_or_process_prefixes() {
+    let registry = Registry::new();
+    Metrics::new(&registry).unwrap();
+    let (addr, _server) = serve("127.0.0.1:0".parse().unwrap(), registry, no_gossipsub())
+        .await
+        .unwrap();
+
+    let (status, body) = request(addr, "/metrics").await;
+
+    assert!(status.contains("200"), "{status}");
+    let mut sample_lines = 0;
+    for line in body.lines() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        sample_lines += 1;
+        assert!(
+            line.starts_with("overlay_") || line.starts_with("process_"),
+            "{line}"
+        );
+    }
+    assert!(sample_lines > 0, "{body}");
 }
