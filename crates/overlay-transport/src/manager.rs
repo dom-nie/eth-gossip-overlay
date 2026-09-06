@@ -1,9 +1,16 @@
 //! One live connection to every other host in the roster, and the live set the router reads.
 
+use overlay_core::roster::Hostname;
+
+/// Whether this host dials `peer` or waits to be dialled by it. The lexicographically lower
+/// hostname dials (§5.3), so a pair reaches one connection with nothing to negotiate and no
+/// window in which both ends are dialling each other. A host never dials itself.
+pub fn should_dial(me: &Hostname, peer: &Hostname) -> bool {
+    me < peer
+}
+
 #[cfg(test)]
 mod tests {
-    use overlay_core::roster::Hostname;
-
     use super::*;
 
     fn host(name: &str) -> Hostname {
