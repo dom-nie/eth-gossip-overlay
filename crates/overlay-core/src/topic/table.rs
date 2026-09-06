@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::roster::Hostname;
 use crate::topic::{Topic, TopicError};
+use crate::wire::Frame;
 
 /// How many topics one table holds, so ids run from 0 to 65,534 and `u16::MAX` is never
 /// assigned. A fleet across a fork transition interns a few hundred, so the ceiling is there to
@@ -84,6 +86,11 @@ impl OwnTopicTable {
     }
 }
 
+/// The table has no id left to assign.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("topic table is full at {CAPACITY} entries")]
+pub struct TableFull;
+
 /// The ids one peer has assigned, and the only table that peer's frames are decoded with.
 #[derive(Clone, Debug, Default)]
 pub struct PeerTopicTable {
@@ -153,10 +160,35 @@ pub enum PeerTableError {
     Unparsable(TopicId, TopicError),
 }
 
-/// The table has no id left to assign.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("topic table is full at {CAPACITY} entries")]
-pub struct TableFull;
+/// What each peer has already been told, and the only place a `TOPIC_ADD` is built.
+#[derive(Clone, Debug, Default)]
+pub struct Announcer {
+    /// How many of the own table's ids each peer has been told. Ids are handed out in order and
+    /// never withdrawn, so one count per peer says which bindings are still owed.
+    told: HashMap<Hostname, usize>,
+}
+
+impl Announcer {
+    /// An announcer that has told nobody anything.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The bindings `peer` has not been told, which this call records as told. T-027 puts them
+    /// on that peer's control stream.
+    pub fn announce(&mut self, peer: &Hostname, table: &OwnTopicTable) -> Vec<Frame> {
+        let told = self.told.entry(peer.clone()).or_default();
+        let frames: Vec<Frame> = table
+            .entries_from(*told)
+            .map(|(id, topic)| Frame::TopicAdd {
+                id: id.get(),
+                topic: topic.to_owned(),
+            })
+            .collect();
+        *told += frames.len();
+        frames
+    }
+}
 
 #[cfg(test)]
 mod tests {
