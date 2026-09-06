@@ -392,7 +392,7 @@ mod tests {
 
     use super::*;
     use crate::logging::testing;
-    use crate::reload::{Deps, Reloader};
+    use crate::reload::{Deps, Reloader, Trigger};
     use overlay_bn::compat::{self, BnInfo};
 
     /// Every await in this file is bounded: a socket that never answers has to fail the test
@@ -427,6 +427,8 @@ mod tests {
     struct Fixture {
         _dir: TempDir,
         socket: PathBuf,
+        config_path: PathBuf,
+        roster_path: PathBuf,
         inject: Arc<AtomicBool>,
         bn_connected: Arc<AtomicBool>,
         bn: watch::Sender<BnInfo>,
@@ -488,6 +490,8 @@ mod tests {
             Self {
                 _dir: dir,
                 socket,
+                config_path,
+                roster_path,
                 inject,
                 bn_connected,
                 bn,
@@ -495,6 +499,18 @@ mod tests {
                 _reload_task: reload_task,
                 _server: server,
             }
+        }
+
+        fn write_roster(&self, text: &str) {
+            std::fs::write(&self.roster_path, text).unwrap();
+        }
+
+        fn write_config(&self, text: &str) {
+            std::fs::write(
+                &self.config_path,
+                text.replace("ROSTER", &self.roster_path.display().to_string()),
+            )
+            .unwrap();
         }
 
         /// The `bn` section of a fresh `status` answer.
@@ -741,5 +757,26 @@ mod tests {
         }
         assert_eq!(dumped[0].site.as_deref(), Some("ams1"));
         assert_eq!(dumped[1].site, None);
+    }
+
+    /// The reload the socket runs is the one SIGHUP runs, trigger included: this roster drops
+    /// two of the three hosts, which an automatic reload refuses and a manual one applies (D26).
+    #[tokio::test]
+    async fn reload_request_runs_a_manual_reload_and_returns_the_report() {
+        let h = Fixture::start(LiveView::default()).await;
+        h.write_roster(&roster_yaml(1));
+        h.write_config("overlay:\n  roster_file: ROSTER\n  listen: \"[::]:9999\"\ninject: false\n");
+
+        let response = h.send(&Request::Reload).await;
+
+        assert!(response.ok, "{response:?}");
+        let report = response.reload.expect("a reload report");
+        assert_eq!(report.trigger, Trigger::Manual);
+        assert_eq!(report.applied, ["inject", "roster"]);
+        assert_eq!(report.restart_required, ["overlay.listen"]);
+        assert!(report.error.is_none(), "{report:?}");
+        assert!(!h.inject.load(Ordering::Relaxed));
+        let roster = h.send(&Request::Roster).await.roster.expect("a roster");
+        assert_eq!(roster.len(), 1);
     }
 }
