@@ -200,8 +200,10 @@ impl Announcer {
 mod tests {
     use super::*;
 
+    use std::collections::BTreeSet;
+
     use crate::roster::Hostname;
-    use crate::topic::Topic;
+    use crate::topic::{SubscriptionSets, Topic};
     use crate::wire::Frame;
 
     const DIGEST: [u8; 4] = [0x6a, 0x95, 0xa1, 0xa9];
@@ -369,5 +371,35 @@ mod tests {
         own.intern(&column(2)).unwrap();
 
         assert_eq!(announcer.announce(&host("c"), &own), [topic_add(2, 2)]);
+    }
+
+    #[test]
+    fn changed_local_set_produces_topic_add_for_new_topics_only_including_extra_columns() {
+        let block = Topic::parse("/eth2/6a95a1a9/beacon_block/ssz_snappy").unwrap();
+        let extra = column(4);
+        let sets = SubscriptionSets {
+            advertised: BTreeSet::from([block.clone()]),
+            local: BTreeSet::from([block.clone(), extra.clone()]),
+        };
+        assert!(!sets.advertised.contains(&extra));
+        let peers = [host("a"), host("b")];
+        let mut own = OwnTopicTable::new();
+        let mut announcer = Announcer::new();
+
+        let owed = on_changed(&sets, peers.iter(), &mut own, &mut announcer).unwrap();
+
+        let expected = vec![
+            Frame::TopicAdd {
+                id: 0,
+                topic: block.to_string(),
+            },
+            topic_add(1, 4),
+        ];
+        assert_eq!(owed, [(&peers[0], expected.clone()), (&peers[1], expected)]);
+        assert!(
+            on_changed(&sets, peers.iter(), &mut own, &mut announcer)
+                .unwrap()
+                .is_empty()
+        );
     }
 }
