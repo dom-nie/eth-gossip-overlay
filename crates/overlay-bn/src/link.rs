@@ -544,11 +544,10 @@ impl Link {
             .behaviour_mut()
             .gossip
             .remove_explicit_peer(&peer_id);
-        if self.bn_peer.take().is_some() {
-            self.connected.store(false, Ordering::Relaxed);
-            self.probe = None;
-            self.emit(BnEvent::Disconnected);
-        }
+        self.bn_peer = None;
+        self.connected.store(false, Ordering::Relaxed);
+        self.probe = None;
+        self.emit(BnEvent::Disconnected);
         self.retry_later();
     }
 
