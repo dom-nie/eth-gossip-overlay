@@ -4358,11 +4358,13 @@ dependencies = [
  "mutants",
  "overlay-core",
  "quinn",
+ "rand 0.10.2",
  "rustls",
  "socket2",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "zeroize",
 ]
 
