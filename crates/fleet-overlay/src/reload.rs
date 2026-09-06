@@ -267,7 +267,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use overlay_core::config::{Log, PublishRateLimit};
-    use overlay_core::roster::Roster;
+    use overlay_core::roster::{Hostname, Roster};
     use tempfile::TempDir;
     use tokio::sync::watch;
 
@@ -295,6 +295,7 @@ mod tests {
         config_path: PathBuf,
         roster_path: PathBuf,
         inject: Arc<AtomicBool>,
+        roster: watch::Receiver<Roster>,
         reloader: Reloader,
     }
 
@@ -310,7 +311,7 @@ mod tests {
             )
             .unwrap();
             let inject = Arc::new(AtomicBool::new(true));
-            let (roster_tx, _) = watch::channel(Roster::from_yaml(roster).unwrap());
+            let (roster_tx, roster_rx) = watch::channel(Roster::from_yaml(roster).unwrap());
             let (seed_tx, _) = watch::channel(None);
             let (limits_tx, _) = watch::channel(PublishRateLimit::default());
             let (_, _, log) = testing::subscriber(&Log::default(), false, None);
@@ -331,8 +332,13 @@ mod tests {
                 config_path,
                 roster_path,
                 inject,
+                roster: roster_rx,
                 reloader,
             }
+        }
+
+        fn write_roster(&self, text: &str) {
+            fs::write(&self.roster_path, text).unwrap();
         }
 
         fn write_config(&self, text: &str) {
@@ -356,5 +362,19 @@ mod tests {
         assert!(report.error.is_none(), "{report:?}");
         assert!(!h.inject.load(Ordering::Relaxed));
         assert!(!h.reloader.config().inject);
+    }
+
+    #[test]
+    fn reload_publishes_new_roster_on_the_watch_channel() {
+        let mut h = Fixture::new(CONFIG, &roster_yaml(3));
+        h.write_roster(&roster_yaml(4));
+
+        let report = h.reloader.reload(Trigger::Manual);
+
+        assert_eq!(report.applied, ["roster"]);
+        assert!(report.error.is_none(), "{report:?}");
+        let published = h.roster.borrow_and_update();
+        assert_eq!(published.hosts.len(), 4);
+        assert_eq!(published.hosts[3].hostname, Hostname("bn-4".to_owned()));
     }
 }
