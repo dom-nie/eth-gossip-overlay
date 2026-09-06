@@ -405,8 +405,22 @@ impl<A: Admission> TestCluster<A> {
             listen: self.hosts[index].addr,
             ..self.cfg.clone()
         };
-        let server = tls::server_config(self.pins.clone(), &self.nodes[index].key).unwrap();
-        self.nodes[index].endpoint = Some(endpoint::bind(&cfg, server).unwrap());
+        // The manager has closed the endpoint and waited for it to go idle, but quinn's driver
+        // task holds the socket until the runtime gets round to dropping it, so the port comes
+        // free a scheduler tick or two after `shutdown` returns rather than inside it.
+        let deadline = tokio::time::Instant::now() + WAIT;
+        let endpoint = loop {
+            let server = tls::server_config(self.pins.clone(), &self.nodes[index].key).unwrap();
+            match endpoint::bind(&cfg, server) {
+                Ok(endpoint) => break endpoint,
+                Err(error) if tokio::time::Instant::now() < deadline => {
+                    tracing::debug!(%error, "port not free yet");
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("node {index} could not rebind {cfg:?}: {error}"),
+            }
+        };
+        self.nodes[index].endpoint = Some(endpoint);
         self.start_manager(index);
     }
 
