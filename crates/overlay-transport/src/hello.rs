@@ -431,7 +431,10 @@ mod tests {
 
     use super::*;
     use crate::manager::PeerEvent;
-    use crate::testutil::{Builder, CountingStats, NodeKind, REGION, TestCluster, WAIT};
+    use crate::testlog::LOG;
+    use crate::testutil::{
+        Builder, CountingStats, NodeKind, REGION, TestCluster, WAIT, eventually,
+    };
 
     /// A fork digest, as a topic string carries one.
     const DIGEST: [u8; 4] = [0x6a, 0x95, 0xa1, 0xa9];
@@ -885,5 +888,45 @@ mod tests {
 
         let after = next_up(&mut cluster, 1, &dialler).await;
         assert_ne!(after.instance_id, at_one.instance_id);
+    }
+
+    /// What the supersede line is for: an operator seeing a pair reconnect wants to know whether
+    /// the peer came back or only moved. The instance id is the difference, and it is the only
+    /// thing that differs between these two connections (D15).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn supersede_log_says_peer_restarted_or_path_changed() {
+        let mark = LOG.len();
+        let mut cluster = Builder::new(&[NodeKind::Bare, NodeKind::Manager])
+            .start()
+            .await;
+        let peer = cluster.hostname(0);
+        let running = cluster.self_hello(0);
+        let restarted = SelfHello {
+            instance_id: running.instance_id.wrapping_add(1),
+            ..running.clone()
+        };
+        let _first = cluster.dial_with_hello(0, 1, &running).await;
+        assert!(matches!(cluster.next_event(1).await, PeerEvent::Up(_)));
+
+        let _same_process = cluster.dial_with_hello(0, 1, &running).await;
+        let _new_process = cluster.dial_with_hello(0, 1, &restarted).await;
+
+        eventually("both supersedes to be logged", || {
+            LOG.since(mark)
+                .lines()
+                .filter(|line| line.contains(&peer.0))
+                .count()
+                >= 2
+        })
+        .await;
+        let lines = LOG.since(mark);
+        let said = |what: &str| {
+            lines
+                .lines()
+                .filter(|line| line.contains(what) && line.contains(&peer.0))
+                .count()
+        };
+        assert_eq!(said("path changed"), 1, "{lines}");
+        assert_eq!(said("peer restarted"), 1, "{lines}");
     }
 }
