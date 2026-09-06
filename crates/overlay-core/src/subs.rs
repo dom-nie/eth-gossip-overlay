@@ -104,4 +104,18 @@ mod tests {
             prop_assert_eq!(listed, set);
         }
     }
+
+    /// The payload a `SUBS` frame carries. A bitmap goes out on every change to every peer, so
+    /// it has to cost about what the topics it names cost: 200 subscriptions is a beacon node
+    /// on a busy fork transition, and 25 bytes is a quarter of one topic string.
+    #[test]
+    fn bitmap_encoding_round_trips_and_is_compact() {
+        let bitmap = bitmap(0..200);
+
+        let encoded = bitmap.encode();
+
+        assert_eq!(Bitmap::decode(&encoded), bitmap);
+        assert!(encoded.len() < 100, "200 bits took {} bytes", encoded.len());
+        assert_eq!(Bitmap::decode(&Bitmap::new().encode()), Bitmap::new());
+    }
 }
