@@ -1134,4 +1134,41 @@ mod tests {
             before.connection.stable_id()
         );
     }
+
+    /// Admits everything and puts the peer in a region of its own choosing.
+    struct DeclaresRegion(&'static str);
+
+    impl Admission for DeclaresRegion {
+        fn admit(
+            &self,
+            connection: quinn::Connection,
+            _role: Role,
+            pinned: &PinEntry,
+        ) -> impl Future<Output = Result<PeerInfo, AdmitError>> + Send {
+            std::future::ready(Ok(admitted(pinned, self.0, connection)))
+        }
+    }
+
+    /// The region a peer declares is the region its second hop fans out in, so it is the one
+    /// the live view records even when the roster disagrees. The disagreement means a stale
+    /// roster on one of the two hosts, which is worth a counter and a line, not a close (D15).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn declared_region_differing_from_roster_is_recorded_counted_and_not_closed() {
+        let mut cluster = Builder::new(&[NodeKind::Sink, NodeKind::Manager])
+            .start_with(DeclaresRegion("us"))
+            .await;
+        let host = cluster.hostname(0);
+        let connection = cluster.dial(0, 1).await.unwrap();
+
+        let PeerEvent::Up(up) = cluster.next_event(1).await else {
+            panic!("the connection did not come up")
+        };
+
+        assert_eq!(up.region, Region("us".to_owned()));
+        let live = cluster.live(1);
+        assert_eq!(live.in_region(&Region("us".to_owned())).len(), 1);
+        assert!(live.in_region(&Region(REGION.to_owned())).is_empty());
+        assert_eq!(cluster.stats(1).region_mismatches(&host), 1);
+        assert_eq!(connection.close_reason(), None);
+    }
 }
