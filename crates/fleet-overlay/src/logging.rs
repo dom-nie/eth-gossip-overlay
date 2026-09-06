@@ -1,3 +1,121 @@
+//! The process's one subscriber, and the only place `tracing_subscriber::fmt` is constructed
+//! (D32).
+//!
+//! Logs and events share it: both go through one `EnvFilter`, one formatter and one
+//! [`tracing_appender::non_blocking`] writer onto stdout, which under systemd is the journal and
+//! from there one Loki stream. Events are told apart by their `event` field, not by a second
+//! stream, so there is nothing extra for an operator to configure and no way for the two to
+//! drift apart.
+//!
+//! Level and format sit behind [`reload`] layers, because T-043 changes both on SIGHUP without
+//! restarting the process, and a peer's connection must not notice.
+
+use std::io::IsTerminal;
+
+use overlay_core::config::{Log, LogFormat, LogLevel};
+use tracing::Dispatch;
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::layer::{Layer, Layered, SubscriberExt};
+use tracing_subscriber::{EnvFilter, Registry, fmt, reload};
+
+/// The variable that overrides `log.level`, and the only way to filter per target.
+const RUST_LOG: &str = "RUST_LOG";
+
+/// One rendering of the log stream, boxed so the two formats are one type and can be swapped.
+type Rendered = Box<dyn Layer<Registry> + Send + Sync>;
+
+/// The subscriber the filter is added to, once the formatter is in place.
+type Stack = Layered<reload::Layer<Rendered, Registry>, Registry>;
+
+/// Builds a formatter for a resolved format, holding the writer both share.
+type Renderer = Box<dyn Fn(LogFormat) -> Rendered + Send + Sync>;
+
+/// Installs the subscriber for the whole process and returns the handle that changes it.
+///
+/// Reads the two things a test cannot stage: whether stdout is a terminal, which is what
+/// `format: auto` turns on, and `RUST_LOG`.
+pub fn init(cfg: &Log) -> LogHandle {
+    let (writer, guard) = tracing_appender::non_blocking(std::io::stdout());
+    let (dispatch, handle) = build(
+        cfg,
+        writer,
+        std::io::stdout().is_terminal(),
+        std::env::var(RUST_LOG).ok(),
+        Some(guard),
+    );
+    // Nothing else in either binary installs a subscriber, so this can only fail if init ran
+    // twice, and the subscriber already in place still writes every line.
+    let _ = tracing::dispatcher::set_global_default(dispatch);
+    handle
+}
+
+/// The subscriber and its handle, with everything it reads from the process passed in.
+fn build<W>(
+    cfg: &Log,
+    writer: W,
+    is_tty: bool,
+    rust_log: Option<String>,
+    guard: Option<WorkerGuard>,
+) -> (Dispatch, LogHandle)
+where
+    W: for<'a> MakeWriter<'a> + Clone + Send + Sync + 'static,
+{
+    let render: Renderer = Box::new(move |format| match format {
+        LogFormat::Json => fmt::layer()
+            .json()
+            .flatten_event(true)
+            .with_writer(writer.clone())
+            .boxed(),
+        // `resolve` answers Json or Text, never Auto.
+        LogFormat::Text | LogFormat::Auto => fmt::layer()
+            .with_ansi(is_tty)
+            .with_writer(writer.clone())
+            .boxed(),
+    });
+    let (rendering, format) = reload::Layer::new(render(cfg.format.resolve(is_tty)));
+    let (filtering, level) = reload::Layer::new(match &rust_log {
+        Some(directives) => EnvFilter::new(directives),
+        None => EnvFilter::new(directive(cfg.level)),
+    });
+    let handle = LogHandle {
+        format,
+        level,
+        render,
+        is_tty,
+        rust_log,
+        _guard: guard,
+    };
+    (
+        Dispatch::new(Registry::default().with(rendering).with(filtering)),
+        handle,
+    )
+}
+
+/// What T-043 changes about the running subscriber. The non-blocking writer's worker thread
+/// lives as long as this handle, so the app has to hold it for the process's lifetime or lose
+/// the lines still in flight.
+pub struct LogHandle {
+    format: reload::Handle<Rendered, Registry>,
+    level: reload::Handle<EnvFilter, Stack>,
+    render: Renderer,
+    is_tty: bool,
+    rust_log: Option<String>,
+    _guard: Option<WorkerGuard>,
+}
+
+/// The `EnvFilter` directive for a configured level. `log.level` is a closed enum, so this is
+/// the whole filter; anything per-target comes from `RUST_LOG`.
+fn directive(level: LogLevel) -> &'static str {
+    match level {
+        LogLevel::Trace => "trace",
+        LogLevel::Debug => "debug",
+        LogLevel::Info => "info",
+        LogLevel::Warn => "warn",
+        LogLevel::Error => "error",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::{self, Write};
