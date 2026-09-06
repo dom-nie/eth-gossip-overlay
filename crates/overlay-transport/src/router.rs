@@ -213,4 +213,26 @@ mod tests {
             RoutePlan::Direct(vec![host("bn-a"), host("bn-b"), host("bn-c")])
         );
     }
+
+    /// A peer that has paired and announced its topic ids but has not sent a `SUBS` yet wants
+    /// nothing until it says so. Its bitmap is empty, and an empty bitmap is the same answer as
+    /// a beacon node that is down (§9), which is the safe way round: the alternative sends it
+    /// every topic it named.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_without_any_subs_frame_yet_is_excluded() {
+        let connection = connection().await;
+        let block = topic("beacon_block");
+        let (subscriber, silent) = (host("bn-a"), host("bn-b"));
+        let live = view(
+            &connection,
+            vec![
+                (subscriber.clone(), peer_state(&[(1, &block)], &[1])),
+                (silent, peer_state(&[(1, &block)], &[])),
+            ],
+        );
+
+        let plan = route(&block, Class::Large, &live, &me(), &Fanout::default());
+
+        assert_eq!(plan, RoutePlan::Direct(vec![subscriber]));
+    }
 }
