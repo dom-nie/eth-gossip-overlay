@@ -1171,4 +1171,25 @@ mod tests {
         assert_eq!(cluster.stats(1).region_mismatches(&host), 1);
         assert_eq!(connection.close_reason(), None);
     }
+
+    /// Striping and relay selection both derive their order from the hostname (T-072, D20), so
+    /// the order the live view comes back in is part of the answer and not an accident of how
+    /// the peers happened to connect.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn live_view_in_region_is_sorted_by_hostname() {
+        let mut cluster = TestCluster::start(4).await;
+        let expected: Vec<Hostname> = (1..4).map(|node| cluster.hostname(node)).collect();
+        for _ in 0..3 {
+            assert!(matches!(cluster.next_event(0).await, PeerEvent::Up(_)));
+        }
+
+        let live = cluster.live(0);
+        let ordered: Vec<Hostname> = live
+            .in_region(&Region(REGION.to_owned()))
+            .into_iter()
+            .map(|(hostname, _)| hostname.clone())
+            .collect();
+
+        assert_eq!(ordered, expected);
+    }
 }
