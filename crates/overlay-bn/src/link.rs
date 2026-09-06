@@ -578,8 +578,8 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use lighthouse_network::rpc::StatusMessage;
     use lighthouse_network::rpc::methods::{MetaData, StatusMessageV2};
+    use lighthouse_network::rpc::{GoodbyeReason, StatusMessage};
     use overlay_core::lanes::{ClassLanes, LaneStats, SMALL_LANE_CAPACITY};
     use overlay_core::msgid;
     use overlay_core::topic::{Class, Topic, TopicKind};
@@ -596,7 +596,7 @@ mod tests {
     use crate::gossip::wire;
     use crate::node_key::NodeKey;
     use crate::spec::spec_watch;
-    use crate::testutil::{FakeBn, FakeBnEvent, RpcAnswer, link_config, node_key, ok_json};
+    use crate::testutil::{FakeBn, FakeBnEvent, LOG, RpcAnswer, link_config, node_key, ok_json};
 
     /// Long enough for a dial, a noise handshake and a gossipsub exchange on a loaded CI box,
     /// short enough that a test which waits in vain still ends inside its 5 s budget.
@@ -1244,6 +1244,36 @@ mod tests {
         };
         assert!(metadata.attnets().get(7).unwrap());
         mirror.abort();
+    }
+
+    /// The beacon node's farewell. The sidecar reads the reason and closes the connection
+    /// itself, which is the path this asserts through the log; T-013's backoff then brings
+    /// the link back to the same fake. The reason is this test's own, so its line in the
+    /// shared log is this test's line.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn goodbye_from_fake_bn_closes_and_the_link_reconnects() {
+        let log = &*LOG;
+        let mut bn = FakeBn::start().await;
+        let (mut harness, _answers) = connected(&mut bn).await;
+        wait_for(&mut harness.link.events, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+
+        bn.send_goodbye(GoodbyeReason::TooManyPeers).await;
+
+        wait_for(&mut harness.link.events, |e| *e == BnEvent::Disconnected).await;
+        wait_for(&mut harness.link.events, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+        let text = log.text();
+        let farewell: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains(&bn.peer_id().to_string()) && line.contains("goodbye"))
+            .collect();
+        assert_eq!(farewell.len(), 1, "{text}");
+        assert!(farewell[0].contains("reason=129"), "{}", farewell[0]);
     }
 
     #[test]
