@@ -124,3 +124,26 @@ fn ctl_reports_exit_2_when_socket_is_missing() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains(&missing.display().to_string()), "{stderr}");
 }
+
+#[test]
+fn ctl_json_flag_prints_raw_response() {
+    let answer = Response {
+        ok: true,
+        inject: Some(true),
+        ..Response::default()
+    };
+    let server = TestServer::start(answer);
+
+    let output = ctl(&server.socket)
+        .args(["--json", "inject", "status"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let printed = String::from_utf8(output.stdout).unwrap();
+    // The line the sidecar sent, so `jq` reads the same object the socket wrote.
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(printed.trim()).unwrap(),
+        serde_json::json!({"ok": true, "inject": true})
+    );
+}
