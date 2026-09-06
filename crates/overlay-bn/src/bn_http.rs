@@ -1,8 +1,8 @@
-//! One-shot calls to the local beacon node's HTTP API: its peer id before every dial, and on
-//! every connect its version, whether it lists the sidecar as trusted, and the spec constants
-//! the sidecar sizes itself by. One attempt per call and a short timeout; the BN link retries
-//! with backoff, so a beacon node that is down or still starting costs a clear error and
-//! nothing else here.
+//! One-shot calls to the local beacon node's HTTP API: its peer id before every dial, the
+//! sidecar's ENR handed over with it, and on every connect the beacon node's version, whether
+//! it lists the sidecar as trusted, and the spec constants the sidecar sizes itself by. One
+//! attempt per call and a short timeout; the BN link retries with backoff, so a beacon node
+//! that is down or still starting costs a clear error and nothing else here.
 //!
 //! Checked against Lighthouse v8.2.2: `/eth/v1/node/identity` and `/eth/v1/node/version` wrap
 //! their payload as `{"data": ...}` (`GenericResponse` in `common/eth2/src/types.rs`), where
@@ -16,13 +16,14 @@
 //! (`consensus/types/src/core/config_and_preset.rs`): `UPPERCASE` keys with numbers as
 //! quoted decimal strings, plus `BLOB_SCHEDULE`, which is an array. A map of strings would
 //! choke on that array, which is why the snapshot is a struct that names its keys and
-//! ignores the rest.
+//! ignores the rest. `POST /lighthouse/add_peer` takes `api_types::AdminPeer`, one `enr`
+//! string, and answers an empty 200.
 
 use std::time::Duration;
 
 use libp2p::PeerId;
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::spec::SpecSnapshot;
@@ -31,6 +32,7 @@ const IDENTITY: &str = "/eth/v1/node/identity";
 const VERSION: &str = "/eth/v1/node/version";
 const PEERS: &str = "/lighthouse/peers";
 const SPEC: &str = "/eth/v1/config/spec";
+const ADD_PEER: &str = "/lighthouse/add_peer";
 
 /// The client. One connection pool shared by every call, built once at startup.
 #[derive(Clone, Debug)]
@@ -40,6 +42,7 @@ pub struct BnClient {
     version: Url,
     peers: Url,
     spec: Url,
+    add_peer: Url,
 }
 
 /// What the beacon node knows about one of its peers, cut down to what the sidecar acts on.
@@ -55,7 +58,7 @@ pub struct PeerInfo {
 #[derive(Debug, thiserror::Error)]
 pub enum BnHttpError {
     /// No HTTP response came back: the BN is down, still starting or not where the config says.
-    #[error("GET {endpoint}: {}", root_cause(.source))]
+    #[error("{endpoint}: {}", root_cause(.source))]
     Connect {
         /// The path that was requested.
         endpoint: &'static str,
@@ -64,20 +67,20 @@ pub enum BnHttpError {
     },
     /// No complete response within the client's timeout. On localhost that is a beacon node
     /// that is wedged, not one that is slow.
-    #[error("GET {endpoint}: {}", root_cause(.source))]
+    #[error("{endpoint}: {}", root_cause(.source))]
     Timeout {
         /// The path that was requested.
         endpoint: &'static str,
         /// What the HTTP client said.
         source: reqwest::Error,
     },
-    /// The BN answered outside 2xx. A 404 on `/lighthouse/peers` means a BN that is not
-    /// Lighthouse or has the endpoint off, which the caller reports differently from an
-    /// empty peer list.
+    /// The BN answered outside 2xx. A 404 on `/lighthouse/peers` or `/lighthouse/add_peer`
+    /// means a BN that is not Lighthouse or has the endpoint off, which the caller reports
+    /// differently from an empty peer list or a registration the BN rejected.
     #[error("beacon node answered HTTP {0}")]
     Status(u16),
     /// The body was not the JSON the sidecar expects.
-    #[error("GET {endpoint}: {}", root_cause(.source))]
+    #[error("{endpoint}: {}", root_cause(.source))]
     Body {
         /// The path that was requested.
         endpoint: &'static str,
@@ -85,7 +88,7 @@ pub enum BnHttpError {
         source: reqwest::Error,
     },
     /// The identity's `peer_id` is not a peer id.
-    #[error("GET {IDENTITY}: {0:?} is not a peer id")]
+    #[error("{IDENTITY}: {0:?} is not a peer id")]
     InvalidPeerId(String),
 }
 
@@ -122,6 +125,12 @@ fn map(err: reqwest::Error, endpoint: &'static str) -> BnHttpError {
 #[derive(Deserialize)]
 struct Data<T> {
     data: T,
+}
+
+/// `api_types::AdminPeer`, the body `POST /lighthouse/add_peer` takes.
+#[derive(Serialize)]
+struct AdminPeer<'a> {
+    enr: &'a str,
 }
 
 #[derive(Deserialize)]
@@ -166,6 +175,7 @@ impl BnClient {
             version: sibling(&identity_url, VERSION),
             peers: sibling(&identity_url, PEERS),
             spec: sibling(&identity_url, SPEC),
+            add_peer: sibling(&identity_url, ADD_PEER),
             identity: identity_url,
         }
     }
@@ -198,6 +208,25 @@ impl BnClient {
             .into_iter()
             .find(|peer| peer.peer_id == own)
             .map(|peer| peer.peer_info))
+    }
+
+    /// Hands the beacon node `enr` so its peer manager trusts that peer id and dials it, at
+    /// once and on every heartbeat while it is disconnected. This is what gets the sidecar in
+    /// when the beacon node's inbound cap is full (MD-01).
+    pub async fn add_peer(&self, enr: &str) -> Result<(), BnHttpError> {
+        let response = self
+            .http
+            .post(self.add_peer.clone())
+            .json(&AdminPeer { enr })
+            .send()
+            .await
+            .map_err(|err| map(err, ADD_PEER))?;
+        let status = response.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            Err(BnHttpError::Status(status.as_u16()))
+        }
     }
 
     /// The spec constants as the beacon node runs them.
@@ -550,7 +579,8 @@ mod tests {
     /// that is not Lighthouse or has the endpoint off.
     #[tokio::test]
     async fn add_peer_posts_the_enr_and_maps_404_to_status() {
-        let text = "enr:-Ku4QHqVeJ8PPICcWk1vSn_XcSkjOkNiTg6Fmii5j6vUQgvzMc9L1goFnLKgXqBJspJjIsbFXUn4";
+        let text =
+            "enr:-Ku4QHqVeJ8PPICcWk1vSn_XcSkjOkNiTg6Fmii5j6vUQgvzMc9L1goFnLKgXqBJspJjIsbFXUn4";
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/lighthouse/add_peer"))
