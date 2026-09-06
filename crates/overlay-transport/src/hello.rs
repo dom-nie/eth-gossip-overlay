@@ -709,4 +709,36 @@ mod tests {
         assert!(peer.negotiated.peer_max_frame_bytes < MAX_FRAME_BYTES);
         assert!(peer.negotiated.peer_max_batch_entries < MAX_BATCH_ENTRIES);
     }
+
+    /// A peer that finishes the TLS handshake and then says nothing holds a connection that QUIC
+    /// itself is happy with: it is idle, not broken. The timeout is the only thing that ends it,
+    /// and it counts as a timeout rather than as a peer that is not in the roster.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn acceptor_times_out_when_dialer_never_sends() {
+        let cluster = Builder::new(&[NodeKind::Bare; 2]).start().await;
+        let lower = cluster.hostname(0);
+        let acceptor = cluster.self_hello(1);
+        let (_dialling, accepting) = cluster.connected_pair(0, 1).await;
+
+        let refused = perform(
+            accepting,
+            Role::Accept,
+            &acceptor,
+            &lower,
+            Vec::new(),
+            Duration::from_millis(100),
+            &(),
+        )
+        .await
+        .expect_err("the dialler opened nothing and sent nothing");
+
+        assert!(matches!(refused, HelloError::Timeout(_)), "{refused:?}");
+        assert_eq!(
+            refused.refusal(Role::Accept),
+            AdmitError {
+                reason: FailureReason::Timeout,
+                close: CloseCode::HelloTimeout,
+            }
+        );
+    }
 }
