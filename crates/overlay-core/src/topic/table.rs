@@ -162,12 +162,25 @@ pub struct TableFull;
 mod tests {
     use super::*;
 
+    use crate::roster::Hostname;
     use crate::topic::Topic;
+    use crate::wire::Frame;
 
     const DIGEST: [u8; 4] = [0x6a, 0x95, 0xa1, 0xa9];
 
     fn column(index: u8) -> Topic {
         Topic::data_column(DIGEST, index)
+    }
+
+    fn host(name: &str) -> Hostname {
+        Hostname(name.to_owned())
+    }
+
+    fn topic_add(id: u16, index: u8) -> Frame {
+        Frame::TopicAdd {
+            id,
+            topic: column(index).to_string(),
+        }
     }
 
     #[test]
@@ -281,5 +294,26 @@ mod tests {
 
         assert_eq!(interned, 65_535);
         assert_eq!(own.snapshot().len(), 65_535);
+    }
+
+    #[test]
+    fn announcer_yields_each_new_id_exactly_once_per_peer() {
+        let mut own = OwnTopicTable::new();
+        let mut announcer = Announcer::new();
+        own.intern(&column(0)).unwrap();
+        own.intern(&column(1)).unwrap();
+
+        let first = announcer.announce(&host("a"), &own);
+
+        assert_eq!(first, [topic_add(0, 0), topic_add(1, 1)]);
+        assert!(announcer.announce(&host("a"), &own).is_empty());
+        assert_eq!(
+            announcer.announce(&host("b"), &own),
+            [topic_add(0, 0), topic_add(1, 1)]
+        );
+
+        own.intern(&column(2)).unwrap();
+
+        assert_eq!(announcer.announce(&host("a"), &own), [topic_add(2, 2)]);
     }
 }
