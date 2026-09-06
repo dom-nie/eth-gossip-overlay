@@ -1356,6 +1356,9 @@ mod tests {
             CloseCode::RosterRemoved,
             CloseCode::Shutdown,
             CloseCode::RateExceeded,
+            CloseCode::HelloTimeout,
+            CloseCode::HostnameMismatch,
+            CloseCode::ProtocolError,
         ]
         .map(|code| {
             (
@@ -1373,6 +1376,9 @@ mod tests {
                 (4, "roster removed".to_owned()),
                 (5, "shutdown".to_owned()),
                 (6, "rate exceeded".to_owned()),
+                (7, "hello timeout".to_owned()),
+                (8, "hostname mismatch".to_owned()),
+                (9, "protocol error".to_owned()),
             ]
         );
     }
