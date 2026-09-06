@@ -22,7 +22,9 @@ fn no_gossipsub() -> Arc<Mutex<prometheus_client::registry::Registry>> {
     Arc::new(Mutex::new(prometheus_client::registry::Registry::default()))
 }
 
-/// One request over a fresh connection, returned as (status line, body).
+/// One request over a fresh connection, returned as (status line, body). A broken fixture is
+/// reported by panicking, which is what the unwraps here are.
+#[allow(clippy::unwrap_used)]
 async fn request(addr: SocketAddr, path: &str) -> (String, String) {
     let mut stream = timeout(PATIENCE, TcpStream::connect(addr))
         .await

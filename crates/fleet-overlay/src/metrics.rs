@@ -27,12 +27,26 @@
 //! ticket that lands the component adds the handle and the trait that feeds it.
 
 use std::collections::BTreeMap;
+use std::convert::Infallible;
+use std::io;
+use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
 
+use hyper::body::{Body, Bytes, Frame, Incoming, SizeHint};
+use hyper::header::CONTENT_TYPE;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Request, Response, StatusCode};
 use prometheus::core::Collector;
 use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
-    Result,
+    Result, TextEncoder,
 };
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
+use tracing::{debug, warn};
 
 /// Overlay peers with a live connection, by the region and site they declared.
 pub const PEERS_CONNECTED: &str = "overlay_peers_connected";
@@ -410,5 +424,153 @@ impl Metrics {
     /// The label names `metric` was registered with, or `None` if it was not registered here.
     pub fn label_names(&self, metric: &str) -> Option<&[String]> {
         self.registered.get(metric).map(Vec::as_slice)
+    }
+}
+
+/// The scrape endpoint, bound before it returns so a port already in use is a startup failure
+/// and not a task that dies quietly. `GET /metrics` answers with the exposition of `main`.
+///
+/// D30 puts the endpoint on `127.0.0.1:7789` and the scraper on the host. Binding anywhere
+/// else exposes every hostname in the roster to whoever can reach the port, so it is warned
+/// about rather than refused: an operator with a scrape from another machine may mean it.
+pub async fn serve(
+    addr: SocketAddr,
+    main: Registry,
+    gossipsub: Arc<Mutex<prometheus_client::registry::Registry>>,
+) -> io::Result<(SocketAddr, JoinHandle<()>)> {
+    if !addr.ip().is_loopback() {
+        warn!(
+            %addr,
+            "metrics_listen is not a loopback address; the scrape endpoint is reachable from the network"
+        );
+    }
+
+    let listener = TcpListener::bind(addr).await?;
+    let bound = listener.local_addr()?;
+    let task = tokio::spawn(async move {
+        loop {
+            // A failed accept is per-connection (the peer went away between the SYN and here);
+            // the listener is still good, so the next scrape is unaffected.
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            let main = main.clone();
+            let gossipsub = Arc::clone(&gossipsub);
+            tokio::spawn(async move {
+                let service = service_fn(move |req: Request<Incoming>| {
+                    let response = respond(&req, &main, &gossipsub);
+                    async move { Ok::<_, Infallible>(response) }
+                });
+                if let Err(err) = http1::Builder::new()
+                    .serve_connection(TokioIo(stream), service)
+                    .await
+                {
+                    debug!(%err, "scrape connection ended early");
+                }
+            });
+        }
+    });
+
+    Ok((bound, task))
+}
+
+/// What Prometheus reads: the text format both encoders write, served under the 0.0.4 content
+/// type that Prometheus accepts for either.
+const TEXT_FORMAT: &str = "text/plain; version=0.0.4";
+
+fn respond(
+    _req: &Request<Incoming>,
+    main: &Registry,
+    _gossipsub: &Mutex<prometheus_client::registry::Registry>,
+) -> Response<OneShot> {
+    match TextEncoder::new().encode_to_string(&main.gather()) {
+        Ok(body) => Response::builder()
+            .header(CONTENT_TYPE, TEXT_FORMAT)
+            .body(OneShot::from(body)),
+        Err(err) => {
+            warn!(%err, "could not encode the metrics registry");
+            Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(OneShot::from(String::new()))
+        }
+    }
+    .unwrap_or_else(|_| {
+        // `Response::builder` only fails on a header this function does not build from input.
+        Response::new(OneShot::from(String::new()))
+    })
+}
+
+/// The whole response in one frame. `http-body-util`'s `Full` does this and is not a workspace
+/// dependency; the body of a scrape is one buffer either way.
+struct OneShot(Option<Bytes>);
+
+impl From<String> for OneShot {
+    fn from(body: String) -> Self {
+        Self(Some(Bytes::from(body)))
+    }
+}
+
+impl Body for OneShot {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+    ) -> Poll<Option<std::result::Result<Frame<Bytes>, Infallible>>> {
+        Poll::Ready(self.get_mut().0.take().map(|body| Ok(Frame::data(body))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// An exact hint is what gives the response a `Content-Length` instead of chunked framing,
+    /// so a scrape arrives as one body a parser can read without unwrapping chunks.
+    fn size_hint(&self) -> SizeHint {
+        let len = self.0.as_ref().map_or(0, Bytes::len);
+        SizeHint::with_exact(u64::try_from(len).unwrap_or(u64::MAX))
+    }
+}
+
+/// hyper 1 reads and writes through traits of its own and leaves the tokio bridge to
+/// `hyper-util`, which this workspace does not carry. The bridge is these two impls.
+struct TokioIo(TcpStream);
+
+impl hyper::rt::Read for TokioIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        mut cursor: hyper::rt::ReadBufCursor<'_>,
+    ) -> Poll<io::Result<()>> {
+        let mut scratch = [0u8; 8192];
+        let wanted = cursor.remaining().min(scratch.len());
+        let mut buf = tokio::io::ReadBuf::new(&mut scratch[..wanted]);
+        match tokio::io::AsyncRead::poll_read(Pin::new(&mut self.0), cx, &mut buf) {
+            Poll::Ready(Ok(())) => {
+                cursor.put_slice(buf.filled());
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl hyper::rt::Write for TokioIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        tokio::io::AsyncWrite::poll_write(Pin::new(&mut self.0), cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        tokio::io::AsyncWrite::poll_flush(Pin::new(&mut self.0), cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        tokio::io::AsyncWrite::poll_shutdown(Pin::new(&mut self.0), cx)
     }
 }
