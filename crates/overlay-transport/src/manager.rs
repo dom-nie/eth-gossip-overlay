@@ -29,7 +29,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -53,6 +53,13 @@ const RECONNECT_MIN: Duration = Duration::from_millis(500);
 /// §5.3's reconnect ceiling. A host that has been unreachable for a while is retried twice a
 /// minute, which is what keeps a fleet-wide outage from ending in a reconnect storm (§9).
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
+
+/// How many refused peers the accept loop remembers having warned about. Well above the
+/// largest roster this design targets, so a fleet never reaches it, and small enough that the
+/// set stays a few tens of kilobytes for a host whose open port is being probed from
+/// everywhere. Past the cap a refusal is still counted, and the log stays quiet rather than
+/// turning a flood of packets into a flood of lines.
+const WARNED_PEERS_MAX: usize = 1024;
 
 /// Whether this host dials `peer` or waits to be dialled by it. The lexicographically lower
 /// hostname dials (§5.3), so a pair reaches one connection with nothing to negotiate and no
@@ -349,9 +356,11 @@ struct Shared {
     events: mpsc::Sender<PeerEvent>,
     stats: Arc<dyn ManagerStats>,
     peers: Mutex<HashMap<Hostname, Slot>>,
-    /// Remote addresses already warned about on the accept loop. A rejected key has no
-    /// hostname, so the rate limit is keyed by address and pruned when one is admitted.
-    warned: Mutex<HashSet<SocketAddr>>,
+    /// Peers already warned about on the accept loop. A rejected key has no hostname, so the
+    /// rate limit is keyed by the address it came from and pruned when one is admitted. By the
+    /// address rather than the socket, because a peer that reconnects from a new ephemeral port
+    /// is the same peer and must not earn a second line or a second entry.
+    warned: Mutex<HashSet<IpAddr>>,
     stop: watch::Sender<bool>,
 }
 
@@ -366,7 +375,7 @@ impl Shared {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn warned(&self) -> MutexGuard<'_, HashSet<SocketAddr>> {
+    fn warned(&self) -> MutexGuard<'_, HashSet<IpAddr>> {
         self.warned
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -552,7 +561,7 @@ impl Shared {
     }
 
     fn warn_once(&self, remote: SocketAddr, reason: FailureReason) {
-        if self.warned().insert(remote) {
+        if first_refusal(&mut self.warned(), remote.ip()) {
             tracing::warn!(%remote, %reason, "refusing an incoming connection");
         }
     }
@@ -573,6 +582,13 @@ impl Shared {
         self.warn_once(remote, reason);
         code.close(connection);
     }
+}
+
+/// Whether a refusal from `peer` is the first the accept loop has seen, and so the one that
+/// gets a line. The set only ever grows from packets nobody has authenticated, so it stops at
+/// [`WARNED_PEERS_MAX`]: past that every refusal is counted and none is logged.
+fn first_refusal(warned: &mut HashSet<IpAddr>, peer: IpAddr) -> bool {
+    warned.len() < WARNED_PEERS_MAX && warned.insert(peer)
 }
 
 /// The connection manager: the accept loop, one task per dialled peer, and the table they share.
@@ -720,7 +736,7 @@ async fn accept_one<A: Admission>(
             return;
         }
     };
-    shared.warned().remove(&remote);
+    shared.warned().remove(&remote.ip());
     shared.check_region(&info, &entry);
     shared.adopt(info);
 
