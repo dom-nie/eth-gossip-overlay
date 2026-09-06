@@ -628,6 +628,12 @@ impl FakeBn {
                 .mount(&self.http)
                 .await;
         }
+        // The registration the link posts before every dial. Lighthouse answers an empty 200.
+        Mock::given(method("POST"))
+            .and(path("/lighthouse/add_peer"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&self.http)
+            .await;
     }
 }
 

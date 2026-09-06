@@ -723,6 +723,20 @@ mod tests {
         format!("/ip4/127.0.0.1/tcp/{port}").parse().unwrap()
     }
 
+    /// The ENRs the link has posted to `/lighthouse/add_peer`, in order.
+    async fn registered_enrs(http: &MockServer) -> Vec<String> {
+        http.received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|request| request.url.path() == "/lighthouse/add_peer")
+            .map(|request| {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                body["enr"].as_str().unwrap().to_owned()
+            })
+            .collect()
+    }
+
     async fn identity_requests(http: &MockServer) -> usize {
         http.received_requests()
             .await
@@ -1027,6 +1041,39 @@ mod tests {
         );
         assert_eq!(bn.connections().await, 1);
         assert!(harness.link.connected.load(Ordering::Relaxed));
+    }
+
+    /// `--libp2p-addresses` is read once when the beacon node starts, so a sidecar that
+    /// restarts afterwards is only dialled again if it says so itself. The link posts its ENR
+    /// before every dial, and the beacon node's peer manager dials that ENR at once and again
+    /// on every heartbeat while it is disconnected.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn link_registers_with_add_peer_before_each_dial() {
+        let bn = FakeBn::start().await;
+        let dir = tempfile::tempdir().unwrap();
+        let key = node_key(&dir);
+        let cfg = link_config(&bn);
+        let enr = key.enr(&cfg.listen_addr).unwrap();
+        let mut harness = spawn_with_key(cfg, &bn, &key);
+        wait_for(&mut harness.link.events, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+        let first = registered_enrs(bn.http()).await;
+
+        let port = bn.port();
+        let http = bn.shutdown().await;
+        wait_for(&mut harness.link.events, |e| *e == BnEvent::Disconnected).await;
+        let bn = FakeBn::start_on(port, http).await;
+        wait_for(&mut harness.link.events, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+
+        assert_eq!(first, vec![enr.clone()]);
+        let again = registered_enrs(bn.http()).await;
+        assert!(!again.is_empty(), "no registration after the restart");
+        assert!(again.iter().all(|posted| *posted == enr), "{again:?}");
     }
 
     /// The sidecar never subscribes here, so it has no mesh for the topic, and the publish
