@@ -71,3 +71,55 @@ fn pr_template_contains_baseline_dod_items() {
         "the PR template's checklist drifted from CONTRIBUTING.md"
     );
 }
+
+fn rust_files(dir: &Path, into: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        if path.is_dir() {
+            rust_files(&path, into)?;
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            into.push(path);
+        }
+    }
+    Ok(())
+}
+
+/// A `mutants::skip` with nothing saying why is the one thing the mutation-testing rule forbids:
+/// the nightly run goes quiet and a reader cannot tell whether the mutant was equivalent or the
+/// test was simply missing. The reason is a comment on the line above the attribute or on the
+/// attribute's own line, and the same goes for the `exclude_re` list that skips the mutants no
+/// attribute can reach.
+#[test]
+fn every_mutants_skip_carries_a_reason() {
+    let root = workspace_root();
+    let mut sources = Vec::new();
+    rust_files(&root.join("crates"), &mut sources).unwrap();
+    assert!(!sources.is_empty(), "no Rust sources found under crates/");
+
+    let mut bare = Vec::new();
+    for path in &sources {
+        let text = std::fs::read_to_string(path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            let is_attribute = line.contains("mutants::skip") && line.trim_start().starts_with('#');
+            let has_reason = lines[..index]
+                .last()
+                .is_some_and(|above| above.trim_start().starts_with("//"))
+                || line.contains("//");
+            if is_attribute && !has_reason {
+                bare.push(format!("{}:{}", path.display(), index + 1));
+            }
+        }
+    }
+    assert!(bare.is_empty(), "mutants::skip with no reason: {bare:?}");
+
+    let config = std::fs::read_to_string(root.join(".cargo/mutants.toml")).unwrap();
+    let introduced_by_a_comment = config
+        .split_once("exclude_re")
+        .and_then(|(before, _)| before.lines().last().map(str::trim_start))
+        .is_some_and(|above| above.starts_with('#'));
+    assert!(
+        !config.contains("exclude_re") || introduced_by_a_comment,
+        "exclude_re in .cargo/mutants.toml has no comment saying why"
+    );
+}
