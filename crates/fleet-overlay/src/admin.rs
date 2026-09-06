@@ -408,6 +408,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
+    use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
     use tokio::sync::watch;
     use tokio::task::JoinHandle;
 
@@ -422,6 +423,16 @@ mod tests {
 
     /// A config document with the roster path filled in by [`Fixture::start`].
     const CONFIG: &str = "overlay:\n  roster_file: ROSTER\ninject: true\n";
+
+    /// The next line the socket wrote, which a test fails on rather than waits for.
+    async fn answered(reader: &mut BufReader<OwnedReadHalf>) -> String {
+        let mut answer = String::new();
+        tokio::time::timeout(PATIENCE, reader.read_line(&mut answer))
+            .await
+            .expect("an answer within the timeout")
+            .unwrap();
+        answer
+    }
 
     /// A topic on one fork digest, for the subscription count.
     fn topic(name: &str) -> Topic {
@@ -551,23 +562,25 @@ mod tests {
             serde_json::from_str(&line).unwrap_or_else(|err| panic!("{line:?}: {err}"))
         }
 
-        /// The raw answer to a raw line, for the requests a well-formed [`Request`] cannot be.
-        async fn send_line(&self, line: &str) -> String {
+        /// A connection of its own, as `fleet-overlayctl` makes one, split so a test can watch
+        /// what happens to it after an answer.
+        async fn connect(&self) -> (BufReader<OwnedReadHalf>, OwnedWriteHalf) {
             let stream = tokio::time::timeout(PATIENCE, UnixStream::connect(&self.socket))
                 .await
-                .expect("the admin socket answers")
+                .expect("the admin socket accepts a connection")
                 .unwrap();
-            let (read, mut write) = stream.into_split();
+            let (read, write) = stream.into_split();
+            (BufReader::new(read), write)
+        }
+
+        /// The raw answer to a raw line, for the requests a well-formed [`Request`] cannot be.
+        async fn send_line(&self, line: &str) -> String {
+            let (mut reader, mut write) = self.connect().await;
             tokio::time::timeout(PATIENCE, write.write_all(format!("{line}\n").as_bytes()))
                 .await
                 .unwrap()
                 .unwrap();
-            let mut answer = String::new();
-            tokio::time::timeout(PATIENCE, BufReader::new(read).read_line(&mut answer))
-                .await
-                .expect("an answer within the timeout")
-                .unwrap();
-            answer
+            answered(&mut reader).await
         }
     }
 
@@ -799,5 +812,48 @@ mod tests {
         assert!(!h.inject.load(Ordering::Relaxed));
         let roster = h.send(&Request::Roster).await.roster.expect("a roster");
         assert_eq!(roster.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn malformed_json_replies_error_and_does_not_crash_the_server() {
+        let h = Fixture::start(LiveView::default()).await;
+        let (mut reader, mut write) = h.connect().await;
+
+        write.write_all(b"{not json\n").await.unwrap();
+        let answer: Response = serde_json::from_str(&answered(&mut reader).await).unwrap();
+
+        assert!(!answer.ok, "{answer:?}");
+        assert!(answer.error.is_some(), "{answer:?}");
+        // The reader is out of step with whoever wrote that, so the connection ends here.
+        let mut after = String::new();
+        let read = tokio::time::timeout(PATIENCE, reader.read_line(&mut after))
+            .await
+            .expect("the connection to be closed")
+            .unwrap();
+        assert_eq!(read, 0, "the connection stayed open: {after:?}");
+        // A command on a new connection is unaffected, which is the server still serving.
+        let next = h.send(&Request::Inject { value: None }).await;
+        assert_eq!(next.inject, Some(true));
+    }
+
+    #[tokio::test]
+    async fn oversized_line_is_rejected() {
+        let h = Fixture::start(LiveView::default()).await;
+        let mut huge = vec![b'x'; MAX_LINE_BYTES + 1];
+        huge.push(b'\n');
+        let (mut reader, mut write) = h.connect().await;
+
+        // The server stops at the bound and closes, so the tail of a line this long may never
+        // be taken: the answer is what this asserts, not that every byte was written.
+        let _ = tokio::time::timeout(PATIENCE, write.write_all(&huge))
+            .await
+            .expect("the write to finish or be refused");
+        let answer: Response = serde_json::from_str(&answered(&mut reader).await).unwrap();
+
+        assert!(!answer.ok, "{answer:?}");
+        let error = answer.error.unwrap_or_default();
+        assert!(error.contains(&MAX_LINE_BYTES.to_string()), "{error}");
+        let next = h.send(&Request::Inject { value: None }).await;
+        assert_eq!(next.inject, Some(true));
     }
 }
