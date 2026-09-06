@@ -104,6 +104,41 @@ pub struct LogHandle {
     _guard: Option<WorkerGuard>,
 }
 
+impl LogHandle {
+    /// Changes the level every layer filters on, from the next line onwards.
+    ///
+    /// A no-op while `RUST_LOG` is set, which is what an operator debugging a running sidecar
+    /// expects: the variable they exported outranks the file, and the line says so rather than
+    /// leaving them to wonder why the reload did nothing.
+    pub fn set_level(&self, level: &str) {
+        if let Some(directives) = &self.rust_log {
+            tracing::info!(
+                rust_log = directives,
+                level,
+                "RUST_LOG is set, so log.level is not applied"
+            );
+            return;
+        }
+        match EnvFilter::try_new(level) {
+            // The only way a reload fails is the subscriber being gone, and a process without
+            // its subscriber has nowhere to report that.
+            Ok(filter) => {
+                let _ = self.level.reload(filter);
+            }
+            Err(error) => tracing::warn!(%error, level, "keeping the level: it does not parse"),
+        }
+    }
+
+    /// Swaps the formatter, from the next line onwards. `Auto` resolves against the terminal
+    /// answer the subscriber was built with, because whether stdout is a terminal cannot change
+    /// under a running process.
+    pub fn set_format(&self, format: LogFormat) {
+        let _ = self
+            .format
+            .reload((self.render)(format.resolve(self.is_tty)));
+    }
+}
+
 /// The `EnvFilter` directive for a configured level. `log.level` is a closed enum, so this is
 /// the whole filter; anything per-target comes from `RUST_LOG`.
 fn directive(level: LogLevel) -> &'static str {
@@ -327,8 +362,9 @@ mod tests {
             tracing::debug!("in text now");
         });
 
-        let lines: Vec<&str> = sink.text().lines().collect();
-        assert_eq!(lines.len(), 2, "{}", sink.text());
+        let text = sink.text();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "{text}");
         assert_eq!(
             serde_json::from_str::<Value>(lines[0]).unwrap()["message"],
             "above it now"
