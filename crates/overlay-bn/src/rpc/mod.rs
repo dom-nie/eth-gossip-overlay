@@ -256,4 +256,18 @@ mod tests {
             Response::InvalidRequest
         );
     }
+
+    #[test]
+    fn ping_reply_carries_the_current_metadata_seq_number() {
+        let responder = Responder::new();
+
+        let reply = responder.respond(Protocol::PingV1, &Ping(41).encode());
+
+        assert_eq!(responder.metadata().seq_number, 0);
+        assert_eq!(reply, Response::Success(Ping(0).encode()));
+        assert_eq!(
+            responder.respond(Protocol::PingV1, &[1, 2, 3]),
+            Response::InvalidRequest
+        );
+    }
 }
