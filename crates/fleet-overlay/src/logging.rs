@@ -240,4 +240,28 @@ mod tests {
         assert_eq!(line["source"], "bn");
         assert!(line.contains_key("timestamp"), "{line:?}");
     }
+
+    #[test]
+    fn first_arrival_from_overlay_includes_origin_peer() {
+        let node = node();
+        let topic = block();
+        let origin = Hostname("bn-fra1-02".to_owned());
+
+        let sink = capture(&Log::default(), false, None, |_| {
+            emit_first_arrival(&arrival(
+                &topic,
+                &node,
+                Class::Large,
+                Source::Overlay { origin: &origin },
+            ));
+            emit_first_arrival(&arrival(&topic, &node, Class::Large, Source::Bn));
+        });
+
+        let lines = sink.objects();
+        assert_eq!(lines.len(), 2, "{}", sink.text());
+        assert_eq!(lines[0]["source"], "overlay");
+        assert_eq!(lines[0]["origin_peer"], "bn-fra1-02");
+        assert_eq!(lines[1]["source"], "bn");
+        assert!(!lines[1].contains_key("origin_peer"), "{:?}", lines[1]);
+    }
 }
