@@ -1027,4 +1027,27 @@ mod tests {
             vec![SignatureScheme::ED25519]
         );
     }
+    /// T-023 calls this on `closed()` as well as on a failed dial, and there an orderly
+    /// shutdown is the common case. A peer that says goodbye, or a connection this host
+    /// closed on purpose during a reload, is not a failed handshake and must not turn up in
+    /// `handshake_failures_total`.
+    #[test]
+    fn an_orderly_close_is_not_a_handshake_failure() {
+        let goodbye = quinn::ConnectionError::ApplicationClosed(quinn::ApplicationClose {
+            error_code: 0u32.into(),
+            reason: Default::default(),
+        });
+
+        assert_eq!(
+            HandshakeFailure::from_connection_error(Role::Dial, &goodbye),
+            None
+        );
+        assert_eq!(
+            HandshakeFailure::from_connection_error(
+                Role::Accept,
+                &quinn::ConnectionError::LocallyClosed
+            ),
+            None
+        );
+    }
 }
