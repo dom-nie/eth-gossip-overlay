@@ -81,7 +81,7 @@ fn array<const N: usize>(bytes: &[u8]) -> [u8; N] {
 
 #[cfg(test)]
 mod tests {
-    use lighthouse_network::rpc::methods::StatusMessageV1;
+    use lighthouse_network::rpc::methods::{StatusMessageV1, StatusMessageV2};
     use ssz::{Decode, Encode};
     use types::{Epoch, Hash256, Slot};
 
@@ -112,5 +112,24 @@ mod tests {
         assert_eq!(theirs.head_root, Hash256::repeat_byte(0xbb));
         assert_eq!(theirs.head_slot, Slot::new(250));
         assert_eq!(back, status());
+    }
+
+    #[test]
+    fn status_v2_round_trips_against_lighthouse_ssz() {
+        let status = Status {
+            earliest_available_slot: Some(9),
+            ..status()
+        };
+        let ours = status.encode(2);
+
+        let theirs = StatusMessageV2::from_ssz_bytes(&ours).unwrap();
+        let back = Status::decode(&theirs.as_ssz_bytes(), 2).unwrap();
+
+        assert_eq!(ours.len(), Status::V2_LEN);
+        assert_eq!(theirs.head_slot, Slot::new(250));
+        assert_eq!(theirs.earliest_available_slot, Slot::new(9));
+        assert_eq!(back, status);
+        assert!(StatusMessageV1::from_ssz_bytes(&ours).is_err());
+        assert_eq!(Status::decode(&ours, 1), Err(Malformed));
     }
 }
