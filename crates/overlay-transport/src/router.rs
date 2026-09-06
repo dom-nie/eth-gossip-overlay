@@ -4,14 +4,14 @@
 //! nothing to ask (§3). The answer is an enum and not a list of hosts so that the send path
 //! (T-032) matches on one thing however the class ends up being carried.
 //!
-//! v1 has one plan to make: the whole message to every live peer whose beacon node is
-//! subscribed to the topic (§5.4), in hostname order, this host aside, and
-//! [`RoutePlan::Nothing`] when that leaves nobody. T-072 adds the stripe a
-//! large message takes over a region and T-063 the relays a small-class batch crosses a region
-//! through, both as variants of this enum, so neither has to touch what already calls it.
+//! v1 has one plan to make: the whole message to every live peer whose beacon node is subscribed
+//! to the topic (§5.4), in hostname order and this host aside, or [`RoutePlan::Nothing`] when that
+//! leaves nobody. T-072 adds the stripe a large message takes over a region, T-063 the relays a
+//! small-class batch crosses a region through, and both are variants of this enum, so neither has
+//! to touch what already calls it.
 //!
-//! The class and the fan-out settings are what those two will read. v1 reads neither: a small
-//! message and a large one on the same topic get the same plan.
+//! `_class` and `_cfg` are the arguments those two read. v1 reads neither, so a small message and
+//! a large one on the same topic get the same plan.
 
 use overlay_core::config::Fanout;
 use overlay_core::roster::{Hostname, SelfIdentity};
