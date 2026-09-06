@@ -15,3 +15,13 @@
 # for longer than the arithmetic suggests, and a mutant that looks like a timeout has to be
 # triaged by hand. A minute of headroom is cheaper than that.
 minimum_test_timeout = 60.0
+
+# Two mutants that no attribute can reach: cargo-mutants takes `#[mutants::skip]` on an item or
+# on a few expression kinds, and neither of these is one. Both join two nibbles that occupy
+# disjoint bits, `(high << 4) | low`, where `^` and `|` compute the same byte for every input,
+# so the mutant changes nothing a test could observe. The `| with &` and `<< with >>` mutants of
+# the same two lines are caught, and the rest of both functions stays under test.
+exclude_re = [
+  "replace \\| with \\^ in decode_hex",
+  "replace \\| with \\^ in fork_digest",
+]

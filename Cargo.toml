@@ -56,6 +56,9 @@ thiserror = "2"
 rand = "0.10"
 
 proptest = "1"
+# The no-op #[mutants::skip] attribute cargo-mutants reads (T-009). A dev-dependency, not a
+# normal one: every use is inside cfg_attr(test, ...), so nothing but a test build sees it.
+mutants = "0.0.4"
 ethereum_ssz = "0.10"
 strum = "0.27"
 assert_cmd = "2"

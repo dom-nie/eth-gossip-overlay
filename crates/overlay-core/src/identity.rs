@@ -36,6 +36,10 @@ impl From<[u8; 32]> for FleetSeed {
 }
 
 impl fmt::Debug for FleetSeed {
+    // mutants::skip: an empty placeholder still keeps the seed out of the output, which is the
+    // whole reason this impl exists, so the only test that fails on the mutant is one asserting
+    // the placeholder's exact text.
+    #[cfg_attr(test, mutants::skip)]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("FleetSeed(..)")
     }

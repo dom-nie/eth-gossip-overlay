@@ -4082,6 +4082,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "mutants"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "add0ac067452ff1aca8c5002111bd6b1c895baee6e45fcbc44e0193aea17be56"
+
+[[package]]
 name = "ndk-context"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4326,6 +4332,7 @@ dependencies = [
  "bytes",
  "ed25519-dalek 3.0.0",
  "hkdf 0.13.0",
+ "mutants",
  "proptest",
  "rand 0.10.2",
  "serde",
@@ -4347,6 +4354,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "ed25519-dalek 3.0.0",
+ "mutants",
  "overlay-core",
  "quinn",
  "rustls",

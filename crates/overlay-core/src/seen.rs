@@ -116,6 +116,10 @@ impl SeenCache {
         }
     }
 
+    // mutants::skip: expire drains through this until the front is unexpired, so a pop_oldest
+    // that does not pop loops forever. The mutant hangs the suite instead of failing it, and no
+    // test can tell the difference.
+    #[cfg_attr(test, mutants::skip)]
     fn pop_oldest(&mut self) -> bool {
         match self.order.pop_front() {
             Some((_, id)) => self.seen.remove(&id),

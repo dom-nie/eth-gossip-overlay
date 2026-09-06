@@ -415,6 +415,9 @@ fn ed25519_only() -> Vec<SignatureScheme> {
 /// The acceptor authenticates its peer by key alone: no chain to walk, no roots to consult,
 /// no name to match, and `now` unread.
 impl ClientCertVerifier for AcceptorVerifier {
+    // mutants::skip: the mutant returns a leaked empty Vec, which is the same empty slice by
+    // any observation a test can make.
+    #[cfg_attr(test, mutants::skip)]
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
         &[]
     }

@@ -22,9 +22,10 @@ url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+mutants.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "test-util", "time"] }
 tracing-subscriber.workspace = true
 
 [lints]
