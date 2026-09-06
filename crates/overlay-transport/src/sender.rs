@@ -27,6 +27,12 @@ use tokio::task::AbortHandle;
 /// carries what this lane drops.
 pub const SMALL_LANE_FRAMES: usize = 600;
 
+/// Bytes one peer's large lane holds before the oldest one goes. About five blocks, or the
+/// columns of one slot for a single peer, which is as far behind as a peer that is still
+/// keeping up can be: past that the frames at the back are for a slot that has moved on and
+/// the beacon node has public gossip for them.
+pub const LARGE_LANE_BYTES: usize = 1024 * 1024;
+
 /// Why a frame never went out: the `reason` label of
 /// `peer_queue_drops_total{peer, class, reason}` (§12).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -322,7 +328,14 @@ mod tests {
 
     /// A frame numbered `n`, so a test can tell which ones survived and in what order.
     fn frame(n: usize) -> Bytes {
-        Bytes::from(n.to_le_bytes().to_vec())
+        frame_of(n, size_of::<usize>())
+    }
+
+    /// The same, of a size a byte bound notices.
+    fn frame_of(n: usize, bytes: usize) -> Bytes {
+        let mut frame = vec![0; bytes];
+        frame[..size_of::<usize>()].copy_from_slice(&n.to_le_bytes());
+        Bytes::from(frame)
     }
 
     fn number(frame: &Bytes) -> usize {
@@ -421,5 +434,26 @@ mod tests {
         })
         .await;
         assert_eq!(link.numbers(), (1..=SMALL_LANE_FRAMES).collect::<Vec<_>>());
+    }
+
+    /// The large lane is bounded by bytes rather than frames, because one block is worth six
+    /// hundred attestations, and the oldest goes first for the same reason the small lane's
+    /// does (D17).
+    #[tokio::test]
+    async fn large_lane_drops_the_oldest_when_bytes_exceed_1mib_and_counts_full() {
+        let link = Link::open();
+        let (sender, stats) = sender(&link);
+        let now = Instant::now();
+        let quarter = LARGE_LANE_BYTES / 4;
+
+        for n in 0..5 {
+            sender
+                .push(Class::Large, frame_of(n, quarter), now)
+                .unwrap();
+        }
+
+        assert_eq!(stats.queue_drops(&peer(), Class::Large, DropReason::Full), 1);
+        eventually("the lane to drain", || link.sent().len() == 4).await;
+        assert_eq!(link.numbers(), vec![1, 2, 3, 4]);
     }
 }
