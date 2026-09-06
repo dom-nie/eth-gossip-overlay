@@ -21,6 +21,7 @@ use overlay_core::wire::{
     read_frame, write_frame,
 };
 use proptest::prelude::*;
+use tokio::io::AsyncWriteExt;
 
 #[test]
 fn round_trip_each_variant_with_representative_values() {
@@ -433,4 +434,25 @@ async fn stream_helpers_round_trip_two_frames_back_to_back() {
 
         assert!(matches!(read, Ok(Read::Frame(got)) if got == frame));
     }
+}
+
+#[tokio::test]
+async fn read_frame_returns_unknown_for_an_unknown_type_and_the_next_frame_after_it() {
+    let (mut writer, mut reader) = tokio::io::duplex(64 * 1024);
+    let (_, hello) = common::samples().swap_remove(0);
+
+    let body = [200u8, 0, 1, 2, 3];
+    within(writer.write_all(&(body.len() as u32).to_le_bytes()))
+        .await
+        .expect("write");
+    within(writer.write_all(&body)).await.expect("write");
+    within(write_frame(&mut writer, &hello))
+        .await
+        .expect("write");
+
+    let first = within(read_frame(&mut reader, MAX_FRAME_BYTES)).await;
+    let second = within(read_frame(&mut reader, MAX_FRAME_BYTES)).await;
+
+    assert!(matches!(first, Ok(Read::Unknown(200))));
+    assert!(matches!(second, Ok(Read::Frame(got)) if got == hello));
 }
