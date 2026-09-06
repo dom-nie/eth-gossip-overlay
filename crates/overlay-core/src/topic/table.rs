@@ -123,7 +123,8 @@ impl OwnTopicTable {
     }
 
     /// The bindings from `start` on, in id order. Ids are handed out in order and never
-    /// reused, so an index into `topics` is also a count of what a peer has been told.
+    /// reused, so an index into `topics` is also a count of what a peer has been told, and
+    /// [`CAPACITY`] is what keeps it inside a `u16`.
     fn entries_from(&self, start: usize) -> impl Iterator<Item = (TopicId, &str)> {
         self.topics
             .iter()
@@ -268,13 +269,9 @@ impl Announcer {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     use std::collections::BTreeSet;
 
-    use crate::roster::Hostname;
-    use crate::topic::{SubscriptionSets, Topic};
-    use crate::wire::Frame;
+    use super::*;
 
     const DIGEST: [u8; 4] = [0x6a, 0x95, 0xa1, 0xa9];
 
