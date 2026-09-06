@@ -1,0 +1,17 @@
+# cargo-mutants, for the two pure crates (T-009, MD-02):
+#
+#   cargo mutants -p overlay-core
+#   cargo mutants -p overlay-transport
+#
+# No file exclusions are configured, and none are needed: cargo-mutants already skips items
+# marked `#[cfg(test)]`, `#[test]` or `#[tokio::test]`, so the `#[cfg(test)]` trees and the
+# `testutil` and `conformance` modules behind them are never mutated, and integration test
+# targets such as overlay-bn's `tests/matrix.rs` are not mutated either. `cargo mutants
+# --list-files` is the check. Code that cannot be tested from this suite carries
+# `#[cfg_attr(test, mutants::skip)]` with its reason, so the skip is visible where the code is.
+
+# The transport suite runs real QUIC handshakes on loopback. The default floor of 20 s is 600
+# times the unmutated suite, which is ample here, but a shared CI runner can stall a handshake
+# for longer than the arithmetic suggests, and a mutant that looks like a timeout has to be
+# triaged by hand. A minute of headroom is cheaper than that.
+minimum_test_timeout = 60.0
