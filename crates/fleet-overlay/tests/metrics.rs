@@ -365,7 +365,13 @@ fn lane_stats_counts_bn_events_by_class_and_control() {
     LaneStats::dropped(&metrics, Class::Large);
     LaneStats::control_dropped(&metrics);
 
-    let dropped = |class| sample(&registry, "overlay_bn_events_dropped_total", &[("class", class)]);
+    let dropped = |class| {
+        sample(
+            &registry,
+            "overlay_bn_events_dropped_total",
+            &[("class", class)],
+        )
+    };
     assert_eq!(dropped("large"), Some(1.0));
     assert_eq!(dropped("control"), Some(1.0));
     assert_eq!(dropped("small"), None);
@@ -419,7 +425,11 @@ fn publish_stats_counts_publishes_suppressions_and_errors() {
         Some(1.0)
     );
     assert_eq!(
-        sample(&registry, "overlay_rate_limited_total", &[("class", "small")]),
+        sample(
+            &registry,
+            "overlay_rate_limited_total",
+            &[("class", "small")]
+        ),
         Some(1.0)
     );
     assert_eq!(
@@ -546,7 +556,10 @@ fn manager_stats_counts_admission_and_replaces_the_peer_gauges() {
         "overlay_roster_region_mismatch_total",
         "overlay_unknown_frame_type_total",
     ] {
-        assert_eq!(sample(&registry, name, &[("peer", peer.0.as_str())]), Some(1.0));
+        assert_eq!(
+            sample(&registry, name, &[("peer", peer.0.as_str())]),
+            Some(1.0)
+        );
     }
 
     let mut counts = PeerCounts::new();
@@ -576,7 +589,10 @@ fn subs_stats_sets_the_subscription_gauge() {
 
     SubsStats::bn_subscriptions(&metrics, 96);
 
-    assert_eq!(sample(&registry, "overlay_bn_subscriptions", &[]), Some(96.0));
+    assert_eq!(
+        sample(&registry, "overlay_bn_subscriptions", &[]),
+        Some(96.0)
+    );
 }
 
 #[test]
@@ -606,8 +622,14 @@ fn traffic_stats_counts_messages_and_bytes_per_peer() {
         ("region", "eu"),
         ("site", ""),
     ];
-    assert_eq!(sample(&registry, "overlay_messages_total", labels), Some(1.0));
-    assert_eq!(sample(&registry, "overlay_bytes_total", labels), Some(1500.0));
+    assert_eq!(
+        sample(&registry, "overlay_messages_total", labels),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(&registry, "overlay_bytes_total", labels),
+        Some(1500.0)
+    );
 }
 
 #[test]
@@ -644,7 +666,10 @@ fn receive_stats_labels_the_overlay_as_the_source() {
         "overlay_unwanted_topic_total",
         "overlay_invalid_payload_total",
     ] {
-        assert_eq!(sample(&registry, name, &[("peer", peer.0.as_str())]), Some(1.0));
+        assert_eq!(
+            sample(&registry, name, &[("peer", peer.0.as_str())]),
+            Some(1.0)
+        );
     }
     assert_eq!(
         sample(
@@ -663,13 +688,17 @@ fn sender_stats_reports_queue_depth_in_both_units() {
     let peer = hostname();
 
     metrics.queue_depth(&peer, Class::Small, 12, 4096);
-    metrics.queue_drop(&peer, Class::Small, SendDropReason::PeerDown);
+    SenderStats::queue_drop(&metrics, &peer, Class::Small, SendDropReason::PeerDown);
 
     let depth = |unit| {
         sample(
             &registry,
             "overlay_peer_queue_depth",
-            &[("peer", peer.0.as_str()), ("class", "small"), ("unit", unit)],
+            &[
+                ("peer", peer.0.as_str()),
+                ("class", "small"),
+                ("unit", unit),
+            ],
         )
     };
     assert_eq!(depth("frames"), Some(12.0));

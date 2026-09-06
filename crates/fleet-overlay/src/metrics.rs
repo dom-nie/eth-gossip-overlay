@@ -39,7 +39,21 @@ use hyper::header::CONTENT_TYPE;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
+use overlay_bn::compat::CompatStats;
+use overlay_bn::inbound::InboundStats;
+use overlay_bn::publish::PublishStats;
+use overlay_core::budget::FanoutKind;
+use overlay_core::lanes::LaneStats;
+use overlay_core::pubqueue::{DropReason as QueueDropReason, QueueStats};
+use overlay_core::roster::Hostname;
+use overlay_core::seen::SeenStats;
 use overlay_core::topic::Class;
+use overlay_transport::fanout::{Direction, PeerLabels, TrafficStats};
+use overlay_transport::manager::{ManagerStats, PeerCounts};
+use overlay_transport::receive::ReceiveStats;
+use overlay_transport::sender::{DropReason as SendDropReason, SenderStats};
+use overlay_transport::subs::SubsStats;
+use overlay_transport::tls::HandshakeFailure;
 use prometheus::core::Collector;
 use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
@@ -210,10 +224,40 @@ impl Builder<'_> {
     }
 }
 
-/// Every §12 metric, registered on one `prometheus::Registry`.
+/// Every §12 metric, registered on one `prometheus::Registry`, and the implementation of every
+/// stats trait the component crates defined so none of them links `prometheus` itself.
 pub struct Metrics {
-    registered: BTreeMap<String, Vec<String>>,
+    peers_connected: IntGaugeVec,
+    peers_roster: IntGaugeVec,
+    bn_connected: IntGauge,
+    bn_subscriptions: IntGauge,
+    bn_info: IntGaugeVec,
+    bn_compat: IntGaugeVec,
+    bn_trusted: IntGaugeVec,
+    bn_events_dropped: IntCounterVec,
+    messages: IntCounterVec,
+    bytes: IntCounterVec,
+    first_seen: IntCounterVec,
+    duplicates_dropped: IntCounterVec,
+    seen_cache_evicted: IntCounterVec,
+    rate_limited: IntCounterVec,
+    publish_errors: IntCounterVec,
+    publish_queue_drops: IntCounterVec,
+    publish_suppressed: IntCounterVec,
+    invalid_payload: IntCounterVec,
+    unknown_topic_id: IntCounterVec,
+    unknown_frame_type: IntCounterVec,
+    unwanted_topic: IntCounterVec,
+    unknown_topic_kind: IntCounterVec,
+    handshake_failures: IntCounterVec,
+    roster_region_mismatch: IntCounterVec,
+    peer_auth_via_previous_seed: IntCounterVec,
+    fanout_suppressed: IntCounterVec,
+    fanout_lane_dropped: IntCounterVec,
+    peer_queue_depth: IntGaugeVec,
+    peer_queue_drops: IntCounterVec,
     reconstruct_seconds: HistogramVec,
+    registered: BTreeMap<String, Vec<String>>,
 }
 
 impl Metrics {
@@ -235,136 +279,135 @@ impl Metrics {
         ];
         let class_reason = &[LABEL_CLASS, LABEL_REASON];
         let class_source = &[LABEL_CLASS, LABEL_SOURCE];
+        let per_class = &[LABEL_CLASS];
         let per_peer = &[LABEL_PEER];
 
-        b.gauge_vec(
+        let peers_connected = b.gauge_vec(
             PEERS_CONNECTED,
             "Overlay peers with a live connection.",
             region_site,
         )?;
-        b.gauge_vec(
+        let peers_roster = b.gauge_vec(
             PEERS_ROSTER,
             "Roster hosts other than this one.",
             region_site,
         )?;
-        b.gauge(BN_CONNECTED, "1 while the beacon node link is up.")?;
-        b.gauge(BN_SUBSCRIPTIONS, "Topics the beacon node is subscribed to.")?;
-        b.gauge_vec(BN_INFO, "The beacon node's version.", &[LABEL_VERSION])?;
-        b.gauge_vec(
+        let bn_connected = b.gauge(BN_CONNECTED, "1 while the beacon node link is up.")?;
+        let bn_subscriptions =
+            b.gauge(BN_SUBSCRIPTIONS, "Topics the beacon node is subscribed to.")?;
+        let bn_info = b.gauge_vec(BN_INFO, "The beacon node's version.", &[LABEL_VERSION])?;
+        let bn_compat = b.gauge_vec(
             BN_COMPAT,
             "The beacon node's compatibility state.",
             &[LABEL_STATE],
         )?;
-        b.gauge_vec(
+        let bn_trusted = b.gauge_vec(
             BN_TRUSTED,
             "1 when the beacon node lists the sidecar as trusted.",
             &[],
         )?;
-        b.counter_vec(
+        let bn_events_dropped = b.counter_vec(
             BN_EVENTS_DROPPED_TOTAL,
             "Beacon node events dropped because their lane was full.",
-            &[LABEL_CLASS],
+            per_class,
         )?;
-        b.counter_vec(MESSAGES_TOTAL, "Messages accounted for.", peer_traffic)?;
-        b.counter_vec(BYTES_TOTAL, "Payload bytes accounted for.", peer_traffic)?;
-        b.counter_vec(
+        let messages = b.counter_vec(MESSAGES_TOTAL, "Messages accounted for.", peer_traffic)?;
+        let bytes = b.counter_vec(BYTES_TOTAL, "Payload bytes accounted for.", peer_traffic)?;
+        let first_seen = b.counter_vec(
             FIRST_SEEN_TOTAL,
             "Messages this host had not seen before.",
             class_source,
         )?;
-        b.counter_vec(
+        let duplicates_dropped = b.counter_vec(
             DUPLICATES_DROPPED_TOTAL,
             "Messages the seen cache already held.",
             class_source,
         )?;
-        b.counter_vec(
+        let seen_cache_evicted = b.counter_vec(
             SEEN_CACHE_EVICTED_TOTAL,
             "Seen-cache entries evicted before they expired.",
             &[LABEL_REASON],
         )?;
-        b.counter_vec(
-            STALE_DROPPED_TOTAL,
-            "Messages dropped for being too old to be worth handling.",
-            class_reason,
-        )?;
-        b.counter_vec(
+        let rate_limited = b.counter_vec(
             RATE_LIMITED_TOTAL,
             "Publishes the rate limit refused.",
-            &[LABEL_CLASS],
+            per_class,
         )?;
-        b.counter_vec(
+        let publish_errors = b.counter_vec(
             PUBLISH_ERRORS_TOTAL,
             "Publishes gossipsub refused.",
             class_reason,
         )?;
-        b.counter_vec(
+        let publish_queue_drops = b.counter_vec(
             PUBLISH_QUEUE_DROPS_TOTAL,
             "Entries the publish queue threw away.",
             class_reason,
         )?;
-        b.counter_vec(
+        let publish_suppressed = b.counter_vec(
             PUBLISH_SUPPRESSED_TOTAL,
             "Publishes suppressed before gossipsub saw them.",
             class_reason,
         )?;
-        b.counter_vec(
+        let invalid_payload = b.counter_vec(
             INVALID_PAYLOAD_TOTAL,
             "Payloads that failed the snappy or message-id check.",
             per_peer,
         )?;
-        b.counter_vec(
+        let unknown_topic_id = b.counter_vec(
             UNKNOWN_TOPIC_ID_TOTAL,
             "Frames carrying a topic id the peer had not announced.",
             per_peer,
         )?;
-        b.counter_vec(
+        let unknown_frame_type = b.counter_vec(
             UNKNOWN_FRAME_TYPE_TOTAL,
             "Frames of a type this release does not define.",
             per_peer,
         )?;
-        b.counter_vec(
+        let unwanted_topic = b.counter_vec(
             UNWANTED_TOPIC_TOTAL,
             "Messages on a topic outside the advertised set.",
             per_peer,
         )?;
-        b.counter_vec(
+        let unknown_topic_kind = b.counter_vec(
             UNKNOWN_TOPIC_KIND_TOTAL,
             "Messages on a topic name the sidecar does not know.",
-            &[LABEL_CLASS],
+            per_class,
         )?;
-        b.counter_vec(
+        let handshake_failures = b.counter_vec(
             HANDSHAKE_FAILURES_TOTAL,
             "Handshakes that did not produce a peer.",
             &[LABEL_ROLE, LABEL_REASON],
         )?;
-        b.counter_vec(
+        let roster_region_mismatch = b.counter_vec(
             ROSTER_REGION_MISMATCH_TOTAL,
             "Peers whose declared region disagreed with the roster.",
             per_peer,
         )?;
-        b.counter_vec(
+        let peer_auth_via_previous_seed = b.counter_vec(
             PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL,
             "Peers admitted on a key from the outgoing fleet seed.",
             per_peer,
         )?;
-        b.counter_vec(
+        let fanout_suppressed = b.counter_vec(
             FANOUT_SUPPRESSED_TOTAL,
             "Second-hop work refused by the fan-out budget.",
             &[LABEL_PEER, LABEL_KIND],
         )?;
-        b.counter(RELAYED_BATCHES_TOTAL, "Batches re-fanned as a relay.")?;
-        b.counter_vec(
+        let fanout_lane_dropped = b.counter_vec(
             FANOUT_LANE_DROPPED_TOTAL,
             "Messages dropped because the fanout lane was full.",
-            &[LABEL_CLASS],
+            per_class,
         )?;
-        b.counter(CHUNKS_SENT_TOTAL, "Chunks written to peers.")?;
-        b.counter(CHUNKS_RECEIVED_TOTAL, "Chunks read from peers.")?;
-        b.counter(
-            PARITY_USED_TOTAL,
-            "Messages that needed a parity chunk to reconstruct.",
+        let peer_queue_depth = b.gauge_vec(
+            PEER_QUEUE_DEPTH,
+            "What a peer's send lane holds now.",
+            &[LABEL_PEER, LABEL_CLASS, LABEL_UNIT],
         )?;
-        b.counter(REPAIR_REQUESTS_TOTAL, "Repair requests sent.")?;
+        let peer_queue_drops = b.counter_vec(
+            PEER_QUEUE_DROPS_TOTAL,
+            "Frames a peer's send lane threw away.",
+            &[LABEL_PEER, LABEL_CLASS, LABEL_REASON],
+        )?;
         // A millisecond to two seconds, doubling: reassembly either finishes inside a slot or
         // has already lost the race, so the resolution belongs at the fast end.
         let reconstruct_seconds = b.add(HistogramVec::new(
@@ -373,18 +416,25 @@ impl Metrics {
                 "Seconds from a message's first chunk to its reconstruction.",
             )
             .buckets(prometheus::exponential_buckets(0.001, 2.0, 12)?),
-            &[LABEL_CLASS],
+            per_class,
         )?)?;
-        b.gauge_vec(
-            PEER_QUEUE_DEPTH,
-            "What a peer's send lane holds now.",
-            &[LABEL_PEER, LABEL_CLASS, LABEL_UNIT],
-        )?;
+
+        // Registered and then let go of: their producers land in v2, v3 and T-043, and each of
+        // those tickets adds the handle it needs. The registry keeps the collector alive, so
+        // the name is on the scrape from this release on.
         b.counter_vec(
-            PEER_QUEUE_DROPS_TOTAL,
-            "Frames a peer's send lane threw away.",
-            &[LABEL_PEER, LABEL_CLASS, LABEL_REASON],
+            STALE_DROPPED_TOTAL,
+            "Messages dropped for being too old to be worth handling.",
+            class_reason,
         )?;
+        b.counter(RELAYED_BATCHES_TOTAL, "Batches re-fanned as a relay.")?;
+        b.counter(CHUNKS_SENT_TOTAL, "Chunks written to peers.")?;
+        b.counter(CHUNKS_RECEIVED_TOTAL, "Chunks read from peers.")?;
+        b.counter(
+            PARITY_USED_TOTAL,
+            "Messages that needed a parity chunk to reconstruct.",
+        )?;
+        b.counter(REPAIR_REQUESTS_TOTAL, "Repair requests sent.")?;
         b.counter_vec(
             CONFIG_RELOAD_TOTAL,
             "Configuration reloads.",
@@ -394,6 +444,7 @@ impl Metrics {
             ROSTER_RELOAD_REJECTED_TOTAL,
             "Automatic roster reloads the shrink guard refused.",
         )?;
+
         b.gauge_vec(
             BUILD_INFO,
             "Always 1; the labels carry the build.",
@@ -413,6 +464,35 @@ impl Metrics {
         ))?;
 
         Ok(Self {
+            peers_connected,
+            peers_roster,
+            bn_connected,
+            bn_subscriptions,
+            bn_info,
+            bn_compat,
+            bn_trusted,
+            bn_events_dropped,
+            messages,
+            bytes,
+            first_seen,
+            duplicates_dropped,
+            seen_cache_evicted,
+            rate_limited,
+            publish_errors,
+            publish_queue_drops,
+            publish_suppressed,
+            invalid_payload,
+            unknown_topic_id,
+            unknown_frame_type,
+            unwanted_topic,
+            unknown_topic_kind,
+            handshake_failures,
+            roster_region_mismatch,
+            peer_auth_via_previous_seed,
+            fanout_suppressed,
+            fanout_lane_dropped,
+            peer_queue_depth,
+            peer_queue_drops,
             reconstruct_seconds,
             registered: b.registered,
         })
@@ -437,6 +517,272 @@ impl Metrics {
         self.reconstruct_seconds
             .with_label_values(&[class_label(class)])
             .observe(seconds);
+    }
+
+    /// Mirrors `BnLink.connected`, the flag the link keeps and T-045 hands on.
+    pub fn set_bn_connected(&self, connected: bool) {
+        self.bn_connected.set(i64::from(connected));
+    }
+}
+
+impl SeenStats for Metrics {
+    fn evicted_for_capacity(&self, count: usize) {
+        self.seen_cache_evicted
+            .with_label_values(&[REASON_CAPACITY])
+            .inc_by(count.try_into().unwrap_or(u64::MAX));
+    }
+}
+
+impl LaneStats for Metrics {
+    fn dropped(&self, class: Class) {
+        self.bn_events_dropped
+            .with_label_values(&[class_label(class)])
+            .inc();
+    }
+
+    fn control_dropped(&self) {
+        self.bn_events_dropped
+            .with_label_values(&[CLASS_CONTROL])
+            .inc();
+    }
+}
+
+impl QueueStats for Metrics {
+    fn dropped(&self, class: Class, reason: QueueDropReason) {
+        self.publish_queue_drops
+            .with_label_values(&[class_label(class), queue_reason(reason)])
+            .inc();
+    }
+}
+
+impl PublishStats for Metrics {
+    /// `messages_total` only: the publisher counts messages, not bytes, so a `bytes_total`
+    /// series for this direction would sit at zero and read as "no traffic" on a dashboard.
+    fn published(&self, class: Class) {
+        self.messages
+            .with_label_values(&[DIRECTION_BN_OUT, class_label(class), ABSENT, ABSENT, ABSENT])
+            .inc();
+    }
+
+    fn suppressed_inject_off(&self, class: Class) {
+        self.publish_suppressed
+            .with_label_values(&[class_label(class), REASON_INJECT_OFF])
+            .inc();
+    }
+
+    fn rate_limited(&self, class: Class) {
+        self.rate_limited
+            .with_label_values(&[class_label(class)])
+            .inc();
+    }
+
+    fn error(&self, class: Class, reason: &'static str) {
+        self.publish_errors
+            .with_label_values(&[class_label(class), reason])
+            .inc();
+    }
+
+    fn queue_drop(&self, class: Class, reason: QueueDropReason) {
+        QueueStats::dropped(self, class, reason);
+    }
+}
+
+impl CompatStats for Metrics {
+    fn set_compat(&self, state: &'static str) {
+        self.bn_compat.reset();
+        self.bn_compat.with_label_values(&[state]).set(1);
+    }
+
+    fn set_info(&self, version: &str) {
+        self.bn_info.reset();
+        self.bn_info.with_label_values(&[version]).set(1);
+    }
+
+    fn set_trusted(&self, trusted: Option<bool>) {
+        // An `IntGaugeVec` with no labels rather than an `IntGauge`, because a plain gauge is
+        // exported from the moment it is registered and §12 wants no series at all while the
+        // beacon node has not said.
+        self.bn_trusted.reset();
+        if let Some(trusted) = trusted {
+            self.bn_trusted
+                .with_label_values(NO_LABELS)
+                .set(i64::from(trusted));
+        }
+    }
+}
+
+impl ManagerStats for Metrics {
+    fn handshake_failure(&self, failure: HandshakeFailure) {
+        self.handshake_failures
+            .with_label_values(&[failure.role.as_str(), failure.reason.as_str()])
+            .inc();
+    }
+
+    fn auth_via_previous_seed(&self, peer: &Hostname) {
+        self.peer_auth_via_previous_seed
+            .with_label_values(&[&peer.0])
+            .inc();
+    }
+
+    fn roster_region_mismatch(&self, peer: &Hostname) {
+        self.roster_region_mismatch
+            .with_label_values(&[&peer.0])
+            .inc();
+    }
+
+    fn unknown_frame_type(&self, peer: &Hostname) {
+        self.unknown_frame_type.with_label_values(&[&peer.0]).inc();
+    }
+
+    fn dial_started(&self, _: &Hostname) {
+        // No series in §12: a dial is only visible from the dialling side, so the count says
+        // nothing an operator can read across a pair.
+    }
+
+    fn peers_connected(&self, counts: &PeerCounts) {
+        set_peer_counts(&self.peers_connected, counts);
+    }
+
+    fn peers_roster(&self, counts: &PeerCounts) {
+        set_peer_counts(&self.peers_roster, counts);
+    }
+}
+
+impl SubsStats for Metrics {
+    fn bn_subscriptions(&self, topics: usize) {
+        self.bn_subscriptions
+            .set(topics.try_into().unwrap_or(i64::MAX));
+    }
+}
+
+impl TrafficStats for Metrics {
+    fn message(&self, direction: Direction, class: Class, peer: PeerLabels<'_>, bytes: usize) {
+        let labels = &[
+            direction.as_str(),
+            class_label(class),
+            &peer.hostname.0,
+            &peer.region.0,
+            peer.site.unwrap_or(ABSENT),
+        ];
+        self.messages.with_label_values(labels).inc();
+        self.bytes
+            .with_label_values(labels)
+            .inc_by(bytes.try_into().unwrap_or(u64::MAX));
+    }
+}
+
+impl ReceiveStats for Metrics {
+    fn unknown_topic_id(&self, peer: &Hostname) {
+        self.unknown_topic_id.with_label_values(&[&peer.0]).inc();
+    }
+
+    fn unwanted_topic(&self, peer: &Hostname) {
+        self.unwanted_topic.with_label_values(&[&peer.0]).inc();
+    }
+
+    fn invalid_payload(&self, peer: &Hostname) {
+        self.invalid_payload.with_label_values(&[&peer.0]).inc();
+    }
+
+    fn first_seen(&self, class: Class) {
+        self.first_seen
+            .with_label_values(&[class_label(class), SOURCE_OVERLAY])
+            .inc();
+    }
+
+    fn duplicate(&self, class: Class) {
+        self.duplicates_dropped
+            .with_label_values(&[class_label(class), SOURCE_OVERLAY])
+            .inc();
+    }
+
+    fn fanout_suppressed(&self, peer: &Hostname, kind: FanoutKind) {
+        self.fanout_suppressed
+            .with_label_values(&[&peer.0, kind.as_str()])
+            .inc();
+    }
+}
+
+impl SenderStats for Metrics {
+    fn queue_depth(&self, peer: &Hostname, class: Class, frames: usize, bytes: usize) {
+        let class = class_label(class);
+        self.peer_queue_depth
+            .with_label_values(&[&peer.0, class, UNIT_FRAMES])
+            .set(frames.try_into().unwrap_or(i64::MAX));
+        self.peer_queue_depth
+            .with_label_values(&[&peer.0, class, UNIT_BYTES])
+            .set(bytes.try_into().unwrap_or(i64::MAX));
+    }
+
+    fn queue_drop(&self, peer: &Hostname, class: Class, reason: SendDropReason) {
+        self.peer_queue_drops
+            .with_label_values(&[&peer.0, class_label(class), reason.as_str()])
+            .inc();
+    }
+}
+
+/// The beacon node side of the inbound path. [`InboundStats`] and [`ReceiveStats`] count the
+/// same two series and differ only in the `source` label, which is why this side is a type of
+/// its own: the trait deliberately takes no `source` argument, so the adapter binds it (T-016).
+pub struct BnInbound(
+    /// The registry the counts land on.
+    pub Arc<Metrics>,
+);
+
+impl InboundStats for BnInbound {
+    fn first_seen(&self, class: Class) {
+        self.0
+            .first_seen
+            .with_label_values(&[class_label(class), SOURCE_BN])
+            .inc();
+    }
+
+    fn duplicate(&self, class: Class) {
+        self.0
+            .duplicates_dropped
+            .with_label_values(&[class_label(class), SOURCE_BN])
+            .inc();
+    }
+
+    fn dropped_full(&self, class: Class) {
+        self.0
+            .fanout_lane_dropped
+            .with_label_values(&[class_label(class)])
+            .inc();
+    }
+
+    fn unknown_kind(&self, class: Class) {
+        self.0
+            .unknown_topic_kind
+            .with_label_values(&[class_label(class)])
+            .inc();
+    }
+}
+
+/// Replaces the gauge's series outright. A region or site that leaves the roster has to take
+/// its series with it, or the overlay-health alert keeps reading a count for hosts that are
+/// gone.
+fn set_peer_counts(gauge: &IntGaugeVec, counts: &PeerCounts) {
+    gauge.reset();
+    for ((region, site), count) in counts {
+        gauge
+            .with_label_values(&[&region.0, site.as_deref().unwrap_or(ABSENT)])
+            .set((*count).try_into().unwrap_or(i64::MAX));
+    }
+}
+
+/// The one series of a metric that has no labels at all.
+const NO_LABELS: &[&str] = &[];
+
+/// What `site`, `peer` and `region` carry when the producer has none. An empty label and an
+/// absent one are the same series to Prometheus, so this cannot collide with a real site.
+const ABSENT: &str = "";
+
+/// The `reason` label of a publish-queue drop.
+fn queue_reason(reason: QueueDropReason) -> &'static str {
+    match reason {
+        QueueDropReason::Full => "full",
+        QueueDropReason::Stale => "stale",
     }
 }
 
