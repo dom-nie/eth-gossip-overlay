@@ -574,15 +574,15 @@ fn build_swarm(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{BTreeSet, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     use lighthouse_network::rpc::StatusMessage;
-    use lighthouse_network::rpc::methods::StatusMessageV2;
+    use lighthouse_network::rpc::methods::{MetaData, StatusMessageV2};
     use overlay_core::lanes::{ClassLanes, LaneStats, SMALL_LANE_CAPACITY};
     use overlay_core::msgid;
-    use overlay_core::topic::{Class, TopicKind};
+    use overlay_core::topic::{Class, Topic, TopicKind};
     use prometheus_client::registry::Registry;
     use proptest::prelude::*;
     use proptest::strategy::ValueTree;
@@ -1134,6 +1134,34 @@ mod tests {
         (harness, answers)
     }
 
+    /// The advertised set a mirror would publish for `names`, all under one fork digest.
+    fn advertised(names: &[&str]) -> SubscriptionSets {
+        let advertised: BTreeSet<Topic> = names
+            .iter()
+            .map(|name| Topic::parse(&format!("/eth2/6a95a1a9/{name}/ssz_snappy")).unwrap())
+            .collect();
+        SubscriptionSets {
+            local: advertised.clone(),
+            advertised,
+        }
+    }
+
+    /// Pings until the sidecar answers with `seq`, so a test never races a subscription on
+    /// its way to the responder against the request that reads it.
+    async fn ping_until(bn: &FakeBn, answers: &mut mpsc::Receiver<RpcAnswer>, seq: u64) {
+        tokio::time::timeout(WAIT, async {
+            loop {
+                bn.send_ping(0).await;
+                if next_answer(answers).await == RpcAnswer::Pong(seq) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the sidecar never reported sequence number {seq}"));
+    }
+
     /// Lighthouse offers status v2 first, so that is what is negotiated, and the echo comes
     /// back through its own outbound codec: the fields it sent, `earliest_available_slot`
     /// included.
@@ -1149,6 +1177,35 @@ mod tests {
             RpcAnswer::Status(bn_status())
         );
         drop(harness);
+    }
+
+    /// A ping is answered with the sidecar's own sequence number, not the one it was sent,
+    /// and the metadata request that follows carries the bits of the advertised set.
+    /// Lighthouse offers v3 first, so v3 is what it decodes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fake_bn_ping_gets_seq_number_and_metadata_request_gets_current_bitfields() {
+        let mut bn = FakeBn::start().await;
+        let (harness, mut answers) = connected(&mut bn).await;
+
+        harness
+            .sets
+            .send(advertised(&["beacon_attestation_3", "sync_committee_1"]))
+            .unwrap();
+        ping_until(&bn, &mut answers, 1).await;
+        bn.request_metadata().await;
+
+        let answer = next_answer(&mut answers).await;
+        let RpcAnswer::MetaData(metadata) = &answer else {
+            panic!("not a metadata answer: {answer:?}");
+        };
+        let MetaData::V3(metadata) = metadata.as_ref() else {
+            panic!("not metadata v3: {metadata:?}");
+        };
+        assert_eq!(metadata.seq_number, 1);
+        assert!(metadata.attnets.get(3).unwrap());
+        assert!(!metadata.attnets.get(4).unwrap());
+        assert!(metadata.syncnets.get(1).unwrap());
+        assert_eq!(metadata.custody_group_count, 0);
     }
 
     #[test]
