@@ -30,7 +30,7 @@ use serde::Serialize;
 use serde_yaml_bw as yaml;
 use tokio::sync::watch;
 
-use crate::logging::LogHandle;
+use crate::logging::{LogHandle, directive};
 
 /// Every key that may change under a running sidecar (Appendix A), as the dotted paths of
 /// `config.yaml`. Anything else that changed is reported as needing a restart.
@@ -160,6 +160,20 @@ impl Reloader {
                     Ok(())
                 }),
             ),
+            ("log.level", {
+                let log = deps.log.clone();
+                Box::new(move |cfg: &Config| {
+                    log.set_level(directive(cfg.log.level));
+                    Ok(())
+                })
+            }),
+            ("log.format", {
+                let log = deps.log;
+                Box::new(move |cfg: &Config| {
+                    log.set_format(cfg.log.format);
+                    Ok(())
+                })
+            }),
             (
                 "overlay.fleet_seed_previous_file",
                 Box::new(move |cfg: &Config| {

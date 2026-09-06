@@ -141,7 +141,7 @@ impl LogHandle {
 
 /// The `EnvFilter` directive for a configured level. `log.level` is a closed enum, so this is
 /// the whole filter; anything per-target comes from `RUST_LOG`.
-fn directive(level: LogLevel) -> &'static str {
+pub(crate) fn directive(level: LogLevel) -> &'static str {
     match level {
         LogLevel::Trace => "trace",
         LogLevel::Debug => "debug",
