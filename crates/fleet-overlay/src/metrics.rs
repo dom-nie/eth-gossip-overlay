@@ -55,6 +55,8 @@ use overlay_transport::receive::ReceiveStats;
 use overlay_transport::sender::{DropReason as SendDropReason, SenderStats};
 use overlay_transport::subs::SubsStats;
 use overlay_transport::tls::HandshakeFailure;
+
+use crate::reload::{ReloadError, ReloadReport, ReloadStats};
 use prometheus::core::Collector;
 use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
@@ -184,6 +186,10 @@ pub const DIRECTION_BN_OUT: &str = "bn_out";
 pub const UNIT_FRAMES: &str = "frames";
 /// The lane counts payload bytes.
 pub const UNIT_BYTES: &str = "bytes";
+/// The reload ran to the end.
+pub const OUTCOME_OK: &str = "ok";
+/// The reload kept some or all of the previous values.
+pub const OUTCOME_ERROR: &str = "error";
 /// A seen-cache entry went to stay within the bound, not because it expired.
 pub const REASON_CAPACITY: &str = "capacity";
 /// The `inject: false` kill switch.
@@ -257,6 +263,8 @@ pub struct Metrics {
     fanout_lane_dropped: IntCounterVec,
     peer_queue_depth: IntGaugeVec,
     peer_queue_drops: IntCounterVec,
+    config_reload: IntCounterVec,
+    roster_reload_rejected: IntCounter,
     reconstruct_seconds: HistogramVec,
     registered: BTreeMap<String, Vec<String>>,
 }
@@ -436,12 +444,12 @@ impl Metrics {
             "Messages that needed a parity chunk to reconstruct.",
         )?;
         b.counter(REPAIR_REQUESTS_TOTAL, "Repair requests sent.")?;
-        b.counter_vec(
+        let config_reload = b.counter_vec(
             CONFIG_RELOAD_TOTAL,
             "Configuration reloads.",
             &[LABEL_OUTCOME],
         )?;
-        b.counter(
+        let roster_reload_rejected = b.counter(
             ROSTER_RELOAD_REJECTED_TOTAL,
             "Automatic roster reloads the shrink guard refused.",
         )?;
@@ -495,6 +503,8 @@ impl Metrics {
             peer_queue_depth,
             peer_queue_drops,
             reconstruct_seconds,
+            config_reload,
+            roster_reload_rejected,
             registered: b.registered,
         })
     }
@@ -523,6 +533,22 @@ impl Metrics {
     /// Mirrors `BnLink.connected`, the flag the link keeps and T-045 hands on.
     pub fn set_bn_connected(&self, connected: bool) {
         self.bn_connected.set(i64::from(connected));
+    }
+}
+
+impl ReloadStats for Metrics {
+    /// One reload, one count. A roster the shrink guard refused is an error like any other
+    /// reload error and is also counted on its own, because the alert on it is about the
+    /// discovery tool rather than about the sidecar.
+    fn reloaded(&self, report: &ReloadReport) {
+        let outcome = match report.error {
+            None => OUTCOME_OK,
+            Some(_) => OUTCOME_ERROR,
+        };
+        self.config_reload.with_label_values(&[outcome]).inc();
+        if matches!(report.error, Some(ReloadError::RosterShrinkRejected { .. })) {
+            self.roster_reload_rejected.inc();
+        }
     }
 }
 

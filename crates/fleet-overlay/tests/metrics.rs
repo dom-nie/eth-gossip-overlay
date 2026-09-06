@@ -726,9 +726,6 @@ fn sender_stats_reports_queue_depth_in_both_units() {
     );
 }
 
-/// The process collector is Linux-only in the prometheus crate, so this is the one test the
-/// workspace's other platforms skip rather than fake.
-#[cfg(target_os = "linux")]
 /// A report of one reload, which is all [`ReloadStats`] is given.
 fn report(error: Option<ReloadError>) -> ReloadReport {
     ReloadReport {
@@ -768,6 +765,9 @@ fn reload_stats_counts_the_outcome_and_a_rejected_roster() {
     );
 }
 
+/// The process collector is Linux-only in the prometheus crate, so this is the one test the
+/// workspace's other platforms skip rather than fake.
+#[cfg(target_os = "linux")]
 #[test]
 fn process_collector_exports_resident_memory() {
     let registry = Registry::new();
