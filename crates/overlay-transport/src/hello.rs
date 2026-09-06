@@ -430,7 +430,7 @@ mod tests {
     use overlay_core::topic::Topic;
 
     use super::*;
-    use crate::testutil::{Builder, NodeKind, REGION, WAIT};
+    use crate::testutil::{Builder, CountingStats, NodeKind, REGION, WAIT};
 
     /// A fork digest, as a topic string carries one.
     const DIGEST: [u8; 4] = [0x6a, 0x95, 0xa1, 0xa9];
@@ -783,5 +783,38 @@ mod tests {
                 close: CloseCode::ProtocolError,
             }
         );
+    }
+
+    /// The skip rule (D10) holds on the control stream too, including before HELLO: a release
+    /// that adds a frame type can send it first and still pair with this one. The counter is
+    /// what tells an operator it is happening.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_frame_type_before_hello_is_skipped_and_counted() {
+        let cluster = Builder::new(&[NodeKind::Bare; 2]).start().await;
+        let lower = cluster.hostname(0);
+        let acceptor = cluster.self_hello(1);
+        let stats = CountingStats::default();
+        let (dialling, accepting) = cluster.connected_pair(0, 1).await;
+        let (mut send, _recv) = dialling.open_bi().await.unwrap();
+        // Type 200 with a body nothing here can read, then the HELLO behind it.
+        write_raw(&mut send, &[200, 0, 1, 2, 3]).await;
+        write_frame(&mut send, &Frame::Hello(peer_hello(&lower)))
+            .await
+            .unwrap();
+
+        let peer = perform(
+            accepting,
+            Role::Accept,
+            &acceptor,
+            &lower,
+            Vec::new(),
+            WAIT,
+            &stats,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(peer.hostname, lower);
+        assert_eq!(stats.unknown_frame_types(&lower), 1);
     }
 }
