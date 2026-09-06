@@ -48,6 +48,21 @@ enum Command {
         /// What to do with the kill switch.
         action: InjectAction,
     },
+    /// Print the roster the sidecar is using, or make it read the files again.
+    Roster {
+        #[command(subcommand)]
+        action: Option<RosterAction>,
+    },
+}
+
+/// What a `roster` command does.
+#[derive(Subcommand)]
+enum RosterAction {
+    /// Re-read config.yaml and roster.yaml, exactly as SIGHUP does.
+    ///
+    /// A manual reload applies whatever the files say, a roster that halves the fleet
+    /// included, which is what the automatic reload refuses and a human confirms here.
+    Reload,
 }
 
 /// What an `inject` command does to the flag.
@@ -86,6 +101,10 @@ fn main() -> ExitCode {
         Command::Inject { action } => Request::Inject {
             value: action.value(),
         },
+        Command::Roster { action: None } => Request::Roster,
+        Command::Roster {
+            action: Some(RosterAction::Reload),
+        } => Request::Reload,
     };
     match ask(&cli.socket, &request) {
         Ok(response) => {
@@ -128,11 +147,33 @@ fn render(response: &Response) {
     if let Some(inject) = response.inject {
         println!("inject {}", if inject { "on" } else { "off" });
     }
+    if let Some(report) = &response.reload {
+        println!("applied: {}", names(&report.applied));
+        println!("restart required: {}", names(&report.restart_required));
+        if let Some(error) = &report.error {
+            eprintln!("fleet-overlayctl: {error}");
+        }
+    }
 }
 
-/// 0 when the command took effect, 1 when the sidecar says it did not.
+/// A report's key list as one line.
+fn names(keys: &[String]) -> String {
+    if keys.is_empty() {
+        "none".to_owned()
+    } else {
+        keys.join(", ")
+    }
+}
+
+/// 0 when the command took effect, 1 when the sidecar says it did not. A reload that ran and
+/// kept the previous values is one of those: the sidecar answered, and what the operator pushed
+/// is not in force.
 fn exit_code(response: &Response) -> ExitCode {
-    if response.ok {
+    let reload_failed = response
+        .reload
+        .as_ref()
+        .is_some_and(|report| report.error.is_some());
+    if response.ok && !reload_failed {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(DAEMON_ERROR)
