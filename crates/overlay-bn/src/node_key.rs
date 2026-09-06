@@ -8,8 +8,8 @@ use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::path::Path;
 
-use enr::Enr;
 use enr::ed25519_dalek::SigningKey;
+use enr::{CombinedKey, Enr};
 pub use libp2p::PeerId;
 use libp2p::identity::{Keypair, ed25519};
 use libp2p::multiaddr::{Multiaddr, Protocol};
@@ -87,8 +87,8 @@ impl NodeKey {
             IpAddr::V6(_) => builder.tcp6(port),
         };
         builder
-            .build(&key)
-            .map(|record: Enr<SigningKey>| record.to_base64())
+            .build(&CombinedKey::Ed25519(key))
+            .map(|record: Enr<CombinedKey>| record.to_base64())
             .map_err(EnrError::Refused)
     }
 }
@@ -160,11 +160,15 @@ mod tests {
             .unwrap();
 
         assert!(text.starts_with("enr:"), "{text}");
-        let record: enr::Enr<enr::ed25519_dalek::SigningKey> = text.parse().unwrap();
+        // Parsed as Lighthouse parses it, so the signature is checked by the same decoder.
+        let record: Enr<CombinedKey> = text.parse().unwrap();
         assert_eq!(record.ip4(), Some(std::net::Ipv4Addr::LOCALHOST));
         assert_eq!(record.tcp4(), Some(7787));
+        let enr::CombinedPublicKey::Ed25519(key_in_record) = record.public_key() else {
+            panic!("the record is not signed by an Ed25519 key");
+        };
         let public =
-            libp2p::identity::ed25519::PublicKey::try_from_bytes(&record.public_key().to_bytes())
+            libp2p::identity::ed25519::PublicKey::try_from_bytes(&key_in_record.to_bytes())
                 .unwrap();
         assert_eq!(PeerId::from_public_key(&public.into()), key.peer_id());
     }

@@ -19,8 +19,11 @@ lighthouse_network = { git = "https://github.com/sigp/lighthouse.git", tag = "v8
 types = { git = "https://github.com/sigp/lighthouse.git", tag = "v8.2.2", features = ["saturating-arith"] }
 libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", default-features = false, features = ["tcp", "noise", "yamux", "identify", "gossipsub", "gossipsub-partial-messages", "request-response", "metrics", "tokio", "macros"] }
 # The version Lighthouse's discv5 already resolves to, so the sidecar signs the records the
-# beacon node parses. Only the ed25519 signing scheme is needed; k256 and serde stay off.
-enr = { version = "0.13", default-features = false, features = ["ed25519"] }
+# beacon node parses. The sidecar only signs with ed25519, but `CombinedKey` and the
+# `ed25519_dalek` re-export that names the dalek version the crate signs with are both behind
+# `all(ed25519, k256)`, so k256 comes along. Without it the crate compiles and neither type can
+# be named; a test build hides that, because Lighthouse's own discv5 turns k256 on.
+enr = { version = "0.13", default-features = false, features = ["ed25519", "k256"] }
 
 tokio = "1"
 quinn = "0.11"
