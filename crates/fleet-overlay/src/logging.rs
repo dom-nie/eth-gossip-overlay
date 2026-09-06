@@ -295,4 +295,25 @@ mod tests {
         assert_eq!(lines[1]["target"], "overlay::event");
         assert_ne!(lines[0]["target"], lines[1]["target"]);
     }
+
+    #[test]
+    fn auto_format_is_json_off_a_tty_and_text_on_one() {
+        let piped = capture(&Log::default(), false, None, |_| {
+            tracing::info!("the overlay is up");
+        });
+        let terminal = capture(&Log::default(), true, None, |_| {
+            tracing::info!("the overlay is up");
+        });
+
+        assert_eq!(
+            serde_json::from_str::<Value>(piped.text().trim()).unwrap()["message"],
+            "the overlay is up"
+        );
+        assert!(
+            serde_json::from_str::<Value>(terminal.text().trim()).is_err(),
+            "{}",
+            terminal.text()
+        );
+        assert!(terminal.text().contains("the overlay is up"));
+    }
 }
