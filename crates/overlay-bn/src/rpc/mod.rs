@@ -642,6 +642,27 @@ mod tests {
         );
     }
 
+    /// A body longer than anything the sidecar serves, on a protocol it does not serve: a
+    /// by-root request of three roots is 96 bytes and routine. The protocol decides, not the
+    /// body, because `ResourceUnavailable` on a by-root protocol carries no peer action while
+    /// `InvalidRequest` is a `PeerAction::LowToleranceError`
+    /// (`RPCError::ErrorResponse` in `beacon_node/lighthouse_network/src/peer_manager/mod.rs`).
+    #[test]
+    fn an_unserved_protocol_is_unavailable_whatever_its_body_was() {
+        let id = StreamProtocol::new("/eth2/beacon_chain/req/blob_sidecars_by_root/1/ssz_snappy");
+        let long = read(&id, &request(&[0xab; 96]));
+
+        assert_eq!(long, (Protocol::Unsupported, Err(Malformed)));
+        assert_eq!(
+            Responder::new().answer(&long),
+            Response::ResourceUnavailable
+        );
+        assert_eq!(
+            Responder::new().answer(&(Protocol::PingV1, Err(Malformed))),
+            Response::InvalidRequest
+        );
+    }
+
     /// A well-formed BlocksByRange v2 request (start slot, count, step) on a registered
     /// protocol the sidecar does not serve.
     #[test]
