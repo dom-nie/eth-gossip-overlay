@@ -448,9 +448,20 @@ impl Link {
     /// Anyone else is closed at once. The listen port is on localhost, so this is a
     /// misconfiguration rather than an attack, but a stray peer must not become the explicit
     /// peer or be mistaken for the beacon node going away later.
+    ///
+    /// A second connection to the beacon node, which is what both sides dialling at once
+    /// leaves, is closed and the older one kept: the older is the one gossipsub holds mesh and
+    /// explicit-peer state on and the connect probe belongs to, and keeping it means no window
+    /// where the link has no connection at all. The beacon node's own
+    /// `max_established_per_peer(1)` settles it the same way from its side.
     fn on_connected(&mut self, peer_id: PeerId, connection_id: ConnectionId) {
         if self.known_bn != Some(peer_id) {
             tracing::warn!(%peer_id, "closing a connection from a peer that is not the beacon node");
+            self.swarm.close_connection(connection_id);
+            return;
+        }
+        if self.bn_peer == Some(peer_id) {
+            tracing::debug!(%peer_id, "closing the newer of two connections to the beacon node");
             self.swarm.close_connection(connection_id);
             return;
         }
