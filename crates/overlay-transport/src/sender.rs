@@ -659,4 +659,22 @@ mod tests {
         .await;
         assert!(stalled_link.sent().is_empty());
     }
+
+    /// Large before small whenever both are waiting (D17): a block queued behind a second of
+    /// attestations arrives after the slot it belongs to, and the attestations lose nothing by
+    /// going second.
+    #[tokio::test]
+    async fn large_lane_is_drained_before_small_when_both_are_pending() {
+        let link = Link::stalled();
+        let (sender, _) = sender(&link);
+        let now = Instant::now();
+
+        sender.push(Class::Small, frame(0), now).unwrap();
+        sender.push(Class::Large, frame(1), now).unwrap();
+        sender.push(Class::Small, frame(2), now).unwrap();
+        link.release();
+
+        eventually("all three to go out", || link.sent().len() == 3).await;
+        assert_eq!(link.numbers(), vec![1, 0, 2]);
+    }
 }
