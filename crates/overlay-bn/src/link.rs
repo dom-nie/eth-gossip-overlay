@@ -636,7 +636,7 @@ mod tests {
     use crate::node_key::NodeKey;
     use crate::spec::spec_watch;
     use crate::testutil::{
-        FakeBn, FakeBnEvent, IDLE_TIMEOUT, RpcAnswer, link_config, node_key, ok_json,
+        FakeBn, FakeBnEvent, IDLE_TIMEOUT, LOG, RpcAnswer, link_config, node_key, ok_json,
     };
 
     /// Long enough for a dial, a noise handshake and a gossipsub exchange on a loaded CI box,
@@ -917,6 +917,42 @@ mod tests {
             recv_from(&mut harness.lanes, Class::Large).await.id,
             block_id
         );
+    }
+
+    /// The listen port faces localhost, but anything that reaches it and is not the beacon
+    /// node gets nothing: no gossip session, no explicit peer, no effect on the link's own
+    /// connection state.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn inbound_from_an_unknown_peer_is_closed() {
+        let log = &*LOG;
+        let bn = FakeBn::start().await;
+        let cfg = LinkConfig {
+            libp2p_addr: closed_port(),
+            ..link_config(&bn)
+        };
+        let mut harness = spawn(cfg, &bn);
+        let addr = listen_addr(&harness).await;
+        identity_requests_reach(&bn, 2).await;
+        let mut stray = FakeBn::start().await;
+
+        stray.dial(addr).await;
+
+        let sidecar = harness.peer_id;
+        stray
+            .wait_for(|e| matches!(e, FakeBnEvent::Disconnected(peer) if *peer == sidecar))
+            .await;
+        let event =
+            tokio::time::timeout(Duration::from_millis(200), harness.link.events.recv()).await;
+        assert!(
+            event.is_err(),
+            "the stray peer produced an event: {event:?}"
+        );
+        assert!(!harness.link.connected.load(Ordering::Relaxed));
+        let id = stray.peer_id().to_string();
+        let text = log.text();
+        let lines: Vec<&str> = text.lines().filter(|line| line.contains(&id)).collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(lines[0].contains("WARN"), "{}", lines[0]);
     }
 
     /// The sidecar never subscribes here, so it has no mesh for the topic, and the publish
