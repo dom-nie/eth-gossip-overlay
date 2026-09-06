@@ -18,7 +18,7 @@ use overlay_core::protocol::{MAX_BATCH_ENTRIES, MAX_FRAME_BYTES};
 use overlay_core::wire::{
     BatchEntry, BatchFlags, Chunk, ChunkFlags, DecodeError, Frame, FrameType, Hello,
     MAX_MISSING_INDICES, MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, Read, ReadError, RepairReq,
-    RepairResp, read_frame, write_frame,
+    RepairResp, decode_datagram, encode_datagram, read_frame, write_frame,
 };
 use proptest::prelude::*;
 use tokio::io::AsyncWriteExt;
@@ -467,4 +467,27 @@ async fn read_frame_rejects_length_prefix_above_maximum_without_allocating() {
     let read = within(read_frame(&mut reader, MAX_FRAME_BYTES)).await;
 
     assert!(matches!(read, Err(ReadError::TooLarge(u32::MAX))));
+}
+
+#[test]
+fn datagram_carries_exactly_one_frame() {
+    for (name, frame) in common::samples() {
+        let datagram = encode_datagram(&frame);
+
+        assert_eq!(decode_datagram(datagram.clone()), Ok(frame), "{name}");
+
+        let mut padded = BytesMut::from(&datagram[..]);
+        padded.put_u8(0);
+
+        assert_eq!(
+            decode_datagram(padded.freeze()),
+            Err(DecodeError::Invalid("trailing")),
+            "{name} with a byte after it"
+        );
+    }
+
+    assert_eq!(
+        decode_datagram(Bytes::from_static(&[9, 0])),
+        Err(DecodeError::UnknownType(9))
+    );
 }
