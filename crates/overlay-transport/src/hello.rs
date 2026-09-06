@@ -634,4 +634,45 @@ mod tests {
         assert!(peer.connection.close_reason().is_none());
         assert!(dialling.close_reason().is_none());
     }
+
+    /// A peer several releases ahead pairs with this one instead of refusing it: the minor drops
+    /// to the lower of the two and the bits this release has never heard of are gone after the
+    /// AND, so nothing here can be told to use them (D29).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn negotiated_minor_is_the_minimum_and_features_the_intersection() {
+        use overlay_core::protocol::features;
+
+        let cluster = Builder::new(&[NodeKind::Bare; 2]).start().await;
+        let lower = cluster.hostname(0);
+        let acceptor = cluster.self_hello(1);
+        let (dialling, accepting) = cluster.connected_pair(0, 1).await;
+        let (mut send, _recv) = dialling.open_bi().await.unwrap();
+        let ahead = Hello {
+            minor: 7,
+            features: features::DATAGRAM_BATCHES | features::STRIPING | features::REPAIR,
+            ..peer_hello(&lower)
+        };
+        write_frame(&mut send, &Frame::Hello(ahead)).await.unwrap();
+
+        let peer = perform(
+            accepting,
+            Role::Accept,
+            &acceptor,
+            &lower,
+            Vec::new(),
+            WAIT,
+            &(),
+        )
+        .await
+        .unwrap();
+
+        // The literals rather than the constants: this release advertises minor 0 and no
+        // features, and a test that reads the answer out of the same constants it is checking
+        // would still pass if the negotiation stopped happening.
+        assert_eq!(peer.negotiated.minor, 0);
+        assert_eq!(peer.negotiated.features, 0);
+        assert!(!peer.negotiated.allows(features::STRIPING));
+        assert!(!peer.negotiated.allows(features::DATAGRAM_BATCHES));
+        assert!(!peer.negotiated.allows(features::REPAIR));
+    }
 }
