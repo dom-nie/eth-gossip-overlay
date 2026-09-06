@@ -1284,6 +1284,131 @@ mod tests {
         assert_eq!(ordered, expected);
     }
 
+    /// A peer's state as its `SUBS` and `TOPIC_ADD`s would have left it.
+    fn peer_state(bindings: &[(u16, &Topic)], bits: &[u16]) -> PeerState {
+        let mut table = PeerTopicTable::new();
+        for (id, topic) in bindings {
+            table
+                .apply_add(TopicId::new(*id), &topic.to_string())
+                .unwrap();
+        }
+        let mut bitmap = Bitmap::new();
+        for bit in bits {
+            bitmap.set(TopicId::new(*bit));
+        }
+        PeerState { table, bitmap }
+    }
+
+    /// A live view of peers a test has decided the subscriptions of. They share one connection,
+    /// because nothing about a subscription question reads it.
+    fn view(connection: &quinn::Connection, peers: Vec<(Hostname, PeerState)>) -> LiveView {
+        LiveView(
+            peers
+                .into_iter()
+                .map(|(hostname, state)| {
+                    (
+                        hostname,
+                        LivePeer {
+                            region: Region(REGION.to_owned()),
+                            site: None,
+                            rtt: Duration::ZERO,
+                            instance_id: 0,
+                            software_version: "test".to_owned(),
+                            negotiated: Negotiated {
+                                minor: 0,
+                                features: 0,
+                                peer_max_frame_bytes: 0,
+                                peer_max_batch_entries: 0,
+                            },
+                            connection: connection.clone(),
+                            state: Arc::new(Mutex::new(state)),
+                        },
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    fn topic(name: &str) -> Topic {
+        Topic::parse(&format!("/eth2/6a95a1a9/{name}/ssz_snappy")).unwrap()
+    }
+
+    /// The two-step lookup D13 rests on. The bit is at the id the *peer* gave the topic, which
+    /// has nothing to do with the id this host gave it: both hosts hand out ids in the order
+    /// their own beacon node happened to subscribe, and neither ever reads the other's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn subscribed_resolves_through_the_peers_own_table() {
+        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare]).start().await;
+        let (connection, _accepted) = cluster.connected_pair(0, 1).await;
+        let (peer, wanted) = (cluster.hostname(0), topic("beacon_block"));
+
+        let live = view(
+            &connection,
+            vec![(peer.clone(), peer_state(&[(7, &wanted)], &[7]))],
+        );
+
+        assert!(live.subscribed(&peer, &wanted));
+    }
+
+    /// A bit set for an id the peer has not announced says nothing about the topic this host is
+    /// asking about, so the answer is no. The peer is the only one that can bind that id, and
+    /// until it does the frame would go out addressed to a topic nobody named.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn topic_unknown_to_peer_table_is_not_subscribed() {
+        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare]).start().await;
+        let (connection, _accepted) = cluster.connected_pair(0, 1).await;
+        let (peer, wanted) = (cluster.hostname(0), topic("beacon_block"));
+
+        let live = view(&connection, vec![(peer.clone(), peer_state(&[], &[7]))]);
+
+        assert!(!live.subscribed(&peer, &wanted));
+    }
+
+    /// What the router asks: everyone who wants this topic, and nobody else. A peer that
+    /// announced the topic without setting its bit is a beacon node that stopped subscribing,
+    /// and sending to it would waste a copy on a host that drops it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn subscribers_returns_only_peers_with_the_bit_set() {
+        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare]).start().await;
+        let (connection, _accepted) = cluster.connected_pair(0, 1).await;
+        let wanted = topic("beacon_block");
+        let (subscriber, silent, elsewhere) = (host("bn-a"), host("bn-b"), host("bn-c"));
+
+        let live = view(
+            &connection,
+            vec![
+                (subscriber.clone(), peer_state(&[(1, &wanted)], &[1])),
+                (silent.clone(), peer_state(&[(1, &wanted)], &[])),
+                (
+                    elsewhere.clone(),
+                    peer_state(&[(1, &topic("beacon_attestation_3"))], &[1]),
+                ),
+            ],
+        );
+
+        assert_eq!(live.subscribers(&wanted), vec![&subscriber]);
+    }
+
+    /// A subscriber that goes away stops being one the moment it leaves the live set, with
+    /// nothing to unsubscribe: the view is a snapshot of who is connected (§5.3), so a host
+    /// that died takes its bitmap with it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_down_removes_it_from_subscribers() {
+        let mut cluster = Builder::new(&[NodeKind::Manager, NodeKind::Vanishing])
+            .start()
+            .await;
+        let (peer, wanted) = (cluster.hostname(1), topic("beacon_block"));
+        assert!(matches!(cluster.next_event(0).await, PeerEvent::Up(_)));
+        *crate::subs::state(&cluster.live(0).get(&peer).unwrap().state) =
+            peer_state(&[(4, &wanted)], &[4]);
+        assert_eq!(cluster.live(0).subscribers(&wanted), vec![&peer]);
+
+        cluster.vanish(1);
+
+        assert!(matches!(cluster.next_event(0).await, PeerEvent::Down(_, _)));
+        assert!(cluster.live(0).subscribers(&wanted).is_empty());
+    }
+
     /// A roster host presenting a key the seed does not derive for it, which is what a
     /// mistyped address or an impostor looks like from the dial side. Every attempt is counted
     /// so the rate can be alerted on, and one line is logged for the whole backoff cycle so a
