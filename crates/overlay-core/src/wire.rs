@@ -339,8 +339,9 @@ pub enum DecodeError {
 
 impl Frame {
     /// A whole message in the chunk layout: one data chunk, no parity, `total_len` the payload's
-    /// own length. The payload must be within [`MAX_PAYLOAD_BYTES`], which is what the beacon node
-    /// already enforced on it.
+    /// own length. Infallible by design, so the caller owns the bound: the payload has to be
+    /// within [`MAX_PAYLOAD_BYTES`], which the beacon node already enforced on it, and a debug
+    /// build stops on one that is not rather than build a chunk whose declared length wrapped.
     pub fn whole_message(msg_id: MessageId, topic_id: u16, payload: Bytes) -> Self {
         Self::Chunk {
             flags: ChunkFlags::NONE,
@@ -350,7 +351,7 @@ impl Frame {
                 k: 1,
                 m: 0,
                 index: 0,
-                total_len: payload.len() as u32,
+                total_len: len32(payload.len()),
                 data: payload,
             },
         }
@@ -377,8 +378,13 @@ impl Frame {
         }
     }
 
-    /// Appends the frame, header and body, with no length prefix. Fields have to be within the
-    /// limits this module documents; a value built past them encodes a length the decoder refuses.
+    /// Appends the frame, header and body, with no length prefix.
+    ///
+    /// Encoding cannot fail, so the caller owns the limits and [`Frame::decode`] is where they are
+    /// enforced: a count or a length past what this module documents encodes as written and the
+    /// peer refuses it. A value past the *field* that carries it is different, and is a caller
+    /// bug: it would wrap into a smaller one and produce a frame that decodes cleanly with
+    /// something else in it. The debug assertions on every length cast stop a debug build there.
     pub fn encode(&self, out: &mut BytesMut) {
         out.put_u8(self.frame_type().id());
         out.put_u8(self.flag_bits());
@@ -393,14 +399,14 @@ impl Frame {
                 put_str16(out, &hello.region);
                 put_str16(out, &hello.site);
                 put_str16(out, &hello.software_version);
-                out.put_u16_le(hello.topics.len() as u16);
+                out.put_u16_le(len16(hello.topics.len()));
                 for (id, topic) in &hello.topics {
                     out.put_u16_le(*id);
                     put_str16(out, topic);
                 }
             }
             Self::Subs { bitmap } => {
-                out.put_u16_le(bitmap.len() as u16);
+                out.put_u16_le(len16(bitmap.len()));
                 out.put_slice(bitmap);
             }
             Self::TopicAdd { id, topic } => {
@@ -408,10 +414,10 @@ impl Frame {
                 put_str16(out, topic);
             }
             Self::Batch { entries, .. } => {
-                out.put_u16_le(entries.len() as u16);
+                out.put_u16_le(len16(entries.len()));
                 for entry in entries {
                     out.put_u16_le(entry.topic_id);
-                    out.put_u16_le(entry.payload.len() as u16);
+                    out.put_u16_le(len16(entry.payload.len()));
                     out.put_slice(&entry.payload);
                 }
             }
@@ -419,7 +425,7 @@ impl Frame {
             Self::RepairReq(RepairReq::Missing { msg_id, missing }) => {
                 out.put_u8(0);
                 out.put_slice(&msg_id.0);
-                out.put_u16_le(missing.len() as u16);
+                out.put_u16_le(len16(missing.len()));
                 for index in missing {
                     out.put_u16_le(*index);
                 }
@@ -432,7 +438,7 @@ impl Frame {
             Self::RepairResp(RepairResp::NotFound) => out.put_u8(0),
             Self::RepairResp(RepairResp::Chunks(chunks)) => {
                 out.put_u8(1);
-                out.put_u16_le(chunks.len() as u16);
+                out.put_u16_le(len16(chunks.len()));
                 for chunk in chunks {
                     put_chunk(out, chunk);
                 }
@@ -558,8 +564,31 @@ impl Frame {
     }
 }
 
+/// A count or a length in the `u16` the layout gives it. Encoding is infallible, so a value past
+/// the field would wrap into a smaller one and put a frame on the wire that decodes cleanly with
+/// the wrong contents in it. That is a caller bug rather than anything the layout can express, so
+/// a debug build stops here; a release build cannot reach it from any payload a beacon node
+/// produces or any roster this sidecar accepts.
+fn len16(value: usize) -> u16 {
+    debug_assert!(
+        value <= u16::MAX as usize,
+        "{value} does not fit a u16 length"
+    );
+    value as u16
+}
+
+/// The same for a chunk's `u32` length, bounded by what the decoder accepts rather than by the
+/// field: [`MAX_PAYLOAD_BYTES`] is the real ceiling and 4 GiB is not a value any caller can hold.
+fn len32(value: usize) -> u32 {
+    debug_assert!(
+        value <= MAX_PAYLOAD_BYTES,
+        "{value} bytes is past MAX_PAYLOAD_BYTES"
+    );
+    value as u32
+}
+
 fn put_str16(out: &mut BytesMut, value: &str) {
-    out.put_u16_le(value.len() as u16);
+    out.put_u16_le(len16(value.len()));
     out.put_slice(value.as_bytes());
 }
 
@@ -570,7 +599,7 @@ fn put_chunk(out: &mut BytesMut, chunk: &Chunk) {
     out.put_u16_le(chunk.m);
     out.put_u16_le(chunk.index);
     out.put_u32_le(chunk.total_len);
-    out.put_u32_le(chunk.data.len() as u32);
+    out.put_u32_le(len32(chunk.data.len()));
     out.put_slice(&chunk.data);
 }
 

@@ -631,3 +631,43 @@ fn topic_add(topic: &str) -> Bytes {
     .encode(&mut out);
     out.freeze()
 }
+
+/// Encoding is infallible, so the only place a count past its field can be caught is here. A
+/// release build would wrap 65_536 entries into a count of zero and send a frame that decodes.
+#[test]
+#[should_panic(expected = "does not fit")]
+#[cfg(debug_assertions)]
+fn encoding_a_count_past_its_field_panics_in_a_debug_build() {
+    let entries = vec![
+        BatchEntry {
+            topic_id: 0,
+            payload: Bytes::new(),
+        };
+        u16::MAX as usize + 1
+    ];
+
+    Frame::Batch {
+        flags: BatchFlags::NONE,
+        entries,
+    }
+    .encode(&mut BytesMut::new());
+}
+
+#[test]
+fn a_field_at_its_largest_encodes_and_decodes() {
+    let bitmap = Bytes::from(vec![0xa5; u16::MAX as usize]);
+    let mut out = BytesMut::new();
+    Frame::Subs {
+        bitmap: bitmap.clone(),
+    }
+    .encode(&mut out);
+
+    assert_eq!(Frame::decode(&mut out.freeze()), Ok(Frame::Subs { bitmap }));
+
+    let payload = Bytes::from(vec![0x5a; MAX_PAYLOAD_BYTES]);
+    let frame = Frame::whole_message(MessageId([1; 20]), 3, payload);
+    let mut out = BytesMut::new();
+    frame.encode(&mut out);
+
+    assert_eq!(Frame::decode(&mut out.freeze()), Ok(frame));
+}
