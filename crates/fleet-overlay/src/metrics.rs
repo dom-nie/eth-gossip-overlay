@@ -481,9 +481,9 @@ const TEXT_FORMAT: &str = "text/plain; version=0.0.4";
 fn respond(
     _req: &Request<Incoming>,
     main: &Registry,
-    _gossipsub: &Mutex<prometheus_client::registry::Registry>,
+    gossipsub: &Mutex<prometheus_client::registry::Registry>,
 ) -> Response<OneShot> {
-    match TextEncoder::new().encode_to_string(&main.gather()) {
+    match exposition(main, gossipsub) {
         Ok(body) => Response::builder()
             .header(CONTENT_TYPE, TEXT_FORMAT)
             .body(OneShot::from(body)),
@@ -498,6 +498,23 @@ fn respond(
         // `Response::builder` only fails on a header this function does not build from input.
         Response::new(OneShot::from(String::new()))
     })
+}
+
+/// Both registries in one body. Gossipsub's metrics come from `prometheus_client`, whose
+/// OpenMetrics encoder ends with `# EOF`, so its half goes last: anything after that marker is
+/// not read. Prometheus accepts the concatenation under the 0.0.4 content type.
+fn exposition(
+    main: &Registry,
+    gossipsub: &Mutex<prometheus_client::registry::Registry>,
+) -> std::result::Result<String, Box<dyn std::error::Error>> {
+    let mut body = TextEncoder::new().encode_to_string(&main.gather())?;
+    // A panicking scrape would poison the lock and silence gossipsub's metrics for good; the
+    // registry behind it is only ever read.
+    let gossipsub = gossipsub
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    prometheus_client::encoding::text::encode(&mut body, &gossipsub)?;
+    Ok(body)
 }
 
 /// The whole response in one frame. `http-body-util`'s `Full` does this and is not a workspace
