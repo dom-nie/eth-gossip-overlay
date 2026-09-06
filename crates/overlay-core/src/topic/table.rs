@@ -190,4 +190,16 @@ mod tests {
             assert_eq!(peer.id_of(&topic), Some(id));
         }
     }
+
+    #[test]
+    fn apply_add_with_conflicting_string_is_conflict_error() {
+        let mut peer = PeerTopicTable::new();
+        peer.apply_add(TopicId::new(3), &column(0).to_string())
+            .unwrap();
+
+        let refused = peer.apply_add(TopicId::new(3), &column(1).to_string());
+
+        assert_eq!(refused, Err(PeerTableError::Conflict(TopicId::new(3))));
+        assert_eq!(peer.resolve(TopicId::new(3)), Some(&column(0)));
+    }
 }
