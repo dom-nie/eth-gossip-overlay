@@ -10,6 +10,7 @@
 //! else can. There is no remote access and no authentication to add.
 
 use std::io;
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -46,6 +47,8 @@ pub enum Request {
     },
     /// Everything an operator looks at during a rollout (D29).
     Status,
+    /// The roster in force, as the sidecar reads it.
+    Roster,
 }
 
 /// What `status` answers: this host, then one entry per live peer in hostname order.
@@ -105,6 +108,20 @@ pub struct Peer {
     pub features: u64,
 }
 
+/// One roster entry, as `roster.yaml` gives it (Appendix A). The dump is the roster in force,
+/// which after a refused reload is not what the file on disk says.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Host {
+    /// The host's name, its identity everywhere.
+    pub hostname: String,
+    /// The region it fans out in.
+    pub region: String,
+    /// Its site label, `null` when it has none.
+    pub site: Option<String>,
+    /// The address this host dials it on.
+    pub addr: SocketAddr,
+}
+
 /// A peer's two send lanes, in both units each is bounded by (§5.7).
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 pub struct Queue {
@@ -133,6 +150,9 @@ pub struct Response {
     /// What `status` found.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<Status>,
+    /// The roster in force, from `roster`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roster: Option<Vec<Host>>,
 }
 
 impl Response {
@@ -158,6 +178,15 @@ impl Response {
         Self {
             ok: true,
             status: Some(status),
+            ..Self::default()
+        }
+    }
+
+    /// The roster in force.
+    fn roster(hosts: Vec<Host>) -> Self {
+        Self {
+            ok: true,
+            roster: Some(hosts),
             ..Self::default()
         }
     }
@@ -268,6 +297,20 @@ async fn answer(request: Request, state: &State) -> Response {
             Response::inject(state.inject.load(Ordering::Relaxed))
         }
         Request::Status => Response::status(status(state)),
+        Request::Roster => Response::roster(
+            state
+                .roster
+                .borrow()
+                .hosts
+                .iter()
+                .map(|host| Host {
+                    hostname: host.hostname.0.clone(),
+                    region: host.region.0.clone(),
+                    site: host.site.clone(),
+                    addr: host.addr,
+                })
+                .collect(),
+        ),
     }
 }
 
