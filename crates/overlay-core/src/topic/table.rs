@@ -253,4 +253,25 @@ mod tests {
         assert_eq!(peer.resolve(TopicId::new(1)), None);
         assert_eq!(peer.id_of(&column(9)), None);
     }
+
+    /// 65,535 written out rather than [`CAPACITY`]: a test that names the constant follows it
+    /// wherever it goes and so cannot see the ceiling move.
+    #[test]
+    fn table_full_at_65535_returns_error() {
+        let mut own = OwnTopicTable::new();
+        let every_column_of_every_digest = (0..=u8::MAX).flat_map(|digest| {
+            (0..=u8::MAX).map(move |index| Topic::data_column([digest, 0, 0, 0], index))
+        });
+        let mut interned = 0;
+
+        for topic in every_column_of_every_digest {
+            if own.intern(&topic).is_err() {
+                break;
+            }
+            interned += 1;
+        }
+
+        assert_eq!(interned, 65_535);
+        assert_eq!(own.snapshot().len(), 65_535);
+    }
 }
