@@ -304,3 +304,46 @@ fn striped(k: u16, m: u16, index: u16) -> Bytes {
     .encode(&mut out);
     out.freeze()
 }
+
+#[test]
+fn whole_message_chunk_has_k1_m0_index0_and_len_equal_to_total_len() {
+    let payload = Bytes::from_static(b"a whole gossipsub message");
+    let frame = Frame::whole_message(MessageId([7; 20]), 9, payload.clone());
+
+    let Frame::Chunk { flags, chunk } = &frame else {
+        panic!("whole_message built {frame:?}");
+    };
+    assert_eq!(*flags, ChunkFlags::NONE);
+    assert_eq!((chunk.k, chunk.m, chunk.index), (1, 0, 0));
+    assert_eq!(chunk.total_len as usize, payload.len());
+    assert_eq!(chunk.data, payload);
+    assert!(chunk.is_whole());
+
+    let mut out = BytesMut::new();
+    Frame::Chunk {
+        flags: ChunkFlags::NONE,
+        chunk: Chunk {
+            total_len: chunk.total_len + 1,
+            ..chunk.clone()
+        },
+    }
+    .encode(&mut out);
+
+    assert_eq!(
+        Frame::decode(&mut out.freeze()),
+        Err(DecodeError::Invalid("whole"))
+    );
+    assert!(!striped_chunk().is_whole());
+}
+
+fn striped_chunk() -> Chunk {
+    Chunk {
+        msg_id: MessageId([7; 20]),
+        topic_id: 9,
+        k: 2,
+        m: 0,
+        index: 1,
+        total_len: 2048,
+        data: Bytes::from_static(b"half of it"),
+    }
+}
