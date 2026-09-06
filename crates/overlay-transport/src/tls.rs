@@ -350,4 +350,17 @@ mod tests {
 
         assert_eq!(failure.reason.as_str(), "unknown_key");
     }
+    #[test]
+    fn dialer_verifier_rejects_another_roster_hosts_key_as_key_mismatch() {
+        let seeds = seeds(0x11, None);
+        let verifier = DialerVerifier::new(pins(&roster(&["bn-a", "bn-b"]), &seeds), host("bn-a"));
+
+        verifier.check(&presented(&seeds.current, "bn-a")).unwrap();
+        let failure = verifier
+            .check(&presented(&seeds.current, "bn-b"))
+            .unwrap_err();
+
+        assert_eq!(failure.role.as_str(), "dial");
+        assert_eq!(failure.reason.as_str(), "key_mismatch");
+    }
 }
