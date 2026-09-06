@@ -38,9 +38,10 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use overlay_core::budget::{Charge, FanoutBudget, FanoutKind};
 use overlay_core::msgid::{self, Branch, MessageId};
 use overlay_core::protocol::MAX_FRAME_BYTES;
 use overlay_core::pubqueue::{PublishItem, PublishSink};
@@ -56,7 +57,7 @@ use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::fanout::{Direction, PeerLabels, TrafficStats};
-use crate::manager::{ManagerStats, PeerInfo};
+use crate::manager::{CloseCode, ManagerStats, PeerInfo};
 use crate::subs;
 
 /// How long one frame may take to arrive once its stream has started (DX-N3). A peer that opens
@@ -91,6 +92,11 @@ pub trait ReceiveStats: ManagerStats + TrafficStats {
 
     /// `duplicates_dropped_total{class, source="overlay"}`: the seen cache already held the id.
     fn duplicate(&self, class: Class);
+
+    /// `fanout_suppressed_total{peer, kind}`: the peer asked for more second-hop work than its
+    /// budget covers, so it was delivered locally and fanned out nowhere (DX-N3). §12 alerts on
+    /// any non-zero value.
+    fn fanout_suppressed(&self, peer: &Hostname, kind: FanoutKind);
 }
 
 impl ReceiveStats for () {
@@ -99,6 +105,7 @@ impl ReceiveStats for () {
     fn invalid_payload(&self, _: &Hostname) {}
     fn first_seen(&self, _: Class) {}
     fn duplicate(&self, _: Class) {}
+    fn fanout_suppressed(&self, _: &Hostname, _: FanoutKind) {}
 }
 
 /// What to do with a chunk that is a piece of a message rather than a whole one. T-074 puts the
@@ -140,11 +147,18 @@ pub struct Deps {
     pub stripes: Arc<dyn Stripes>,
     /// Where every counter above lands.
     pub stats: Arc<dyn ReceiveStats>,
+    /// The budget each peer gets a copy of. A bucket that starts full is what a peer that
+    /// connects an hour later would have anyway, since a refill saturates at the capacity.
+    pub budget: FanoutBudget,
 }
 
 /// One peer's receiver. Dropping it stops the task: everything it holds belongs to a connection,
 /// and a connection that is gone has nothing left to read.
 pub struct PeerReceiver {
+    peer: Hostname,
+    connection: quinn::Connection,
+    budget: Mutex<FanoutBudget>,
+    stats: Arc<dyn ReceiveStats>,
     task: JoinHandle<()>,
 }
 
@@ -153,6 +167,8 @@ impl PeerReceiver {
     /// [`PeerEvent::Up`](crate::manager::PeerEvent::Up) and dropped on its `Down`.
     pub fn spawn(peer: &PeerInfo, deps: Deps) -> Self {
         let connection = peer.connection.clone();
+        let budget = Mutex::new(deps.budget.clone());
+        let stats = deps.stats.clone();
         let ctx = Arc::new(Ctx {
             peer: peer.hostname.clone(),
             region: peer.region.clone(),
@@ -162,8 +178,20 @@ impl PeerReceiver {
             warned_invalid: AtomicBool::new(false),
         });
         Self {
+            peer: peer.hostname.clone(),
+            connection: connection.clone(),
+            budget,
+            stats,
             task: tokio::spawn(accept(connection, ctx)),
         }
+    }
+
+    /// Charges this peer's fan-out budget for `bytes` of second-hop work, counting a refusal
+    /// and closing the connection when the peer has been over budget for too long (DX-N3).
+    /// Nothing in v1 calls it, because nothing in v1 fans out what it receives; T-063 charges
+    /// `kind = Relay` and T-073 `kind = Chunk`.
+    pub fn charge(&self, kind: FanoutKind, bytes: usize, now: Instant) -> Charge {
+        todo!("T-032: charge the peer's budget, count the refusal and close on a long one")
     }
 }
 
@@ -348,6 +376,7 @@ mod tests {
         subscriptions, topic,
     };
     use bytes::BytesMut;
+    use overlay_core::budget::SUSTAINED_VIOLATION;
     use overlay_core::seen::SeenCache;
     use overlay_core::time::SystemClock;
     use overlay_core::topic::UNKNOWN_LARGE_THRESHOLD_BYTES;
@@ -802,6 +831,7 @@ mod tests {
                 sets: watching,
                 stripes: Arc::new(NoStripes::new(stats.clone())),
                 stats,
+                budget: FanoutBudget::default_for(2, 2048, 12, Instant::now()),
             },
             warned_invalid: AtomicBool::new(false),
         });
@@ -822,6 +852,52 @@ mod tests {
         assert_eq!(end, StreamEnd::Timeout);
         assert!(started.elapsed() >= STREAM_READ_TIMEOUT);
         assert!(published.published().is_empty());
+    }
+
+    /// A peer that keeps asking for more second-hop work than its budget covers loses the
+    /// connection (DX-N3), and comes back through the ordinary reconnect backoff, which is what
+    /// makes the close a pause rather than a punishment.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sustained_budget_violation_for_10s_closes_with_rate_exceeded_and_the_peer_reconnects()
+    {
+        let block = topic("beacon_block");
+        let mut cluster = TestCluster::start(2).await;
+        for node in 0..2 {
+            cluster.start_sidecar(node, subscriptions(&[&block], &[]));
+        }
+        let sender = cluster.hostname(0);
+        eventually("the pair to pair", || {
+            cluster.receiver(1, &sender).is_some()
+        })
+        .await;
+        let receiver = cluster.receiver(1, &sender).unwrap();
+        let over_budget = 20 * 1024 * 1024;
+        let went_over = Instant::now();
+
+        assert_eq!(
+            receiver.charge(FanoutKind::Chunk, over_budget, went_over),
+            Charge::Suppressed
+        );
+        assert_eq!(
+            receiver.charge(
+                FanoutKind::Chunk,
+                over_budget,
+                went_over + SUSTAINED_VIOLATION + Duration::from_secs(1)
+            ),
+            Charge::CloseRateExceeded
+        );
+
+        assert_eq!(
+            cluster
+                .stats(1)
+                .fanout_suppressed(&sender, FanoutKind::Chunk),
+            2
+        );
+        eventually("the connection to go", || cluster.live(1).is_empty()).await;
+        eventually("the peer to come back", || {
+            cluster.live(1).len() == 1 && cluster.live(0).len() == 1
+        })
+        .await;
     }
 
     /// The property the whole design rests on (§3 principle 1, §5.5). A sidecar publishes what

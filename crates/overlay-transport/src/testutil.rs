@@ -44,6 +44,7 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use ed25519_dalek::SigningKey;
+use overlay_core::budget::{FanoutBudget, FanoutKind};
 use overlay_core::config::{self, Overlay};
 use overlay_core::fanout::Outbound;
 use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
@@ -158,6 +159,7 @@ pub struct CountingStats {
     invalid_payloads: Mutex<BTreeMap<Hostname, u64>>,
     first_seen: Mutex<HashMap<Class, u64>>,
     duplicates: Mutex<HashMap<Class, u64>>,
+    fanout_suppressed: Mutex<BTreeMap<(Hostname, FanoutKind), u64>>,
 }
 
 impl CountingStats {
@@ -257,6 +259,11 @@ impl CountingStats {
             .unwrap_or_default()
     }
 
+    /// `fanout_suppressed_total{peer, kind}`.
+    pub fn fanout_suppressed(&self, peer: &Hostname, kind: FanoutKind) -> u64 {
+        count(&self.fanout_suppressed, &(peer.clone(), kind))
+    }
+
     /// `duplicates_dropped_total{class, source="overlay"}`.
     pub fn duplicates(&self, class: Class) -> u64 {
         self.duplicates
@@ -342,6 +349,10 @@ impl ReceiveStats for CountingStats {
 
     fn duplicate(&self, class: Class) {
         *self.duplicates.lock().unwrap().entry(class).or_default() += 1;
+    }
+
+    fn fanout_suppressed(&self, peer: &Hostname, kind: FanoutKind) {
+        add(&self.fanout_suppressed, (peer.clone(), kind));
     }
 }
 
@@ -926,6 +937,14 @@ impl<A: Admission> TestCluster<A> {
             sets: watching.clone(),
             stripes: Arc::new(NoStripes::new(stats.clone())),
             stats: stats.clone(),
+            // The slot length comes from the beacon node's spec snapshot in production
+            // (CL-N3); a cluster has no beacon node, so it runs at mainnet's.
+            budget: FanoutBudget::default_for(
+                self.hosts.len(),
+                config::LargeClass::default().chunk_bytes,
+                12,
+                Instant::now(),
+            ),
         };
         let receivers: Receivers = Arc::new(Mutex::new(BTreeMap::new()));
         let (to_exchange, exchanged) = mpsc::channel(64);
