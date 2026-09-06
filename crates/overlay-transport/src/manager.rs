@@ -1278,6 +1278,38 @@ mod tests {
         );
     }
 
+    /// A supersede is a new connection, so it is a new sender (D15). The live view hands out
+    /// the new handle, which is where fanout reads one, and the old handle takes nothing more:
+    /// what was queued for a connection that has been closed can only be dropped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn supersede_restarts_the_sender_and_fanout_uses_the_new_handle() {
+        let mut cluster = Builder::new(&[NodeKind::Sink, NodeKind::Manager])
+            .start()
+            .await;
+        let peer = cluster.hostname(0);
+        let _first = cluster.dial_with_hello(0, 1, &cluster.self_hello(0)).await;
+        assert!(matches!(cluster.next_event(1).await, PeerEvent::Up(_)));
+        let old = cluster.live(1).get(&peer).unwrap().sender.clone();
+
+        let second = cluster.dial_with_hello(0, 1, &cluster.self_hello(0)).await;
+
+        assert!(matches!(cluster.next_event(1).await, PeerEvent::Down(_, _)));
+        assert!(matches!(cluster.next_event(1).await, PeerEvent::Up(_)));
+        let new = cluster.live(1).get(&peer).unwrap().sender.clone();
+        assert!(old.push(Class::Small, frame(), Instant::now()).is_err());
+        new.push(Class::Small, frame(), Instant::now()).unwrap();
+
+        let mut stream = tokio::time::timeout(WAIT, second.connection.accept_uni())
+            .await
+            .expect("the new connection to carry the frame")
+            .unwrap();
+        let carried = tokio::time::timeout(WAIT, stream.read_to_end(frame().len()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(carried, frame());
+    }
+
     /// A peer as an admission that skips HELLO would report it. The control stream is opened
     /// rather than exchanged on: [`PeerInfo`] owns one, and a test about the manager has no use
     /// for what travels on it.
