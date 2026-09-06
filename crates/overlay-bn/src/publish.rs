@@ -264,7 +264,7 @@ mod tests {
     use overlay_core::config::PublishRateLimit;
     use overlay_core::lanes::ClassLanes;
     use overlay_core::msgid::{self, MessageId};
-    use overlay_core::pubqueue::PublishItem;
+    use overlay_core::pubqueue::{PublishItem, PublishSink};
     use overlay_core::ratelimit::PublishLimits;
     use overlay_core::time::FakeClock;
     use overlay_core::topic::{Class, SubscriptionSets, Topic};
@@ -285,6 +285,20 @@ mod tests {
 
     const ATTESTATION_3: &str = "/eth2/00000000/beacon_attestation_3/ssz_snappy";
     const BLOCK: &str = "/eth2/00000000/beacon_block/ssz_snappy";
+
+    /// The overlay receive path (T-032) cannot name [`PublishHandle`] without pulling libp2p
+    /// into a crate that must never link it, so it holds the trait `overlay-core` defines beside
+    /// [`PublishItem`] and this is the implementation behind it. What goes in through the trait
+    /// is what the drain task pops.
+    #[test]
+    fn enqueue_through_the_publish_sink_queues_the_item() {
+        let harness = Harness::new();
+        let queued = item(Class::Large, 1);
+
+        PublishSink::enqueue(&harness.handle, queued.clone());
+
+        assert_eq!(harness.handle.pop(), Some(queued));
+    }
 
     /// An item numbered `n` on the topic its class suggests, with `payload_len` bytes.
     fn sized_item(class: Class, n: usize, payload_len: usize) -> PublishItem {
