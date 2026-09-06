@@ -5,7 +5,8 @@
 //! (T-032) matches on one thing however the class ends up being carried.
 //!
 //! v1 has one plan to make: the whole message to every live peer whose beacon node is
-//! subscribed to the topic (§5.4), in hostname order, this host aside. T-072 adds the stripe a
+//! subscribed to the topic (§5.4), in hostname order, this host aside, and
+//! [`RoutePlan::Nothing`] when that leaves nobody. T-072 adds the stripe a
 //! large message takes over a region and T-063 the relays a small-class batch crosses a region
 //! through, both as variants of this enum, so neither has to touch what already calls it.
 //!
@@ -24,6 +25,8 @@ use crate::subs;
 pub enum RoutePlan {
     /// The whole message to each of these hosts, in hostname order.
     Direct(Vec<Hostname>),
+    /// No live peer wants it, so it goes nowhere.
+    Nothing,
 }
 
 /// The plan for a message on `topic`, from the live set as it stood when `view` was taken. Pure:
@@ -40,13 +43,17 @@ pub fn route(
     self_id: &SelfIdentity,
     _cfg: &Fanout,
 ) -> RoutePlan {
-    RoutePlan::Direct(
-        view.iter()
-            .filter(|(hostname, _)| **hostname != self_id.hostname)
-            .filter(|(_, peer)| subs::state(&peer.state).subscribed(topic))
-            .map(|(hostname, _)| hostname.clone())
-            .collect(),
-    )
+    let targets: Vec<Hostname> = view
+        .iter()
+        .filter(|(hostname, _)| **hostname != self_id.hostname)
+        .filter(|(_, peer)| subs::state(&peer.state).subscribed(topic))
+        .map(|(hostname, _)| hostname.clone())
+        .collect();
+    if targets.is_empty() {
+        RoutePlan::Nothing
+    } else {
+        RoutePlan::Direct(targets)
+    }
 }
 
 #[cfg(test)]
