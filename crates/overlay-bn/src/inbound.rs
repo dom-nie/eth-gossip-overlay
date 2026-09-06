@@ -16,9 +16,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use overlay_core::events::{self, FirstArrival};
 use overlay_core::fanout::Outbound;
 use overlay_core::lanes::{ClassLanes, LanePusher};
 use overlay_core::msgid::MessageId;
+use overlay_core::roster::SelfIdentity;
 use overlay_core::seen::SharedSeenCache;
 use overlay_core::time::Clock;
 use overlay_core::topic::{Class, Topic, TopicKind};
@@ -64,6 +66,7 @@ pub struct Inbound {
     commands: mpsc::Sender<BnCommand>,
     seen: SharedSeenCache,
     out: LanePusher<Outbound>,
+    node: Arc<SelfIdentity>,
     clock: Arc<dyn Clock>,
     stats: Arc<dyn InboundStats>,
     /// Unknown topic names and unparsable topic strings already warned about, so a stream
@@ -74,12 +77,14 @@ pub struct Inbound {
 
 impl Inbound {
     /// Starts draining `lanes`. Every message is reported `Accept` on `commands`; a new one
-    /// becomes an [`Outbound`] on `out`, stamped with `clock`'s time.
+    /// becomes an [`Outbound`] on `out`, stamped with `clock`'s time, and a new large one is
+    /// logged as this host's first arrival under `node`'s name (T-044).
     pub fn spawn(
         lanes: ClassLanes<BnMessage>,
         commands: mpsc::Sender<BnCommand>,
         seen: SharedSeenCache,
         out: LanePusher<Outbound>,
+        node: Arc<SelfIdentity>,
         clock: Arc<dyn Clock>,
         stats: Arc<dyn InboundStats>,
     ) -> JoinHandle<()> {
@@ -88,6 +93,7 @@ impl Inbound {
             commands,
             seen,
             out,
+            node,
             clock,
             stats,
             warned: BTreeSet::new(),
@@ -102,6 +108,9 @@ impl Inbound {
 
     fn handle(&mut self, msg: BnMessage) {
         let received_at = self.clock.now();
+        // The wall reading of the same moment, taken here rather than at the event below so
+        // what it records is receipt from the beacon node and not the work in between.
+        let arrived = self.clock.wall();
         // The swarm loop drains its commands without ever waiting, so a full channel means it
         // is wedged, and waiting here would only add this task to what it holds up.
         match self.commands.try_send(BnCommand::ReportAccept {
@@ -152,6 +161,14 @@ impl Inbound {
             return;
         }
         self.stats.first_seen(class);
+        events::emit_first_arrival(&FirstArrival {
+            id,
+            class,
+            topic: &topic,
+            node: &self.node,
+            at: arrived,
+            source: events::Source::Bn,
+        });
         let outbound = Outbound {
             topic,
             class,
@@ -178,6 +195,7 @@ mod tests {
     use overlay_core::fanout::Outbound;
     use overlay_core::lanes::{ClassLanes, LARGE_LANE_CAPACITY, LanePusher};
     use overlay_core::msgid::{self, MessageId};
+    use overlay_core::roster::{Hostname, Region};
     use overlay_core::seen::{SeenCache, SharedSeenCache};
     use overlay_core::time::FakeClock;
     use overlay_core::topic::{Class, SubscriptionSets, Topic, UNKNOWN_LARGE_THRESHOLD_BYTES};
@@ -213,6 +231,15 @@ mod tests {
             topic: topic.to_owned(),
             data: data.to_vec(),
             source: *BN,
+        }
+    }
+
+    /// Who the sidecar is, as the event log names it.
+    fn node() -> SelfIdentity {
+        SelfIdentity {
+            hostname: Hostname("bn-ams1-07".to_owned()),
+            region: Region("eu".to_owned()),
+            site: Some("ams1".to_owned()),
         }
     }
 
@@ -319,6 +346,7 @@ mod tests {
                 self.command_tx.clone(),
                 self.seen.clone(),
                 self.out.pusher(),
+                Arc::new(node()),
                 Arc::new(self.clock.clone()),
                 self.stats.clone(),
             );
@@ -573,6 +601,7 @@ mod tests {
             commands.clone(),
             seen.clone(),
             out.pusher(),
+            Arc::new(node()),
             Arc::new(clock),
             Arc::new(()),
         );
