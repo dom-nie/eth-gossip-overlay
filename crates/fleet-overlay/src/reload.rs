@@ -491,9 +491,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use arc_swap::ArcSwap;
     use overlay_core::config::{Log, LogFormat, LogLevel, PublishRateLimit};
-    use overlay_core::identity::{FleetSeed, write_secret_file};
+    use overlay_core::identity::{FleetSeed, Seeds, expected_tls_public_key, write_secret_file};
     use overlay_core::roster::{Hostname, Roster};
+    use overlay_transport::tls::PinTable;
     use tempfile::TempDir;
     use tokio::sync::{Notify, watch};
 
@@ -991,5 +993,45 @@ mod tests {
         assert!(report.error.is_none(), "{report:?}");
         let limits = h.limits.borrow_and_update();
         assert_eq!((limits.small_per_s, limits.large_per_s), (100, 20));
+    }
+
+    /// Waits for `done`, so a test fails on a bound instead of hanging when the task under it
+    /// stops working.
+    async fn until(mut done: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !done() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the pin table was never rebuilt");
+    }
+
+    #[tokio::test]
+    async fn pin_table_follows_the_roster_and_the_previous_seed() {
+        let current = FleetSeed::from([1; 32]);
+        let previous = FleetSeed::from([2; 32]);
+        let roster = Roster::from_yaml(&roster_yaml(2)).unwrap();
+        let seeds = Seeds {
+            current: current.clone(),
+            previous: None,
+        };
+        let pins = Arc::new(ArcSwap::from_pointee(PinTable::build(&roster, &seeds)));
+        let (roster_tx, roster_rx) = watch::channel(roster);
+        let (seed_tx, seed_rx) = watch::channel(None);
+        let _task = spawn_pin_table(pins.clone(), current.clone(), roster_rx, seed_rx);
+        let pinned = |seed: &FleetSeed, host: &str| {
+            let key = expected_tls_public_key(seed, &Hostname(host.to_owned()));
+            pins.load().lookup(&key).is_some()
+        };
+
+        roster_tx.send_replace(Roster::from_yaml(&roster_yaml(3)).unwrap());
+
+        until(|| pinned(&current, "bn-3")).await;
+
+        seed_tx.send_replace(Some(FleetSeed::from([2; 32])));
+
+        until(|| pinned(&previous, "bn-1")).await;
+        assert!(pinned(&current, "bn-1"));
     }
 }
