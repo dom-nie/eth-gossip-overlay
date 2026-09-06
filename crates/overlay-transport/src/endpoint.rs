@@ -213,6 +213,14 @@ mod tests {
         tls::client_config(pins.clone(), &own_key(seeds, from), &host(to)).unwrap()
     }
 
+    /// A runtime of its own, so a test can take one away and leave the other running.
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
     /// quinn's `TransportConfig` has setters and no getters, so its `Debug` output is the only
     /// way to read a value back out. A name that is not in it is a broken test rather than
     /// anything a sidecar could do.
@@ -340,5 +348,52 @@ mod tests {
             .unwrap();
 
         assert_eq!(received.await.unwrap(), Bytes::from_static(b"batch"));
+    }
+
+    /// A host that stops answering without saying goodbye. The peer runs on a runtime of its
+    /// own and that runtime is dropped whole, which is the only way to reach this: an endpoint
+    /// dropped on a live runtime closes its connections politely on the way out, and the
+    /// dialler would be told rather than left waiting.
+    #[test]
+    fn silent_peer_is_closed_after_idle_timeout() {
+        let (seeds, pins) = fleet(&["bn-a", "bn-b"]);
+        let cfg = Overlay {
+            keepalive: Duration::from_millis(50),
+            idle_timeout: Duration::from_millis(200),
+            ..config("127.0.0.1:0")
+        };
+        let peer = runtime();
+        let addr = peer.block_on(async {
+            let acceptor = endpoint(&cfg, &pins, &seeds, "bn-a");
+            let addr = acceptor.local_addr().unwrap();
+            tokio::spawn(async move {
+                let _held = acceptor
+                    .accept()
+                    .await
+                    .expect("the endpoint is still open")
+                    .await
+                    .unwrap();
+                std::future::pending::<()>().await;
+            });
+            addr
+        });
+
+        let error = runtime().block_on(async {
+            let dialler = endpoint(&cfg, &pins, &seeds, "bn-b");
+            let connection = connect(
+                &cfg,
+                &dialler,
+                addr,
+                dial_config(&pins, &seeds, "bn-b", "bn-a"),
+            )
+            .await
+            .unwrap();
+            peer.shutdown_background();
+            tokio::time::timeout(Duration::from_millis(500), connection.closed())
+                .await
+                .expect("the idle timeout is 200 ms")
+        });
+
+        assert!(matches!(error, quinn::ConnectionError::TimedOut), "{error}");
     }
 }
