@@ -435,6 +435,14 @@ mod tests {
     /// A fork digest, as a topic string carries one.
     const DIGEST: [u8; 4] = [0x6a, 0x95, 0xa1, 0xa9];
 
+    /// One length-prefixed frame's worth of bytes, whatever they are, as the codec would put on
+    /// a stream.
+    async fn write_raw(send: &mut quinn::SendStream, body: &[u8]) {
+        let mut out = (body.len() as u32).to_le_bytes().to_vec();
+        out.extend_from_slice(body);
+        send.write_all(&out).await.unwrap();
+    }
+
     /// A HELLO as a peer would send it, which a test then changes one field of to be the peer
     /// this release has to cope with.
     fn peer_hello(hostname: &Hostname) -> Hello {
@@ -738,6 +746,41 @@ mod tests {
             AdmitError {
                 reason: FailureReason::Timeout,
                 close: CloseCode::HelloTimeout,
+            }
+        );
+    }
+
+    /// A peer sending something that is not a frame is refused, and refused the same way every
+    /// time: no panic on a length that promises more than arrived, and a decode failure counted
+    /// under its own reason rather than as an unknown host.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn garbage_on_first_stream_is_decode_error_not_panic() {
+        let cluster = Builder::new(&[NodeKind::Bare; 2]).start().await;
+        let lower = cluster.hostname(0);
+        let acceptor = cluster.self_hello(1);
+        let (dialling, accepting) = cluster.connected_pair(0, 1).await;
+        let (mut send, _recv) = dialling.open_bi().await.unwrap();
+        // A CHUNK header that stops in the middle of its message id.
+        write_raw(&mut send, &[5, 0, 0xab, 0xcd, 0xef]).await;
+
+        let refused = perform(
+            accepting,
+            Role::Accept,
+            &acceptor,
+            &lower,
+            Vec::new(),
+            WAIT,
+            &(),
+        )
+        .await
+        .expect_err("those bytes are not a frame");
+
+        assert!(matches!(refused, HelloError::Decode(_)), "{refused:?}");
+        assert_eq!(
+            refused.refusal(Role::Accept),
+            AdmitError {
+                reason: FailureReason::Decode,
+                close: CloseCode::ProtocolError,
             }
         );
     }
