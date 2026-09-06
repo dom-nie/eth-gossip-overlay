@@ -243,4 +243,14 @@ mod tests {
         );
         assert_eq!(peer.resolve(TopicId::new(0)), None);
     }
+
+    #[test]
+    fn resolve_unknown_id_is_none() {
+        let mut peer = PeerTopicTable::new();
+        peer.apply_add(TopicId::new(0), &column(0).to_string())
+            .unwrap();
+
+        assert_eq!(peer.resolve(TopicId::new(1)), None);
+        assert_eq!(peer.id_of(&column(9)), None);
+    }
 }
