@@ -93,7 +93,9 @@ impl OwnTopicTable {
         Self::default()
     }
 
-    /// The id for `topic`, and whether this call is what created it.
+    /// The id for `topic`, and whether this call is what minted it. Interning is idempotent,
+    /// so the mirror hands the whole subscription set over on every change and only the
+    /// additions come back new. It fails only once every id is spent.
     pub fn intern(&mut self, topic: &Topic) -> Result<(TopicId, bool), TableFull> {
         if let Some(&id) = self.ids.get(topic) {
             return Ok((id, false));
@@ -142,6 +144,8 @@ pub struct TableFull;
 /// The ids one peer has assigned, and the only table that peer's frames are decoded with.
 #[derive(Clone, Debug, Default)]
 pub struct PeerTopicTable {
+    /// The parse is stored beside the id, so a receiver reads the class and kind off a frame
+    /// without parsing the topic string again.
     by_id: HashMap<TopicId, Topic>,
     /// The reverse direction, which the router needs to ask whether a peer has an id for a
     /// topic at all before anything is sent on it.
@@ -154,7 +158,8 @@ impl PeerTopicTable {
         Self::default()
     }
 
-    /// Takes the whole table a peer announced in its HELLO.
+    /// Takes the whole table a peer announced in its HELLO, entry by entry and under the same
+    /// rules as [`Self::apply_add`].
     pub fn apply_snapshot<S: AsRef<str>>(
         &mut self,
         entries: impl IntoIterator<Item = (TopicId, S)>,
@@ -208,29 +213,6 @@ pub enum PeerTableError {
     Unparsable(TopicId, TopicError),
 }
 
-/// Answers the mirror's `Changed` (T-014): interns everything the sidecar subscribes to and
-/// returns what each live peer is owed, leaving out the peers that are owed nothing. T-027
-/// writes the frames to the control streams.
-///
-/// It reads `local` and not `advertised` because the extra data column topics T-015 adds are
-/// the ones an own proposal's chunks go out on, so their ids have to reach peers even though
-/// the SUBS bitmap leaves those topics out (D06, D12).
-pub fn on_changed<'a>(
-    sets: &SubscriptionSets,
-    peers: impl IntoIterator<Item = &'a Hostname>,
-    table: &mut OwnTopicTable,
-    announcer: &mut Announcer,
-) -> Result<Vec<(&'a Hostname, Vec<Frame>)>, TableFull> {
-    for topic in &sets.local {
-        table.intern(topic)?;
-    }
-    Ok(peers
-        .into_iter()
-        .map(|peer| (peer, announcer.announce(peer, table)))
-        .filter(|(_, owed)| !owed.is_empty())
-        .collect())
-}
-
 /// What each peer has already been told, and the only place a `TOPIC_ADD` is built.
 #[derive(Clone, Debug, Default)]
 pub struct Announcer {
@@ -265,6 +247,29 @@ impl Announcer {
         *told += frames.len();
         frames
     }
+}
+
+/// Answers the mirror's `Changed` (T-014): interns everything the sidecar subscribes to and
+/// returns what each live peer is owed, leaving out the peers that are owed nothing. T-027
+/// writes the frames to the control streams.
+///
+/// It reads `local` and not `advertised` because the extra data column topics T-015 adds are
+/// the ones an own proposal's chunks go out on, so their ids have to reach peers even though
+/// the SUBS bitmap leaves those topics out (D06, D12).
+pub fn on_changed<'a>(
+    sets: &SubscriptionSets,
+    peers: impl IntoIterator<Item = &'a Hostname>,
+    table: &mut OwnTopicTable,
+    announcer: &mut Announcer,
+) -> Result<Vec<(&'a Hostname, Vec<Frame>)>, TableFull> {
+    for topic in &sets.local {
+        table.intern(topic)?;
+    }
+    Ok(peers
+        .into_iter()
+        .map(|peer| (peer, announcer.announce(peer, table)))
+        .filter(|(_, owed)| !owed.is_empty())
+        .collect())
 }
 
 #[cfg(test)]
