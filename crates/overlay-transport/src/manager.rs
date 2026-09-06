@@ -557,6 +557,11 @@ impl Shared {
     /// admitted and then went quiet is a sibling going down (§9) rather than a handshake
     /// problem, so its timeout is not counted either. Everything else that ends a connection
     /// short is counted, so a pair that keeps failing in some way nobody has named is visible.
+    // Nothing the suite can produce reaches the counting branch: an orderly close and an idle
+    // timeout are the two endings two loopback endpoints can be made to have, and both are
+    // deliberately not counted. What is left is a QUIC protocol violation or a stateless reset
+    // from a peer's replacement endpoint, neither of which quinn's API offers a way to cause.
+    #[cfg_attr(test, mutants::skip)]
     fn count_close(&self, role: Role, error: &quinn::ConnectionError) {
         if let Some(failure) = HandshakeFailure::from_connection_error(role, error)
             .filter(|failure| failure.reason != FailureReason::Timeout)
