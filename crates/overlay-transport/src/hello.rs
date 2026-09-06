@@ -598,4 +598,40 @@ mod tests {
             }
         );
     }
+
+    /// A peer's region is where its own second hop fans out, so the peer is the authority on it
+    /// and a roster that disagrees is a stale file, not an intruder. The region is recorded as
+    /// declared and the connection stays up; T-023 is what counts the disagreement (D15).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn region_in_hello_differing_from_roster_is_returned_as_declared_and_does_not_close() {
+        let cluster = Builder::new(&[NodeKind::Bare; 2]).start().await;
+        let lower = cluster.hostname(0);
+        let acceptor = cluster.self_hello(1);
+        let (dialling, accepting) = cluster.connected_pair(0, 1).await;
+        let (mut send, _recv) = dialling.open_bi().await.unwrap();
+        let elsewhere = Hello {
+            region: "us".to_owned(),
+            ..peer_hello(&lower)
+        };
+        write_frame(&mut send, &Frame::Hello(elsewhere))
+            .await
+            .unwrap();
+
+        let peer = perform(
+            accepting,
+            Role::Accept,
+            &acceptor,
+            &lower,
+            Vec::new(),
+            WAIT,
+            &(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(peer.region, Region("us".to_owned()));
+        assert_ne!(peer.region, Region(REGION.to_owned()));
+        assert!(peer.connection.close_reason().is_none());
+        assert!(dialling.close_reason().is_none());
+    }
 }
