@@ -293,6 +293,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use overlay_core::config::{Log, PublishRateLimit};
+    use overlay_core::identity::{FleetSeed, write_secret_file};
     use overlay_core::roster::{Hostname, Roster};
     use tempfile::TempDir;
     use tokio::sync::watch;
@@ -322,6 +323,7 @@ mod tests {
         roster_path: PathBuf,
         inject: Arc<AtomicBool>,
         roster: watch::Receiver<Roster>,
+        previous_seed: watch::Receiver<Option<FleetSeed>>,
         reloader: Reloader,
     }
 
@@ -338,7 +340,7 @@ mod tests {
             .unwrap();
             let inject = Arc::new(AtomicBool::new(true));
             let (roster_tx, roster_rx) = watch::channel(Roster::from_yaml(roster).unwrap());
-            let (seed_tx, _) = watch::channel(None);
+            let (seed_tx, previous_seed) = watch::channel(None);
             let (limits_tx, _) = watch::channel(PublishRateLimit::default());
             let (_, _, log) = testing::subscriber(&Log::default(), false, None);
             let reloader = Reloader::new(
@@ -359,6 +361,7 @@ mod tests {
                 roster_path,
                 inject,
                 roster: roster_rx,
+                previous_seed,
                 reloader,
             }
         }
@@ -402,5 +405,46 @@ mod tests {
         let published = h.roster.borrow_and_update();
         assert_eq!(published.hosts.len(), 4);
         assert_eq!(published.hosts[3].hostname, Hostname("bn-4".to_owned()));
+    }
+
+    #[test]
+    fn reload_publishes_previous_seed_when_fleet_seed_previous_file_is_set_and_none_when_removed() {
+        let mut h = Fixture::new(CONFIG, &roster_yaml(3));
+        let seed = h.roster_path.with_file_name("seed.previous");
+        write_secret_file(&seed, &[7; 32]).unwrap();
+        h.write_config(&format!(
+            "overlay:\n  roster_file: ROSTER\n  fleet_seed_previous_file: {}\ninject: true\n",
+            seed.display()
+        ));
+
+        let report = h.reloader.reload(Trigger::Manual);
+
+        assert_eq!(report.applied, ["overlay.fleet_seed_previous_file"]);
+        assert!(h.previous_seed.borrow_and_update().is_some(), "{report:?}");
+
+        h.write_config(CONFIG);
+        let report = h.reloader.reload(Trigger::Manual);
+
+        assert_eq!(report.applied, ["overlay.fleet_seed_previous_file"]);
+        assert!(h.previous_seed.borrow_and_update().is_none(), "{report:?}");
+    }
+
+    #[test]
+    fn an_unreadable_previous_seed_is_a_reload_error() {
+        let mut h = Fixture::new(CONFIG, &roster_yaml(3));
+        let missing = h.roster_path.with_file_name("seed.previous");
+        h.write_config(&format!(
+            "overlay:\n  roster_file: ROSTER\n  fleet_seed_previous_file: {}\ninject: true\n",
+            missing.display()
+        ));
+
+        let report = h.reloader.reload(Trigger::Manual);
+
+        assert!(report.applied.is_empty(), "{report:?}");
+        assert!(
+            matches!(&report.error, Some(ReloadError::Config(reason)) if reason.contains("seed.previous")),
+            "{report:?}"
+        );
+        assert!(h.previous_seed.borrow_and_update().is_none());
     }
 }
