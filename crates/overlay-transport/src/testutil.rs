@@ -47,6 +47,7 @@ use crate::manager::{
     Admission, CloseCode, ConnectionManager, Handle, LiveView, Local, ManagerStats, PeerCounts,
     PeerEvent, PeerInfo,
 };
+use crate::subs::SubsStats;
 use crate::tls::{self, FailureReason, HandshakeFailure, PinTable, Role};
 
 /// Long enough for a handshake, an admission and a reconnect on a loaded machine, and short
@@ -113,6 +114,7 @@ pub struct CountingStats {
     dials: Mutex<BTreeMap<Hostname, u64>>,
     connected: Mutex<PeerCounts>,
     in_roster: Mutex<PeerCounts>,
+    bn_subscriptions: Mutex<Option<usize>>,
 }
 
 impl CountingStats {
@@ -149,6 +151,11 @@ impl CountingStats {
     /// `peers_roster{region,site}` as it was last set.
     pub fn roster_gauge(&self) -> PeerCounts {
         self.in_roster.lock().unwrap().clone()
+    }
+
+    /// `bn_subscriptions` as it was last set, or `None` if it never was.
+    pub fn bn_subscriptions(&self) -> Option<usize> {
+        *self.bn_subscriptions.lock().unwrap()
     }
 }
 
@@ -190,6 +197,12 @@ impl ManagerStats for CountingStats {
 
     fn peers_roster(&self, counts: &PeerCounts) {
         *self.in_roster.lock().unwrap() = counts.clone();
+    }
+}
+
+impl SubsStats for CountingStats {
+    fn bn_subscriptions(&self, topics: usize) {
+        *self.bn_subscriptions.lock().unwrap() = Some(topics);
     }
 }
 

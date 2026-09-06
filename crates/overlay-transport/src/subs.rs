@@ -216,7 +216,7 @@ pub(crate) fn state(peer: &Mutex<PeerState>) -> MutexGuard<'_, PeerState> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use std::time::Instant;
 
     use bytes::Bytes;
@@ -224,12 +224,13 @@ mod tests {
     use overlay_core::topic::table::TopicId;
     use overlay_core::topic::{SubscriptionSets, Topic};
     use overlay_core::wire::{Frame, Read};
-    use tokio::sync::watch;
+    use tokio::sync::{mpsc, watch};
 
     use crate::hello;
+    use crate::hello::OwnTopics;
     use crate::manager::{PeerInfo, RECONNECT_MIN};
     use crate::testlog::LOG;
-    use crate::testutil::{Builder, NodeKind, TestCluster, WAIT, eventually};
+    use crate::testutil::{Builder, CountingStats, NodeKind, TestCluster, WAIT, eventually};
     use crate::tls::Role;
 
     fn topic(name: &str) -> Topic {
@@ -465,5 +466,35 @@ mod tests {
             .filter(|line| line.contains(peer.0.as_str()) && line.contains("contradicts itself"))
             .count();
         assert!(closes > 1, "the peer was closed {closes} times");
+    }
+
+    /// The gauge an operator watches to see that the beacon node link is alive at all: the size
+    /// of the advertised set, which is the number of bits every `SUBS` carries. It follows the
+    /// mirror and not the peers, so a host with nothing connected still reports it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bn_subscriptions_gauge_follows_the_advertised_set() {
+        let (_events, incoming) = mpsc::channel(1);
+        let (sets, watching) = watch::channel(advertising(&[&topic("beacon_block")]));
+        let stats = Arc::new(CountingStats::default());
+        super::spawn(
+            incoming,
+            watching,
+            Arc::new(Mutex::new(OwnTopics::default())),
+            stats.clone(),
+        );
+        eventually("the gauge to report the first set", || {
+            stats.bn_subscriptions() == Some(1)
+        })
+        .await;
+
+        sets.send_replace(advertising(&[
+            &topic("beacon_block"),
+            &topic("beacon_attestation_3"),
+        ]));
+
+        eventually("the gauge to follow the change", || {
+            stats.bn_subscriptions() == Some(2)
+        })
+        .await;
     }
 }
