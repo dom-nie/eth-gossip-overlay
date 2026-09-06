@@ -710,15 +710,20 @@ mod tests {
         "127.0.0.1:0".parse().unwrap()
     }
 
-    /// An acceptor bound on an ephemeral loopback port, and a task that reports who the first
-    /// connection turned out to be, or what it was counted as.
-    fn acceptor(
+    /// An acceptor bound on an ephemeral loopback port, and a task reporting what became of
+    /// the next `connections` to arrive: an error when the handshake was refused, `None` when
+    /// it completed without the acceptor learning whose key it was.
+    ///
+    /// Each admitted connection is sent a byte and kept open, so a dialler can wait until
+    /// everything the acceptor sent after the handshake has reached it.
+    fn acceptor_taking(
         pins: &Arc<ArcSwap<PinTable>>,
         seeds: &Seeds,
         name: &str,
+        connections: usize,
     ) -> (
         std::net::SocketAddr,
-        tokio::task::JoinHandle<Result<PinEntry, HandshakeFailure>>,
+        tokio::task::JoinHandle<Vec<Result<Option<PinEntry>, HandshakeFailure>>>,
     ) {
         let endpoint = quinn::Endpoint::server(
             server_config(pins.clone(), &own_key(seeds, name)).unwrap(),
@@ -728,20 +733,40 @@ mod tests {
         let addr = endpoint.local_addr().unwrap();
         let pins = pins.clone();
         let task = tokio::spawn(async move {
-            let unknown = HandshakeFailure {
-                role: Role::Accept,
-                reason: FailureReason::UnknownKey,
-            };
-            let incoming = endpoint.accept().await.expect("the endpoint is still open");
-            match incoming.await {
-                Ok(connection) => peer_identity(&pins.load(), &connection).ok_or(unknown),
-                Err(error) => Err(HandshakeFailure::from_connection_error(
-                    Role::Accept,
-                    &error,
-                )),
+            let mut outcomes = Vec::new();
+            let mut open = Vec::new();
+            for _ in 0..connections {
+                let incoming = endpoint.accept().await.expect("the endpoint is still open");
+                outcomes.push(match incoming.await {
+                    Ok(connection) => {
+                        let mut stream = connection.open_uni().await.unwrap();
+                        stream.write_all(b".").await.unwrap();
+                        stream.finish().unwrap();
+                        open.push(connection.clone());
+                        Ok(peer_identity(&pins.load(), &connection))
+                    }
+                    Err(error) => Err(HandshakeFailure::from_connection_error(
+                        Role::Accept,
+                        &error,
+                    )),
+                });
             }
+            drop(open);
+            outcomes
         });
         (addr, task)
+    }
+
+    /// [`acceptor_taking`] for the one connection a test is about.
+    fn acceptor(
+        pins: &Arc<ArcSwap<PinTable>>,
+        seeds: &Seeds,
+        name: &str,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::task::JoinHandle<Vec<Result<Option<PinEntry>, HandshakeFailure>>>,
+    ) {
+        acceptor_taking(pins, seeds, name, 1)
     }
 
     /// A sidecar from a fleet running the next protocol major, built here because the ALPN
@@ -786,7 +811,10 @@ mod tests {
             peer_identity(&pins.load(), &connection).unwrap().hostname,
             host("bn-a")
         );
-        assert_eq!(accepted.await.unwrap().unwrap().hostname, host("bn-b"));
+        assert_eq!(
+            accepted.await.unwrap().remove(0).unwrap().unwrap().hostname,
+            host("bn-b")
+        );
 
         let (addr, _) = acceptor(&pins, &seeds, "bn-a");
         let error = dialler
@@ -839,7 +867,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            accepted.await.unwrap().unwrap_err().reason,
+            accepted.await.unwrap().remove(0).unwrap_err().reason,
             FailureReason::UnknownKey
         );
         assert_eq!(
@@ -852,34 +880,7 @@ mod tests {
     async fn roster_reload_rebuilds_pin_table_without_rebuilding_config() {
         let seeds = seeds(0x11, None);
         let pins = pins(&roster(&["bn-a", "bn-b"]), &seeds);
-        let endpoint = quinn::Endpoint::server(
-            server_config(pins.clone(), &own_key(&seeds, "bn-a")).unwrap(),
-            loopback(),
-        )
-        .unwrap();
-        let addr = endpoint.local_addr().unwrap();
-        let accepting = {
-            let pins = pins.clone();
-            tokio::spawn(async move {
-                let mut outcomes = Vec::new();
-                for _ in 0..2 {
-                    let incoming = endpoint.accept().await.expect("the endpoint is still open");
-                    outcomes.push(match incoming.await {
-                        Ok(connection) => {
-                            peer_identity(&pins.load(), &connection).ok_or(HandshakeFailure {
-                                role: Role::Accept,
-                                reason: FailureReason::UnknownKey,
-                            })
-                        }
-                        Err(error) => Err(HandshakeFailure::from_connection_error(
-                            Role::Accept,
-                            &error,
-                        )),
-                    });
-                }
-                outcomes
-            })
-        };
+        let (addr, accepting) = acceptor_taking(&pins, &seeds, "bn-a", 2);
         let mut dialler = quinn::Endpoint::client(loopback()).unwrap();
         dialler.set_default_client_config(
             client_config(pins.clone(), &own_key(&seeds, "bn-c"), &host("bn-a")).unwrap(),
@@ -906,7 +907,10 @@ mod tests {
             outcomes[0].as_ref().unwrap_err().reason,
             FailureReason::UnknownKey
         );
-        assert_eq!(outcomes[1].as_ref().unwrap().hostname, host("bn-c"));
+        assert_eq!(
+            outcomes[1].as_ref().unwrap().as_ref().unwrap().hostname,
+            host("bn-c")
+        );
         assert_eq!(
             peer_identity(&pins.load(), &admitted).unwrap().hostname,
             host("bn-a")
@@ -933,6 +937,51 @@ mod tests {
             peer_identity(&pins.load(), &connection).unwrap().hostname,
             host("rack3/bn 01")
         );
-        assert_eq!(accepted.await.unwrap().unwrap().hostname, host("bn-b"));
+        assert_eq!(
+            accepted.await.unwrap().remove(0).unwrap().unwrap().hostname,
+            host("bn-b")
+        );
+    }
+    /// A session ticket is a cached admission decision, and admission here is per roster and
+    /// per seed, so resuming one would let a host that has just been removed from the roster
+    /// back in for as long as its ticket lasts. `roster_reload_rebuilds_pin_table_without_
+    /// rebuilding_config` cannot see this: it lets a host in and never puts one out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_expelled_host_cannot_resume_an_earlier_session() {
+        let seeds = seeds(0x11, None);
+        let pins = pins(&roster(&["bn-a", "bn-b", "bn-c"]), &seeds);
+        let (addr, accepting) = acceptor_taking(&pins, &seeds, "bn-a", 2);
+        let mut dialler = quinn::Endpoint::client(loopback()).unwrap();
+        dialler.set_default_client_config(
+            client_config(pins.clone(), &own_key(&seeds, "bn-c"), &host("bn-a")).unwrap(),
+        );
+
+        let admitted = dialler
+            .connect(addr, PLACEHOLDER_NAME)
+            .unwrap()
+            .await
+            .unwrap();
+        admitted
+            .accept_uni()
+            .await
+            .unwrap()
+            .read_to_end(1)
+            .await
+            .unwrap();
+        pins.store(Arc::new(PinTable::build(
+            &roster(&["bn-a", "bn-b"]),
+            &seeds,
+        )));
+        let _resumed = dialler.connect(addr, PLACEHOLDER_NAME).unwrap().await;
+
+        let outcomes = accepting.await.unwrap();
+        assert_eq!(
+            outcomes[0].as_ref().unwrap().as_ref().unwrap().hostname,
+            host("bn-c")
+        );
+        assert_eq!(
+            outcomes[1].as_ref().unwrap_err().reason,
+            FailureReason::UnknownKey
+        );
     }
 }
