@@ -268,6 +268,14 @@ mod tests {
 
     use super::*;
 
+    /// The label an alert and a dashboard are keyed on (§12), so the strings are pinned rather
+    /// than derived.
+    #[test]
+    fn directions_are_the_metric_labels_they_are_counted_under() {
+        assert_eq!(Direction::Out.as_str(), "out");
+        assert_eq!(Direction::In.as_str(), "in");
+    }
+
     /// The allowance is arithmetic and the codec is what decides it, so a field added to a chunk
     /// header without a change here would let a frame past a peer's limit.
     #[test]

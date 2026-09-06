@@ -218,6 +218,11 @@ impl PeerReceiver {
 }
 
 impl Drop for PeerReceiver {
+    // mutants::skip: a receiver is only ever dropped for a connection that has already gone,
+    // where the task ends on its own as soon as the accept fails, so no test in this suite can
+    // tell the abort from its absence. It is here for a handle dropped while its connection is
+    // still up, which would otherwise leave a task reading a peer nothing owns any more.
+    #[cfg_attr(test, mutants::skip)]
     fn drop(&mut self) {
         self.task.abort();
     }
@@ -265,9 +270,13 @@ enum StreamEnd {
 }
 
 async fn read_stream(mut stream: quinn::RecvStream, ctx: Arc<Ctx>) {
-    if read_frames(&mut stream, &ctx).await == StreamEnd::Timeout {
-        tracing::debug!(peer = %ctx.peer, "closing a stream that stalled mid-frame");
-        let _ = stream.stop(VarInt::from_u32(STALLED_STREAM_CODE));
+    match read_frames(&mut stream, &ctx).await {
+        StreamEnd::Timeout => {
+            tracing::debug!(peer = %ctx.peer, "closing a stream that stalled mid-frame");
+            let _ = stream.stop(VarInt::from_u32(STALLED_STREAM_CODE));
+        }
+        // A stream that ended has nothing left to stop, and the peer that finished it knows.
+        StreamEnd::Ended => {}
     }
 }
 
@@ -393,6 +402,7 @@ impl Ctx {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testlog::LOG;
     use crate::testutil::{
         Builder, CountingStats, NodeKind, PublishSpy, SETTLE, TestCluster, WAIT, eventually,
         subscriptions, topic,
@@ -900,6 +910,13 @@ mod tests {
             receiver.charge(FanoutKind::Chunk, over_budget, went_over),
             Charge::Suppressed
         );
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            cluster.live(1).len(),
+            1,
+            "one violation is not what the close is for"
+        );
+
         assert_eq!(
             receiver.charge(
                 FanoutKind::Chunk,
@@ -920,6 +937,101 @@ mod tests {
             cluster.live(1).len() == 1 && cluster.live(0).len() == 1
         })
         .await;
+    }
+
+    /// A chunk that is a piece of a message is a form this release cannot put together, so it is
+    /// counted as a frame type it does not know and dropped (D10). T-074 puts the reassembler
+    /// behind the same hook without touching the dispatch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_striped_chunk_is_counted_and_dropped_until_the_reassembler_lands() {
+        let block = topic("beacon_block");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        let striped = encode_datagram(&Frame::Chunk {
+            flags: ChunkFlags::NONE,
+            chunk: Chunk {
+                msg_id: MessageId([1; 20]),
+                topic_id: 0,
+                k: 2,
+                m: 0,
+                index: 0,
+                total_len: 8,
+                data: Bytes::from_static(b"half"),
+            },
+        });
+
+        send(&peer, &[striped]).await;
+
+        let sender = cluster.hostname(0);
+        eventually("the chunk to be counted", || {
+            cluster.stats(1).unknown_frame_types(&sender) == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert!(cluster.published(1).is_empty());
+    }
+
+    /// One line per connection, however many bad payloads a peer sends: a broken sibling must
+    /// not be able to fill this host's log, and the next connection gets a fresh line because it
+    /// may be a different fault (D03).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peer_sending_invalid_payloads_is_warned_about_once() {
+        let mark = LOG.len();
+        let block = topic("beacon_block");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        let refused = whole(0, &block, b"not snappy at all");
+
+        send(&peer, &[refused.clone(), refused.clone(), refused.clone()]).await;
+
+        let sender = cluster.hostname(0);
+        eventually("all three to be refused", || {
+            cluster.stats(1).invalid_payloads(&sender) == 3
+        })
+        .await;
+        let lines = LOG
+            .since(mark)
+            .lines()
+            .filter(|line| line.contains(sender.0.as_str()) && line.contains("dropping a payload"))
+            .count();
+        assert_eq!(lines, 1);
+    }
+
+    /// A peer that reconnects is a new connection, and a sender bound to the old one can only
+    /// write into a connection that is gone (D15). The budget close is the one way v1 has to
+    /// make a peer come back on a new connection.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_after_a_reconnect_goes_out_on_the_new_connection() {
+        let block = topic("beacon_block");
+        let before = payload(b"before the reconnect");
+        let after = payload(b"after the reconnect");
+        let mut cluster = TestCluster::start(2).await;
+        for node in 0..2 {
+            cluster.start_sidecar(node, subscriptions(&[&block], &[]));
+        }
+        let sender = cluster.hostname(0);
+        eventually("the pair to pair", || {
+            cluster.live(0).subscribers(&block).len() == 1 && cluster.receiver(1, &sender).is_some()
+        })
+        .await;
+        assert!(cluster.from_bn(0, &block, &before));
+        eventually("the first message", || cluster.published(1).len() == 1).await;
+
+        let receiver = cluster.receiver(1, &sender).unwrap();
+        let went_over = Instant::now();
+        receiver.charge(FanoutKind::Chunk, 20 * 1024 * 1024, went_over);
+        receiver.charge(
+            FanoutKind::Chunk,
+            20 * 1024 * 1024,
+            went_over + SUSTAINED_VIOLATION + Duration::from_secs(1),
+        );
+        eventually("the connection to go", || cluster.live(0).is_empty()).await;
+        eventually("the pair to pair again", || {
+            cluster.live(0).subscribers(&block).len() == 1
+        })
+        .await;
+
+        assert!(cluster.from_bn(0, &block, &after));
+
+        eventually("the second message", || cluster.published(1).len() == 2).await;
     }
 
     /// The property the whole design rests on (§3 principle 1, §5.5). A sidecar publishes what
