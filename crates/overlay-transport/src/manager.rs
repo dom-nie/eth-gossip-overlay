@@ -38,12 +38,14 @@ use ed25519_dalek::SigningKey;
 use overlay_core::backoff::Backoff;
 use overlay_core::config::Overlay;
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
+use overlay_core::topic::table::PeerTopicTable;
 use quinn::VarInt;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 
 use crate::endpoint::{self, EndpointError};
+use crate::hello::{ControlStream, Negotiated};
 use crate::tls::{self, FailureReason, HandshakeFailure, PinEntry, PinTable, Role, SeedGeneration};
 
 /// §5.3's reconnect floor. The first retry after a peer goes away is quick because the usual
@@ -86,6 +88,13 @@ pub enum CloseCode {
     /// The peer stayed over its fan-out budget for more than 10 s (DX-N3). Sent by T-032, which
     /// owns the budget; the code lives here so every close reason is in one enum.
     RateExceeded,
+    /// The peer connected and did not finish HELLO in time (T-025).
+    HelloTimeout,
+    /// HELLO named a host other than the one the pin table gives the peer's key (T-025).
+    HostnameMismatch,
+    /// The peer sent something HELLO does not allow: a frame that did not decode, one that has
+    /// no business coming first, or a topic table that contradicts itself (T-025).
+    ProtocolError,
 }
 
 impl CloseCode {
@@ -99,6 +108,9 @@ impl CloseCode {
             Self::RosterRemoved => 4,
             Self::Shutdown => 5,
             Self::RateExceeded => 6,
+            Self::HelloTimeout => 7,
+            Self::HostnameMismatch => 8,
+            Self::ProtocolError => 9,
         })
     }
 
@@ -112,6 +124,9 @@ impl CloseCode {
             Self::RosterRemoved => b"roster removed",
             Self::Shutdown => b"shutdown",
             Self::RateExceeded => b"rate exceeded",
+            Self::HelloTimeout => b"hello timeout",
+            Self::HostnameMismatch => b"hostname mismatch",
+            Self::ProtocolError => b"protocol error",
         }
     }
 
@@ -120,8 +135,10 @@ impl CloseCode {
     }
 }
 
-/// A peer that has passed admission, as [`Admission`] describes it.
-#[derive(Clone, Debug)]
+/// A peer that has passed admission, as [`Admission`] describes it. It is not [`Clone`]: the
+/// control stream and the peer's topic table exist once per connection, and
+/// [`PeerEvent::Up`] is the one path they travel from admission to the task that owns them.
+#[derive(Debug)]
 pub struct PeerInfo {
     /// The roster host the pin table named.
     pub hostname: Hostname,
@@ -131,14 +148,27 @@ pub struct PeerInfo {
     /// The site label, for metrics and failure-domain reporting.
     pub site: Option<String>,
     /// Random per process start, so a second connection from the same host tells a restart from
-    /// a changed path. Zero until HELLO carries one (T-025).
+    /// a changed path (D15).
     pub instance_id: u64,
+    /// The peer's `CARGO_PKG_VERSION`, for `fleet-overlayctl status` (T-042).
+    pub software_version: String,
+    /// What the pair agreed to operate at.
+    pub negotiated: Negotiated,
     /// The connection itself.
     pub connection: quinn::Connection,
+    /// The stream HELLO travelled on, which stays open as the peer's control stream (T-027).
+    pub control: ControlStream,
+    /// The topic ids the peer announced in its HELLO, and the table its later `TOPIC_ADD`s
+    /// extend.
+    pub topics: PeerTopicTable,
 }
 
 /// What the manager tells the router as connections come and go. T-033 restarts a peer's sender
 /// on the [`Down`](PeerEvent::Down) and [`Up`](PeerEvent::Up) pair a supersede produces.
+// `Up` carries a connection, a stream pair and a topic table and is much the larger of the two.
+// Boxing it would add an allocation per connection to save nothing: the channel holds a few
+// events per peer, not a stream of them.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub enum PeerEvent {
     /// The peer is in the live set.
@@ -161,8 +191,13 @@ pub struct LivePeer {
     /// never carried in the table: a number read when the peer was admitted would be minutes
     /// old by the time a route plan asked for it.
     pub rtt: Duration,
-    /// The peer's instance id, zero until T-025.
+    /// The peer's instance id (D15).
     pub instance_id: u64,
+    /// The release the peer is running.
+    pub software_version: String,
+    /// What the pair agreed to operate at, which every send path consults before it builds a
+    /// frame.
+    pub negotiated: Negotiated,
     /// The connection to send on.
     pub connection: quinn::Connection,
 }
@@ -220,6 +255,10 @@ pub trait ManagerStats: Send + Sync {
     /// roster gives it, which means a stale roster on one of the two hosts (D15).
     fn roster_region_mismatch(&self, peer: &Hostname);
 
+    /// `unknown_frame_type_total{peer}`: a frame type this release does not define, skipped on
+    /// the peer's control stream (D10). A peer one release ahead is the ordinary cause.
+    fn unknown_frame_type(&self, peer: &Hostname);
+
     /// Every dial this host starts, before the handshake. §12 has no series for it and T-041
     /// need not add one: the tie-break is only observable from the dial path, because a host
     /// that wrongly dialled a lower peer looks exactly like one whose peer dialled first.
@@ -240,17 +279,22 @@ impl ManagerStats for () {
     fn handshake_failure(&self, _: HandshakeFailure) {}
     fn auth_via_previous_seed(&self, _: &Hostname) {}
     fn roster_region_mismatch(&self, _: &Hostname) {}
+    fn unknown_frame_type(&self, _: &Hostname) {}
     fn dial_started(&self, _: &Hostname) {}
     fn peers_connected(&self, _: &PeerCounts) {}
     fn peers_roster(&self, _: &PeerCounts) {}
 }
 
-/// Why a connection did not become a peer.
+/// Why a connection did not become a peer, and what to do about it. The two are separate
+/// answers: a peer that timed out and one that named the wrong hostname are counted apart, and
+/// the close code is the only thing that tells the peer whether to come back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("admission refused: {reason}")]
 pub struct AdmitError {
     /// What to count under `handshake_failures_total{role, reason}`.
     pub reason: FailureReason,
+    /// What to close the connection with.
+    pub close: CloseCode,
 }
 
 /// What turns an authenticated connection into a peer. It runs on every new connection, in both
@@ -258,8 +302,8 @@ pub struct AdmitError {
 /// made: a second connection from a live peer is adopted only if this succeeds on it.
 ///
 /// `pinned` is the entry the pin table yielded for the key the peer presented, which is the
-/// hostname HELLO will be cross-checked against (D14). T-025 replaces [`IdentityAdmission`]
-/// with that exchange.
+/// hostname HELLO is cross-checked against (D14). [`HelloAdmission`] is the implementation the
+/// sidecar runs.
 pub trait Admission: Send + Sync + 'static {
     /// Admits `connection`, or says what to count for refusing it.
     fn admit(
@@ -278,45 +322,6 @@ impl<A: Admission> Admission for Arc<A> {
         pinned: &PinEntry,
     ) -> impl Future<Output = Result<PeerInfo, AdmitError>> + Send {
         (**self).admit(connection, role, pinned)
-    }
-}
-
-/// Admission by pinned key alone: the hostname the pin table yielded, the region and site the
-/// roster gives that host, and instance id 0 because nothing declares one until HELLO (T-025).
-/// Nothing is read off the wire, so it cannot fail except against a roster that changed while
-/// the handshake was in flight.
-pub struct IdentityAdmission {
-    roster: watch::Receiver<Roster>,
-}
-
-impl IdentityAdmission {
-    /// Reads the roster through the same watch the manager does, so a reload reaches both.
-    pub fn new(roster: watch::Receiver<Roster>) -> Self {
-        Self { roster }
-    }
-}
-
-impl Admission for IdentityAdmission {
-    fn admit(
-        &self,
-        connection: quinn::Connection,
-        _role: Role,
-        pinned: &PinEntry,
-    ) -> impl Future<Output = Result<PeerInfo, AdmitError>> + Send {
-        let entry = self.roster.borrow().get(&pinned.hostname).cloned();
-        let hostname = pinned.hostname.clone();
-        std::future::ready(match entry {
-            Some(entry) => Ok(PeerInfo {
-                hostname,
-                region: entry.region,
-                site: entry.site,
-                instance_id: 0,
-                connection,
-            }),
-            None => Err(AdmitError {
-                reason: FailureReason::Hostname,
-            }),
-        })
     }
 }
 
@@ -441,6 +446,8 @@ impl Shared {
                 // Filled in by `live`, from the connection, every time it is asked for.
                 rtt: Duration::ZERO,
                 instance_id: info.instance_id,
+                software_version: info.software_version.clone(),
+                negotiated: info.negotiated,
                 connection: info.connection.clone(),
             };
             if let Some(Slot::Live(old)) = peers.insert(info.hostname.clone(), Slot::Live(live)) {
@@ -734,7 +741,7 @@ async fn accept_one<A: Admission>(
     {
         Ok(info) => info,
         Err(error) => {
-            shared.refuse(remote, &connection, error.reason, CloseCode::NotInRoster);
+            shared.refuse(remote, &connection, error.reason, error.close);
             return;
         }
     };
@@ -837,7 +844,7 @@ async fn dial_once<A: Admission>(
         .admit(connection.clone(), Role::Dial, &pinned)
         .await
         .map_err(|error| {
-            CloseCode::NotInRoster.close(&connection);
+            error.close.close(&connection);
             Some(HandshakeFailure {
                 role: Role::Dial,
                 reason: error.reason,
@@ -1097,12 +1104,12 @@ mod tests {
             .start()
             .await;
         let peer = cluster.hostname(0);
-        let first = cluster.dial(0, 1).await.unwrap();
+        let first = cluster.dial_with_hello(0, 1, &cluster.self_hello(0)).await;
         let PeerEvent::Up(before) = cluster.next_event(1).await else {
             panic!("the first connection did not come up")
         };
 
-        let _second = cluster.dial(0, 1).await.unwrap();
+        let _second = cluster.dial_with_hello(0, 1, &cluster.self_hello(0)).await;
 
         let down = cluster.next_event(1).await;
         assert!(
@@ -1118,14 +1125,16 @@ mod tests {
             after.connection.stable_id()
         );
 
-        let closed = tokio::time::timeout(WAIT, first.closed()).await.unwrap();
+        let closed = tokio::time::timeout(WAIT, first.connection.closed())
+            .await
+            .unwrap();
         assert!(
             matches!(&closed, quinn::ConnectionError::ApplicationClosed(frame)
                 if frame.error_code == CloseCode::Superseded.code()),
             "{closed:?}"
         );
-        // Both connections carry instance id 0 until HELLO declares one (T-025), so what
-        // changed is the path and the line has to say so (D15).
+        // Both connections come from one process and carry its instance id, so what changed is
+        // the path and the line has to say so (D15).
         assert!(
             LOG.since(mark)
                 .lines()
@@ -1134,13 +1143,26 @@ mod tests {
         );
     }
 
-    fn admitted(pinned: &PinEntry, region: &str, connection: quinn::Connection) -> PeerInfo {
+    /// A peer as an admission that skips HELLO would report it. The control stream is opened
+    /// rather than exchanged on: [`PeerInfo`] owns one, and a test about the manager has no use
+    /// for what travels on it.
+    async fn admitted(pinned: &PinEntry, region: &str, connection: quinn::Connection) -> PeerInfo {
+        let control = ControlStream::open(&connection, Role::Dial).await.unwrap();
         PeerInfo {
             hostname: pinned.hostname.clone(),
             region: Region(region.to_owned()),
             site: None,
             instance_id: 0,
+            software_version: "test".to_owned(),
+            negotiated: Negotiated {
+                minor: 0,
+                features: 0,
+                peer_max_frame_bytes: 0,
+                peer_max_batch_entries: 0,
+            },
             connection,
+            control,
+            topics: PeerTopicTable::new(),
         }
     }
 
@@ -1163,13 +1185,17 @@ mod tests {
                 *seen += 1;
                 *seen == 1
             };
-            std::future::ready(if first {
-                Ok(admitted(pinned, REGION, connection))
-            } else {
-                Err(AdmitError {
-                    reason: FailureReason::Hostname,
-                })
-            })
+            let pinned = pinned.clone();
+            async move {
+                if first {
+                    Ok(admitted(&pinned, REGION, connection).await)
+                } else {
+                    Err(AdmitError {
+                        reason: FailureReason::Hostname,
+                        close: CloseCode::HostnameMismatch,
+                    })
+                }
+            }
         }
     }
 
@@ -1212,7 +1238,8 @@ mod tests {
             _role: Role,
             pinned: &PinEntry,
         ) -> impl Future<Output = Result<PeerInfo, AdmitError>> + Send {
-            std::future::ready(Ok(admitted(pinned, self.0, connection)))
+            let (pinned, region) = (pinned.clone(), self.0);
+            async move { Ok(admitted(&pinned, region, connection).await) }
         }
     }
 

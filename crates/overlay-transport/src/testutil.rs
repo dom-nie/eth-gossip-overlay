@@ -39,9 +39,10 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::endpoint::{self, EndpointError};
+use crate::hello::{HelloAdmission, OwnTopics, SelfHello};
 use crate::manager::{
-    Admission, CloseCode, ConnectionManager, Handle, IdentityAdmission, LiveView, Local,
-    ManagerStats, PeerCounts, PeerEvent,
+    Admission, CloseCode, ConnectionManager, Handle, LiveView, Local, ManagerStats, PeerCounts,
+    PeerEvent, PeerInfo,
 };
 use crate::tls::{self, FailureReason, HandshakeFailure, PinTable, Role};
 
@@ -85,6 +86,9 @@ pub enum NodeKind {
     /// A sink whose key derives from the outgoing seed rather than the one in force, as a host
     /// that a rotation has not restarted yet still presents (DX-N2).
     PreviousSeedKey,
+    /// An endpoint with nothing reading from it, so a test drives both ends of a connection
+    /// itself: [`TestCluster::connected_pair`] is what accepts on it.
+    Bare,
     /// A sink with a pin table of its own that is always empty, so it takes the packets of
     /// every dial and refuses the key behind them. A dialler's `connect()` resolves before the
     /// refusal reaches it, which is the one case where a resolved dial is not a peer.
@@ -97,6 +101,7 @@ pub struct CountingStats {
     handshake_failures: Mutex<BTreeMap<(&'static str, &'static str), u64>>,
     previous_seed: Mutex<BTreeMap<Hostname, u64>>,
     region_mismatches: Mutex<BTreeMap<Hostname, u64>>,
+    unknown_frame_types: Mutex<BTreeMap<Hostname, u64>>,
     dials: Mutex<BTreeMap<Hostname, u64>>,
     connected: Mutex<PeerCounts>,
     in_roster: Mutex<PeerCounts>,
@@ -116,6 +121,11 @@ impl CountingStats {
     /// `roster_region_mismatch_total{peer}`.
     pub fn region_mismatches(&self, peer: &Hostname) -> u64 {
         count(&self.region_mismatches, peer)
+    }
+
+    /// `unknown_frame_type_total{peer}`.
+    pub fn unknown_frame_types(&self, peer: &Hostname) -> u64 {
+        count(&self.unknown_frame_types, peer)
     }
 
     /// How many dials to `peer` this host started.
@@ -156,6 +166,10 @@ impl ManagerStats for CountingStats {
 
     fn roster_region_mismatch(&self, peer: &Hostname) {
         add(&self.region_mismatches, peer.clone());
+    }
+
+    fn unknown_frame_type(&self, peer: &Hostname) {
+        add(&self.unknown_frame_types, peer.clone());
     }
 
     fn dial_started(&self, peer: &Hostname) {
@@ -209,24 +223,32 @@ impl Builder {
         self
     }
 
-    /// Starts the cluster with the admission this ticket ships.
-    pub async fn start(self) -> TestCluster<IdentityAdmission> {
-        let (roster, _) = watch::channel(Roster { hosts: Vec::new() });
-        let admission = IdentityAdmission::new(roster.subscribe());
-        self.start_with_channel(roster, admission).await
+    /// Starts the cluster with the admission the sidecar ships, so every connection between two
+    /// managers goes through the real handshake.
+    pub async fn start(self) -> TestCluster<HelloAdmission> {
+        self.start_each(|node| {
+            Arc::new(HelloAdmission::new(
+                node.self_hello.clone(),
+                node.topics.clone(),
+                node.stats.clone(),
+            ))
+        })
+        .await
     }
 
-    /// Starts the cluster with an admission of the test's own.
+    /// Starts the cluster with an admission of the test's own, shared by every node.
     pub async fn start_with<A: Admission>(self, admission: A) -> TestCluster<A> {
-        let (roster, _) = watch::channel(Roster { hosts: Vec::new() });
-        self.start_with_channel(roster, admission).await
+        let admission = Arc::new(admission);
+        self.start_each(move |_| admission.clone()).await
     }
 
-    async fn start_with_channel<A: Admission>(
+    /// One admission per node, rebuilt whenever a node restarts, because a node stands in for a
+    /// process and a restarted process is a new one.
+    async fn start_each<A: Admission>(
         self,
-        roster: watch::Sender<Roster>,
-        admission: A,
+        admission: impl Fn(&Node) -> Arc<A> + Send + Sync + 'static,
     ) -> TestCluster<A> {
+        let (roster, _) = watch::channel(Roster { hosts: Vec::new() });
         let prefix = format!("c{}", CLUSTERS.fetch_add(1, Ordering::Relaxed));
         // Every cluster runs mid-rotation so that a node can hold a key from either seed, which
         // is the only way to reach the previous-seed path from outside.
@@ -240,6 +262,14 @@ impl Builder {
         let mut nodes = Vec::new();
         for (index, kind) in self.kinds.iter().copied().enumerate() {
             let hostname = Hostname(format!("{prefix}-bn-{index:02}"));
+            let self_hello = SelfHello {
+                hostname: hostname.clone(),
+                region: Region(REGION.to_owned()),
+                site: None,
+                // Not the process id: every node in a cluster runs in this one process, and a
+                // test about a restart needs them told apart the way two processes would be.
+                instance_id: rand::random(),
+            };
             let key = match (kind, &seeds.previous) {
                 // Any key the fleet seed does not derive will do; a fixed one keeps the test
                 // deterministic.
@@ -261,9 +291,14 @@ impl Builder {
             };
             let _guard = runtime.as_ref().map(tokio::runtime::Runtime::enter);
             let (endpoint, addr) = bind_reserved(&self.cfg, &node_pins, &key);
-            let sink = (kind != NodeKind::Manager).then(|| match &runtime {
-                Some(runtime) => runtime.spawn(hold_connections(endpoint.clone())),
-                None => tokio::spawn(hold_connections(endpoint.clone())),
+            let holding = !matches!(kind, NodeKind::Manager | NodeKind::Bare);
+            let sink = holding.then(|| {
+                let held =
+                    hold_connections(endpoint.clone(), node_pins.clone(), self_hello.clone());
+                match &runtime {
+                    Some(runtime) => runtime.spawn(held),
+                    None => tokio::spawn(held),
+                }
             });
             drop(_guard);
 
@@ -274,6 +309,8 @@ impl Builder {
                 addr,
             });
             nodes.push(Node {
+                self_hello,
+                topics: Arc::new(Mutex::new(OwnTopics::default())),
                 hostname,
                 key,
                 kind,
@@ -293,7 +330,7 @@ impl Builder {
             hosts,
             roster,
             nodes,
-            admission: Arc::new(admission),
+            admission: Box::new(admission),
         };
         let initial = self
             .roster
@@ -330,18 +367,40 @@ fn bind_reserved(
     panic!("no free port in {PORT_RANGE:?}")
 }
 
-/// Accepts everything and lets nothing go, so the peer's connection stays up until the endpoint
-/// or the runtime under it goes away.
-async fn hold_connections(endpoint: quinn::Endpoint) {
+/// Accepts everything, answers HELLO, and lets nothing go, so the peer's connection stays up
+/// until the endpoint or the runtime under it goes away. A sink that stayed silent would look to
+/// the manager under test like a host that connects and never speaks, which is a different test.
+async fn hold_connections(
+    endpoint: quinn::Endpoint,
+    pins: Arc<ArcSwap<PinTable>>,
+    self_hello: SelfHello,
+) {
     let mut held = Vec::new();
+    let mut paired = Vec::new();
     while let Some(incoming) = endpoint.accept().await {
         if let Ok(connection) = incoming.await {
+            if let Some(pinned) = tls::peer_identity(&pins.load(), &connection)
+                && let Ok(peer) = crate::hello::perform(
+                    connection.clone(),
+                    Role::Accept,
+                    &self_hello,
+                    &pinned.hostname,
+                    Vec::new(),
+                    WAIT,
+                    &(),
+                )
+                .await
+            {
+                paired.push(peer);
+            }
             held.push(connection);
         }
     }
 }
 
 struct Node {
+    self_hello: SelfHello,
+    topics: Arc<Mutex<OwnTopics>>,
     hostname: Hostname,
     key: SigningKey,
     kind: NodeKind,
@@ -354,17 +413,20 @@ struct Node {
 }
 
 /// A running overlay of `n` hosts on loopback.
-pub struct TestCluster<A: Admission = IdentityAdmission> {
+pub struct TestCluster<A: Admission = HelloAdmission> {
     cfg: Overlay,
     seeds: Seeds,
     pins: Arc<ArcSwap<PinTable>>,
     hosts: Vec<HostEntry>,
     roster: watch::Sender<Roster>,
     nodes: Vec<Node>,
-    admission: Arc<A>,
+    admission: NodeAdmission<A>,
 }
 
-impl TestCluster<IdentityAdmission> {
+/// How a cluster builds a node's admission, which it does again whenever a node restarts.
+type NodeAdmission<A> = Box<dyn Fn(&Node) -> Arc<A> + Send + Sync>;
+
+impl TestCluster<HelloAdmission> {
     /// `hosts` managers, all in the roster from the start.
     pub async fn start(hosts: usize) -> Self {
         Builder::new(&vec![NodeKind::Manager; hosts]).start().await
@@ -408,6 +470,11 @@ impl<A: Admission> TestCluster<A> {
             .as_ref()
             .map(Handle::live)
             .unwrap_or_default()
+    }
+
+    /// What node `index` puts in its own HELLO.
+    pub fn self_hello(&self, index: usize) -> SelfHello {
+        self.nodes[index].self_hello.clone()
     }
 
     /// The pin table every node in this cluster reads, as one host's would be after a reload.
@@ -495,6 +562,7 @@ impl<A: Admission> TestCluster<A> {
             }
         };
         self.nodes[index].endpoint = Some(endpoint);
+        self.nodes[index].self_hello.instance_id = rand::random();
         self.start_manager(index);
     }
 
@@ -517,6 +585,49 @@ impl<A: Admission> TestCluster<A> {
         self.dial_as(&self.hostname(from), from, to).await
     }
 
+    /// Both ends of one connection, for a test that plays the handshake itself. Node `to` has to
+    /// be a [`NodeKind::Bare`]: the accept happens here, and a sink would take the connection
+    /// first.
+    pub async fn connected_pair(
+        &self,
+        from: usize,
+        to: usize,
+    ) -> (quinn::Connection, quinn::Connection) {
+        let accepting = async {
+            self.endpoint(to)
+                .accept()
+                .await
+                .expect("the endpoint is still open")
+                .await
+                .unwrap()
+        };
+        let (dialled, accepted) = tokio::join!(self.dial(from, to), accepting);
+        (dialled.unwrap(), accepted)
+    }
+
+    /// A connection to node `to` that has been through the dialler's half of the handshake,
+    /// which is what a peer with a manager of its own would have done. `self_hello` is what the
+    /// far end learns about the caller, so a test decides for itself which process it is.
+    pub async fn dial_with_hello(
+        &self,
+        from: usize,
+        to: usize,
+        self_hello: &SelfHello,
+    ) -> PeerInfo {
+        let connection = self.dial(from, to).await.unwrap();
+        crate::hello::perform(
+            connection,
+            Role::Dial,
+            self_hello,
+            &self.hostname(to),
+            Vec::new(),
+            WAIT,
+            &(),
+        )
+        .await
+        .unwrap()
+    }
+
     fn start_manager(&mut self, index: usize) {
         let node = &self.nodes[index];
         let manager = ConnectionManager::spawn(
@@ -532,7 +643,7 @@ impl<A: Admission> TestCluster<A> {
             },
             node.endpoint.clone().unwrap(),
             self.roster.subscribe(),
-            self.admission.clone(),
+            (self.admission)(node),
             node.events.0.clone(),
             node.stats.clone(),
         );
