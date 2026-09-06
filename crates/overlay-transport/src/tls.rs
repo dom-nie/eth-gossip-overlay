@@ -40,8 +40,13 @@ use arc_swap::ArcSwap;
 use ed25519_dalek::SigningKey;
 use overlay_core::identity::{Seeds, expected_tls_public_key};
 use overlay_core::roster::{Hostname, Roster};
-use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::{
+    CertificateDer, PrivatePkcs8KeyDer, ServerName, SubjectPublicKeyInfoDer, UnixTime,
+};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
 use rustls::sign::CertifiedKey;
+use rustls::{DigitallySignedStruct, DistinguishedName, SignatureScheme};
 use zeroize::Zeroizing;
 
 /// The PKCS#8 v1 wrapper around a bare Ed25519 secret: the sequence, version 0, the Ed25519
@@ -56,6 +61,11 @@ const PKCS8_ED25519_PREFIX: [u8; 16] = [
 const SPKI_ED25519_PREFIX: [u8; 12] = [
     0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
 ];
+
+/// The name the dialler puts in SNI and the acceptor never reads. TLS insists on a name;
+/// the overlay's identities are keys, so one constant stands in for all of them and roster
+/// hostnames never have to fit a name type (D14, D27).
+pub const PLACEHOLDER_NAME: &str = "fleet-overlay";
 
 /// Why the overlay's TLS configuration could not be built. All of it means the crypto provider
 /// is not the one this module installs, so none of it happens under `ring`.
@@ -292,6 +302,131 @@ impl DialerVerifier {
             role: Role::Dial,
             reason: FailureReason::KeyMismatch,
         })
+    }
+}
+
+impl From<HandshakeFailure> for rustls::Error {
+    /// Carries the reason into the alert rustls sends and the message quinn reports, so a
+    /// rejection reads as `unknown_key` rather than as an unspecified bad certificate.
+    fn from(failure: HandshakeFailure) -> Self {
+        Self::InvalidCertificate(rustls::CertificateError::Other(rustls::OtherError(
+            Arc::new(failure),
+        )))
+    }
+}
+
+/// The peer signs the handshake with the key it presented, and this is the helper that reads
+/// that key as a `SubjectPublicKeyInfo`. The certificate-shaped one next to it in rustls
+/// parses its argument as X.509 and rejects a raw key outright.
+fn verify_handshake_signature(
+    message: &[u8],
+    presented: &CertificateDer<'_>,
+    signature: &DigitallySignedStruct,
+) -> Result<HandshakeSignatureValid, rustls::Error> {
+    rustls::crypto::verify_tls13_signature_with_raw_key(
+        message,
+        &SubjectPublicKeyInfoDer::from(presented.as_ref()),
+        signature,
+        &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+    )
+}
+
+/// QUIC mandates TLS 1.3 and the configurations below offer nothing else, so reaching this is
+/// a bug in rustls rather than anything a peer can provoke.
+fn no_tls12_signature() -> Result<HandshakeSignatureValid, rustls::Error> {
+    Err(rustls::PeerIncompatible::Tls12NotOffered.into())
+}
+
+/// Ed25519 and nothing else. The key is derived by HKDF from the fleet seed, so no other
+/// algorithm can ever appear, and offering one would only invite a downgrade.
+fn ed25519_only() -> Vec<SignatureScheme> {
+    vec![SignatureScheme::ED25519]
+}
+
+/// The acceptor authenticates its peer by key alone: no chain to walk, no roots to consult,
+/// no name to match, and `now` unread.
+impl ClientCertVerifier for AcceptorVerifier {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        self.identify(end_entity)?;
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        no_tls12_signature()
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_handshake_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        ed25519_only()
+    }
+
+    fn requires_raw_public_keys(&self) -> bool {
+        true
+    }
+}
+
+/// The dialler likewise, and it ignores `server_name` as well: it dialled an address from the
+/// roster and expects that host's key, which is a stronger statement than any name in the
+/// handshake could make.
+impl ServerCertVerifier for DialerVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: UnixTime,
+    ) -> Result<ServerCertVerified, rustls::Error> {
+        self.check(end_entity)?;
+        Ok(ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        no_tls12_signature()
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        verify_handshake_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        ed25519_only()
+    }
+
+    fn requires_raw_public_keys(&self) -> bool {
+        true
     }
 }
 
