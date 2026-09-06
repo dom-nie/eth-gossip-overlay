@@ -404,14 +404,17 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
 
-    use overlay_core::config::{Log, PublishRateLimit};
+    use overlay_core::config::{Log, LogFormat, LogLevel, PublishRateLimit};
     use overlay_core::identity::{FleetSeed, write_secret_file};
     use overlay_core::roster::{Hostname, Roster};
     use tempfile::TempDir;
     use tokio::sync::watch;
 
+    use tracing::Dispatch;
+
     use super::*;
     use crate::logging::testing;
+    use crate::logging::testing::Sink;
 
     /// A config document with the roster path filled in by [`Fixture::write_config`].
     const CONFIG: &str = "overlay:\n  roster_file: ROSTER\ninject: true\n";
@@ -484,6 +487,17 @@ mod tests {
 
     impl Fixture {
         fn new(config: &str, roster: &str) -> Self {
+            Fixture::with_log(config, roster, &Log::default(), None).0
+        }
+
+        /// A fixture whose log appliers write through an in-memory subscriber, returned with
+        /// the dispatch a test has to install around the code it wants captured.
+        fn with_log(
+            config: &str,
+            roster: &str,
+            log_cfg: &Log,
+            rust_log: Option<&str>,
+        ) -> (Self, Sink, Dispatch) {
             let dir = tempfile::tempdir().unwrap();
             let config_path = dir.path().join("config.yaml");
             let roster_path = dir.path().join("roster.yaml");
@@ -497,7 +511,7 @@ mod tests {
             let (roster_tx, roster_rx) = watch::channel(Roster::from_yaml(roster).unwrap());
             let (seed_tx, previous_seed) = watch::channel(None);
             let (limits_tx, _) = watch::channel(PublishRateLimit::default());
-            let (_, _, log) = testing::subscriber(&Log::default(), false, None);
+            let (sink, dispatch, log) = testing::subscriber(log_cfg, false, rust_log);
             let stats = Arc::new(Recorded::default());
             let reloader = Reloader::new(
                 config_path.clone(),
@@ -511,7 +525,7 @@ mod tests {
                 },
             )
             .unwrap();
-            Self {
+            let fixture = Self {
                 _dir: dir,
                 config_path,
                 roster_path,
@@ -520,7 +534,8 @@ mod tests {
                 previous_seed,
                 stats,
                 reloader,
-            }
+            };
+            (fixture, sink, dispatch)
         }
 
         fn write_roster(&self, text: &str) {
@@ -762,5 +777,85 @@ mod tests {
         assert!(report.error.is_none(), "{report:?}");
         assert_eq!(h.roster.borrow_and_update().hosts.len(), 4);
         assert_eq!(h.stats.rejected(), 0);
+    }
+
+    #[test]
+    fn reload_applies_log_level_and_format() {
+        let (mut h, sink, dispatch) = Fixture::with_log(
+            "overlay:\n  roster_file: ROSTER\nlog:\n  level: info\n  format: text\n",
+            &roster_yaml(3),
+            &Log {
+                level: LogLevel::Info,
+                format: LogFormat::Text,
+            },
+            None,
+        );
+        h.write_config("overlay:\n  roster_file: ROSTER\nlog:\n  level: debug\n  format: json\n");
+
+        let report = tracing::dispatcher::with_default(&dispatch, || {
+            tracing::debug!("below the configured level");
+            let report = h.reloader.reload(Trigger::Manual);
+            tracing::debug!("above it now");
+            report
+        });
+
+        assert_eq!(report.applied, ["log.format", "log.level"]);
+        assert!(
+            !sink.text().contains("below the configured level"),
+            "{}",
+            sink.text()
+        );
+        // Every line parses as JSON, which is the format having changed, and the debug line
+        // after the reload is there, which is the level having changed.
+        let messages: Vec<String> = sink
+            .objects()
+            .iter()
+            .map(|line| line["message"].to_string())
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("above it now")),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn rust_log_set_leaves_the_level_untouched_and_says_so() {
+        let (mut h, sink, dispatch) = Fixture::with_log(
+            "overlay:\n  roster_file: ROSTER\nlog:\n  level: info\n  format: json\n",
+            &roster_yaml(3),
+            &Log {
+                level: LogLevel::Info,
+                format: LogFormat::Json,
+            },
+            Some("debug"),
+        );
+        h.write_config("overlay:\n  roster_file: ROSTER\nlog:\n  level: error\n  format: json\n");
+
+        let report = tracing::dispatcher::with_default(&dispatch, || {
+            let report = h.reloader.reload(Trigger::Manual);
+            tracing::debug!("the environment still lets this through");
+            report
+        });
+
+        assert_eq!(report.applied, ["log.level"]);
+        let messages: Vec<String> = sink
+            .objects()
+            .iter()
+            .map(|line| line["message"].to_string())
+            .collect();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("RUST_LOG is set, so log.level is not applied")),
+            "{messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("the environment still lets this through")),
+            "{messages:?}"
+        );
     }
 }
