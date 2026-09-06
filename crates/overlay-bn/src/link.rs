@@ -188,6 +188,12 @@ impl BnLink {
     /// once; every later one waits for the backoff. `registry` receives gossipsub's metrics,
     /// and `sets` is T-014's mirror: every change to the beacon node's own subscriptions is
     /// what the sidecar's `MetaData` answers report.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the link's wiring: its config, its identity, and one channel end per \
+                  consumer. Every parameter has its own type, so a call site cannot mix two \
+                  up, and a struct to hold them would only move the same list one line up"
+    )]
     pub fn spawn(
         cfg: LinkConfig,
         node_key: &NodeKey,

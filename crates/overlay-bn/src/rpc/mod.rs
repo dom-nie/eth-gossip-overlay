@@ -162,8 +162,8 @@ impl Codec for Eth2Codec {
     type Response = Response;
 
     /// The stream is read to its end, which the requester closes after writing the request
-    /// (`upgrade_outbound` in `rpc/outbound.rs` sends and then closes), bounded by
-    /// [`MAX_REQUEST_BYTES`] so a peer that writes forever is cut off rather than followed.
+    /// (`upgrade_outbound` in `rpc/outbound.rs` sends and then closes), bounded by snappy's
+    /// worst case for a legal request, so a peer that writes forever is cut off, not followed.
     async fn read_request<T>(&mut self, id: &StreamProtocol, io: &mut T) -> io::Result<Request>
     where
         T: AsyncRead + Unpin + Send,
