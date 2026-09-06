@@ -29,8 +29,9 @@ pub mod proto;
 #[derive(Clone, Debug)]
 pub struct Responder {
     metadata: MetaData,
-    /// Column subnets the beacon node subscribes to, before the range below is applied.
-    columns: u64,
+    /// Column subnets the beacon node subscribes to, before the range below is applied. A
+    /// subnet is counted once however many fork digests it is subscribed under.
+    columns: BTreeSet<u8>,
     /// The range Lighthouse accepts a custody group count in.
     custody_requirement: u64,
     number_of_custody_groups: u64,
@@ -43,7 +44,7 @@ impl Default for Responder {
                 custody_group_count: Some(SpecSnapshot::MAINNET.custody_requirement),
                 ..MetaData::default()
             },
-            columns: 0,
+            columns: BTreeSet::new(),
             custody_requirement: SpecSnapshot::MAINNET.custody_requirement,
             number_of_custody_groups: SpecSnapshot::MAINNET.number_of_custody_groups,
         }
@@ -69,14 +70,16 @@ impl Responder {
     pub fn set_subscriptions(&mut self, advertised: &BTreeSet<Topic>) {
         let mut attnets = [0; 8];
         let mut syncnets = 0;
-        self.columns = 0;
+        self.columns.clear();
         for topic in advertised {
             match *topic.kind() {
                 TopicKind::Attestation(i) if usize::from(i) < 8 * attnets.len() => {
                     attnets[usize::from(i / 8)] |= 1 << (i % 8);
                 }
                 TopicKind::SyncCommittee(i) if i < SYNCNETS_BITS => syncnets |= 1 << i,
-                TopicKind::DataColumnSidecar(_) => self.columns += 1,
+                TopicKind::DataColumnSidecar(subnet) => {
+                    self.columns.insert(subnet);
+                }
                 _ => {}
             }
         }
@@ -109,7 +112,7 @@ impl Responder {
             syncnets,
             // Not `clamp`, which panics when a beacon node reports a floor above its ceiling.
             custody_group_count: Some(
-                self.columns
+                (self.columns.len() as u64)
                     .max(self.custody_requirement)
                     .min(self.number_of_custody_groups),
             ),
