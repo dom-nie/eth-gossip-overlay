@@ -54,6 +54,7 @@ use libp2p::gossipsub::{
     self, AllowAllSubscriptionFilter, IdentTopic, Message, MessageAcceptance, MessageAuthenticity,
     MessageId, MetricsConfig, PublishError, TopicHash, ValidationMode,
 };
+use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, noise, yamux};
 use lighthouse_network::rpc::methods::{
@@ -257,6 +258,9 @@ enum Cmd {
     /// Dial this address, the way the beacon node dials a peer it was handed as an ENR or in
     /// `--libp2p-addresses`.
     Dial(Multiaddr),
+    Connections {
+        reply: oneshot::Sender<u32>,
+    },
 }
 
 /// Where a swarm task puts what it sees.
@@ -506,6 +510,17 @@ impl FakeBn {
         self.commands.send(Cmd::Dial(addr)).await.unwrap();
     }
 
+    /// How many connections the fake holds. A test with one peer attached reads this as the
+    /// number of connections to that peer.
+    pub async fn connections(&self) -> u32 {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(Cmd::Connections { reply })
+            .await
+            .unwrap();
+        answer.await.unwrap()
+    }
+
     /// Skips the fake's events until one satisfies `wanted`.
     pub async fn wait_for(&mut self, wanted: impl FnMut(&FakeBnEvent) -> bool) -> FakeBnEvent {
         wait_for(&mut self.events, wanted).await
@@ -730,7 +745,18 @@ async fn drive(mut swarm: Swarm<FakeBnBehaviour>, mut commands: mpsc::Receiver<C
                     }
                 }
                 Some(Cmd::Dial(addr)) => {
-                    swarm.dial(addr).unwrap();
+                    // A fresh source port: libp2p otherwise dials from the listening port, and
+                    // a second connection to a peer already connected to that port is refused
+                    // by the operating system.
+                    let opts = DialOpts::unknown_peer_id()
+                        .address(addr)
+                        .allocate_new_port()
+                        .build();
+                    swarm.dial(opts).unwrap();
+                }
+                Some(Cmd::Connections { reply }) => {
+                    let established = swarm.network_info().connection_counters().num_established();
+                    let _ = reply.send(established);
                 }
                 Some(Cmd::Goodbye(reason)) => {
                     next_request += 1;

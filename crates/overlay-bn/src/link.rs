@@ -985,6 +985,39 @@ mod tests {
         assert!(lines[0].contains("WARN"), "{}", lines[0]);
     }
 
+    /// Both sides dial at once, which is what happens when the beacon node acts on the ENR the
+    /// link has just registered while the link is dialling it. The link keeps the older
+    /// connection: it is the one gossipsub already holds state for, and the newer one buys
+    /// nothing. Nothing is reported, because from outside the link nothing changed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn simultaneous_dials_keep_exactly_one_connection() {
+        let bn = FakeBn::start().await;
+        let mut harness = spawn(link_config(&bn), &bn);
+        let addr = listen_addr(&harness).await;
+        wait_for(&mut harness.link.events, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+
+        bn.dial(addr).await;
+
+        let later = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = harness.link.events.recv().await.expect("the link ended");
+                if !matches!(event, BnEvent::BnInfo { .. }) {
+                    return event;
+                }
+            }
+        })
+        .await;
+        assert!(
+            later.is_err(),
+            "a second connection was reported: {later:?}"
+        );
+        assert_eq!(bn.connections().await, 1);
+        assert!(harness.link.connected.load(Ordering::Relaxed));
+    }
+
     /// The sidecar never subscribes here, so it has no mesh for the topic, and the publish
     /// still reaches the fake. Whether that is explicit-peer forwarding or gossipsub's fanout
     /// fill cannot be separated while the beacon node is the sidecar's only peer: a
