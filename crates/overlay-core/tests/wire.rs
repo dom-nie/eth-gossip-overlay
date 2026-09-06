@@ -491,3 +491,32 @@ fn datagram_carries_exactly_one_frame() {
         Err(DecodeError::UnknownType(9))
     );
 }
+
+/// A valid encoding with one byte replaced, which is what reaches most of the decoder's error
+/// paths; wholly random bytes rarely get past the type byte.
+fn corrupted() -> impl Strategy<Value = Vec<u8>> {
+    (frame(), any::<prop::sample::Index>(), any::<u8>()).prop_map(|(frame, at, byte)| {
+        let mut out = BytesMut::new();
+        frame.encode(&mut out);
+        let mut bytes = out.to_vec();
+        let index = at.index(bytes.len());
+        bytes[index] = byte;
+        bytes
+    })
+}
+
+proptest! {
+    /// The Definition of Done's alternative to a fuzzing target, which this repository does not
+    /// set up. What is asserted is that the decoder returns: reaching the assertion at all means
+    /// nothing panicked, overflowed or tried to reserve a buffer the input only claimed to fill.
+    #[test]
+    fn decoding_arbitrary_bytes_never_panics(
+        bytes in prop_oneof![prop::collection::vec(any::<u8>(), 0..512), corrupted()],
+    ) {
+        let mut rest = Bytes::from(bytes.clone());
+        let stream = Frame::decode(&mut rest);
+        let datagram = decode_datagram(Bytes::from(bytes));
+
+        prop_assert_eq!(datagram.is_ok(), stream.is_ok() && rest.is_empty());
+    }
+}
