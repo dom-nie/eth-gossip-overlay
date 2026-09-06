@@ -1224,4 +1224,30 @@ mod tests {
             .count();
         assert_eq!(warned, 1);
     }
+
+    /// A dial that resolved before the acceptor judged its key is not a pairing, so the
+    /// backoff it reset has to go back where it was. Otherwise a host that every peer has
+    /// dropped from its roster is redialled at the floor for as long as it keeps being
+    /// dropped, which is the tight loop the reset exists to avoid.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dial_refused_after_it_resolves_does_not_reset_the_backoff() {
+        let cluster = Builder::new(&[NodeKind::Manager, NodeKind::RefusesEveryone])
+            .start()
+            .await;
+        let peer = cluster.hostname(1);
+
+        eventually("the backoff to grow past its floor", || {
+            cluster
+                .retry_at(0, &peer)
+                .is_some_and(|at| at > Instant::now() + RECONNECT_MIN)
+        })
+        .await;
+
+        assert!(
+            cluster
+                .stats(0)
+                .handshake_failures(Role::Dial, FailureReason::KeyMismatch)
+                >= 2
+        );
+    }
 }

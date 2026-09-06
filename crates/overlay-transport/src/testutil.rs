@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use ed25519_dalek::SigningKey;
@@ -79,6 +79,10 @@ pub enum NodeKind {
     /// A sink presenting a key the pin table does not hold for its hostname, so a dialler
     /// refuses it the way it would refuse an impostor on a roster address.
     WrongKey,
+    /// A sink with a pin table of its own that is always empty, so it takes the packets of
+    /// every dial and refuses the key behind them. A dialler's `connect()` resolves before the
+    /// refusal reaches it, which is the one case where a resolved dial is not a peer.
+    RefusesEveryone,
 }
 
 /// Everything the manager counts, so a test can read a series by name.
@@ -224,8 +228,12 @@ impl Builder {
                     .build()
                     .unwrap()
             });
+            let node_pins = match kind {
+                NodeKind::RefusesEveryone => Arc::new(ArcSwap::from_pointee(PinTable::default())),
+                _ => pins.clone(),
+            };
             let _guard = runtime.as_ref().map(tokio::runtime::Runtime::enter);
-            let (endpoint, addr) = bind_reserved(&self.cfg, &pins, &key);
+            let (endpoint, addr) = bind_reserved(&self.cfg, &node_pins, &key);
             let sink = (kind != NodeKind::Manager).then(|| match &runtime {
                 Some(runtime) => runtime.spawn(hold_connections(endpoint.clone())),
                 None => tokio::spawn(hold_connections(endpoint.clone())),
@@ -356,6 +364,14 @@ impl<A: Admission> TestCluster<A> {
     /// What node `index`'s manager has counted.
     pub fn stats(&self, index: usize) -> &CountingStats {
         &self.nodes[index].stats
+    }
+
+    /// When node `index`'s manager next dials `peer`, if it is waiting out a backoff.
+    pub fn retry_at(&self, index: usize, peer: &Hostname) -> Option<Instant> {
+        self.nodes[index]
+            .manager
+            .as_ref()
+            .and_then(|manager| manager.retry_at(peer))
     }
 
     /// Who node `index` is connected to.
