@@ -1,5 +1,7 @@
 //! Topic strings to the 16-bit ids that carry them on the wire.
 
+use std::collections::HashMap;
+
 use crate::topic::Topic;
 
 /// A topic's id in one table. Two bytes instead of the fifty a topic string takes, which is what
@@ -23,8 +25,12 @@ impl TopicId {
 /// The ids this host assigns, and the only table its own frames are encoded with.
 #[derive(Clone, Debug, Default)]
 pub struct OwnTopicTable {
-    /// Id to topic string, already in the form the wire wants.
+    /// Id to topic string, already in the form the wire wants, so announcing a topic never
+    /// formats one.
     topics: Vec<String>,
+    /// The reverse direction, keyed by the parsed topic rather than its string, so the send
+    /// path looks an id up without formatting one either.
+    ids: HashMap<Topic, TopicId>,
 }
 
 impl OwnTopicTable {
@@ -35,8 +41,12 @@ impl OwnTopicTable {
 
     /// The id for `topic`, and whether this call is what created it.
     pub fn intern(&mut self, topic: &Topic) -> Result<(TopicId, bool), TableFull> {
+        if let Some(&id) = self.ids.get(topic) {
+            return Ok((id, false));
+        }
         let id = TopicId(self.topics.len() as u16);
         self.topics.push(topic.to_string());
+        self.ids.insert(topic.clone(), id);
         Ok((id, true))
     }
 }
