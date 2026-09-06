@@ -376,4 +376,28 @@ mod tests {
         );
         assert!(lines[1].contains("in text now"), "{}", lines[1]);
     }
+
+    #[test]
+    fn rust_log_wins_over_log_level_and_set_level_says_so() {
+        let cfg = Log {
+            level: LogLevel::Info,
+            format: LogFormat::Json,
+        };
+
+        let sink = capture(&cfg, false, Some("debug"), |handle| {
+            tracing::debug!("RUST_LOG lets this through");
+            handle.set_level("error");
+            tracing::debug!("and still does");
+        });
+
+        let lines = sink.objects();
+        assert_eq!(lines.len(), 3, "{}", sink.text());
+        assert_eq!(lines[0]["message"], "RUST_LOG lets this through");
+        assert_eq!(
+            lines[1]["message"],
+            "RUST_LOG is set, so log.level is not applied"
+        );
+        assert_eq!(lines[1]["rust_log"], "debug");
+        assert_eq!(lines[2]["message"], "and still does");
+    }
 }
