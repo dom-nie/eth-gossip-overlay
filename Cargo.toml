@@ -26,9 +26,12 @@ libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", default-features =
 enr = { version = "0.13", default-features = false, features = ["ed25519", "k256"] }
 
 tokio = "1"
-quinn = "0.11"
-rustls = "0.23"
-rcgen = "0.14"
+# No platform-verifier: the overlay pins peer keys and must never reach for a system trust store.
+quinn = { version = "0.11", default-features = false, features = ["log", "runtime-tokio", "rustls-ring", "bloom"] }
+# One crypto provider for the whole workspace, ring, which is also quinn's. Two providers in one
+# binary make CryptoProvider::get_default() depend on link order. TLS 1.2 never runs under QUIC.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+arc-swap = "1"
 socket2 = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
