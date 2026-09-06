@@ -1,6 +1,10 @@
 //! The frame codec's public surface: round trips, the limits, the two carriers and the frozen
 //! vectors corpus.
 
+// A helper that cannot read its own fixture reports it by panicking, which is what its expects
+// are; the tests themselves are already allowed theirs.
+#![allow(clippy::expect_used)]
+
 mod common;
 
 use std::collections::BTreeMap;
