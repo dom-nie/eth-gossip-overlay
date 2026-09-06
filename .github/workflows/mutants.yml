@@ -1,0 +1,46 @@
+name: Mutants
+
+# cargo-mutants over the two pure crates, overlay-core and overlay-transport: nightly and by
+# hand, never on a pull request. The suite is rebuilt and rerun once per mutant, which is tens
+# of minutes per crate, so it does not fit a per-pull-request check (MD-02).
+on:
+  schedule:
+    - cron: "41 4 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  mutants:
+    name: ${{ matrix.crate }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [overlay-core, overlay-transport]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+
+      # A surviving mutant exits 2 and a timed-out one exits 3, so either fails the job. Both
+      # are named on the log line above the summary, with the file and line they change and
+      # what they change it to; mutants.out has the diff and the test output for each.
+      - name: Mutants in ${{ matrix.crate }}
+        run: cargo mutants --in-place -p ${{ matrix.crate }}
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutants-${{ matrix.crate }}
+          path: mutants.out
