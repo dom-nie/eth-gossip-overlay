@@ -3,6 +3,9 @@
 
 mod common;
 
+use std::collections::BTreeMap;
+use std::path::Path;
+
 use bytes::{BufMut, Bytes, BytesMut};
 use overlay_core::msgid::MessageId;
 use overlay_core::protocol::MAX_BATCH_ENTRIES;
@@ -346,4 +349,51 @@ fn striped_chunk() -> Chunk {
         total_len: 2048,
         data: Bytes::from_static(b"half of it"),
     }
+}
+
+#[test]
+fn vectors_corpus_decodes_to_expected_values_and_reencodes_byte_identically() {
+    let mut on_disk = corpus();
+
+    for (name, frame) in common::samples() {
+        let Some(bytes) = on_disk.remove(name) else {
+            panic!("tests/vectors/v1/{name}.bin is missing");
+        };
+
+        let mut buf = Bytes::from(bytes.clone());
+        assert_eq!(Frame::decode(&mut buf), Ok(frame.clone()), "{name}");
+        assert!(buf.is_empty(), "{name}: {} bytes left over", buf.len());
+
+        let mut out = BytesMut::new();
+        frame.encode(&mut out);
+        assert_eq!(
+            out.as_ref(),
+            bytes.as_slice(),
+            "{name} re-encodes differently"
+        );
+    }
+
+    assert!(
+        on_disk.is_empty(),
+        "vector files no sample accounts for: {:?}",
+        on_disk.keys().collect::<Vec<_>>()
+    );
+}
+
+fn corpus() -> BTreeMap<String, Vec<u8>> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/vectors/v1");
+    let mut files = BTreeMap::new();
+
+    for entry in std::fs::read_dir(&dir).expect("tests/vectors/v1 is missing") {
+        let path = entry.expect("vectors directory entry").path();
+        if path.extension().is_some_and(|ext| ext == "bin") {
+            let name = path
+                .file_stem()
+                .expect("vector file name")
+                .to_string_lossy();
+            let bytes = std::fs::read(&path).expect("vector file");
+            files.insert(name.into_owned(), bytes);
+        }
+    }
+    files
 }
