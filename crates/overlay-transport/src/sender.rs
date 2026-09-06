@@ -255,12 +255,16 @@ impl Queues {
         self.waiting.notify_one();
     }
 
-    /// The next frame to write: from the large lane while it has one, then from the small lane.
-    /// Large first, because a block waiting behind a second of attestations is a block that
-    /// arrives after the slot it belongs to (D17).
-    fn next(&self) -> Option<Bytes> {
-        if let Some(queued) = self.ledger.pop(self) {
-            return Some(queued.frame);
+    /// The next frame to write: from the large lane while it has one that is still worth
+    /// sending at `now`, then from the small lane. Large first, because a block waiting behind
+    /// a second of attestations is a block that arrives after the slot it belongs to (D17).
+    fn next(&self, now: Instant) -> Option<Bytes> {
+        while let Some(queued) = self.ledger.pop(self) {
+            if now.saturating_duration_since(queued.enqueued_at) <= LARGE_STALE_AFTER {
+                return Some(queued.frame);
+            }
+            self.stats
+                .queue_drop(&self.peer, Class::Large, DropReason::Stale);
         }
         Some(self.lane(Class::Small).pop()?.frame)
     }
@@ -322,7 +326,10 @@ impl PeerSender {
 /// has stopped reading holds up its own queue and nothing else.
 async fn drain<T: Transport>(queues: Arc<Queues>, transport: T) {
     loop {
-        let Some(frame) = queues.next() else {
+        // The runtime's clock rather than the system's, so a test can put a frame past the age
+        // bound without waiting three seconds for it.
+        let now = tokio::time::Instant::now().into_std();
+        let Some(frame) = queues.next(now) else {
             queues.waiting.notified().await;
             continue;
         };
