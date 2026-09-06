@@ -212,7 +212,11 @@ async fn scrape_appends_the_gossipsub_registry() {
         .lock()
         .unwrap()
         .sub_registry_with_prefix("overlay_gossipsub")
-        .register("duplicates", "Duplicates gossipsub dropped.", duplicates.clone());
+        .register(
+            "duplicates",
+            "Duplicates gossipsub dropped.",
+            duplicates.clone(),
+        );
     duplicates.inc();
 
     let (addr, _server) = serve("127.0.0.1:0".parse().unwrap(), registry, gossipsub)
@@ -238,8 +242,24 @@ async fn scrape_appends_the_gossipsub_registry() {
     // and Prometheus would stop reading there.
     assert_eq!(body.lines().last(), Some("# EOF"));
     for sample in samples {
-        let (name, value) = sample.rsplit_once(' ').unwrap_or_else(|| panic!("{sample}"));
+        let (name, value) = sample
+            .rsplit_once(' ')
+            .unwrap_or_else(|| panic!("{sample}"));
         assert!(!name.is_empty(), "{sample}");
         assert!(value.parse::<f64>().is_ok(), "{sample}");
     }
+}
+
+#[tokio::test]
+async fn unknown_path_returns_404() {
+    let registry = Registry::new();
+    Metrics::new(&registry).unwrap();
+    let (addr, _server) = serve("127.0.0.1:0".parse().unwrap(), registry, no_gossipsub())
+        .await
+        .unwrap();
+
+    let (status, body) = request(addr, "/").await;
+
+    assert!(status.contains("404"), "{status}");
+    assert!(!body.contains("overlay_build_info"), "{body}");
 }
