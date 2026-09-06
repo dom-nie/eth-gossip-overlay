@@ -27,6 +27,10 @@ const TLS_INFO_PREFIX: &[u8] = b"overlay-tls:";
 /// The secret the whole fleet shares. Together with a hostname it gives that host's overlay
 /// TLS key, and nothing else; the bytes are wiped when the value is dropped and never shown
 /// by `Debug`.
+///
+/// `Clone` because the pin table is rebuilt from the seeds in force whenever the roster or the
+/// outgoing seed changes, and every copy wipes itself the same way.
+#[derive(Clone)]
 pub struct FleetSeed(Zeroizing<[u8; 32]>);
 
 impl From<[u8; 32]> for FleetSeed {

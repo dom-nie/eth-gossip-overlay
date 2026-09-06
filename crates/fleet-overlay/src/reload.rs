@@ -24,9 +24,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use arc_swap::ArcSwap;
 use overlay_core::config::{Config, PublishRateLimit};
-use overlay_core::identity::{FleetSeed, read_secret_file};
+use overlay_core::identity::{FleetSeed, Seeds, read_secret_file};
 use overlay_core::roster::Roster;
+use overlay_transport::tls::PinTable;
 use serde::Serialize;
 use serde_yaml_bw as yaml;
 use tokio::signal::unix::{SignalKind, signal};
@@ -180,6 +182,37 @@ pub fn sighup_loop(handle: ReloadHandle) -> std::io::Result<impl Future<Output =
             if handle.reload(Trigger::Manual).await.is_none() {
                 return;
             }
+        }
+    })
+}
+
+/// Keeps T-021's pin table in step with the two channels a reload writes (DX-N2).
+///
+/// Both decide who may pair: the roster says whose keys are pinned at all, and the outgoing
+/// seed decides whether a peer that has not rotated yet is still one of them. The verifier
+/// reads the table through the `ArcSwap` on every handshake, so replacing it drops no
+/// connection. The task ends when the reloader that owns both senders does.
+pub fn spawn_pin_table(
+    pins: Arc<ArcSwap<PinTable>>,
+    current: FleetSeed,
+    mut roster: watch::Receiver<Roster>,
+    mut previous_seed: watch::Receiver<Option<FleetSeed>>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let changed = tokio::select! {
+                changed = roster.changed() => changed,
+                changed = previous_seed.changed() => changed,
+            };
+            if changed.is_err() {
+                return;
+            }
+            let seeds = Seeds {
+                current: current.clone(),
+                previous: previous_seed.borrow_and_update().clone(),
+            };
+            let table = PinTable::build(&roster.borrow_and_update(), &seeds);
+            pins.store(Arc::new(table));
         }
     })
 }
