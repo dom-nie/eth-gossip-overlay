@@ -890,6 +890,7 @@ fn reconcile<A: Admission>(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::net::{IpAddr, Ipv4Addr};
 
     use super::*;
     use crate::testlog::LOG;
@@ -1383,5 +1384,22 @@ mod tests {
 
         assert_eq!(cluster.stats(0).previous_seed(&peer), 1);
         assert_eq!(cluster.stats(0).previous_seed(&cluster.hostname(0)), 0);
+    }
+
+    /// The accept loop takes its rate-limit keys from whoever sends a packet, so the set they
+    /// go in needs a ceiling. Past it a refusal is still counted; only the log suppression
+    /// stops, and it stops by staying quiet rather than by logging every packet.
+    #[test]
+    fn the_warn_set_stops_growing_at_its_cap() {
+        let mut warned = HashSet::new();
+        let peer = |n: u32| IpAddr::V4(Ipv4Addr::from_bits(n));
+
+        let lines = (0..WARNED_PEERS_MAX as u32 * 2)
+            .filter(|n| first_refusal(&mut warned, peer(*n)))
+            .count();
+
+        assert_eq!(lines, WARNED_PEERS_MAX);
+        assert_eq!(warned.len(), WARNED_PEERS_MAX);
+        assert!(!first_refusal(&mut warned, peer(0)), "one peer, one line");
     }
 }
