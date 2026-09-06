@@ -6,6 +6,7 @@ pub mod hello;
 pub mod manager;
 pub mod receive;
 pub mod router;
+pub mod sender;
 pub mod subs;
 pub mod tls;
 

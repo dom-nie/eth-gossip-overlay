@@ -71,6 +71,7 @@ use crate::manager::{
     ManagerStats, PeerCounts, PeerEvent, PeerInfo,
 };
 use crate::receive::{Deps, NoStripes, PeerReceiver, ReceiveStats};
+use crate::sender::{DropReason, SenderStats};
 use crate::subs::SubsStats;
 use crate::tls::{self, FailureReason, HandshakeFailure, PinTable, Role};
 
@@ -160,6 +161,8 @@ pub struct CountingStats {
     first_seen: Mutex<HashMap<Class, u64>>,
     duplicates: Mutex<HashMap<Class, u64>>,
     fanout_suppressed: Mutex<BTreeMap<(Hostname, FanoutKind), u64>>,
+    queue_depths: Mutex<HashMap<(Hostname, Class), (usize, usize)>>,
+    queue_drops: Mutex<HashMap<(Hostname, Class, DropReason), u64>>,
 }
 
 impl CountingStats {
@@ -264,6 +267,26 @@ impl CountingStats {
         count(&self.fanout_suppressed, &(peer.clone(), kind))
     }
 
+    /// `peer_queue_depth{peer, class}` in frames and bytes, as it was last set.
+    pub fn queue_depth(&self, peer: &Hostname, class: Class) -> (usize, usize) {
+        self.queue_depths
+            .lock()
+            .unwrap()
+            .get(&(peer.clone(), class))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// `peer_queue_drops_total{peer, class, reason}`.
+    pub fn queue_drops(&self, peer: &Hostname, class: Class, reason: DropReason) -> u64 {
+        self.queue_drops
+            .lock()
+            .unwrap()
+            .get(&(peer.clone(), class, reason))
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// `duplicates_dropped_total{class, source="overlay"}`.
     pub fn duplicates(&self, class: Class) -> u64 {
         self.duplicates
@@ -353,6 +376,24 @@ impl ReceiveStats for CountingStats {
 
     fn fanout_suppressed(&self, peer: &Hostname, kind: FanoutKind) {
         add(&self.fanout_suppressed, (peer.clone(), kind));
+    }
+}
+
+impl SenderStats for CountingStats {
+    fn queue_depth(&self, peer: &Hostname, class: Class, frames: usize, bytes: usize) {
+        self.queue_depths
+            .lock()
+            .unwrap()
+            .insert((peer.clone(), class), (frames, bytes));
+    }
+
+    fn queue_drop(&self, peer: &Hostname, class: Class, reason: DropReason) {
+        *self
+            .queue_drops
+            .lock()
+            .unwrap()
+            .entry((peer.clone(), class, reason))
+            .or_default() += 1;
     }
 }
 
