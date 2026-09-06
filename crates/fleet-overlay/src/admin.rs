@@ -189,15 +189,23 @@ async fn answer(request: Request, state: &State) -> Response {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
 
+    use bytes::Bytes;
     use overlay_core::config::Log;
     use overlay_core::identity::FleetSeed;
     use overlay_core::roster::{Hostname, Region, Roster, SelfIdentity};
-    use overlay_core::topic::SubscriptionSets;
-    use overlay_transport::manager::{LiveSource, LiveView};
+    use overlay_core::topic::{Class, SubscriptionSets};
+    use overlay_transport::hello::Negotiated;
+    use overlay_transport::manager::{LivePeer, LiveSource, LiveView};
+    use overlay_transport::sender::{
+        self, LARGE_QUEUED_BYTES_MAX, LargeLedger, PeerSender, SenderHandle,
+    };
+    use overlay_transport::testutil::{
+        Builder, NodeKind, SendSpy, eventually, peer_state, view_of,
+    };
     use tempfile::TempDir;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
@@ -347,5 +355,132 @@ mod tests {
         assert_eq!(second.inject, Some(false));
         // A query says what the flag is and never sets it: the first one left it alone.
         assert!(!h.inject.load(Ordering::Relaxed));
+    }
+
+    /// A live peer built by hand, because the fields `status` reports are exactly the ones a
+    /// routing test leaves at their defaults. Two peers that differ in every reported field, so
+    /// a value taken from the wrong peer or dropped on the way out shows up.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_lists_live_peers_with_region_site_rtt_software_version_and_features() {
+        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare])
+            .start()
+            .await;
+        let (connection, _accepted) = cluster.connected_pair(0, 1).await;
+        let link = SendSpy::stalled();
+        let queued = PeerSender::spawn(
+            Hostname("bn-2".to_owned()),
+            link.clone(),
+            sender::Deps {
+                ledger: Arc::new(LargeLedger::new(LARGE_QUEUED_BYTES_MAX)),
+                stats: Arc::new(()),
+            },
+        );
+        let now = Instant::now();
+        queued
+            .push(Class::Large, Bytes::from(vec![0; 4096]), now)
+            .unwrap();
+        queued
+            .push(Class::Large, Bytes::from(vec![0; 2048]), now)
+            .unwrap();
+        queued
+            .push(Class::Small, Bytes::from(vec![0; 300]), now)
+            .unwrap();
+        // The drain task takes the first large frame and stalls writing it, so what the lanes
+        // hold from here on is what the status answer has to report.
+        eventually("the sender to stall on its first frame", || {
+            queued.depth(Class::Large).frames == 1
+        })
+        .await;
+
+        let live = |hostname: &str,
+                    region: &str,
+                    site: Option<&str>,
+                    software_version: &str,
+                    features: u64,
+                    sender: SenderHandle,
+                    connected_since: Instant| {
+            (
+                Hostname(hostname.to_owned()),
+                LivePeer {
+                    region: Region(region.to_owned()),
+                    site: site.map(str::to_owned),
+                    rtt: Duration::from_millis(7),
+                    connected_since,
+                    instance_id: 1,
+                    software_version: software_version.to_owned(),
+                    negotiated: Negotiated {
+                        minor: 0,
+                        features,
+                        peer_max_frame_bytes: 1024,
+                        peer_max_batch_entries: 16,
+                    },
+                    connection: connection.clone(),
+                    sender,
+                    state: Arc::new(Mutex::new(peer_state(&[], &[]))),
+                },
+            )
+        };
+        let view = view_of(vec![
+            live(
+                "bn-2",
+                "eu",
+                Some("ams1"),
+                "0.2.0",
+                3,
+                queued.clone(),
+                now - Duration::from_secs(4),
+            ),
+            live(
+                "bn-3",
+                "us",
+                None,
+                "0.1.0",
+                0,
+                SenderHandle::stopped(Hostname("bn-3".to_owned())),
+                now,
+            ),
+        ]);
+        let h = Fixture::start(view).await;
+
+        let status = h.send(&Request::Status).await.status.expect("a status");
+
+        assert_eq!(status.hostname, "bn-1");
+        assert_eq!(status.region, "eu");
+        assert_eq!(status.site.as_deref(), Some("ams1"));
+        assert!(status.inject);
+        let names: Vec<&str> = status.peers.iter().map(|p| p.hostname.as_str()).collect();
+        assert_eq!(names, ["bn-2", "bn-3"]);
+        let first = &status.peers[0];
+        assert_eq!(first.region, "eu");
+        assert_eq!(first.site.as_deref(), Some("ams1"));
+        assert_eq!(first.rtt_ms, 7.0);
+        assert_eq!(first.software_version, "0.2.0");
+        assert_eq!(first.features, 3);
+        assert_eq!(
+            (first.queue.large_frames, first.queue.large_bytes),
+            (1, 2048)
+        );
+        assert_eq!(
+            (first.queue.small_frames, first.queue.small_bytes),
+            (1, 300)
+        );
+        assert!(
+            (4000..6000).contains(&first.connected_for_ms),
+            "{:?}",
+            first.connected_for_ms
+        );
+        let second = &status.peers[1];
+        assert_eq!(second.region, "us");
+        assert_eq!(second.site, None);
+        assert_eq!(second.features, 0);
+        assert_eq!(
+            (second.queue.large_frames, second.queue.small_frames),
+            (0, 0)
+        );
+        assert!(
+            second.connected_for_ms < 1000,
+            "{:?}",
+            second.connected_for_ms
+        );
     }
 }
