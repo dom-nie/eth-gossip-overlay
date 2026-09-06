@@ -10,11 +10,11 @@
 # built into the binary; the node stays at genesis and syncs nothing, which is all the tests
 # need. --ten-minutes (or MATRIX_TEN_MINUTES=1) turns on the ten-minute assertion T-019 owns.
 #
-# LIGHTHOUSE_TARGET_PEERS is the beacon node's --target-peers, 0 as the ticket has it. On
-# v8.2.2 that admits no inbound connection at all, trusted or not (libp2p's connection limit
-# is ceil(0.9 * target) and counts before it knows the peer), so the matrix fails by name on
-# CL-N2 (1); at 1 the sidecar is admitted and the rest of the suite runs. See T-018's open
-# questions.
+# LIGHTHOUSE_TARGET_PEERS is the beacon node's --target-peers, 1 by default (MD-01): at 0
+# v8.2.2 denies every inbound connection before it knows the peer, trusted or not, with
+# `Exceeded { limit: 0, kind: EstablishedIncoming }`, because libp2p's connection limit is
+# ceil(0.9 * target). At 1 the sidecar has the one slot. Filling that slot and having the
+# beacon node dial the sidecar instead is T-020's test.
 set -euo pipefail
 
 version=${1:?usage: $0 <version> [--ten-minutes]}
@@ -76,7 +76,7 @@ http_port=$(free_port)
   --http \
   --http-address 127.0.0.1 \
   --http-port "$http_port" \
-  --target-peers "${LIGHTHOUSE_TARGET_PEERS:-0}" \
+  --target-peers "${LIGHTHOUSE_TARGET_PEERS:-1}" \
   --trusted-peers "$peer_id" \
   --execution-endpoint http://127.0.0.1:1 \
   --execution-jwt "$work/jwt.hex" \

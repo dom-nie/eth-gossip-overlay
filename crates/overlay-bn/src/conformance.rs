@@ -4,7 +4,7 @@
 //!
 //! | CL-N2 | Assumption | Test |
 //! |---|---|---|
-//! | (1) | a trusted peer is accepted inbound at `--target-peers` | `matrix_trusted_peer_is_accepted_inbound_at_target_peers`, `tests/matrix.rs` |
+//! | (1) | a trusted peer is admitted whenever the beacon node is under its inbound cap, is dialled by the beacon node through `--libp2p-addresses` at startup and through `add_peer` on demand under the outbound cap, and is never pruned once connected (MD-01) | under the cap and never pruned: `matrix_trusted_peer_is_admitted_under_the_inbound_cap_and_never_pruned`, `tests/matrix.rs`; the beacon node dialling: T-020's test 10 |
 //! | (2) | a trusted peer is not disconnected or banned after one invalid message and a period of duplicates only | `matrix_trusted_peer_survives_one_invalid_message_and_a_period_of_duplicates_only`, `tests/matrix.rs` |
 //! | (3) | the BN forwards a validated message to an explicit peer that is subscribed but not in the mesh | `bn_forwards_validated_message_to_a_subscribed_explicit_peer_outside_its_mesh`, here |
 //! | (4) | the BN's `publish` reaches an explicit peer on a topic the BN is not subscribed to, and the sidecar's subscription is still required | `bn_publish_reaches_explicit_peer_on_a_topic_the_bn_is_not_subscribed_to_and_needs_the_sidecar_subscription`, here |

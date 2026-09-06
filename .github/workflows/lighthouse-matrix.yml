@@ -17,6 +17,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   MATRIX_TEN_MINUTES: ${{ inputs.ten_minutes && '1' || '0' }}
+  # The smallest target with an inbound slot; see scripts/lighthouse-matrix.sh and MD-01.
+  LIGHTHOUSE_TARGET_PEERS: "1"
 
 jobs:
   matrix:

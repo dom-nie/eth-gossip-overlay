@@ -181,21 +181,20 @@ async fn lighthouse_peer(env: &Env, peer_id: PeerId) -> Option<serde_json::Value
         .map(|peer| peer["peer_info"].clone())
 }
 
-/// CL-N2 (1). Connected, listed as trusted, and the first mirrored subscription, all inside
-/// the ticket's 60 s. The subscription comes without sync: Lighthouse joins its persistent
-/// attestation subnets at startup and its core topics only once synced.
+/// CL-N2 (1), the under-the-cap-and-never-pruned half (MD-01). Connected, listed as
+/// trusted, and the first mirrored subscription, all inside the ticket's 60 s. The
+/// subscription comes without sync: Lighthouse joins its persistent attestation subnets at
+/// startup and its core topics only once synced.
 ///
-/// What the beacon node's peer limit is set to decides what this proves. At `--target-peers
-/// 0`, the ticket's suggestion, v8.2.2 admits nobody: `service/mod.rs` gives libp2p's
-/// connection limits `max_established_incoming = ceil(target * 0.9)`, which is 0 and is
-/// checked by count before any peer id is known, and the peer manager's own inbound cap,
-/// `max_peers = ceil(target * 1.1)`, exempts a peer with a future duty, never a trusted one.
-/// The matrix script runs the beacon node at the value `LIGHTHOUSE_TARGET_PEERS` names; at 1
-/// the sidecar is admitted, which shows the trusted-peer plumbing works, not that it beats
-/// the cap.
+/// The beacon node runs at `--target-peers 1`, the smallest value with an inbound slot: at 0
+/// v8.2.2 admits nobody, because `service/mod.rs` gives libp2p's connection limits
+/// `max_established_incoming = ceil(target * 0.9)`, checked by count before any peer id is
+/// known, and the peer manager's own inbound cap exempts a peer with a future duty, never a
+/// trusted one. The other half of the assumption, the beacon node dialling the sidecar when
+/// its inbound cap is full, is T-020's test 10.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a Lighthouse beacon node: scripts/lighthouse-matrix.sh"]
-async fn matrix_trusted_peer_is_accepted_inbound_at_target_peers() {
+async fn matrix_trusted_peer_is_admitted_under_the_inbound_cap_and_never_pruned() {
     let env = env();
     let mut sidecar = spawn(&env);
 
