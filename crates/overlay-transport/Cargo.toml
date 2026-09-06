@@ -16,7 +16,6 @@ overlay-core.workspace = true
 quinn.workspace = true
 rustls.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]

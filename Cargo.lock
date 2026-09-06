@@ -4352,7 +4352,7 @@ dependencies = [
  "rustls",
  "thiserror 2.0.20",
  "tokio",
- "tracing",
+ "zeroize",
 ]
 
 [[package]]
