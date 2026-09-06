@@ -557,6 +557,7 @@ mod tests {
     use tempfile::TempDir;
     use tokio::sync::{Notify, watch};
 
+    use serde_json::{Map, Value};
     use tracing::Dispatch;
 
     use super::*;
@@ -1091,5 +1092,49 @@ mod tests {
 
         until(|| pinned(&previous, "bn-1")).await;
         assert!(pinned(&current, "bn-1"));
+    }
+
+    /// The one line an operator reads after a reload, as JSON so the fields can be asserted by
+    /// name rather than by matching a rendered string.
+    fn line(sink: &Sink, at: usize) -> Map<String, Value> {
+        sink.objects()[at].clone()
+    }
+
+    #[test]
+    fn the_reload_line_names_the_trigger_and_the_keys() {
+        let (mut h, sink, dispatch) = Fixture::with_log(
+            "overlay:\n  roster_file: ROSTER\n  listen: \"[::]:7788\"\ninject: true\n",
+            &roster_yaml(3),
+            &Log::default(),
+            None,
+        );
+        h.write_config("overlay:\n  roster_file: ROSTER\n  listen: \"[::]:9999\"\ninject: false\n");
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            h.reloader.reload(Trigger::Manual);
+        });
+
+        let line = line(&sink, 0);
+        assert_eq!(line["level"], "INFO");
+        assert_eq!(line["trigger"], "manual");
+        assert_eq!(line["applied"], "inject");
+        assert_eq!(line["restart_required"], "overlay.listen");
+    }
+
+    #[test]
+    fn a_rejected_roster_logs_both_host_counts_at_warn() {
+        let (mut h, sink, dispatch) =
+            Fixture::with_log(CONFIG, &roster_yaml(10), &Log::default(), None);
+        h.write_roster(&roster_yaml(4));
+
+        tracing::dispatcher::with_default(&dispatch, || {
+            h.reloader.reload(Trigger::Automatic);
+        });
+
+        let line = line(&sink, 0);
+        assert_eq!(line["level"], "WARN");
+        assert_eq!(line["trigger"], "automatic");
+        let error = line["error"].to_string();
+        assert!(error.contains("10") && error.contains('4'), "{error}");
     }
 }
