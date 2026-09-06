@@ -858,13 +858,26 @@ impl<A: Admission> TestCluster<A> {
         to: usize,
         self_hello: &SelfHello,
     ) -> PeerInfo {
+        self.dial_announcing(from, to, self_hello, Vec::new()).await
+    }
+
+    /// The same, with a topic table in the HELLO. Node `to` decodes every frame from this
+    /// connection against `announced` and nothing else (D13), so a test that writes frames by
+    /// hand says here what its ids mean.
+    pub async fn dial_announcing(
+        &self,
+        from: usize,
+        to: usize,
+        self_hello: &SelfHello,
+        announced: Vec<(TopicId, String)>,
+    ) -> PeerInfo {
         let connection = self.dial(from, to).await.unwrap();
         crate::hello::perform(
             connection,
             Role::Dial,
             self_hello,
             &self.hostname(to),
-            Vec::new(),
+            announced,
             WAIT,
             &(),
         )
@@ -975,6 +988,12 @@ impl<A: Admission> TestCluster<A> {
             )
             .expect("the fanout lane has room");
         true
+    }
+
+    /// Node `index`'s seen cache, which is what says whether a message was recorded as well as
+    /// published (D08).
+    pub fn seen(&self, index: usize) -> &SharedSeenCache {
+        &self.sidecar(index).seen
     }
 
     /// What node `index` has queued for its beacon node, oldest first.

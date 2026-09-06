@@ -343,12 +343,172 @@ impl Ctx {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{SETTLE, TestCluster, eventually, subscriptions, topic};
+    use crate::testutil::{
+        Builder, NodeKind, SETTLE, TestCluster, eventually, subscriptions, topic,
+    };
+    use bytes::BytesMut;
+    use overlay_core::wire::{BatchEntry, BatchFlags, encode_datagram};
 
     /// The gossipsub wire form of `data`: snappy-compressed, which is what a payload has to be
     /// for its id to come out of the valid branch (D03).
     fn payload(data: &[u8]) -> Vec<u8> {
         snap::raw::Encoder::new().compress_vec(data).unwrap()
+    }
+
+    /// A node with a sidecar and a peer of the test's own, which announced `announced` in its
+    /// HELLO and writes what the test tells it to. The node with the sidecar is the higher
+    /// hostname, so it dials nobody and every connection it has is the one made here.
+    async fn peer_of(
+        sets: SubscriptionSets,
+        announced: &[(u16, &Topic)],
+    ) -> (TestCluster, PeerInfo) {
+        let mut cluster = Builder::new(&[NodeKind::Bare, NodeKind::Manager])
+            .start()
+            .await;
+        cluster.start_sidecar(1, sets);
+        let announced = announced
+            .iter()
+            .map(|(id, topic)| (TopicId::new(*id), topic.to_string()))
+            .collect();
+        let peer = cluster
+            .dial_announcing(0, 1, &cluster.self_hello(0), announced)
+            .await;
+        (cluster, peer)
+    }
+
+    /// Writes each body on one stream, with the `u32` length prefix a stream carries. Bodies and
+    /// not frames, so a test can put a type byte on the wire that no [`Frame`] variant has.
+    async fn send(peer: &PeerInfo, bodies: &[Bytes]) {
+        let mut stream = peer.connection.open_uni().await.unwrap();
+        for body in bodies {
+            let mut out = BytesMut::new();
+            out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            out.extend_from_slice(body);
+            stream.write_all(&out).await.unwrap();
+        }
+        stream.finish().unwrap();
+    }
+
+    /// A whole message as a peer's sender would write it, under the id the payload hashes to
+    /// on `topic`.
+    fn whole(topic_id: u16, topic: &Topic, payload: &[u8]) -> Bytes {
+        let id = msgid::compute(&topic.to_string(), payload, wire::MAX_PAYLOAD_BYTES).id;
+        encode_datagram(&Frame::whole_message(
+            id,
+            topic_id,
+            Bytes::copy_from_slice(payload),
+        ))
+    }
+
+    /// An entry id the peer never announced costs that entry and nothing else (D21): the rest of
+    /// the batch is delivered and the connection carries on, because the sender is one release
+    /// ahead or its `TOPIC_ADD` has not arrived yet, neither of which is a protocol error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_topic_id_drops_only_that_batch_entry_and_keeps_the_connection() {
+        let block = topic("beacon_block");
+        let wanted = payload(b"the entry with an id this host knows");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(4, &block)]).await;
+
+        send(
+            &peer,
+            &[encode_datagram(&Frame::Batch {
+                flags: BatchFlags::NONE,
+                entries: vec![
+                    BatchEntry {
+                        topic_id: 9,
+                        payload: Bytes::from_static(b"nobody can read this"),
+                    },
+                    BatchEntry {
+                        topic_id: 4,
+                        payload: Bytes::from(wanted.clone()),
+                    },
+                ],
+            })],
+        )
+        .await;
+
+        eventually("the readable entry to be queued", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert_eq!(cluster.published(1)[0].payload, wanted);
+        let sender = cluster.hostname(0);
+        assert_eq!(cluster.stats(1).unknown_topic_ids(&sender), 1);
+        assert_eq!(cluster.live(1).len(), 1);
+    }
+
+    /// A frame type this release has never heard of is skipped and reading goes on, which is
+    /// what lets a fleet run two releases at once (D10). The next frame on the same stream is
+    /// delivered as if the first had not been there.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unknown_frame_type_on_a_stream_is_skipped_and_the_next_frame_is_delivered() {
+        let block = topic("beacon_block");
+        let wanted = payload(b"the frame after the one from the future");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        let from_the_future = Bytes::from_static(&[200, 0, 1, 2, 3]);
+
+        send(&peer, &[from_the_future, whole(0, &block, &wanted)]).await;
+
+        eventually("the frame after it to be queued", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert_eq!(cluster.published(1)[0].payload, wanted);
+        assert_eq!(
+            cluster.stats(1).unknown_frame_types(&cluster.hostname(0)),
+            1
+        );
+    }
+
+    /// A sidecar publishes only what its own beacon node subscribed to (DX-N1). A sibling can
+    /// hold an id for one of T-015's extra column topics, which this host interned and announced
+    /// so its own proposals have ids, and sending on it is still traffic nobody here wants.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn payload_on_a_topic_outside_the_advertised_set_is_dropped_and_counted_unwanted() {
+        let block = topic("beacon_block");
+        let column = topic("data_column_sidecar_37");
+        let unwanted = payload(b"a column this beacon node does not custody");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[&column]), &[(0, &column)]).await;
+
+        send(&peer, &[whole(0, &column, &unwanted)]).await;
+
+        let sender = cluster.hostname(0);
+        eventually("the payload to be refused", || {
+            cluster.stats(1).unwanted_topics(&sender) == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert!(cluster.published(1).is_empty());
+        assert!(cluster.seen(1).is_empty());
+        assert_eq!(cluster.stats(1).messages(Direction::In, &sender), 1);
+    }
+
+    /// Lighthouse refuses a payload that does not decompress before it computes an id for it, so
+    /// one that reaches this host must not be published and must not be remembered either: the
+    /// id it would be remembered under is not an id the beacon node would ever agree with (D03).
+    /// A whole message whose header names an id the payload does not hash to is the same case.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invalid_snappy_payload_is_dropped_counted_and_neither_inserted_nor_published() {
+        let block = topic("beacon_block");
+        let good = payload(b"a payload that does decompress");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        let not_snappy = Bytes::from_static(b"\x05\x10not snappy at all");
+        let wrong_id = encode_datagram(&Frame::whole_message(
+            MessageId([7; 20]),
+            0,
+            Bytes::from(good.clone()),
+        ));
+
+        send(&peer, &[whole(0, &block, &not_snappy), wrong_id]).await;
+
+        let sender = cluster.hostname(0);
+        eventually("both payloads to be refused", || {
+            cluster.stats(1).invalid_payloads(&sender) == 2
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert!(cluster.published(1).is_empty());
+        assert!(cluster.seen(1).is_empty());
     }
 
     /// The v1 flow end to end (§6.1): the beacon node forwards a block to its sidecar, the
