@@ -677,4 +677,25 @@ mod tests {
         eventually("all three to go out", || link.sent().len() == 3).await;
         assert_eq!(link.numbers(), vec![1, 0, 2]);
     }
+
+    /// `peer_queue_depth` is how a slow sibling is spotted in production (§12), so it has to
+    /// follow both lanes in both units, and come back down as the queue drains.
+    #[tokio::test]
+    async fn depth_gauges_track_frames_and_bytes() {
+        let link = Link::stalled();
+        let (sender, stats) = sender(&link);
+        let now = Instant::now();
+
+        sender.push(Class::Small, frame_of(0, 100), now).unwrap();
+        sender.push(Class::Small, frame_of(1, 100), now).unwrap();
+        sender.push(Class::Large, frame_of(2, 4096), now).unwrap();
+
+        assert_eq!(stats.queue_depth(&peer(), Class::Small), (2, 200));
+        assert_eq!(stats.queue_depth(&peer(), Class::Large), (1, 4096));
+
+        link.release();
+        eventually("the lanes to drain", || link.sent().len() == 3).await;
+        assert_eq!(stats.queue_depth(&peer(), Class::Small), (0, 0));
+        assert_eq!(stats.queue_depth(&peer(), Class::Large), (0, 0));
+    }
 }
