@@ -400,6 +400,12 @@ impl ClientCertVerifier for AcceptorVerifier {
         &[]
     }
 
+    /// Stated rather than left to rustls's default, because it is the whole security property
+    /// of this crate: a connection with no key to pin is not a peer.
+    fn client_auth_mandatory(&self) -> bool {
+        true
+    }
+
     fn verify_client_cert(
         &self,
         end_entity: &CertificateDer<'_>,
