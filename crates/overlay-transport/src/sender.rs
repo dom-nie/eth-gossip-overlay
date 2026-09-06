@@ -270,6 +270,19 @@ struct Queues {
 }
 
 impl Queues {
+    fn new(peer: Hostname, deps: Deps) -> Self {
+        Self {
+            peer,
+            small: Mutex::new(Lane::default()),
+            large: Mutex::new(Lane::default()),
+            ledger: deps.ledger,
+            stats: deps.stats,
+            waiting: Notify::new(),
+            closed: AtomicBool::new(false),
+            task: OnceLock::new(),
+        }
+    }
+
     /// The lane for `class`, recovering the guard from a poisoned lock for the reason
     /// [`LargeLedger::registry`] gives.
     fn lane(&self, class: Class) -> MutexGuard<'_, Lane> {
@@ -365,6 +378,22 @@ impl SenderHandle {
         Ok(())
     }
 
+    /// A handle with no task behind it, for a live view a test builds by hand: every push is
+    /// [`Dropped`]. The peers in such a view are there to be routed to; a test that sends to one
+    /// replaces its handle with what [`PeerSender::spawn`] returned.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn stopped(peer: Hostname) -> Self {
+        let queues = Queues::new(
+            peer,
+            Deps {
+                ledger: Arc::new(LargeLedger::new(0)),
+                stats: Arc::new(()),
+            },
+        );
+        queues.closed.store(true, Ordering::Relaxed);
+        Self(Arc::new(queues))
+    }
+
     /// Stops the peer's task and refuses every later push. The manager calls it where the peer
     /// leaves the live set, which is the one place that knows it has.
     pub fn stop(&self) {
@@ -393,17 +422,9 @@ pub struct PeerSender;
 impl PeerSender {
     /// Starts writing what is queued for `peer` on `transport`.
     pub fn spawn<T: Transport>(peer: Hostname, transport: T, deps: Deps) -> SenderHandle {
-        let queues = Arc::new(Queues {
-            peer,
-            small: Mutex::new(Lane::default()),
-            large: Mutex::new(Lane::default()),
-            ledger: deps.ledger.clone(),
-            stats: deps.stats,
-            waiting: Notify::new(),
-            closed: AtomicBool::new(false),
-            task: OnceLock::new(),
-        });
-        deps.ledger.register(&queues);
+        let ledger = deps.ledger.clone();
+        let queues = Arc::new(Queues::new(peer, deps));
+        ledger.register(&queues);
         let task = tokio::spawn(drain(queues.clone(), transport));
         let _ = queues.task.set(task.abort_handle());
         SenderHandle(queues)

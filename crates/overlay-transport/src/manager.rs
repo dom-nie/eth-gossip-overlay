@@ -47,6 +47,7 @@ use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 
 use crate::endpoint::{self, EndpointError};
 use crate::hello::{ControlStream, Negotiated};
+use crate::sender::{self, PeerSender, SenderHandle};
 use crate::subs;
 use crate::tls::{self, FailureReason, HandshakeFailure, PinEntry, PinTable, Role, SeedGeneration};
 
@@ -202,6 +203,11 @@ pub struct LivePeer {
     pub negotiated: Negotiated,
     /// The connection to send on.
     pub connection: quinn::Connection,
+    /// The queues in front of that connection, which is what a send path pushes into rather
+    /// than writing to the connection itself (T-033). Its task belongs to this entry in the
+    /// peers table: a snapshot that outlives the peer refuses every push instead of keeping a
+    /// dead peer's task alive.
+    pub sender: SenderHandle,
     /// What the peer has said it wants, as its control stream reader keeps it up to date
     /// (T-027). Shared rather than copied: a [`LiveView`] is a snapshot taken on every send,
     /// and a bitmap copied into each one would be stale by the time the send used it.
@@ -386,6 +392,10 @@ struct Shared {
     roster: watch::Receiver<Roster>,
     events: mpsc::Sender<PeerEvent>,
     stats: Arc<dyn ManagerStats>,
+    /// What every peer's sender is started with. The manager owns their lifetime, because the
+    /// live view is what hands the handles out and the peers table is what says when one is
+    /// still worth writing to.
+    senders: sender::Deps,
     peers: Mutex<HashMap<Hostname, Slot>>,
     /// Peers already warned about on the accept loop. A rejected key has no hostname, so the
     /// rate limit is keyed by the address it came from and pruned when one is admitted. By the
@@ -475,6 +485,13 @@ impl Shared {
                 software_version: info.software_version.clone(),
                 negotiated: info.negotiated,
                 connection: info.connection.clone(),
+                // `tokio::spawn` queues a task and returns, so this is as free of waiting as
+                // the rest of the section the comment above describes.
+                sender: PeerSender::spawn(
+                    info.hostname.clone(),
+                    info.connection.clone(),
+                    self.senders.clone(),
+                ),
                 state: info.state.clone(),
             };
             if let Some(Slot::Live(old)) = peers.insert(info.hostname.clone(), Slot::Live(live)) {
@@ -633,7 +650,8 @@ pub struct ConnectionManager;
 
 impl ConnectionManager {
     /// Starts accepting on `endpoint` and dialling every roster host this one should dial.
-    /// `stats` stands in for T-041's registry, which does not exist yet.
+    /// `stats` stands in for T-041's registry, which does not exist yet, and `senders` is the
+    /// process-wide budget every peer's send queues share (T-033).
     pub fn spawn<A: Admission>(
         local: Local,
         endpoint: quinn::Endpoint,
@@ -641,6 +659,7 @@ impl ConnectionManager {
         admission: A,
         events: mpsc::Sender<PeerEvent>,
         stats: Arc<dyn ManagerStats>,
+        senders: sender::Deps,
     ) -> Handle {
         let (stop, _) = watch::channel(false);
         let shared = Arc::new(Shared {
@@ -649,6 +668,7 @@ impl ConnectionManager {
             roster,
             events,
             stats,
+            senders,
             peers: Mutex::new(HashMap::new()),
             warned: Mutex::new(HashSet::new()),
             stop,
@@ -985,6 +1005,8 @@ mod tests {
     use std::collections::BTreeSet;
     use std::net::{IpAddr, Ipv4Addr};
 
+    use overlay_core::topic::Class;
+
     use super::*;
     use crate::testlog::LOG;
     use crate::testutil::{
@@ -1069,6 +1091,44 @@ mod tests {
 
         assert!(matches!(cluster.next_event(0).await, PeerEvent::Down(down, None) if down == peer));
         assert!(cluster.live(0).is_empty());
+    }
+
+    /// One frame, for the tests that ask whether a peer's queue is still taking them.
+    fn frame() -> bytes::Bytes {
+        bytes::Bytes::from_static(b"a frame")
+    }
+
+    /// A sender's life is its entry in the peers table's, not its last snapshot's: a peer that
+    /// goes away on its own takes its queue with it, so a route plan built a moment earlier
+    /// cannot go on filling a queue nothing will drain.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sender_stops_when_the_peer_leaves_the_live_set() {
+        let mut cluster = Builder::new(&[NodeKind::Manager, NodeKind::Vanishing])
+            .start()
+            .await;
+        let peer = cluster.hostname(1);
+        assert!(matches!(cluster.next_event(0).await, PeerEvent::Up(up) if up.hostname == peer));
+        let sender = cluster.live(0).get(&peer).unwrap().sender.clone();
+
+        cluster.vanish(1);
+
+        assert!(matches!(cluster.next_event(0).await, PeerEvent::Down(down, None) if down == peer));
+        assert!(sender.push(Class::Small, frame(), Instant::now()).is_err());
+    }
+
+    /// The same for a peer this host closes itself: a reload that drops a host stops its
+    /// sender where it closes its connection.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sender_stops_when_a_roster_reload_removes_the_peer() {
+        let mut cluster = TestCluster::start(2).await;
+        let peer = cluster.hostname(1);
+        assert!(matches!(cluster.next_event(0).await, PeerEvent::Up(up) if up.hostname == peer));
+        let sender = cluster.live(0).get(&peer).unwrap().sender.clone();
+
+        cluster.set_roster(&[0]);
+
+        assert!(matches!(cluster.next_event(0).await, PeerEvent::Down(down, _) if down == peer));
+        assert!(sender.push(Class::Small, frame(), Instant::now()).is_err());
     }
 
     /// A sidecar restart: the peer goes away and comes back on the same address, and the dial

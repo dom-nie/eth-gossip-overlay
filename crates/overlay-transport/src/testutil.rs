@@ -50,6 +50,7 @@ use overlay_core::fanout::Outbound;
 use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
 use overlay_core::lanes::{ClassLanes, LanePusher};
 use overlay_core::msgid;
+use overlay_core::protocol::MAX_FRAME_BYTES;
 use overlay_core::pubqueue::{PublishItem, PublishSink};
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::seen::{SeenCache, SharedSeenCache};
@@ -71,7 +72,9 @@ use crate::manager::{
     ManagerStats, PeerCounts, PeerEvent, PeerInfo,
 };
 use crate::receive::{Deps, NoStripes, PeerReceiver, ReceiveStats};
-use crate::sender::{DropReason, SenderStats};
+use crate::sender::{
+    self, DropReason, LARGE_QUEUED_BYTES_MAX, LargeLedger, SenderHandle, SenderStats,
+};
 use crate::subs::SubsStats;
 use crate::tls::{self, FailureReason, HandshakeFailure, PinTable, Role};
 
@@ -1102,6 +1105,12 @@ impl<A: Admission> TestCluster<A> {
             (self.admission)(node),
             node.events.0.clone(),
             node.stats.clone(),
+            sender::Deps {
+                // One ledger per node, because a node stands in for a process and the cap is
+                // what one sidecar holds across its peers.
+                ledger: Arc::new(LargeLedger::new(LARGE_QUEUED_BYTES_MAX)),
+                stats: node.stats.clone(),
+            },
         );
         self.nodes[index].manager = Some(manager);
     }
@@ -1276,7 +1285,7 @@ pub fn view(connection: &quinn::Connection, peers: Vec<(Hostname, PeerState)>) -
             .into_iter()
             .map(|(hostname, state)| {
                 (
-                    hostname,
+                    hostname.clone(),
                     LivePeer {
                         region: Region(REGION.to_owned()),
                         site: None,
@@ -1286,10 +1295,13 @@ pub fn view(connection: &quinn::Connection, peers: Vec<(Hostname, PeerState)>) -
                         negotiated: Negotiated {
                             minor: 0,
                             features: 0,
-                            peer_max_frame_bytes: 0,
+                            // What a v1 peer advertises, so a send path reading this view is
+                            // not stopped by a limit no real peer would name.
+                            peer_max_frame_bytes: MAX_FRAME_BYTES,
                             peer_max_batch_entries: 0,
                         },
                         connection: connection.clone(),
+                        sender: SenderHandle::stopped(hostname.clone()),
                         state: Arc::new(Mutex::new(state)),
                     },
                 )
