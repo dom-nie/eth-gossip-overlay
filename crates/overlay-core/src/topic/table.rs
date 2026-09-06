@@ -116,14 +116,6 @@ impl OwnTopicTable {
         self.ids.get(topic).copied()
     }
 
-    /// Every binding this host has made, as HELLO carries it. A peer that applies this knows
-    /// every id this host can put on a frame at the moment the HELLO went out.
-    pub fn snapshot(&self) -> Vec<(TopicId, String)> {
-        self.entries_from(0)
-            .map(|(id, topic)| (id, topic.to_owned()))
-            .collect()
-    }
-
     /// The bindings from `start` on, in id order. Ids are handed out in order and never
     /// reused, so an index into `topics` is also a count of what a peer has been told, and
     /// [`CAPACITY`] is what keeps it inside a `u16`.
@@ -227,10 +219,26 @@ impl Announcer {
         Self::default()
     }
 
-    /// Records that `peer` was sent the table's whole snapshot, which is what T-025 puts in the
-    /// HELLO. Everything interned after this call is what that peer is still owed.
-    pub fn hello_sent(&mut self, peer: &Hostname, table: &OwnTopicTable) {
-        self.told.insert(peer.clone(), table.topics.len());
+    /// The whole table, as `peer`'s HELLO carries it, recorded as told in the same call. T-025
+    /// sends what this returns and nothing else.
+    ///
+    /// Handing out the entries and recording the count is one method because the two have to
+    /// come from one read of the table. The mirror interns into that same table from another
+    /// task, so a caller that took a snapshot and marked the peer told in two steps would
+    /// record whatever landed in between as sent. Those ids would then never be announced to
+    /// that peer at all, and every frame carrying one would be dropped: the race the eager
+    /// announcement exists to close.
+    pub fn hello_snapshot(
+        &mut self,
+        peer: &Hostname,
+        table: &OwnTopicTable,
+    ) -> Vec<(TopicId, String)> {
+        let entries: Vec<(TopicId, String)> = table
+            .entries_from(0)
+            .map(|(id, topic)| (id, topic.to_owned()))
+            .collect();
+        self.told.insert(peer.clone(), entries.len());
+        entries
     }
 
     /// The bindings `peer` has not been told, which this call records as told. T-027 puts them
