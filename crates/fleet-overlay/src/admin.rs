@@ -59,8 +59,26 @@ pub struct Status {
     pub site: Option<String>,
     /// The kill switch: false means the sidecar observes and reports but publishes nothing.
     pub inject: bool,
+    /// The beacon node this sidecar is attached to.
+    pub bn: Bn,
     /// Every peer with a live connection.
     pub peers: Vec<Peer>,
+}
+
+/// The local beacon node, as the link and the compatibility watch last left it (D09).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Bn {
+    /// Whether the gossipsub link is up.
+    pub connected: bool,
+    /// The beacon node's version string, `null` until it has answered the probe. T-018 checks
+    /// it against the supported range, and a rollout is read off it.
+    pub version: Option<String>,
+    /// Whether the beacon node lists the sidecar as a trusted peer: `null` while it has not
+    /// said, which is a different answer from `false` and alerted on separately.
+    pub trusted: Option<bool>,
+    /// How many topics the beacon node is subscribed to, which is the size of the advertised
+    /// set the mirror follows.
+    pub subscriptions: usize,
 }
 
 /// One live peer. `software_version` and `features` are what a rollout is read off: they show
@@ -253,6 +271,19 @@ async fn answer(request: Request, state: &State) -> Response {
     }
 }
 
+/// The beacon node section, read from the three owners of its parts: the link's own connected
+/// flag, the compatibility watch and the subscription mirror. Nothing is derived a second time
+/// here, so `status` and the gauges cannot tell an operator different things.
+fn bn(state: &State) -> Bn {
+    let info = state.bn.borrow();
+    Bn {
+        connected: state.bn_connected.load(Ordering::Relaxed),
+        version: info.version.clone(),
+        trusted: info.trusted,
+        subscriptions: state.subscriptions.borrow().advertised.len(),
+    }
+}
+
 /// Reads the live values once, so every line of one answer describes the same moment.
 fn status(state: &State) -> Status {
     let live = state.live.live();
@@ -261,6 +292,7 @@ fn status(state: &State) -> Status {
         region: state.self_id.region.0.clone(),
         site: state.self_id.site.clone(),
         inject: state.inject.load(Ordering::Relaxed),
+        bn: bn(state),
         peers: live
             .iter()
             .map(|(hostname, peer)| {
