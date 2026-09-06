@@ -501,6 +501,10 @@ pub fn client_config(
         .with_client_cert_resolver(Arc::new(AlwaysResolvesClientRawPublicKeys::new(identity(
             own_key,
         )?)));
+    // A ticket is a cached admission decision, and admission is per roster and per seed. A
+    // resumed session skips the certificate state entirely, so the pin check would not run
+    // and a ticket would outlive the roster entry that earned it.
+    tls.resumption = rustls::client::Resumption::disabled();
     tls.alpn_protocols = vec![protocol_alpn()];
     Ok(quinn::ClientConfig::new(Arc::new(
         QuicClientConfig::try_from(tls)?,
@@ -520,6 +524,12 @@ pub fn server_config(
         .with_cert_resolver(Arc::new(AlwaysResolvesServerRawPublicKeys::new(identity(
             own_key,
         )?)));
+    // No tickets to hand out and nothing to resume from. A resumed session restores the peer
+    // straight from the ticket without entering the certificate state, so the pin check never
+    // runs and a host expelled from the roster would keep its path in until the ticket aged
+    // out. Admission is per roster and per seed; a cached decision cannot be either.
+    tls.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
+    tls.send_tls13_tickets = 0;
     tls.alpn_protocols = vec![protocol_alpn()];
     Ok(quinn::ServerConfig::with_crypto(Arc::new(
         QuicServerConfig::try_from(tls)?,
@@ -702,6 +712,10 @@ mod tests {
         assert_eq!(during.seed, SeedGeneration::Previous);
         assert_eq!(after.reason.as_str(), "unknown_key");
     }
+    /// What the loopback acceptor made of a connection: an error when it refused the
+    /// handshake, `Ok(None)` when the handshake finished without it identifying anybody.
+    type Accepted = Vec<Result<Option<PinEntry>, HandshakeFailure>>;
+
     fn own_key(seeds: &Seeds, name: &str) -> SigningKey {
         derive_tls_keypair(&seeds.current, &host(name))
     }
@@ -721,10 +735,7 @@ mod tests {
         seeds: &Seeds,
         name: &str,
         connections: usize,
-    ) -> (
-        std::net::SocketAddr,
-        tokio::task::JoinHandle<Vec<Result<Option<PinEntry>, HandshakeFailure>>>,
-    ) {
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<Accepted>) {
         let endpoint = quinn::Endpoint::server(
             server_config(pins.clone(), &own_key(seeds, name)).unwrap(),
             loopback(),
@@ -762,10 +773,7 @@ mod tests {
         pins: &Arc<ArcSwap<PinTable>>,
         seeds: &Seeds,
         name: &str,
-    ) -> (
-        std::net::SocketAddr,
-        tokio::task::JoinHandle<Vec<Result<Option<PinEntry>, HandshakeFailure>>>,
-    ) {
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<Accepted>) {
         acceptor_taking(pins, seeds, name, 1)
     }
 
