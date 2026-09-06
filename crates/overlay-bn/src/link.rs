@@ -1314,6 +1314,21 @@ mod tests {
         assert!(harness.link.connected.load(Ordering::Relaxed));
     }
 
+    /// The fake runs Lighthouse's own idle timeout and the sidecar never grafts it into a
+    /// gossipsub mesh, so what holds a silent link open is the request-response handler on
+    /// each side. Twelve seconds of nothing, and the link is still there and still answers.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn quiet_link_survives_the_fake_bns_ten_second_idle_timeout() {
+        let mut bn = FakeBn::start().await;
+        let (harness, mut answers) = connected(&mut bn).await;
+
+        tokio::time::sleep(IDLE_TIMEOUT + Duration::from_secs(2)).await;
+
+        assert!(harness.link.connected.load(Ordering::Relaxed));
+        bn.send_ping(0).await;
+        assert_eq!(next_answer(&mut answers).await, RpcAnswer::Pong(0));
+    }
+
     #[test]
     fn lane_for_takes_known_large_names_by_prefix_and_others_by_size() {
         let topic = |name: &str| format!("/eth2/6a95a1a9/{name}/ssz_snappy");
