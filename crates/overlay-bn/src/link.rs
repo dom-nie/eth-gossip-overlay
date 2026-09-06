@@ -1208,6 +1208,44 @@ mod tests {
         assert_eq!(metadata.custody_group_count, 0);
     }
 
+    /// The whole path T-014 feeds: the beacon node subscribes, the mirror turns that into a
+    /// new advertised set, and the sidecar's next ping reply carries a sequence number one
+    /// higher, with the metadata behind it showing the subnet.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn subscription_change_bumps_seq_number_seen_by_fake_bn_on_the_next_ping() {
+        let mut bn = FakeBn::start().await;
+        let mut answers = bn.responses();
+        let (commands, commands_rx) = mpsc::channel(64);
+        let (spec_tx, spec_rx) = spec_watch();
+        let (sets, sets_rx) = watch::channel(SubscriptionSets::default());
+        let lanes = ClassLanes::new(Arc::new(Counts::default()));
+        let link = BnLink::spawn(
+            link_config(&bn),
+            &node_key(&tempfile::tempdir().unwrap()),
+            BnClient::new(bn.http_addr(), Duration::from_secs(2)),
+            &mut Registry::default(),
+            lanes.pusher(),
+            spec_tx,
+            sets_rx,
+            commands_rx,
+        );
+        let mirror = crate::mirror::run(link.events, commands, sets, spec_rx);
+        bn.wait_for(|e| matches!(e, FakeBnEvent::Connected(_)))
+            .await;
+        ping_until(&bn, &mut answers, 0).await;
+
+        bn.subscribe(ATTESTATION_TOPIC).await;
+
+        ping_until(&bn, &mut answers, 1).await;
+        bn.request_metadata().await;
+        let answer = next_answer(&mut answers).await;
+        let RpcAnswer::MetaData(metadata) = &answer else {
+            panic!("not a metadata answer: {answer:?}");
+        };
+        assert!(metadata.attnets().get(7).unwrap());
+        mirror.abort();
+    }
+
     #[test]
     fn lane_for_takes_known_large_names_by_prefix_and_others_by_size() {
         let topic = |name: &str| format!("/eth2/6a95a1a9/{name}/ssz_snappy");
