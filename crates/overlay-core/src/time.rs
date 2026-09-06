@@ -2,13 +2,19 @@
 //! with [`FakeClock`] instead of sleeping.
 
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 /// A source of monotonic time. Production code takes a `Clock` so tests can substitute
 /// [`FakeClock`] and drive it by hand.
 pub trait Clock: Send + Sync {
     /// The current instant according to this clock.
     fn now(&self) -> Instant;
+
+    /// The same moment as [`now`](Self::now) on the wall clock, which is the only form that
+    /// means anything on another host. The event log stamps arrivals with it so a message can
+    /// be followed across the fleet (T-044); nothing inside one process should compare it,
+    /// because it jumps when the host's clock is stepped.
+    fn wall(&self) -> SystemTime;
 }
 
 /// The real monotonic clock, for production wiring.
@@ -19,32 +25,55 @@ impl Clock for SystemClock {
     fn now(&self) -> Instant {
         Instant::now()
     }
+
+    fn wall(&self) -> SystemTime {
+        SystemTime::now()
+    }
 }
 
-/// A clock that only moves when a test tells it to. Clones share one instant, so a test can
+/// A clock that only moves when a test tells it to. Clones share one reading, so a test can
 /// keep a handle while the unit under test owns another.
 #[derive(Clone)]
-pub struct FakeClock(Arc<Mutex<Instant>>);
+pub struct FakeClock(Arc<Mutex<Reading>>);
+
+/// The two views of one moment. They move together, so a test that advances the clock knows
+/// the exact wall time an event carries.
+#[derive(Clone, Copy)]
+struct Reading {
+    instant: Instant,
+    wall: SystemTime,
+}
 
 impl FakeClock {
-    /// Starts at the real current instant.
+    /// Starts at the real current time.
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(Instant::now())))
+        Self(Arc::new(Mutex::new(Reading {
+            instant: Instant::now(),
+            wall: SystemTime::now(),
+        })))
     }
 
-    /// Moves the clock forward by `by`.
+    /// Moves the clock forward by `by`, both readings together.
     pub fn advance(&self, by: Duration) {
-        *self.slot() += by;
+        let mut slot = self.slot();
+        slot.instant += by;
+        slot.wall += by;
     }
 
-    /// Jumps the clock to `instant`, forwards or backwards.
+    /// Jumps the clock to `instant`, forwards or backwards. The wall reading moves by the same
+    /// amount, so the two never drift apart.
     pub fn set(&self, instant: Instant) {
-        *self.slot() = instant;
+        let mut slot = self.slot();
+        slot.wall = match instant.checked_duration_since(slot.instant) {
+            Some(forward) => slot.wall + forward,
+            None => slot.wall - (slot.instant - instant),
+        };
+        slot.instant = instant;
     }
 
-    fn slot(&self) -> MutexGuard<'_, Instant> {
-        // A poisoned lock means another test thread panicked mid-update. The stored instant is
-        // still a valid instant, so recover it instead of spreading the panic.
+    fn slot(&self) -> MutexGuard<'_, Reading> {
+        // A poisoned lock means another test thread panicked mid-update. The stored reading is
+        // still a valid one, so recover it instead of spreading the panic.
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -57,7 +86,11 @@ impl Default for FakeClock {
 
 impl Clock for FakeClock {
     fn now(&self) -> Instant {
-        *self.slot()
+        self.slot().instant
+    }
+
+    fn wall(&self) -> SystemTime {
+        self.slot().wall
     }
 }
 
