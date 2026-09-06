@@ -157,11 +157,12 @@ impl<T> ClassLanes<T> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, LazyLock, Mutex};
+    use std::time::Duration;
 
     use super::*;
+    use crate::testlog::LOG;
     use crate::topic::Class;
 
     #[derive(Default)]
@@ -182,24 +183,39 @@ mod tests {
         fn control_dropped(&self) {}
     }
 
-    #[tokio::test]
+    /// Both receivers wait forever on an empty lane, which is what they are for, so a test that
+    /// awaits one directly can only hang when the lane never fills. Under `start_paused` the
+    /// timeout fires as soon as the runtime has nothing else to run, so this costs no real time.
+    async fn within_a_second<T>(lane: impl std::future::Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(1), lane)
+            .await
+            .expect("an item was pushed onto this lane")
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn lanes_recv_prefers_large_when_both_have_items() {
         let mut lanes = ClassLanes::new(Arc::new(()));
         lanes.push(Class::Small, "attestation").unwrap();
         lanes.push(Class::Large, "block").unwrap();
 
-        assert_eq!(lanes.recv().await, "block");
-        assert_eq!(lanes.recv().await, "attestation");
+        assert_eq!(within_a_second(lanes.recv()).await, "block");
+        assert_eq!(within_a_second(lanes.recv()).await, "attestation");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn lanes_recv_from_reads_one_lane_only() {
         let mut lanes = ClassLanes::new(Arc::new(()));
         lanes.push(Class::Large, "block").unwrap();
         lanes.push(Class::Small, "attestation").unwrap();
 
-        assert_eq!(lanes.recv_from(Class::Small).await, "attestation");
-        assert_eq!(lanes.recv_from(Class::Large).await, "block");
+        assert_eq!(
+            within_a_second(lanes.recv_from(Class::Small)).await,
+            "attestation"
+        );
+        assert_eq!(
+            within_a_second(lanes.recv_from(Class::Large)).await,
+            "block"
+        );
     }
 
     #[test]
@@ -226,48 +242,6 @@ mod tests {
         assert_eq!(overflow, Err(Dropped(usize::MAX)));
         assert_eq!(counts.small.load(Ordering::Relaxed), 1);
         assert_eq!(counts.large.load(Ordering::Relaxed), 0);
-    }
-
-    /// Everything `tracing` writes in this test binary. One process-wide subscriber rather
-    /// than a thread-scoped one: tracing caches a call site's interest by asking whichever
-    /// dispatcher first hits it, so a test that pushes to a full large lane with no
-    /// subscriber installed would cache "never" for the `error!` in `LanePusher::push`, and a
-    /// thread-scoped subscriber running after it would see nothing.
-    static LOG: LazyLock<Log> = LazyLock::new(|| {
-        let log = Log::default();
-        let sink = log.clone();
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || sink.clone())
-            .finish();
-        // Another global subscriber in this binary would be a bug, but the test would still
-        // fail on its assertion, so there is no need to panic here.
-        let _ = tracing::subscriber::set_global_default(subscriber);
-        log
-    });
-
-    #[derive(Clone, Default)]
-    struct Log(Arc<Mutex<Vec<u8>>>);
-
-    impl Log {
-        fn len(&self) -> usize {
-            self.0.lock().unwrap().len()
-        }
-
-        /// What was written after the first `from` bytes.
-        fn since(&self, from: usize) -> String {
-            String::from_utf8(self.0.lock().unwrap()[from..].to_vec()).unwrap()
-        }
-    }
-
-    impl Write for Log {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().write(buf)
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
     }
 
     #[test]

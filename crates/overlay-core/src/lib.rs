@@ -12,6 +12,8 @@ pub mod pubqueue;
 pub mod ratelimit;
 pub mod roster;
 pub mod seen;
+#[cfg(test)]
+mod testlog;
 pub mod time;
 pub mod topic;
 
