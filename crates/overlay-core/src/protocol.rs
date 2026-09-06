@@ -30,11 +30,15 @@ pub const PROTOCOL_MINOR: u16 = 0;
 /// and the ticket that ships it are in, so a v1 binary that meets a v2 one is sent v1 frames.
 pub mod features {
     /// Small-class batches over QUIC datagrams instead of streams (T-062).
-    pub const DATAGRAM_BATCHES: u64 = 1 << 0;
+    pub const DATAGRAM_BATCHES: u64 = bit(0);
     /// Large messages split into chunks with parity and striped over a region (T-073).
-    pub const STRIPING: u64 = 1 << 1;
+    pub const STRIPING: u64 = bit(1);
     /// Chunk and custody-column repair (T-082).
-    pub const REPAIR: u64 = 1 << 2;
+    pub const REPAIR: u64 = bit(2);
+
+    const fn bit(position: u32) -> u64 {
+        1 << position
+    }
 }
 
 /// What this build puts in HELLO. Zero in v1: it sends whole messages on streams, which every
@@ -58,5 +62,24 @@ mod tests {
     fn alpn_is_the_protocol_name_and_the_major() {
         assert_eq!(PROTOCOL_MAJOR, 1);
         assert_eq!(protocol_alpn(), b"fleet-overlay/1");
+    }
+
+    /// The numbers a peer reads out of HELLO and holds this host to, so they are pinned as
+    /// literals rather than recomputed the way the constants build them.
+    #[test]
+    fn hello_advertises_the_version_and_limits_this_release_committed_to() {
+        assert_eq!(PROTOCOL_MINOR, 0);
+        assert_eq!(SUPPORTED_FEATURES, 0);
+        assert_eq!(MAX_FRAME_BYTES, 10_486_784);
+        assert_eq!(MAX_BATCH_ENTRIES, 1024);
+    }
+
+    /// A bit that moved would make one release read another's frames as a feature it never
+    /// advertised, which is the one thing the negotiation exists to prevent.
+    #[test]
+    fn feature_bits_keep_the_positions_they_were_assigned() {
+        assert_eq!(features::DATAGRAM_BATCHES, 1);
+        assert_eq!(features::STRIPING, 2);
+        assert_eq!(features::REPAIR, 4);
     }
 }

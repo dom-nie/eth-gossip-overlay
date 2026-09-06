@@ -17,8 +17,8 @@ use overlay_core::msgid::MessageId;
 use overlay_core::protocol::{MAX_BATCH_ENTRIES, MAX_FRAME_BYTES};
 use overlay_core::wire::{
     BatchEntry, BatchFlags, Chunk, ChunkFlags, DecodeError, Frame, FrameType, Hello,
-    MAX_MISSING_INDICES, MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, Read, ReadError, RepairReq,
-    RepairResp, decode_datagram, encode_datagram, read_frame, write_frame,
+    MAX_MISSING_INDICES, MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, MAX_TOPIC_SNAPSHOT_ENTRIES, Read,
+    ReadError, RepairReq, RepairResp, decode_datagram, encode_datagram, read_frame, write_frame,
 };
 use proptest::prelude::*;
 use tokio::io::AsyncWriteExt;
@@ -184,6 +184,12 @@ fn unknown_and_reserved_frame_types_are_unknown_type() {
             Err(DecodeError::UnknownType(type_byte))
         );
     }
+
+    assert_eq!(
+        FrameType::from_u8(FrameType::Have.id()),
+        Some(FrameType::Have),
+        "the reserved id is taken, not free for a later release to reuse"
+    );
 }
 
 #[test]
@@ -467,6 +473,21 @@ async fn read_frame_rejects_length_prefix_above_maximum_without_allocating() {
     let read = within(read_frame(&mut reader, MAX_FRAME_BYTES)).await;
 
     assert!(matches!(read, Err(ReadError::TooLarge(u32::MAX))));
+
+    let (mut writer, mut reader) = tokio::io::duplex(64 * 1024);
+    let (_, hello) = common::samples().swap_remove(0);
+    let mut encoded = BytesMut::new();
+    hello.encode(&mut encoded);
+
+    within(write_frame(&mut writer, &hello))
+        .await
+        .expect("write");
+    let read = within(read_frame(&mut reader, encoded.len() as u32)).await;
+
+    assert!(
+        matches!(read, Ok(Read::Frame(_))),
+        "a frame of exactly the agreed maximum is read, not refused"
+    );
 }
 
 #[test]
@@ -519,4 +540,94 @@ proptest! {
 
         prop_assert_eq!(datagram.is_ok(), stream.is_ok() && rest.is_empty());
     }
+}
+
+#[test]
+fn flag_sets_report_which_bits_are_set() {
+    assert!(ChunkFlags::FORWARDED.contains(ChunkFlags::FORWARDED));
+    assert!(!ChunkFlags::NONE.contains(ChunkFlags::FORWARDED));
+    assert!(ChunkFlags::FORWARDED.contains(ChunkFlags::NONE));
+
+    assert!(BatchFlags::RELAY.contains(BatchFlags::RELAY));
+    assert!(!BatchFlags::NONE.contains(BatchFlags::RELAY));
+    assert!(BatchFlags::RELAY.contains(BatchFlags::NONE));
+}
+
+#[test]
+fn counts_past_the_hello_and_repair_limits_are_over_limit() {
+    assert_eq!(
+        Frame::decode(&mut hello_of(MAX_TOPIC_SNAPSHOT_ENTRIES + 1)),
+        Err(DecodeError::OverLimit("topics"))
+    );
+    assert_eq!(
+        Frame::decode(&mut hello_of(MAX_TOPIC_SNAPSHOT_ENTRIES)),
+        Err(DecodeError::Truncated),
+        "a count at the limit is read, not refused"
+    );
+
+    assert_eq!(
+        Frame::decode(&mut repair_req_of(MAX_MISSING_INDICES + 1)),
+        Err(DecodeError::OverLimit("missing"))
+    );
+    assert_eq!(
+        Frame::decode(&mut repair_req_of(MAX_MISSING_INDICES)),
+        Err(DecodeError::Truncated),
+        "a count at the limit is read, not refused"
+    );
+}
+
+/// A HELLO announcing `count` topics and carrying none of them, so a count past the limit costs
+/// the test nothing to build.
+fn hello_of(count: usize) -> Bytes {
+    let mut out = BytesMut::new();
+    out.put_u8(FrameType::Hello.id());
+    out.put_u8(0);
+    out.put_u16_le(0);
+    out.put_u64_le(0);
+    out.put_u32_le(0);
+    out.put_u16_le(0);
+    out.put_u64_le(0);
+    for _ in 0..4 {
+        out.put_u16_le(0);
+    }
+    out.put_u16_le(count as u16);
+    out.freeze()
+}
+
+/// A repair request asking for `count` indices and listing none of them.
+fn repair_req_of(count: usize) -> Bytes {
+    let mut out = BytesMut::new();
+    out.put_u8(FrameType::RepairReq.id());
+    out.put_u8(0);
+    out.put_u8(0);
+    out.put_slice(&[0u8; 20]);
+    out.put_u16_le(count as u16);
+    out.freeze()
+}
+
+#[test]
+fn a_topic_string_past_the_maximum_is_over_limit() {
+    let at_limit = "t".repeat(MAX_TOPIC_BYTES);
+
+    assert_eq!(
+        Frame::decode(&mut topic_add(&at_limit)),
+        Ok(Frame::TopicAdd {
+            id: 1,
+            topic: at_limit,
+        })
+    );
+    assert_eq!(
+        Frame::decode(&mut topic_add(&"t".repeat(MAX_TOPIC_BYTES + 1))),
+        Err(DecodeError::OverLimit("string"))
+    );
+}
+
+fn topic_add(topic: &str) -> Bytes {
+    let mut out = BytesMut::new();
+    Frame::TopicAdd {
+        id: 1,
+        topic: topic.to_owned(),
+    }
+    .encode(&mut out);
+    out.freeze()
 }
