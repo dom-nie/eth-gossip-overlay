@@ -276,4 +276,23 @@ mod tests {
 
         assert!(sink.text().is_empty(), "{}", sink.text());
     }
+
+    #[test]
+    fn events_and_ordinary_logs_share_one_writer_and_differ_by_the_event_field() {
+        let node = node();
+        let topic = block();
+
+        let sink = capture(&Log::default(), false, None, |_| {
+            tracing::info!("the overlay is up");
+            emit_first_arrival(&arrival(&topic, &node, Class::Large, Source::Bn));
+        });
+
+        let lines = sink.objects();
+        assert_eq!(lines.len(), 2, "{}", sink.text());
+        assert_eq!(lines[0]["message"], "the overlay is up");
+        assert!(!lines[0].contains_key("event"), "{:?}", lines[0]);
+        assert_eq!(lines[1]["event"], "first_arrival");
+        assert_eq!(lines[1]["target"], "overlay::event");
+        assert_ne!(lines[0]["target"], lines[1]["target"]);
+    }
 }
