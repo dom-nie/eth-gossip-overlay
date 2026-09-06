@@ -38,16 +38,18 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
 use overlay_core::budget::{Charge, FanoutBudget, FanoutKind};
+use overlay_core::events::{self, FirstArrival};
 use overlay_core::msgid::{self, Branch, MessageId};
 use overlay_core::protocol::MAX_FRAME_BYTES;
 use overlay_core::pubqueue::{PublishItem, PublishSink};
-use overlay_core::roster::{Hostname, Region};
+use overlay_core::roster::{Hostname, Region, SelfIdentity};
 use overlay_core::seen::SharedSeenCache;
 use overlay_core::subs::PeerState;
+use overlay_core::time::Clock;
 use overlay_core::topic::table::TopicId;
 use overlay_core::topic::{Class, SubscriptionSets, Topic};
 use overlay_core::wire::{self, Chunk, ChunkFlags, Frame, Read};
@@ -147,6 +149,10 @@ pub struct Deps {
     pub stripes: Arc<dyn Stripes>,
     /// Where every counter above lands.
     pub stats: Arc<dyn ReceiveStats>,
+    /// Who this host is, which the event log names as the host that saw the message.
+    pub node: Arc<SelfIdentity>,
+    /// The clock the arrival time in that event is read from.
+    pub clock: Arc<dyn Clock>,
     /// The budget each peer gets a copy of. A bucket that starts full is what a peer that
     /// connects an hour later would have anyway, since a refill saturates at the capacity.
     pub budget: FanoutBudget,
@@ -310,16 +316,20 @@ async fn read_frames<R: AsyncRead + Unpin>(stream: &mut R, ctx: &Ctx) -> StreamE
 impl Ctx {
     /// Sends one frame down the path its carrier and shape call for.
     fn frame(&self, frame: Frame) {
+        // Off the socket and decoded, which is the earliest the arrival time can be read here;
+        // everything below it, the id above all, costs time this host should not be charged
+        // with in the fleet-spread query.
+        let arrived = self.deps.clock.wall();
         match frame {
             Frame::Chunk { chunk, .. } if chunk.is_whole() => {
-                self.deliver(chunk.topic_id, chunk.data, Some(chunk.msg_id));
+                self.deliver(chunk.topic_id, chunk.data, Some(chunk.msg_id), arrived);
             }
             Frame::Chunk { flags, chunk } => self.deps.stripes.chunk(&self.peer, flags, chunk),
             // `RELAY` asks the receiver to re-fan the batch inside its own region, which is
             // T-063's to act on. v1 delivers the entries locally and lets the flag be (D20).
             Frame::Batch { entries, .. } => {
                 for entry in entries {
-                    self.deliver(entry.topic_id, entry.payload, None);
+                    self.deliver(entry.topic_id, entry.payload, None, arrived);
                 }
             }
             other => tracing::debug!(
@@ -331,8 +341,15 @@ impl Ctx {
     }
 
     /// One payload, from a whole message or from a batch entry. `header_id` is the id the frame
-    /// claimed for it, which only a chunk header carries.
-    fn deliver(&self, topic_id: u16, payload: Bytes, header_id: Option<MessageId>) {
+    /// claimed for it, which only a chunk header carries, and `arrived` is when the frame that
+    /// carried it came off the socket.
+    fn deliver(
+        &self,
+        topic_id: u16,
+        payload: Bytes,
+        header_id: Option<MessageId>,
+        arrived: SystemTime,
+    ) {
         let Some(topic) = self.topic(topic_id) else {
             self.deps.stats.unknown_topic_id(&self.peer);
             return;
@@ -367,6 +384,14 @@ impl Ctx {
             return;
         }
         self.deps.stats.first_seen(class);
+        events::emit_first_arrival(&FirstArrival {
+            id: computed.id,
+            class,
+            topic: &topic,
+            node: &self.deps.node,
+            at: arrived,
+            source: events::Source::Overlay { origin: &self.peer },
+        });
         self.deps.publish.enqueue(PublishItem {
             topic,
             id: computed.id,
@@ -865,6 +890,12 @@ mod tests {
                 sets: watching,
                 stripes: Arc::new(NoStripes::new(stats.clone())),
                 stats,
+                node: Arc::new(SelfIdentity {
+                    hostname: Hostname("stalled-host".to_owned()),
+                    region: Region("eu".to_owned()),
+                    site: None,
+                }),
+                clock: Arc::new(SystemClock),
                 budget: FanoutBudget::default_for(2, 2048, 12, Instant::now()),
             },
             warned_invalid: AtomicBool::new(false),

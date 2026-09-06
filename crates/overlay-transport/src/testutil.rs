@@ -975,12 +975,19 @@ impl<A: Admission> TestCluster<A> {
             Arc::new(SystemClock),
         ));
         let (subscriptions, watching) = watch::channel(sets);
+        let identity = SelfIdentity {
+            hostname: node.hostname.clone(),
+            region: Region(REGION.to_owned()),
+            site: None,
+        };
         let deps = Deps {
             seen: seen.clone(),
             publish: published.clone(),
             sets: watching.clone(),
             stripes: Arc::new(NoStripes::new(stats.clone())),
             stats: stats.clone(),
+            node: Arc::new(identity.clone()),
+            clock: Arc::new(SystemClock),
             // The slot length comes from the beacon node's spec snapshot in production
             // (CL-N3); a cluster has no beacon node, so it runs at mainnet's.
             budget: FanoutBudget::default_for(
@@ -1000,11 +1007,7 @@ impl<A: Admission> TestCluster<A> {
             Fanout::spawn(
                 lanes,
                 live,
-                SelfIdentity {
-                    hostname: node.hostname.clone(),
-                    region: Region(REGION.to_owned()),
-                    site: None,
-                },
+                identity,
                 config::Fanout::default(),
                 node.topics.clone(),
                 stats,
