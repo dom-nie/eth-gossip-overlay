@@ -521,8 +521,8 @@ impl Shared {
                 peers.get(peer),
                 Some(Slot::Live(live)) if live.connection.stable_id() == connection.stable_id()
             );
-            if current {
-                peers.remove(peer);
+            if current && let Some(Slot::Live(live)) = peers.remove(peer) {
+                live.sender.stop();
                 self.emit(PeerEvent::Down(peer.clone(), code));
             }
             current
@@ -537,6 +537,7 @@ impl Shared {
         {
             let mut peers = self.peers();
             if let Some(Slot::Live(live)) = peers.remove(peer) {
+                live.sender.stop();
                 code.close(&live.connection);
                 self.emit(PeerEvent::Down(peer.clone(), Some(code)));
             }
@@ -724,16 +725,20 @@ impl Handle {
         }
     }
 
-    /// Closes every live connection with [`CloseCode::Shutdown`], stops the loops and waits for
-    /// them, then closes the endpoint. It returns only once nothing of the manager's is still
-    /// holding the socket, which is what lets a replacement bind the same port.
+    /// Stops the loops, closes every live connection with [`CloseCode::Shutdown`], then closes
+    /// the endpoint. It returns only once nothing of the manager's is still holding the socket,
+    /// which is what lets a replacement bind the same port.
+    ///
+    /// The loops go first because a dial in flight adopts its peer when it resolves: closing
+    /// the live set first leaves whatever was adopted in the window still connected, and its
+    /// sender still writing to a connection nothing will ever close.
     pub async fn shutdown(self) {
-        for peer in self.shared.live_hostnames() {
-            self.shared.close_peer(&peer, CloseCode::Shutdown);
-        }
         let _ = self.shared.stop.send(true);
         let _ = self.supervisor.await;
         let _ = self.accept.await;
+        for peer in self.shared.live_hostnames() {
+            self.shared.close_peer(&peer, CloseCode::Shutdown);
+        }
         self.shared
             .endpoint
             .close(CloseCode::Shutdown.code(), CloseCode::Shutdown.reason());
