@@ -114,8 +114,12 @@ type Applier = Box<dyn FnMut(&Config) -> Result<(), String> + Send>;
 /// sidecar. Owned by one task; [`ReloadHandle`] is how everything else reaches it.
 pub struct Reloader {
     config_path: PathBuf,
+    /// Fixed at construction: `overlay.roster_file` takes a restart, so the file a reload reads
+    /// is the one the sidecar started from whatever a new document says.
+    roster_path: PathBuf,
     document: yaml::Value,
     config: Config,
+    roster: watch::Sender<Roster>,
     appliers: Vec<(&'static str, Applier)>,
     stats: Arc<dyn ReloadStats>,
 }
@@ -138,8 +142,10 @@ impl Reloader {
         )];
         Ok(Self {
             config_path,
+            roster_path: config.overlay.roster_file.clone(),
             document,
             config,
+            roster: deps.roster,
             appliers,
             stats: deps.stats,
         })
@@ -161,7 +167,12 @@ impl Reloader {
             error: None,
         };
         match read_config(&self.config_path) {
-            Ok((document, config)) => self.apply_config(document, config, &mut report),
+            Ok((document, config)) => {
+                self.apply_config(document, config, &mut report);
+                self.apply_roster(&mut report);
+            }
+            // A config the sidecar cannot run with stops the reload before the roster is read:
+            // one broken file, one error, and the next reload applies both.
             Err(error) => report.error = Some(error),
         }
         self.stats.reloaded(&report);
@@ -196,6 +207,21 @@ impl Reloader {
         }
         self.document = document;
         self.config = config;
+    }
+}
+
+impl Reloader {
+    /// Publishes the roster on the watch channel when the file says something new. A file that
+    /// does not parse leaves the roster in force where it is.
+    fn apply_roster(&mut self, report: &mut ReloadReport) {
+        match Roster::load(&self.roster_path) {
+            Ok(roster) if *self.roster.borrow() == roster => {}
+            Ok(roster) => {
+                self.roster.send_replace(roster);
+                report.applied.push("roster".to_owned());
+            }
+            Err(error) => report.error = Some(ReloadError::Roster(error.to_string())),
+        }
     }
 }
 
