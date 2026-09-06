@@ -91,6 +91,16 @@ pub enum Trigger {
     Automatic,
 }
 
+impl Trigger {
+    /// The trigger as a log line and the report's JSON spell it.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Automatic => "automatic",
+        }
+    }
+}
+
 /// What one reload did, returned to whoever asked for it and serialized verbatim by T-042's
 /// admin socket.
 #[derive(Clone, Debug, Serialize)]
@@ -354,18 +364,22 @@ impl Reloader {
             Err(error) => report.error = Some(error),
         }
         self.stats.reloaded(&report);
+        let (applied, restart_required) = (
+            report.applied.join(", "),
+            report.restart_required.join(", "),
+        );
         match &report.error {
             None => tracing::info!(
-                trigger = ?report.trigger,
-                applied = ?report.applied,
-                restart_required = ?report.restart_required,
+                trigger = report.trigger.as_str(),
+                applied,
+                restart_required,
                 "reloaded"
             ),
             Some(error) => tracing::warn!(
                 %error,
-                trigger = ?report.trigger,
-                applied = ?report.applied,
-                restart_required = ?report.restart_required,
+                trigger = report.trigger.as_str(),
+                applied,
+                restart_required,
                 "reloaded with an error, previous values kept"
             ),
         }
