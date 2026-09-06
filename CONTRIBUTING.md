@@ -51,7 +51,7 @@ The subject is a lowercase imperative summary under 72 characters. Changes from 
 
 ## Developer Certificate of Origin
 
-Contributors certify the [Developer Certificate of Origin 1.1](https://developercertificate.org/) by adding `Signed-off-by: Name <email>` to each commit, which `git commit -s` does for you. There is no CLA.
+Contributors certify the [Developer Certificate of Origin 1.1](https://developercertificate.org/) by adding `Signed-off-by: Name <email>` to each commit, which `git commit -s` does for you. There is no CLA. The sign-off is what a pull request needs, and it is the only trailer this project uses: no `Co-Authored-By`, no tool attribution.
 
 ## Bumping Lighthouse
 
