@@ -22,7 +22,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use libp2p::gossipsub::PublishError;
-use overlay_core::pubqueue::{DropReason, PublishItem, PublishQueue, Pushed, QueueStats};
+use overlay_core::pubqueue::{
+    DropReason, PublishItem, PublishQueue, PublishSink, Pushed, QueueStats,
+};
 use overlay_core::ratelimit::PublishLimits;
 use overlay_core::time::Clock;
 use overlay_core::topic::Class;
@@ -126,6 +128,14 @@ impl PublishHandle {
         // A poisoned lock means a thread panicked mid-push. The queue's accounting is updated
         // before any call that could panic, so recover it instead of spreading the panic.
         self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl PublishSink for PublishHandle {
+    fn enqueue(&self, item: PublishItem) {
+        // The outcome is the queue's to count, on the stats the whole publish path shares, so
+        // an ingress site on the other side of the crate boundary has nothing to do with it.
+        PublishHandle::enqueue(self, item);
     }
 }
 
