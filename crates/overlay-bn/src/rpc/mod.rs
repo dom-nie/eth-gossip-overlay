@@ -344,4 +344,23 @@ mod tests {
             Response::Success(expected.encode(3))
         );
     }
+
+    /// The mirror's extra column topics live in `local`, never in `advertised`, so a
+    /// responder fed the advertised set alone counts only what the beacon node subscribed to.
+    #[test]
+    fn custody_group_count_counts_only_columns_the_bn_subscribes_to() {
+        let columns: Vec<String> = (0..128)
+            .map(|i| format!("data_column_sidecar_{i}"))
+            .collect();
+        let names: Vec<&str> = columns.iter().map(String::as_str).collect();
+        let mut all = Responder::new();
+        let mut none = Responder::new();
+
+        all.set_subscriptions(&topics(&names));
+        none.set_subscriptions(&topics(&["beacon_block"]));
+
+        assert_eq!(all.metadata().custody_group_count, Some(128));
+        assert_eq!(none.metadata().custody_group_count, Some(0));
+        assert_eq!(all.metadata().attnets, [0; 8]);
+    }
 }
