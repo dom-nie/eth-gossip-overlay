@@ -98,6 +98,10 @@ pub enum NodeKind {
     /// (T-027), and it happens again on every redial, which is what a peer whose fault survives
     /// a reconnect looks like.
     ConflictingTopicAdd,
+    /// A sink that answers HELLO and then closes the connection with a code of the test's
+    /// choosing, which is how a peer that has paired and then decided against the connection
+    /// looks from the dial side.
+    ClosesWith(CloseCode),
     /// A sink with a pin table of its own that is always empty, so it takes the packets of
     /// every dial and refuses the key behind them. A dialler's `connect()` resolves before the
     /// refusal reaches it, which is the one case where a resolved dial is not a peer.
@@ -435,6 +439,13 @@ async fn hold_connections(
                         topic: topic("beacon_attestation_3"),
                     };
                     let _ = peer.control.write_frame(&contradiction).await;
+                }
+                if let NodeKind::ClosesWith(code) = kind {
+                    // A close abandons whatever the streams still hold, so the HELLO this side
+                    // just wrote would never reach the dialler and the connection would end in
+                    // a refused admission instead of the close the test is about.
+                    tokio::time::sleep(Duration::from_millis(30)).await;
+                    code.close(&connection);
                 }
                 answered.push(peer);
             }

@@ -1529,6 +1529,46 @@ mod tests {
         );
     }
 
+    /// The half of the rule the peer decides: a `TOPIC_ADD` this host sent that the peer's
+    /// table refuses closes the connection from the far end, and the redial would send the same
+    /// binding again. The dialler cannot tell that from the close code alone unless it looks,
+    /// so it looks (T-027).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peer_that_closes_for_a_protocol_error_is_not_redialled_at_the_floor() {
+        let cluster = Builder::new(&[
+            NodeKind::Manager,
+            NodeKind::ClosesWith(CloseCode::ProtocolError),
+        ])
+        .start()
+        .await;
+        let peer = cluster.hostname(1);
+
+        eventually("the backoff to grow past its floor", || {
+            cluster
+                .retry_at(0, &peer)
+                .is_some_and(|at| at > Instant::now() + RECONNECT_MIN)
+        })
+        .await;
+    }
+
+    /// The other half: every other ending is a peer that went away, and §5.3 wants the first
+    /// retry quick because the usual cause is a sidecar restart that is already finishing. A
+    /// backoff that grew on those would leave a restarted host dark for half a minute.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peer_that_closes_for_shutdown_is_redialled_at_the_floor() {
+        let cluster = Builder::new(&[NodeKind::Manager, NodeKind::ClosesWith(CloseCode::Shutdown)])
+            .start()
+            .await;
+        let peer = cluster.hostname(1);
+
+        // Six dials inside the harness's five seconds is only possible at the floor: a backoff
+        // that doubled from 500 ms would still be on its fifth after eight.
+        eventually("six dials at the floor", || {
+            cluster.stats(0).dials(&peer) >= 6
+        })
+        .await;
+    }
+
     /// The application error codes are protocol: a peer reads the number off the close frame,
     /// so renumbering them would leave two versions of a fleet disagreeing about why a
     /// connection went away.
