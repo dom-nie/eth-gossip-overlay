@@ -425,4 +425,14 @@ mod tests {
                 .is_empty()
         );
     }
+
+    #[test]
+    fn get_on_unknown_topic_returns_none_and_does_not_grow_the_table() {
+        let mut own = OwnTopicTable::new();
+        own.intern(&column(0)).unwrap();
+
+        assert_eq!(own.get(&column(0)), Some(TopicId::new(0)));
+        assert_eq!(own.get(&column(1)), None);
+        assert_eq!(own.snapshot().len(), 1);
+    }
 }
