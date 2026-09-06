@@ -8,12 +8,20 @@ repository.workspace = true
 
 [dependencies]
 clap.workspace = true
+hyper = { workspace = true, features = ["http1", "server"] }
 overlay-bn.workspace = true
 overlay-core.workspace = true
+overlay-transport.workspace = true
+prometheus = { workspace = true, features = ["process"] }
+prometheus-client.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync"] }
+tracing.workspace = true
 
 [dev-dependencies]
 assert_cmd.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tracing-subscriber.workspace = true
 
 [[bin]]
 name = "fleet-overlay"
