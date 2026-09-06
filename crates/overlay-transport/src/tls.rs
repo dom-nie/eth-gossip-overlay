@@ -752,9 +752,9 @@ mod tests {
         assert_eq!(during.seed, SeedGeneration::Previous);
         assert_eq!(after.reason.as_str(), "unknown_key");
     }
-    /// What the loopback acceptor made of a connection: an error when it refused the
+    /// What the loopback acceptor made of one connection: an error when it refused the
     /// handshake, `Ok(None)` when the handshake finished without it identifying anybody.
-    type Accepted = Vec<Result<Option<PinEntry>, HandshakeFailure>>;
+    type Accepted = Result<Option<PinEntry>, HandshakeFailure>;
 
     fn own_key(seeds: &Seeds, name: &str) -> SigningKey {
         derive_tls_keypair(&seeds.current, &host(name))
@@ -764,26 +764,15 @@ mod tests {
         "127.0.0.1:0".parse().unwrap()
     }
 
-    /// An acceptor bound on an ephemeral loopback port, and a task reporting what became of
-    /// the next `connections` to arrive: an error when the handshake was refused, `None` when
-    /// it completed without the acceptor learning whose key it was.
-    ///
-    /// Each admitted connection is sent a byte and kept open, so a dialler can wait until
-    /// everything the acceptor sent after the handshake has reached it.
-    fn acceptor_taking(
-        pins: &Arc<ArcSwap<PinTable>>,
-        seeds: &Seeds,
-        name: &str,
+    /// Reports what becomes of the next `connections` to arrive. Each admitted connection is
+    /// sent a byte and kept open, so a dialler can wait until everything the acceptor sent
+    /// after the handshake has reached it.
+    fn accepting(
+        endpoint: quinn::Endpoint,
+        pins: Arc<ArcSwap<PinTable>>,
         connections: usize,
-    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<Accepted>) {
-        let endpoint = quinn::Endpoint::server(
-            server_config(pins.clone(), &own_key(seeds, name)).unwrap(),
-            loopback(),
-        )
-        .unwrap();
-        let addr = endpoint.local_addr().unwrap();
-        let pins = pins.clone();
-        let task = tokio::spawn(async move {
+    ) -> tokio::task::JoinHandle<Vec<Accepted>> {
+        tokio::spawn(async move {
             let mut outcomes = Vec::new();
             let mut open = Vec::new();
             for _ in 0..connections {
@@ -805,8 +794,34 @@ mod tests {
             }
             drop(open);
             outcomes
-        });
-        (addr, task)
+        })
+    }
+
+    /// An acceptor on an ephemeral loopback port running the configuration this crate ships,
+    /// with `change` applied, so a test can put back exactly the one setting it is about.
+    fn acceptor_with(
+        pins: &Arc<ArcSwap<PinTable>>,
+        seeds: &Seeds,
+        name: &str,
+        connections: usize,
+        change: impl FnOnce(&mut rustls::ServerConfig),
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<Vec<Accepted>>) {
+        let mut tls = server_tls(pins.clone(), &own_key(seeds, name)).unwrap();
+        change(&mut tls);
+        let config =
+            quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls).unwrap()));
+        let endpoint = quinn::Endpoint::server(config, loopback()).unwrap();
+        let addr = endpoint.local_addr().unwrap();
+        (addr, accepting(endpoint, pins.clone(), connections))
+    }
+
+    fn acceptor_taking(
+        pins: &Arc<ArcSwap<PinTable>>,
+        seeds: &Seeds,
+        name: &str,
+        connections: usize,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<Vec<Accepted>>) {
+        acceptor_with(pins, seeds, name, connections, |_| {})
     }
 
     /// [`acceptor_taking`] for the one connection a test is about.
@@ -814,31 +829,43 @@ mod tests {
         pins: &Arc<ArcSwap<PinTable>>,
         seeds: &Seeds,
         name: &str,
-    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<Accepted>) {
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<Vec<Accepted>>) {
         acceptor_taking(pins, seeds, name, 1)
     }
 
-    /// A sidecar from a fleet running the next protocol major, built here because the ALPN
-    /// this crate offers has one source and no knob.
+    /// The dialler this crate ships, with `change` applied, for the same reason.
+    fn dialler_with(
+        pins: &Arc<ArcSwap<PinTable>>,
+        own: &SigningKey,
+        peer: &str,
+        change: impl FnOnce(&mut rustls::ClientConfig),
+    ) -> quinn::ClientConfig {
+        let mut tls = client_tls(pins.clone(), own, &host(peer)).unwrap();
+        change(&mut tls);
+        quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(tls).unwrap()))
+    }
+
+    /// A dialler that keeps every ticket it is handed and offers it back.
+    fn dialler_keeping_tickets(
+        pins: &Arc<ArcSwap<PinTable>>,
+        own: &SigningKey,
+        peer: &str,
+    ) -> quinn::ClientConfig {
+        dialler_with(pins, own, peer, |tls| {
+            tls.resumption = rustls::client::Resumption::in_memory_sessions(256);
+        })
+    }
+
+    /// A sidecar from a fleet running the next protocol major, because the ALPN this crate
+    /// offers comes from the major and has no knob.
     fn dialler_of_another_major(
         pins: &Arc<ArcSwap<PinTable>>,
         own: &SigningKey,
         peer: &str,
     ) -> quinn::ClientConfig {
-        let mut tls = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .unwrap()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(DialerVerifier::new(pins.clone(), host(peer))))
-        .with_client_cert_resolver(Arc::new(
-            rustls::client::AlwaysResolvesClientRawPublicKeys::new(identity(own).unwrap()),
-        ));
-        tls.alpn_protocols = vec![b"fleet-overlay/2".to_vec()];
-        quinn::ClientConfig::new(Arc::new(
-            quinn::crypto::rustls::QuicClientConfig::try_from(tls).unwrap(),
-        ))
+        dialler_with(pins, own, peer, |tls| {
+            tls.alpn_protocols = vec![b"fleet-overlay/2".to_vec()];
+        })
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -995,19 +1022,17 @@ mod tests {
             host("bn-b")
         );
     }
-    /// A session ticket is a cached admission decision, and admission here is per roster and
-    /// per seed, so resuming one would let a host that has just been removed from the roster
-    /// back in for as long as its ticket lasts. `roster_reload_rebuilds_pin_table_without_
-    /// rebuilding_config` cannot see this: it lets a host in and never puts one out.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn an_expelled_host_cannot_resume_an_earlier_session() {
-        let seeds = seeds(0x11, None);
-        let pins = pins(&roster(&["bn-a", "bn-b", "bn-c"]), &seeds);
-        let (addr, accepting) = acceptor_taking(&pins, &seeds, "bn-a", 2);
+    /// Dials `addr` twice on one configuration, waiting after the first until everything the
+    /// acceptor sent has arrived, and dropping bn-c from the roster in between.
+    async fn across_an_expulsion(
+        pins: &Arc<ArcSwap<PinTable>>,
+        seeds: &Seeds,
+        addr: std::net::SocketAddr,
+        config: quinn::ClientConfig,
+        accepting: tokio::task::JoinHandle<Vec<Accepted>>,
+    ) -> Vec<Accepted> {
         let mut dialler = quinn::Endpoint::client(loopback()).unwrap();
-        dialler.set_default_client_config(
-            client_config(pins.clone(), &own_key(&seeds, "bn-c"), &host("bn-a")).unwrap(),
-        );
+        dialler.set_default_client_config(config);
 
         let admitted = dialler
             .connect(addr, PLACEHOLDER_NAME)
@@ -1021,13 +1046,15 @@ mod tests {
             .read_to_end(1)
             .await
             .unwrap();
-        pins.store(Arc::new(PinTable::build(
-            &roster(&["bn-a", "bn-b"]),
-            &seeds,
-        )));
-        let _resumed = dialler.connect(addr, PLACEHOLDER_NAME).unwrap().await;
+        pins.store(Arc::new(PinTable::build(&roster(&["bn-a", "bn-b"]), seeds)));
+        let _second = dialler.connect(addr, PLACEHOLDER_NAME).unwrap().await;
 
-        let outcomes = accepting.await.unwrap();
+        accepting.await.unwrap()
+    }
+
+    /// bn-c gets in, the roster drops it, and the second dial has to be turned away by name
+    /// rather than waved through on the strength of the first.
+    fn assert_admitted_then_expelled(outcomes: &[Accepted]) {
         assert_eq!(
             outcomes[0].as_ref().unwrap().as_ref().unwrap().hostname,
             host("bn-c")
@@ -1037,6 +1064,87 @@ mod tests {
             FailureReason::UnknownKey
         );
     }
+
+    /// A session ticket is a cached admission decision, and admission here is per roster and
+    /// per seed, so resuming one would let a host that has just been removed from the roster
+    /// back in for as long as its ticket lasts. `roster_reload_rebuilds_pin_table_without_
+    /// rebuilding_config` cannot see this: it lets a host in and never puts one out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_expelled_host_cannot_resume_an_earlier_session() {
+        let seeds = seeds(0x11, None);
+        let pins = pins(&roster(&["bn-a", "bn-b", "bn-c"]), &seeds);
+        let (addr, accepting) = acceptor_taking(&pins, &seeds, "bn-a", 2);
+        let config = client_config(pins.clone(), &own_key(&seeds, "bn-c"), &host("bn-a")).unwrap();
+
+        let outcomes = across_an_expulsion(&pins, &seeds, addr, config, accepting).await;
+
+        assert_admitted_then_expelled(&outcomes);
+    }
+
+    /// The dialler's own refusal to keep a ticket, with nothing else in the way: this
+    /// acceptor issues and stores tickets the way a stock rustls server does. Three settings
+    /// close the resumption hole and each closes it alone, so the test above stays green if
+    /// any one of them is deleted. This one is only about the dialler's.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_expelled_host_is_refused_by_an_acceptor_that_issues_tickets() {
+        let seeds = seeds(0x11, None);
+        let pins = pins(&roster(&["bn-a", "bn-b", "bn-c"]), &seeds);
+        let key = own_key(&seeds, "bn-c");
+        let (addr, accepting) = acceptor_with(&pins, &seeds, "bn-a", 2, |tls| {
+            tls.session_storage = rustls::server::ServerSessionMemoryCache::new(32);
+            tls.send_tls13_tickets = 2;
+        });
+        let config = client_config(pins.clone(), &key, &host("bn-a")).unwrap();
+
+        let outcomes = across_an_expulsion(&pins, &seeds, addr, config, accepting).await;
+
+        assert_admitted_then_expelled(&outcomes);
+        assert!(
+            !client_tls(pins, &key, &host("bn-a"))
+                .unwrap()
+                .enable_early_data
+        );
+    }
+
+    /// The acceptor's refusal to send tickets, with nothing else in the way: the dialler here
+    /// keeps every ticket it is handed and the acceptor stores sessions as a stock rustls
+    /// server does, so `send_tls13_tickets = 0` is the only thing left.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_expelled_host_is_refused_by_an_acceptor_that_stores_sessions() {
+        let seeds = seeds(0x11, None);
+        let pins = pins(&roster(&["bn-a", "bn-b", "bn-c"]), &seeds);
+        let (addr, accepting) = acceptor_with(&pins, &seeds, "bn-a", 2, |tls| {
+            tls.session_storage = rustls::server::ServerSessionMemoryCache::new(32);
+        });
+        let config = dialler_keeping_tickets(&pins, &own_key(&seeds, "bn-c"), "bn-a");
+
+        let outcomes = across_an_expulsion(&pins, &seeds, addr, config, accepting).await;
+
+        assert_admitted_then_expelled(&outcomes);
+    }
+
+    /// The acceptor's refusal to store sessions, likewise on its own: this one sends tickets
+    /// but keeps nothing to redeem them against.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_expelled_host_is_refused_by_an_acceptor_that_sends_tickets() {
+        let seeds = seeds(0x11, None);
+        let pins = pins(&roster(&["bn-a", "bn-b", "bn-c"]), &seeds);
+        let (addr, accepting) = acceptor_with(&pins, &seeds, "bn-a", 2, |tls| {
+            tls.send_tls13_tickets = 2;
+        });
+        let config = dialler_keeping_tickets(&pins, &own_key(&seeds, "bn-c"), "bn-a");
+
+        let outcomes = across_an_expulsion(&pins, &seeds, addr, config, accepting).await;
+
+        assert_admitted_then_expelled(&outcomes);
+        assert_eq!(
+            server_tls(pins, &own_key(&seeds, "bn-a"))
+                .unwrap()
+                .max_early_data_size,
+            0
+        );
+    }
+
     /// None of this shows up in a handshake test, and all of it is load bearing.
     /// `requires_raw_public_keys` is what drives certificate-type negotiation: set it false
     /// on the acceptor and rustls settles on X.509 with anyone who offers it, every sibling
