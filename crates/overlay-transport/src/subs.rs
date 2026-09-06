@@ -392,4 +392,41 @@ mod tests {
         })
         .await;
     }
+
+    /// The beacon node going away takes its host out of every sibling's routing (§9). The
+    /// mirror reports an empty set, this host advertises an empty bitmap, and the sibling stops
+    /// counting it as a subscriber. The overlay connection is untouched: the host is still there
+    /// to forward for everyone else.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn empty_set_produces_empty_bitmap_and_peer_stops_being_a_subscriber() {
+        let block = topic("beacon_block");
+        let mut cluster = TestCluster::start(2).await;
+        let (subscribed, watching) = watch::channel(advertising(&[&block]));
+        let (_idle, idle_watching) = watch::channel(SubscriptionSets::default());
+        super::spawn(
+            cluster.take_events(0),
+            watching,
+            cluster.topics(0).clone(),
+            Arc::new(()),
+        );
+        super::spawn(
+            cluster.take_events(1),
+            idle_watching,
+            cluster.topics(1).clone(),
+            Arc::new(()),
+        );
+        let host = cluster.hostname(0);
+        eventually("the subscribed host to be one", || {
+            cluster.live(1).subscribers(&block) == vec![&host]
+        })
+        .await;
+
+        subscribed.send_replace(SubscriptionSets::default());
+
+        eventually("the subscriber to stop being one", || {
+            cluster.live(1).subscribers(&block).is_empty()
+        })
+        .await;
+        assert!(cluster.live(1).get(&host).is_some());
+    }
 }
