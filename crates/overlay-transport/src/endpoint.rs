@@ -144,6 +144,7 @@ mod tests {
     use std::time::Duration;
 
     use arc_swap::ArcSwap;
+    use bytes::Bytes;
     use ed25519_dalek::SigningKey;
     use overlay_core::config::Overlay;
     use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
@@ -301,5 +302,43 @@ mod tests {
             host("bn-a")
         );
         assert_eq!(accepted.await.unwrap(), b"pinned");
+    }
+
+    /// Datagrams carry the small class from v2 (§5.3). quinn offers them unless a transport
+    /// config sizes the receive buffer at nothing, and nothing here does, so the check is that
+    /// one crosses rather than that a field holds a number: sending needs the peer to have
+    /// advertised a datagram frame size during the handshake, which no assertion on this side
+    /// would notice.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn datagrams_are_enabled_and_delivered_on_loopback() {
+        let (seeds, pins) = fleet(&["bn-a", "bn-b"]);
+        let cfg = config("127.0.0.1:0");
+        let acceptor = endpoint(&cfg, &pins, &seeds, "bn-a");
+        let dialler = endpoint(&cfg, &pins, &seeds, "bn-b");
+        let addr = acceptor.local_addr().unwrap();
+
+        let received = tokio::spawn(async move {
+            let connection = acceptor
+                .accept()
+                .await
+                .expect("the endpoint is still open")
+                .await
+                .unwrap();
+            connection.read_datagram().await.unwrap()
+        });
+
+        let connection = connect(
+            &cfg,
+            &dialler,
+            addr,
+            dial_config(&pins, &seeds, "bn-b", "bn-a"),
+        )
+        .await
+        .unwrap();
+        connection
+            .send_datagram(Bytes::from_static(b"batch"))
+            .unwrap();
+
+        assert_eq!(received.await.unwrap(), Bytes::from_static(b"batch"));
     }
 }

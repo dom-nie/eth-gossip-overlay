@@ -4353,6 +4353,7 @@ name = "overlay-transport"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "bytes",
  "ed25519-dalek 3.0.0",
  "mutants",
  "overlay-core",
