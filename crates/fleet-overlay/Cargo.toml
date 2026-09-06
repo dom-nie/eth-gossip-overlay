@@ -18,9 +18,10 @@ overlay-transport.workspace = true
 prometheus = { workspace = true, features = ["process"] }
 prometheus-client.workspace = true
 serde = { workspace = true }
+serde_json.workspace = true
 serde_yaml_bw.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt", "signal", "sync"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "signal", "sync"] }
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
@@ -28,7 +29,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 [dev-dependencies]
 assert_cmd.workspace = true
 nix.workspace = true
-serde_json.workspace = true
+overlay-transport = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 
