@@ -387,6 +387,7 @@ fn status(state: &State) -> Status {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -471,8 +472,21 @@ mod tests {
 
     impl Fixture {
         async fn start(live: LiveView) -> Self {
+            Self::start_over(live, false).await
+        }
+
+        /// The same, with a regular file already at the socket path, as a killed process
+        /// leaves behind.
+        async fn start_over_stale_file(live: LiveView) -> Self {
+            Self::start_over(live, true).await
+        }
+
+        async fn start_over(live: LiveView, stale: bool) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let socket = dir.path().join("admin.sock");
+            if stale {
+                std::fs::write(&socket, "not a socket").unwrap();
+            }
             let config_path = dir.path().join("config.yaml");
             let roster_path = dir.path().join("roster.yaml");
             std::fs::write(&roster_path, roster_yaml(3)).unwrap();
@@ -855,5 +869,32 @@ mod tests {
         assert!(error.contains(&MAX_LINE_BYTES.to_string()), "{error}");
         let next = h.send(&Request::Inject { value: None }).await;
         assert_eq!(next.inject, Some(true));
+    }
+
+    #[tokio::test]
+    async fn stale_socket_file_is_removed_at_startup() {
+        let h = Fixture::start_over_stale_file(LiveView::default()).await;
+
+        let response = h.send(&Request::Inject { value: None }).await;
+
+        assert_eq!(response.inject, Some(true));
+        assert!(
+            std::fs::metadata(&h.socket)
+                .unwrap()
+                .file_type()
+                .is_socket(),
+            "the path is still whatever the last process left"
+        );
+    }
+
+    /// The socket's mode is the whole of its access control (§11): the service user and its
+    /// group, and nobody else on the host.
+    #[tokio::test]
+    async fn socket_is_created_with_mode_0660() {
+        let h = Fixture::start(LiveView::default()).await;
+
+        let mode = std::fs::metadata(&h.socket).unwrap().permissions().mode() & 0o777;
+
+        assert_eq!(mode, 0o660, "{mode:04o}");
     }
 }
