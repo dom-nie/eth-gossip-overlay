@@ -31,6 +31,12 @@
 //! payloads that follow: their authenticity is the receiving beacon node's BLS validation, and
 //! a member that floods its siblings is the fan-out budget's problem (T-032), not this
 //! module's.
+//!
+//! Every overlay connection runs a full handshake. TLS session resumption is turned off on
+//! both sides, because a ticket is a cached admission decision and admission here derives
+//! from the roster and the seeds in force, both of which change under a running endpoint. A
+//! resumed session would restore its peer from the ticket without the pin check running at
+//! all, so a host removed from the roster would keep its way in until the ticket aged out.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -223,7 +229,7 @@ impl fmt::Display for Role {
 }
 
 /// Why a handshake did not finish, as the `reason` label of `handshake_failures_total`. This
-/// module produces the first three; T-025 maps HELLO's failures onto the rest.
+/// module never produces `Hostname` or `Decode`; both belong to HELLO and T-025 maps them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FailureReason {
     /// The presented key belongs to no host in the roster under any seed in force.
