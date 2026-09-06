@@ -543,17 +543,19 @@ impl Shared {
         }
     }
 
-    /// What a connection that ended has to say about admission. An orderly close says nothing,
-    /// which is what [`HandshakeFailure::from_connection_error`] answers `None` to. A peer that
-    /// was admitted and then went quiet is a sibling going down (§9) and not a handshake
-    /// problem, so its timeout is not counted; every other ending is, because a dial that
-    /// resolved before the acceptor judged its key is rejected here and nowhere else.
+    /// What a connection that ended has to say about admission. Only an admitted connection
+    /// reaches here, on either loop; a handshake that never produced one is counted where it
+    /// failed. An orderly close says nothing, which is what
+    /// [`HandshakeFailure::from_connection_error`] answers `None` to, and a peer that was
+    /// admitted and then went quiet is a sibling going down (§9) rather than a handshake
+    /// problem, so its timeout is not counted either. Every other ending is, because a dial
+    /// that resolved before the acceptor judged its key is rejected here and nowhere else.
     ///
     /// Answers whether the ending was counted, which is also what tells the dial loop that its
     /// pairing was refused rather than lost.
-    fn count_close(&self, role: Role, error: &quinn::ConnectionError, admitted: bool) -> bool {
+    fn count_close(&self, role: Role, error: &quinn::ConnectionError) -> bool {
         let counted = HandshakeFailure::from_connection_error(role, error)
-            .filter(|failure| !(admitted && failure.reason == FailureReason::Timeout));
+            .filter(|failure| failure.reason != FailureReason::Timeout);
         if let Some(failure) = counted {
             self.stats.handshake_failure(failure);
         }
@@ -741,7 +743,7 @@ async fn accept_one<A: Admission>(
     shared.adopt(info);
 
     let error = connection.closed().await;
-    shared.count_close(Role::Accept, &error, true);
+    shared.count_close(Role::Accept, &error);
     shared.down(&pinned.hostname, &connection, None);
 }
 
@@ -769,7 +771,7 @@ async fn dial_loop<A: Admission>(peer: Hostname, shared: Arc<Shared>, admission:
                 backoff.reset();
                 warned = false;
                 let error = connection.closed().await;
-                if shared.count_close(Role::Dial, &error, true) {
+                if shared.count_close(Role::Dial, &error) {
                     backoff = unproven;
                 }
                 shared.down(&peer, &connection, None);
