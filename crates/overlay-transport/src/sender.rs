@@ -534,6 +534,34 @@ mod tests {
         assert_eq!(DropReason::PeerDown.as_str(), "peer_down");
     }
 
+    /// `fleet-overlayctl status` reads a peer's queue depth off the handle and
+    /// `peer_queue_depth` is set from the same lane, so the two can never disagree about a peer
+    /// (T-042). Nothing is awaited between the pushes and the reads, so the drain task has not
+    /// run and what the lanes hold is what was put in them.
+    #[tokio::test]
+    async fn depth_reports_what_the_gauge_reports_for_each_lane() {
+        let link = SendSpy::stalled();
+        let (sender, stats) = sender(&link);
+        let now = Instant::now();
+
+        sender.push(Class::Large, frame_of(1, 4096), now).unwrap();
+        sender.push(Class::Large, frame_of(2, 2048), now).unwrap();
+        sender.push(Class::Small, frame_of(3, 128), now).unwrap();
+
+        let large = sender.depth(Class::Large);
+        let small = sender.depth(Class::Small);
+        assert_eq!((large.frames, large.bytes), (2, 6144));
+        assert_eq!((small.frames, small.bytes), (1, 128));
+        assert_eq!(
+            stats.queue_depth(&peer(), Class::Large),
+            (large.frames, large.bytes)
+        );
+        assert_eq!(
+            stats.queue_depth(&peer(), Class::Small),
+            (small.frames, small.bytes)
+        );
+    }
+
     /// A frame the per-peer bound threw away is not still charged to the process budget. One
     /// peer overflowing its own lane must not squeeze every other peer out of the ledger.
     #[tokio::test]
