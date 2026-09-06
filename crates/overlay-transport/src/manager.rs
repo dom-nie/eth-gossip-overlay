@@ -150,7 +150,9 @@ pub struct LivePeer {
     pub region: Region,
     /// The site label from the peer's own view of itself.
     pub site: Option<String>,
-    /// The connection's current round-trip estimate, read at the moment of the snapshot.
+    /// The connection's round-trip estimate as it stood when the snapshot was taken. It is
+    /// never carried in the table: a number read when the peer was admitted would be minutes
+    /// old by the time a route plan asked for it.
     pub rtt: Duration,
     /// The peer's instance id, zero until T-025.
     pub instance_id: u64,
@@ -427,7 +429,8 @@ impl Shared {
             let live = LivePeer {
                 region: info.region.clone(),
                 site: info.site.clone(),
-                rtt: info.connection.rtt(),
+                // Filled in by `live`, from the connection, every time it is asked for.
+                rtt: Duration::ZERO,
                 instance_id: info.instance_id,
                 connection: info.connection.clone(),
             };
@@ -926,7 +929,16 @@ mod tests {
         }
 
         for node in 0..3 {
-            assert_eq!(cluster.live(node).len(), 2);
+            let live = cluster.live(node);
+            assert_eq!(live.len(), 2);
+            assert!(!live.is_empty());
+            assert_eq!(live.iter().count(), 2);
+            for (peer, live) in live.iter() {
+                assert!(
+                    live.rtt > Duration::ZERO,
+                    "{peer} has no round-trip estimate"
+                );
+            }
         }
     }
 
@@ -1258,6 +1270,39 @@ mod tests {
                 .stats(0)
                 .handshake_failures(Role::Dial, FailureReason::KeyMismatch)
                 >= 2
+        );
+    }
+
+    /// The application error codes are protocol: a peer reads the number off the close frame,
+    /// so renumbering them would leave two versions of a fleet disagreeing about why a
+    /// connection went away.
+    #[test]
+    fn close_codes_and_their_reasons_are_fixed() {
+        let wire = [
+            CloseCode::Superseded,
+            CloseCode::NotInRoster,
+            CloseCode::WrongDirection,
+            CloseCode::RosterRemoved,
+            CloseCode::Shutdown,
+            CloseCode::RateExceeded,
+        ]
+        .map(|code| {
+            (
+                code.code().into_inner(),
+                str::from_utf8(code.reason()).unwrap().to_owned(),
+            )
+        });
+
+        assert_eq!(
+            wire.map(|(code, reason)| (code, reason)),
+            [
+                (1, "superseded".to_owned()),
+                (2, "not in roster".to_owned()),
+                (3, "wrong direction".to_owned()),
+                (4, "roster removed".to_owned()),
+                (5, "shutdown".to_owned()),
+                (6, "rate exceeded".to_owned()),
+            ]
         );
     }
 }
