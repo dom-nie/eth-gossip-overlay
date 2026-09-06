@@ -47,6 +47,8 @@ thiserror = "2"
 rand = "0.10"
 
 proptest = "1"
+ethereum_ssz = "0.10"
+strum = "0.27"
 assert_cmd = "2"
 tempfile = "3"
 wiremock = "0.6"

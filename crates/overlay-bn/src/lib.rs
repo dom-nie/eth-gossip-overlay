@@ -10,6 +10,7 @@ pub mod link;
 pub mod mirror;
 pub mod node_key;
 pub mod publish;
+pub mod rpc;
 pub mod spec;
 #[cfg(test)]
 mod testutil;

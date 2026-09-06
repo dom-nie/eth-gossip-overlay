@@ -19,6 +19,7 @@ tracing.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+ethereum_ssz.workspace = true
 lighthouse_network.workspace = true
 proptest.workspace = true
 serde_json.workspace = true
