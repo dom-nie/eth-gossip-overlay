@@ -497,4 +497,29 @@ mod tests {
         );
         assert_eq!(h.roster.borrow_and_update().hosts.len(), 3);
     }
+
+    #[test]
+    fn changed_non_reloadable_key_is_listed_as_restart_required_and_old_value_stays() {
+        let mut h = Fixture::new(
+            "overlay:\n  roster_file: ROSTER\n  listen: \"[::]:7788\"\nbn:\n  node_key_file: /var/lib/fleet-overlay/node.key\ninject: true\n",
+            &roster_yaml(3),
+        );
+        h.write_config(
+            "overlay:\n  roster_file: ROSTER\n  listen: \"[::]:9999\"\nbn:\n  node_key_file: /var/lib/fleet-overlay/other.key\ninject: true\n",
+        );
+
+        let report = h.reloader.reload(Trigger::Manual);
+
+        assert!(report.applied.is_empty(), "{report:?}");
+        assert_eq!(
+            report.restart_required,
+            ["bn.node_key_file", "overlay.listen"]
+        );
+        assert!(report.error.is_none(), "{report:?}");
+        assert_eq!(h.reloader.config().overlay.listen.port(), 7788);
+        assert_eq!(
+            h.reloader.config().bn.node_key_file,
+            PathBuf::from("/var/lib/fleet-overlay/node.key")
+        );
+    }
 }
