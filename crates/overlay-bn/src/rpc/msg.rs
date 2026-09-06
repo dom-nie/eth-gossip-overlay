@@ -124,6 +124,48 @@ impl MetaData {
     }
 }
 
+/// `Ping`: the sender's metadata sequence number, so the other side knows whether its copy of
+/// the metadata is stale.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ping(pub u64);
+
+impl Ping {
+    /// The body: one `u64`.
+    pub fn encode(self) -> Vec<u8> {
+        self.0.to_le_bytes().to_vec()
+    }
+
+    /// Reads a body.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Malformed> {
+        u64_exact(bytes).map(Self)
+    }
+}
+
+/// `Goodbye`: the reason code the sender closes the connection with, from Lighthouse's
+/// `GoodbyeReason` (1 client shutdown, 2 irrelevant network, 3 fault, 128 and up for the
+/// peer-management reasons). Kept as the raw number: the sidecar only logs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Goodbye(pub u64);
+
+impl Goodbye {
+    /// The body: one `u64`.
+    pub fn encode(self) -> Vec<u8> {
+        self.0.to_le_bytes().to_vec()
+    }
+
+    /// Reads a body.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Malformed> {
+        u64_exact(bytes).map(Self)
+    }
+}
+
+/// A body that is exactly one little-endian `u64`.
+fn u64_exact(bytes: &[u8]) -> Result<u64, Malformed> {
+    <[u8; 8]>::try_from(bytes)
+        .map(u64::from_le_bytes)
+        .map_err(|_| Malformed)
+}
+
 /// A little-endian `u64` at `offset`; the caller has checked the length.
 fn u64_at(bytes: &[u8], offset: usize) -> u64 {
     u64::from_le_bytes(array(&bytes[offset..offset + 8]))
