@@ -200,3 +200,46 @@ async fn scrape_lines_carry_only_overlay_or_process_prefixes() {
     }
     assert!(sample_lines > 0, "{body}");
 }
+
+#[tokio::test]
+async fn scrape_appends_the_gossipsub_registry() {
+    let registry = Registry::new();
+    Metrics::new(&registry).unwrap();
+
+    let gossipsub = no_gossipsub();
+    let duplicates = prometheus_client::metrics::counter::Counter::<u64>::default();
+    gossipsub
+        .lock()
+        .unwrap()
+        .sub_registry_with_prefix("overlay_gossipsub")
+        .register("duplicates", "Duplicates gossipsub dropped.", duplicates.clone());
+    duplicates.inc();
+
+    let (addr, _server) = serve("127.0.0.1:0".parse().unwrap(), registry, gossipsub)
+        .await
+        .unwrap();
+    let (_status, body) = request(addr, "/metrics").await;
+
+    let samples: Vec<&str> = body
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .collect();
+    let gossipsub_at = samples
+        .iter()
+        .position(|line| line.starts_with("overlay_gossipsub_duplicates_total "))
+        .unwrap_or_else(|| panic!("{body}"));
+    let last_main = samples
+        .iter()
+        .rposition(|line| !line.starts_with("overlay_gossipsub_"))
+        .unwrap_or_else(|| panic!("{body}"));
+    assert!(gossipsub_at > last_main, "{body}");
+
+    // OpenMetrics closes with `# EOF`; concatenating the other way round would put it mid-body
+    // and Prometheus would stop reading there.
+    assert_eq!(body.lines().last(), Some("# EOF"));
+    for sample in samples {
+        let (name, value) = sample.rsplit_once(' ').unwrap_or_else(|| panic!("{sample}"));
+        assert!(!name.is_empty(), "{sample}");
+        assert!(value.parse::<f64>().is_ok(), "{sample}");
+    }
+}
