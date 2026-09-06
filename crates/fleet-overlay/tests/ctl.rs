@@ -18,6 +18,8 @@ struct TestServer {
     asked: Arc<Mutex<Vec<String>>>,
 }
 
+// A broken fixture is reported by panicking, which is what the unwraps here are.
+#[allow(clippy::unwrap_used)]
 impl TestServer {
     fn start(answer: Response) -> Self {
         let dir = tempfile::tempdir().unwrap();
