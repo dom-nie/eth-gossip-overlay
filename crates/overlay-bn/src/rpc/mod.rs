@@ -125,6 +125,22 @@ impl Responder {
         }
     }
 
+    /// The response to what the codec read off one stream.
+    ///
+    /// The protocol is decided on before the body: a protocol the sidecar registers but does
+    /// not serve is answered `ResourceUnavailable` whatever arrived on it, because a body
+    /// longer than the 92 bytes of the largest request the sidecar serves is routine there (a
+    /// by-root request of three roots is 96 bytes) and `InvalidRequest` costs the sidecar
+    /// peer score where `ResourceUnavailable` on a by-root protocol costs nothing
+    /// (`RPCError::ErrorResponse` in `beacon_node/lighthouse_network/src/peer_manager/mod.rs`).
+    pub fn answer(&self, request: &Request) -> Response {
+        match request {
+            (Protocol::Unsupported, _) => Response::ResourceUnavailable,
+            (protocol, Ok(body)) => self.respond(*protocol, body),
+            (_, Err(Malformed)) => Response::InvalidRequest,
+        }
+    }
+
     /// The response to `request`, received on `protocol`.
     ///
     /// A Goodbye is reported rather than answered: there is no chunk to write for it, and the

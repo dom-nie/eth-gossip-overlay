@@ -36,7 +36,6 @@ use tokio::task::JoinHandle;
 use crate::bn_http::{BnClient, BnHttpError, PeerInfo};
 use crate::gossip::{BnLinkConfig, GossipBehaviour, build_behaviour};
 use crate::node_key::NodeKey;
-use crate::rpc::msg::Malformed;
 use crate::rpc::{Eth2Codec, Request, Responder, Response, proto};
 use crate::spec::SpecSnapshot;
 
@@ -394,13 +393,10 @@ impl Link {
     fn on_rpc_request(
         &mut self,
         peer: PeerId,
-        (protocol, body): Request,
+        request: Request,
         channel: ResponseChannel<Response>,
     ) {
-        let response = match body {
-            Ok(body) => self.responder.respond(protocol, &body),
-            Err(Malformed) => Response::InvalidRequest,
-        };
+        let response = self.responder.answer(&request);
         if let Response::Goodbye(reason) = response {
             tracing::info!(%peer, reason, "the beacon node said goodbye");
             let _ = self.swarm.disconnect_peer_id(peer);
