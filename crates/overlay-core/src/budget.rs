@@ -89,7 +89,13 @@ impl FanoutBudget {
         slot_secs: u64,
         now: Instant,
     ) -> Self {
-        todo!("T-032: the fan-out budget's arithmetic")
+        let chunk_bytes = chunk_bytes.max(1) as u64;
+        let share = (4 * LARGE_BYTES_PER_SLOT_ESTIMATE / roster_size.max(1)) as u64;
+        let capacity = share.div_ceil(chunk_bytes) * chunk_bytes;
+        Self {
+            bucket: TokenBucket::new(capacity / slot_secs.max(1), capacity, now),
+            violation_since: None,
+        }
     }
 
     /// Takes `bytes` out of the bucket, refilled up to `now`.
@@ -98,7 +104,16 @@ impl FanoutBudget {
     /// under. One bucket covers every kind: the budget is what one peer may make this host fan
     /// out, however it asked.
     pub fn charge(&mut self, _kind: FanoutKind, bytes: usize, now: Instant) -> Charge {
-        todo!("T-032: charge the bucket and watch how long the peer stays over it")
+        if self.bucket.try_take(bytes as u64, now) {
+            self.violation_since = None;
+            return Charge::Allowed;
+        }
+        let since = *self.violation_since.get_or_insert(now);
+        if now.saturating_duration_since(since) > SUSTAINED_VIOLATION {
+            Charge::CloseRateExceeded
+        } else {
+            Charge::Suppressed
+        }
     }
 }
 
