@@ -117,7 +117,7 @@ struct Queued {
 }
 
 /// What one lane holds, in both units `peer_queue_depth{unit}` carries. The gauge and
-/// [`SenderHandle::depth`] are the two readers, and both take it from [`Lane::depth`], so
+/// [`SenderHandle::depth`] are the two readers and both take it from the same lane, so
 /// `fleet-overlayctl status` and the dashboard cannot disagree about a peer (T-042).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Depth {
