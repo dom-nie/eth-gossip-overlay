@@ -463,4 +463,38 @@ mod tests {
         );
         assert!(h.previous_seed.borrow_and_update().is_none());
     }
+
+    #[test]
+    fn invalid_config_yaml_keeps_previous_values_and_reports_error() {
+        let mut h = Fixture::new(CONFIG, &roster_yaml(3));
+        h.write_config("overlay:\n  roster_file: ROSTER\ninject: yes please\n");
+        h.write_roster(&roster_yaml(4));
+
+        let report = h.reloader.reload(Trigger::Manual);
+
+        assert!(report.applied.is_empty(), "{report:?}");
+        assert!(
+            matches!(report.error, Some(ReloadError::Config(_))),
+            "{report:?}"
+        );
+        assert!(h.reloader.config().inject);
+        assert!(h.inject.load(Ordering::Relaxed));
+        assert_eq!(h.roster.borrow_and_update().hosts.len(), 3);
+    }
+
+    #[test]
+    fn invalid_roster_yaml_keeps_previous_roster() {
+        let mut h = Fixture::new(CONFIG, &roster_yaml(3));
+        h.write_roster(
+            "hosts:\n  - hostname: bn-1\n    region: eu\n    addr: \"not an address\"\n",
+        );
+
+        let report = h.reloader.reload(Trigger::Manual);
+
+        assert!(
+            matches!(report.error, Some(ReloadError::Roster(_))),
+            "{report:?}"
+        );
+        assert_eq!(h.roster.borrow_and_update().hosts.len(), 3);
+    }
 }
