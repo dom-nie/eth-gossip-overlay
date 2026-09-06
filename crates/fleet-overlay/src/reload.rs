@@ -17,6 +17,31 @@
 //! The one consequence: adding or removing a key whose value equals the default reads as a
 //! change, because the documents differ even though the effective configuration does not. That
 //! is honest about the file and costs one applier run.
+//!
+//! # Who consumes each reloadable key
+//!
+//! [`RELOADABLE`] is the whole set (Appendix A), and each key has at most one applier, which is
+//! whatever puts it where its consumer already reads it:
+//!
+//! - `inject`: the `AtomicBool` T-017's publisher reads per item, so the kill switch takes hold
+//!   on the next message either way it is flipped.
+//! - `bn.publish_rate_limit.*`: one applier for the section, sending the three ceilings to
+//!   T-017's publisher, which rebuilds its token buckets.
+//! - `overlay.fleet_seed_previous_file`: loaded with T-004's reader and published for
+//!   [`spawn_pin_table`], which rebuilds T-021's pin table so the verifier accepts keys from
+//!   the outgoing seed for as long as the file is configured (DX-N2).
+//! - `log.level` and `log.format`: T-044's [`LogHandle`], which leaves the level alone while
+//!   `RUST_LOG` is set and says so (D32).
+//! - `overlay.fanout.small.relay_min_remote_hosts` (D36) and `classes.large.repair_deadline_ms`
+//!   (D24) have no applier: their consumers arrive with T-063 and T-082, which register one
+//!   each. Until then a change is still applied, in that [`Reloader::config`] answers with it.
+//!
+//! The roster is not a config key and has no applier. It goes on its own watch channel, which
+//! T-023's connection manager and [`spawn_pin_table`] follow, and is the one entry in
+//! [`ReloadReport::applied`] that is not a dotted path.
+//!
+//! Adding a reloadable key is one path in [`RELOADABLE`] and one closure in [`Reloader::new`],
+//! registered on that path or on the section it belongs to.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
