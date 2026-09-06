@@ -571,4 +571,44 @@ mod tests {
             PathBuf::from("/var/lib/fleet-overlay/node.key")
         );
     }
+
+    #[test]
+    fn changed_reloadable_key_without_an_applier_is_reported_applied_and_visible_in_config() {
+        let mut h = Fixture::new(
+            "overlay:\n  roster_file: ROSTER\n  fanout:\n    small:\n      relay_min_remote_hosts: 12\ninject: true\n",
+            &roster_yaml(3),
+        );
+        h.write_config(
+            "overlay:\n  roster_file: ROSTER\n  fanout:\n    small:\n      relay_min_remote_hosts: 6\ninject: true\n",
+        );
+
+        let report = h.reloader.reload(Trigger::Manual);
+
+        assert_eq!(
+            report.applied,
+            ["overlay.fanout.small.relay_min_remote_hosts"]
+        );
+        assert!(report.restart_required.is_empty(), "{report:?}");
+        assert_eq!(
+            h.reloader
+                .config()
+                .overlay
+                .fanout
+                .small
+                .relay_min_remote_hosts,
+            6
+        );
+    }
+
+    #[test]
+    fn every_key_an_applier_owns_is_reloadable() {
+        let h = Fixture::new(CONFIG, &roster_yaml(3));
+
+        for (key, _) in &h.reloader.appliers {
+            assert!(
+                RELOADABLE.iter().any(|path| covers(key, path)),
+                "{key} has an applier but is not in RELOADABLE"
+            );
+        }
+    }
 }
