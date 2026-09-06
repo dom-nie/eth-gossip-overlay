@@ -32,6 +32,9 @@ const CONNECT: Duration = Duration::from_secs(60);
 struct Env {
     http: String,
     p2p: Multiaddr,
+    /// Where the sidecar listens for the beacon node's own dial. An ephemeral port unless the
+    /// script named one, which it does for the tests the beacon node has to dial into.
+    listen: Multiaddr,
     key: NodeKey,
 }
 
@@ -44,6 +47,10 @@ fn env() -> Env {
     Env {
         http: var("LIGHTHOUSE_HTTP").trim_end_matches('/').to_owned(),
         p2p: var("LIGHTHOUSE_P2P").parse().unwrap(),
+        listen: std::env::var("SIDECAR_LISTEN")
+            .unwrap_or_else(|_| "/ip4/127.0.0.1/tcp/0".to_owned())
+            .parse()
+            .unwrap(),
         key: NodeKey::load_or_create(std::path::Path::new(&var("SIDECAR_NODE_KEY"))).unwrap(),
     }
 }
@@ -69,6 +76,7 @@ fn spawn(env: &Env) -> Sidecar {
     let link = BnLink::spawn(
         LinkConfig {
             libp2p_addr: env.p2p.clone(),
+            listen_addr: env.listen.clone(),
             backoff_min: BACKOFF_MIN,
             backoff_max: BACKOFF_MAX,
             gossip: BnLinkConfig {

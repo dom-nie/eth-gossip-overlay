@@ -75,6 +75,9 @@ pub const LARGE_NAME_PREFIXES: [&str; 3] =
 pub struct LinkConfig {
     /// `bn.libp2p_addr`, parsed; the beacon node's peer id is appended per dial.
     pub libp2p_addr: Multiaddr,
+    /// `bn.listen_addr`, parsed: where the beacon node dials the sidecar when its own inbound
+    /// cap leaves the sidecar's dial no room (MD-01).
+    pub listen_addr: Multiaddr,
     /// The first reconnect delay.
     pub backoff_min: Duration,
     /// The reconnect delay ceiling.
@@ -88,6 +91,7 @@ impl LinkConfig {
     pub fn from_config(bn: &Bn) -> Result<Self, multiaddr::Error> {
         Ok(Self {
             libp2p_addr: bn.libp2p_addr.parse()?,
+            listen_addr: bn.listen_addr.parse()?,
             backoff_min: BACKOFF_MIN,
             backoff_max: BACKOFF_MAX,
             gossip: BnLinkConfig {
@@ -181,6 +185,9 @@ pub struct BnLink {
     pub connected: Arc<AtomicBool>,
     /// The control events, [`CONTROL_CHANNEL_CAPACITY`] deep.
     pub events: mpsc::Receiver<BnEvent>,
+    /// The address the swarm bound, once it has one. The configured port may be 0, so this is
+    /// the address to put in front of a beacon node, not the one in the config.
+    pub listen: watch::Receiver<Option<Multiaddr>>,
 }
 
 impl BnLink {
@@ -206,10 +213,17 @@ impl BnLink {
     ) -> Self {
         let connected = Arc::new(AtomicBool::new(false));
         let (control, events) = mpsc::channel(CONTROL_CHANNEL_CAPACITY);
+        let (listen_tx, listen) = watch::channel(None);
         let mut responder = Responder::new();
         responder.set_spec(&spec.borrow());
+        let mut swarm = build_swarm(&cfg.gossip, node_key, registry);
+        // Before the first dial, so a beacon node that dials back the moment it is registered
+        // finds the port open. A sidecar that cannot bind still dials, which is the fast path.
+        if let Err(err) = swarm.listen_on(cfg.listen_addr.clone()) {
+            tracing::error!(%err, addr = %cfg.listen_addr, "cannot listen for the beacon node");
+        }
         let link = Link {
-            swarm: build_swarm(&cfg.gossip, node_key, registry),
+            swarm,
             backoff: Backoff::new(cfg.backoff_min, cfg.backoff_max),
             own_peer_id: node_key.peer_id(),
             cfg,
@@ -221,6 +235,7 @@ impl BnLink {
             commands,
             responder,
             connected: connected.clone(),
+            listen: listen_tx,
             bn_peer: None,
             reconnect: None,
             probe: None,
@@ -229,6 +244,7 @@ impl BnLink {
             task: tokio::spawn(link.run()),
             connected,
             events,
+            listen,
         }
     }
 }
@@ -255,6 +271,7 @@ struct Link {
     commands: mpsc::Receiver<BnCommand>,
     responder: Responder,
     connected: Arc<AtomicBool>,
+    listen: watch::Sender<Option<Multiaddr>>,
     backoff: Backoff,
     /// The beacon node this link is connected to, while it is.
     bn_peer: Option<PeerId>,
@@ -334,6 +351,10 @@ impl Link {
                 cause,
                 ..
             } => self.on_closed(peer_id, cause),
+            SwarmEvent::NewListenAddr { address, .. } => {
+                tracing::info!(%address, "listening for the beacon node");
+                self.listen.send_replace(Some(address));
+            }
             SwarmEvent::OutgoingConnectionError { error, .. } => {
                 tracing::warn!(%error, "dial to the beacon node failed");
                 self.retry_later();
