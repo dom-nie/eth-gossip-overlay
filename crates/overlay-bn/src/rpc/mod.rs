@@ -210,8 +210,10 @@ mod tests {
 
     use libp2p::StreamProtocol;
     use libp2p::futures::executor::block_on;
+    use libp2p::futures::io::Cursor;
     use libp2p::request_response::Codec;
     use overlay_core::topic::Topic;
+    use proptest::prelude::*;
 
     use super::*;
     use crate::rpc::msg::{Ping, Status};
@@ -225,6 +227,10 @@ mod tests {
     }
 
     const PING: StreamProtocol = StreamProtocol::new("/eth2/beacon_chain/req/ping/1/ssz_snappy");
+    const STATUS_V2: StreamProtocol =
+        StreamProtocol::new("/eth2/beacon_chain/req/status/2/ssz_snappy");
+    const METADATA_V2: StreamProtocol =
+        StreamProtocol::new("/eth2/beacon_chain/req/metadata/2/ssz_snappy");
 
     /// CRC-32C (Castagnoli), bit by bit, then snappy's checksum mask.
     fn snappy_crc(data: &[u8]) -> u32 {
@@ -383,6 +389,66 @@ mod tests {
             responder.respond(Protocol::PingV1, &Ping(0).encode()),
             Response::Success(Ping(3).encode())
         );
+    }
+
+    /// The request framing without the result byte a response carries.
+    fn request(body: &[u8]) -> Vec<u8> {
+        chunk(SUCCESS, body).unwrap()[1..].to_vec()
+    }
+
+    fn read(id: &StreamProtocol, bytes: &[u8]) -> (Protocol, Result<Vec<u8>, Malformed>) {
+        block_on(Eth2Codec.read_request(id, &mut Cursor::new(bytes.to_vec())))
+            .expect("a request is read to a result, never an io error")
+    }
+
+    /// Nothing a peer puts on the wire reaches a panic. The length prefix is checked against
+    /// the largest legal request before anything is decompressed, a frame that runs out or
+    /// disagrees with its prefix is refused, and a `MetaData` request, which Lighthouse sends
+    /// as an empty stream, still reads.
+    #[test]
+    fn malformed_request_gets_invalid_request_not_a_panic() {
+        let status = status().encode(2);
+        let good = request(&status);
+        let responder = Responder::new();
+        let answer = |id: &StreamProtocol, bytes: &[u8]| match read(id, bytes) {
+            (protocol, Ok(body)) => responder.respond(protocol, &body),
+            (_, Err(Malformed)) => Response::InvalidRequest,
+        };
+
+        assert_eq!(read(&STATUS_V2, &good), (Protocol::StatusV2, Ok(status)));
+        assert_eq!(read(&METADATA_V2, &[]), (Protocol::MetaDataV2, Ok(Vec::new())));
+        for bytes in [
+            // The frame runs out before the prefix is satisfied.
+            good[..good.len() - 4].to_vec(),
+            // The prefix promises a v2 body and the frame carries a v1 one.
+            [varint(Status::V2_LEN), request(&good[..Status::V1_LEN])].concat(),
+            // One byte past the largest legal request, and a prefix promising megabytes.
+            [varint(Status::V2_LEN + 1), good[1..].to_vec()].concat(),
+            varint(1 << 20),
+            Vec::new(),
+        ] {
+            assert_eq!(answer(&STATUS_V2, &bytes), Response::InvalidRequest, "{bytes:02x?}");
+        }
+
+        proptest!(|(bytes in proptest::collection::vec(any::<u8>(), 0..256))| {
+            for id in proto::all() {
+                let response = answer(&id, &bytes);
+                prop_assert!(plausible(proto::classify(&id), &response), "{id} {response:?}");
+            }
+        });
+    }
+
+    /// What a response to random bytes may be: an error, or a success whose body is the one
+    /// its protocol calls for. A `Goodbye` only ever comes from the goodbye protocol.
+    fn plausible(protocol: Protocol, response: &Response) -> bool {
+        match (protocol, response) {
+            (Protocol::StatusV1, Response::Success(body)) => body.len() == Status::V1_LEN,
+            (Protocol::StatusV2, Response::Success(body)) => body.len() == Status::V2_LEN,
+            (Protocol::PingV1, Response::Success(body)) => body.len() == 8,
+            (Protocol::GoodbyeV1, Response::Goodbye(_)) => true,
+            (_, Response::Goodbye(_)) => false,
+            _ => true,
+        }
     }
 
     /// A well-formed BlocksByRange v2 request (start slot, count, step) on a registered
