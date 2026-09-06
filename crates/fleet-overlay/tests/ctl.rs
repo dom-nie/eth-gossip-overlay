@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use assert_cmd::Command;
 use assert_cmd::cargo::cargo_bin;
 use fleet_overlay::admin::Response;
+use fleet_overlay::reload::{ReloadError, ReloadReport, Trigger};
 use tempfile::TempDir;
 
 /// A socket that answers every line with the same response and remembers what it was asked.
@@ -76,4 +77,36 @@ fn ctl_inject_off_against_test_server_exits_0_and_prints_confirmation() {
     assert_eq!(server.asked(), [r#"{"cmd":"inject","value":false}"#]);
     let printed = String::from_utf8(output.stdout).unwrap();
     assert!(printed.contains("inject off"), "{printed}");
+}
+
+#[test]
+fn ctl_roster_reload_prints_applied_and_restart_required_fields_and_exits_1_on_error() {
+    let server = TestServer::start(Response {
+        ok: true,
+        reload: Some(ReloadReport {
+            trigger: Trigger::Manual,
+            applied: vec!["inject".to_owned(), "roster".to_owned()],
+            restart_required: vec!["overlay.listen".to_owned()],
+            error: Some(ReloadError::Roster("roster.yaml: no such file".to_owned())),
+        }),
+        ..Response::default()
+    });
+
+    let output = ctl(&server.socket)
+        .args(["roster", "reload"])
+        .output()
+        .unwrap();
+
+    // The reload ran, so the command reached the sidecar; the report says it did not finish,
+    // and configuration management has to see that as a failure.
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(server.asked(), [r#"{"cmd":"reload"}"#]);
+    let printed = String::from_utf8(output.stdout).unwrap();
+    assert!(printed.contains("applied: inject, roster"), "{printed}");
+    assert!(
+        printed.contains("restart required: overlay.listen"),
+        "{printed}"
+    );
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("no such file"), "{stderr}");
 }
