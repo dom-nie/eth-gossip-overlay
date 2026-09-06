@@ -325,9 +325,13 @@ mod tests {
     use crate::spec::SpecSnapshot;
 
     fn topics(names: &[&str]) -> BTreeSet<Topic> {
+        topics_at("6a95a1a9", names)
+    }
+
+    fn topics_at(digest: &str, names: &[&str]) -> BTreeSet<Topic> {
         names
             .iter()
-            .map(|name| Topic::parse(&format!("/eth2/6a95a1a9/{name}/ssz_snappy")).unwrap())
+            .map(|name| Topic::parse(&format!("/eth2/{digest}/{name}/ssz_snappy")).unwrap())
             .collect()
     }
 
@@ -458,6 +462,11 @@ mod tests {
 
     /// The mirror's extra column topics live in `local`, never in `advertised`, so a
     /// responder fed the advertised set alone counts only what the beacon node subscribed to.
+    ///
+    /// What is counted is the subnet, not the topic. Across a fork the beacon node holds both
+    /// digests' topics at once, joining the next fork's two slots early and leaving the old
+    /// one two epochs late (`beacon_node/network/src/service.rs`), and counting topics would
+    /// double the number it reports for those two epochs.
     #[test]
     fn custody_group_count_counts_only_columns_the_bn_subscribes_to() {
         let columns: Vec<String> = (0..128)
@@ -466,12 +475,19 @@ mod tests {
         let names: Vec<&str> = columns.iter().map(String::as_str).collect();
         let mut all = Responder::new();
         let mut none = Responder::new();
+        let mut forking = Responder::new();
+        let two_digests: BTreeSet<Topic> = topics_at("6a95a1a9", &names[..8])
+            .union(&topics_at("f0e1d2c3", &names[..8]))
+            .cloned()
+            .collect();
 
         all.set_subscriptions(&topics(&names));
         none.set_subscriptions(&topics(&["beacon_block"]));
+        forking.set_subscriptions(&two_digests);
 
         assert_eq!(all.metadata().custody_group_count, Some(128));
         assert_eq!(none.metadata().custody_group_count, Some(4));
+        assert_eq!(forking.metadata().custody_group_count, Some(8));
         assert_eq!(all.metadata().attnets, [0; 8]);
     }
 
