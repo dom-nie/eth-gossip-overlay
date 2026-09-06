@@ -4358,8 +4358,10 @@ dependencies = [
  "overlay-core",
  "quinn",
  "rustls",
+ "socket2",
  "thiserror 2.0.20",
  "tokio",
+ "tracing",
  "zeroize",
 ]
 

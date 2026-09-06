@@ -1,10 +1,122 @@
 //! The one QUIC endpoint a sidecar owns: what it binds and what every connection through it
 //! agrees to.
+//!
+//! A sidecar accepts and dials on the same socket, because the overlay is a full mesh and the
+//! lexicographically lower hostname is the one that dials (§5.3). There is no interface
+//! selection anywhere: `overlay.listen` is `[::]:7788`, outbound follows the default route, and
+//! `[::]` is opened dual-stack so a peer that only has this host's IPv4 address still arrives.
 
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use overlay_core::config::Overlay;
 use quinn::{IdleTimeout, VarInt};
+use socket2::{Domain, Protocol, Socket, Type};
+
+use crate::tls::PLACEHOLDER_NAME;
+
+/// What the overlay asks the kernel for on both socket buffers, which is §5.3's floor. It is a
+/// constant rather than a config key because an operator raises the ceiling in `sysctl.d`
+/// (T-046), not here: a key would only let a host ask for less than the design needs.
+const SOCKET_BUFFER_BYTES: usize = 8 * 1024 * 1024;
+
+/// Why the endpoint could not be brought up, or a peer could not be reached.
+#[derive(Debug, thiserror::Error)]
+pub enum EndpointError {
+    /// The listen address could not be opened: something else holds the port, or no local
+    /// interface has that address. The address is in the message because `overlay.listen` is
+    /// the thing the operator can change.
+    #[error("overlay endpoint: {addr}: {source}")]
+    Bind {
+        /// The address `overlay.listen` asked for.
+        addr: SocketAddr,
+        /// What the kernel said.
+        source: std::io::Error,
+    },
+    /// quinn would not start the dial, so nothing left the host. A roster address this endpoint
+    /// cannot reach at all, such as an IPv6 peer from an IPv4-only listen address.
+    #[error("overlay endpoint: {0}")]
+    Dial(#[from] quinn::ConnectError),
+    /// The dial went out and no connection came back. T-023 hands this to
+    /// [`crate::tls::HandshakeFailure::from_connection_error`] to learn whether the two ends
+    /// disagreed about the roster or the peer simply never answered.
+    #[error("overlay endpoint: {0}")]
+    Connection(#[from] quinn::ConnectionError),
+}
+
+/// The sidecar's endpoint, listening on `overlay.listen` and ready to dial from the same
+/// socket. `server` comes from [`crate::tls::server_config`] and carries the pin table, so
+/// which hosts may connect stays this function's caller's business and not the endpoint's.
+pub fn bind(
+    cfg: &Overlay,
+    mut server: quinn::ServerConfig,
+) -> Result<quinn::Endpoint, EndpointError> {
+    let listen = cfg.listen;
+    let failed = move |source| EndpointError::Bind {
+        addr: listen,
+        source,
+    };
+    server.transport_config(Arc::new(transport_config(cfg)));
+    let socket = bind_socket(listen).map_err(failed)?;
+    quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        Some(server),
+        socket,
+        Arc::new(quinn::TokioRuntime),
+    )
+    .map_err(failed)
+}
+
+/// Dials `addr` and waits for the handshake. `client` comes from [`crate::tls::client_config`]
+/// and already knows which host it expects to find there, so the name in SNI is the placeholder
+/// nobody reads and there is no hostname to pass.
+pub async fn connect(
+    cfg: &Overlay,
+    endpoint: &quinn::Endpoint,
+    addr: SocketAddr,
+    mut client: quinn::ClientConfig,
+) -> Result<quinn::Connection, EndpointError> {
+    client.transport_config(Arc::new(transport_config(cfg)));
+    Ok(endpoint
+        .connect_with(client, addr, PLACEHOLDER_NAME)?
+        .await?)
+}
+
+/// The UDP socket quinn runs on, sized and bound before quinn sees it.
+///
+/// `IPV6_V6ONLY` off is what makes `[::]` dual-stack: with it on, a peer dialling this host's
+/// IPv4 address is answered by nothing at all. It says nothing about an IPv4 listen address and
+/// the kernel rejects it there, so it goes with the family rather than unconditionally.
+///
+/// The requested buffer sizes are logged beside what came back because the kernel silently caps
+/// them at `net.core.rmem_max` and `net.core.wmem_max`, and on Linux reports twice what it
+/// stored. An operator who sees the effective size fall short of the request is looking at a
+/// host where the sysctl file from T-046 never landed.
+fn bind_socket(listen: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    let socket = Socket::new(
+        Domain::for_address(listen),
+        Type::DGRAM,
+        Some(Protocol::UDP),
+    )?;
+    if listen.is_ipv6() {
+        socket.set_only_v6(false)?;
+    }
+    socket.set_recv_buffer_size(SOCKET_BUFFER_BYTES)?;
+    socket.set_send_buffer_size(SOCKET_BUFFER_BYTES)?;
+    socket.bind(&listen.into())?;
+
+    let (recv, send) = (socket.recv_buffer_size()?, socket.send_buffer_size()?);
+    let socket = std::net::UdpSocket::from(socket);
+    tracing::info!(
+        listen = %socket.local_addr()?,
+        requested_bytes = SOCKET_BUFFER_BYTES,
+        recv_buffer_bytes = recv,
+        send_buffer_bytes = send,
+        "overlay endpoint bound"
+    );
+    Ok(socket)
+}
 
 /// The parameters every overlay connection runs under, dialled or accepted. One function
 /// because there is one place to change: T-076 adds the inbound stream limits, the receive
