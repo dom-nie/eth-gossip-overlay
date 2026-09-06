@@ -323,12 +323,14 @@ mod tests {
         for index in 0..4 {
             own.intern(&column(index)).unwrap();
         }
+        let mut announcer = Announcer::new();
         let mut peer = PeerTopicTable::new();
 
-        peer.apply_snapshot(own.snapshot()).unwrap();
+        let snapshot = announcer.hello_snapshot(&host("a"), &own);
+        peer.apply_snapshot(snapshot.clone()).unwrap();
 
-        assert_eq!(own.snapshot().len(), 4);
-        for (id, text) in own.snapshot() {
+        assert_eq!(snapshot.len(), 4);
+        for (id, text) in snapshot {
             let topic = Topic::parse(&text).unwrap();
 
             assert_eq!(peer.resolve(id), Some(&topic));
@@ -430,7 +432,7 @@ mod tests {
         }
 
         assert_eq!(interned, 65_535);
-        assert_eq!(own.snapshot().len(), 65_535);
+        assert_eq!(own.entries_from(0).count(), 65_535);
     }
 
     #[test]
@@ -461,13 +463,27 @@ mod tests {
         own.intern(&column(0)).unwrap();
         own.intern(&column(1)).unwrap();
 
-        announcer.hello_sent(&host("c"), &own);
+        let hello = announcer.hello_snapshot(&host("c"), &own);
 
+        assert_eq!(hello.len(), 2);
         assert!(announcer.announce(&host("c"), &own).is_empty());
 
         own.intern(&column(2)).unwrap();
 
         assert_eq!(announcer.announce(&host("c"), &own), [topic_add(2, 2)]);
+    }
+
+    #[test]
+    fn a_topic_interned_after_the_hello_snapshot_is_still_announced() {
+        let mut own = OwnTopicTable::new();
+        let mut announcer = Announcer::new();
+        own.intern(&column(0)).unwrap();
+
+        let hello = announcer.hello_snapshot(&host("d"), &own);
+        own.intern(&column(1)).unwrap();
+
+        assert_eq!(hello, [(TopicId::new(0), column(0).to_string())]);
+        assert_eq!(announcer.announce(&host("d"), &own), [topic_add(1, 1)]);
     }
 
     #[test]
@@ -507,6 +523,6 @@ mod tests {
 
         assert_eq!(own.get(&column(0)), Some(TopicId::new(0)));
         assert_eq!(own.get(&column(1)), None);
-        assert_eq!(own.snapshot().len(), 1);
+        assert_eq!(own.entries_from(0).count(), 1);
     }
 }
