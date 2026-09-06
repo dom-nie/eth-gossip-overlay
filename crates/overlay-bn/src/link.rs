@@ -502,6 +502,18 @@ impl Link {
     }
 }
 
+/// The `lighthouse.env` line that makes the beacon node trust the sidecar and dial it: the
+/// only place the file's content is built, so what T-045 writes cannot drift from what the
+/// link listens on. `--libp2p-addresses` is dialled once at beacon-node startup and is
+/// deprecated at v8.2.2; the ENR the link registers on every reconnect is what covers a
+/// sidecar restart (MD-01).
+pub fn lighthouse_env_line(peer_id: &PeerId, listen: &Multiaddr) -> String {
+    format!(
+        "FLEET_OVERLAY_TRUSTED_PEER_ARGS=--trusted-peers {peer_id} \
+         --libp2p-addresses {listen}/p2p/{peer_id}"
+    )
+}
+
 /// The lane a message queues in: a known large name by prefix, else by size (D02). The name
 /// is the third `/`-separated field of `/eth2/<digest>/<name>/ssz_snappy`.
 fn lane_for(topic: &str, payload_len: usize) -> Class {
