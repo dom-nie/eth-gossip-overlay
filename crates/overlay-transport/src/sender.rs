@@ -222,7 +222,14 @@ impl Queues {
             enqueued_at: now,
         };
         match class {
-            Class::Small => self.lane(Class::Small).push(queued),
+            Class::Small => {
+                let mut lane = self.lane(Class::Small);
+                while lane.frames.len() >= SMALL_LANE_FRAMES && lane.pop().is_some() {
+                    self.stats
+                        .queue_drop(&self.peer, Class::Small, DropReason::Full);
+                }
+                lane.push(queued);
+            }
             Class::Large => self.ledger.push(self, queued),
         }
         self.waiting.notify_one();
