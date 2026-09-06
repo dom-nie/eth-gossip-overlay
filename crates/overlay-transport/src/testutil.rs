@@ -1,5 +1,6 @@
 //! A real overlay on loopback, for this crate's tests and for the crates that need one running:
-//! T-032's fanout and T-051's fleet harness.
+//! T-032's fanout and T-051's fleet harness. Behind a feature because it is test-only code that
+//! other crates' tests link.
 //!
 //! [`TestCluster`] binds an endpoint per host, builds the roster from the ports it got, and then
 //! starts a [`ConnectionManager`] on each. Binding first is what lets the roster hold real
