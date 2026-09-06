@@ -3,7 +3,7 @@
 
 mod common;
 
-use bytes::{Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use overlay_core::msgid::MessageId;
 use overlay_core::protocol::MAX_BATCH_ENTRIES;
 use overlay_core::wire::{
@@ -196,4 +196,28 @@ fn unknown_flag_bits_are_ignored_and_defined_bits_round_trip() {
 
         assert_eq!(Frame::decode(&mut buf), Ok(frame), "{name} with bit 7 set");
     }
+}
+
+#[test]
+fn batch_exceeding_max_batch_entries_is_over_limit() {
+    assert_eq!(
+        Frame::decode(&mut batch_of(MAX_BATCH_ENTRIES + 1)),
+        Err(DecodeError::OverLimit("entries"))
+    );
+    assert!(matches!(
+        Frame::decode(&mut batch_of(MAX_BATCH_ENTRIES)),
+        Ok(Frame::Batch { .. })
+    ));
+}
+
+fn batch_of(count: u16) -> Bytes {
+    let mut out = BytesMut::new();
+    out.put_u8(FrameType::Batch.id());
+    out.put_u8(0);
+    out.put_u16_le(count);
+    for _ in 0..count {
+        out.put_u16_le(1);
+        out.put_u16_le(0);
+    }
+    out.freeze()
 }
