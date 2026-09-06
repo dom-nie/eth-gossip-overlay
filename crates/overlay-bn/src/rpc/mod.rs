@@ -13,7 +13,7 @@ use libp2p::StreamProtocol;
 use libp2p::futures::{AsyncWrite, AsyncWriteExt};
 use libp2p::request_response::Codec;
 
-use crate::rpc::msg::{Malformed, MetaData, Status};
+use crate::rpc::msg::{Malformed, MetaData, Ping, Status};
 use crate::rpc::proto::Protocol;
 
 pub mod msg;
@@ -48,6 +48,9 @@ impl Responder {
         let body = match protocol {
             Protocol::StatusV1 => Status::decode(request, 1).map(|status| status.encode(1)),
             Protocol::StatusV2 => Status::decode(request, 2).map(|status| status.encode(2)),
+            Protocol::PingV1 => {
+                Ping::decode(request).map(|_| Ping(self.metadata.seq_number).encode())
+            }
             _ => return Response::ResourceUnavailable,
         };
         match body {
