@@ -7,11 +7,13 @@
 //! response chunk is a result byte in front of the same. The protocols answered here carry no
 //! context bytes (`ProtocolId::has_context_bytes` in `rpc/protocol.rs`).
 
+use std::collections::BTreeSet;
 use std::io::{self, Write};
 
 use libp2p::StreamProtocol;
 use libp2p::futures::{AsyncWrite, AsyncWriteExt};
 use libp2p::request_response::Codec;
+use overlay_core::topic::{Topic, TopicKind};
 
 use crate::rpc::msg::{Malformed, MetaData, Ping, Status};
 use crate::rpc::proto::Protocol;
@@ -37,6 +39,36 @@ impl Responder {
         &self.metadata
     }
 
+    /// Recomputes the metadata from the beacon node's own subscriptions (the mirror's
+    /// `advertised` set, D12): attestation and sync committee subnets become bits, the data
+    /// column topics are counted as custody groups. The extra column topics the sidecar adds
+    /// on its own are in `local`, not here, so they never inflate the count. The sequence
+    /// number moves only when the result differs, because Lighthouse re-requests the metadata
+    /// every time it sees the number rise.
+    pub fn set_subscriptions(&mut self, advertised: &BTreeSet<Topic>) {
+        let mut next = MetaData {
+            custody_group_count: Some(0),
+            ..MetaData::default()
+        };
+        for topic in advertised {
+            match *topic.kind() {
+                TopicKind::Attestation(i) if usize::from(i) < 8 * next.attnets.len() => {
+                    next.attnets[usize::from(i / 8)] |= 1 << (i % 8);
+                }
+                TopicKind::SyncCommittee(i) if i < SYNCNETS_BITS => next.syncnets |= 1 << i,
+                TopicKind::DataColumnSidecar(_) => {
+                    next.custody_group_count = next.custody_group_count.map(|n| n + 1);
+                }
+                _ => {}
+            }
+        }
+        next.seq_number = self.metadata.seq_number;
+        if next != self.metadata {
+            next.seq_number += 1;
+            self.metadata = next;
+        }
+    }
+
     /// The response to `request`, received on `protocol`.
     ///
     /// Status is echoed. Lighthouse classifies a peer by comparing the peer's Status with its
@@ -51,6 +83,9 @@ impl Responder {
             Protocol::PingV1 => {
                 Ping::decode(request).map(|_| Ping(self.metadata.seq_number).encode())
             }
+            Protocol::MetaDataV1 => Ok(self.metadata.encode(1)),
+            Protocol::MetaDataV2 => Ok(self.metadata.encode(2)),
+            Protocol::MetaDataV3 => Ok(self.metadata.encode(3)),
             _ => return Response::ResourceUnavailable,
         };
         match body {
@@ -73,6 +108,9 @@ pub enum Response {
     /// The peer sent Goodbye with this reason; there is no response to write.
     Goodbye(u64),
 }
+
+/// `syncnets` is SSZ `Bitvector[4]`; a set bit past that fails Lighthouse's decode.
+const SYNCNETS_BITS: u8 = 4;
 
 /// The result byte of a success chunk (`RpcResponse::as_u8` in `rpc/methods.rs`).
 pub const SUCCESS: u8 = 0;
