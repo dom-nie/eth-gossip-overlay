@@ -121,6 +121,70 @@ impl FanoutBudget {
 mod tests {
     use super::*;
 
+    /// The label an alert is keyed on (§12), so the strings are pinned rather than derived.
+    #[test]
+    fn fanout_kinds_are_the_metric_labels_they_are_counted_under() {
+        assert_eq!(FanoutKind::Relay.as_str(), "relay");
+        assert_eq!(FanoutKind::Chunk.as_str(), "chunk");
+    }
+
+    /// The connection goes only once a peer has been over budget for longer than the bound, so
+    /// a peer that recovers exactly at it keeps its connection. The close costs a reconnect and
+    /// a backoff, and a burst that lands on the boundary has not earned one.
+    #[test]
+    fn a_violation_closes_only_after_it_has_lasted_longer_than_the_bound() {
+        let went_over = Instant::now();
+        let mut budget = FanoutBudget::default_for(200, 2048, 12, went_over);
+        let over_budget = 4 * 1024 * 1024;
+
+        assert_eq!(
+            budget.charge(FanoutKind::Chunk, over_budget, went_over),
+            Charge::Suppressed
+        );
+        assert_eq!(
+            budget.charge(
+                FanoutKind::Chunk,
+                over_budget,
+                went_over + SUSTAINED_VIOLATION
+            ),
+            Charge::Suppressed
+        );
+        assert_eq!(
+            budget.charge(
+                FanoutKind::Chunk,
+                over_budget,
+                went_over + SUSTAINED_VIOLATION + Duration::from_nanos(1)
+            ),
+            Charge::CloseRateExceeded
+        );
+    }
+
+    /// A peer that comes back inside its budget starts a fresh window, so drifting in and out of
+    /// it over a slot never adds up to a close.
+    #[test]
+    fn a_charge_that_fits_clears_the_violation() {
+        let went_over = Instant::now();
+        let mut budget = FanoutBudget::default_for(200, 2048, 12, went_over);
+        let over_budget = 4 * 1024 * 1024;
+
+        assert_eq!(
+            budget.charge(FanoutKind::Chunk, over_budget, went_over),
+            Charge::Suppressed
+        );
+        assert_eq!(
+            budget.charge(FanoutKind::Chunk, 1, went_over),
+            Charge::Allowed
+        );
+        assert_eq!(
+            budget.charge(
+                FanoutKind::Chunk,
+                over_budget,
+                went_over + SUSTAINED_VIOLATION + Duration::from_secs(1)
+            ),
+            Charge::Suppressed
+        );
+    }
+
     /// A slot's traffic in one burst goes through, and the byte after it does not until the
     /// bucket has refilled. The numbers are the arithmetic in [`FanoutBudget::default_for`] for
     /// a 200-host fleet at T-071's chunk size and mainnet's slot: 4 x 6 MiB over 200 hosts is
