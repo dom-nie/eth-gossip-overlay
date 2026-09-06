@@ -446,9 +446,8 @@ impl Frame {
     pub fn decode(buf: &mut Bytes) -> Result<Self, DecodeError> {
         let type_byte = read_u8(buf)?;
         let flag_bits = read_u8(buf)?;
-        let unknown = Err(DecodeError::UnknownType(type_byte));
         let Some(frame_type) = FrameType::from_u8(type_byte) else {
-            return unknown;
+            return Err(DecodeError::UnknownType(type_byte));
         };
 
         match frame_type {
@@ -520,7 +519,7 @@ impl Frame {
                 flags: ChunkFlags::from_bits_truncate(flag_bits),
                 chunk: read_chunk(buf)?,
             }),
-            FrameType::Have => unknown,
+            FrameType::Have => Err(DecodeError::UnknownType(type_byte)),
             FrameType::RepairReq => match read_u8(buf)? {
                 0 => {
                     let msg_id = MessageId(read_array(buf)?);
