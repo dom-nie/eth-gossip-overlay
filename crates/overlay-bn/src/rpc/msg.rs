@@ -81,9 +81,11 @@ fn array<const N: usize>(bytes: &[u8]) -> [u8; N] {
 
 #[cfg(test)]
 mod tests {
-    use lighthouse_network::rpc::methods::{StatusMessageV1, StatusMessageV2};
+    use lighthouse_network::rpc::methods::{
+        MetaDataV2, MetaDataV3, StatusMessageV1, StatusMessageV2,
+    };
     use ssz::{Decode, Encode};
-    use types::{Epoch, Hash256, Slot};
+    use types::{Epoch, Hash256, MainnetEthSpec, Slot};
 
     use super::*;
 
@@ -131,5 +133,39 @@ mod tests {
         assert_eq!(back, status);
         assert!(StatusMessageV1::from_ssz_bytes(&ours).is_err());
         assert_eq!(Status::decode(&ours, 1), Err(Malformed));
+    }
+
+    /// Bit 3 of attnets and bit 1 of syncnets: byte i/8, bit i%8, as `Bitvector` lays them
+    /// out.
+    #[test]
+    fn metadata_v2_and_v3_round_trip_against_lighthouse_ssz() {
+        let metadata = MetaData {
+            seq_number: 5,
+            attnets: [0b1000, 0, 0, 0, 0, 0, 0, 0],
+            syncnets: 0b10,
+            custody_group_count: Some(8),
+        };
+
+        let v2 = metadata.encode(2);
+        let theirs = MetaDataV2::<MainnetEthSpec>::from_ssz_bytes(&v2).unwrap();
+        assert_eq!(v2.len(), MetaData::V2_LEN);
+        assert_eq!(theirs.seq_number, 5);
+        assert!(theirs.attnets.get(3).unwrap());
+        assert!(!theirs.attnets.get(2).unwrap());
+        assert!(theirs.syncnets.get(1).unwrap());
+        assert_eq!(
+            MetaData::decode(&theirs.as_ssz_bytes(), 2).unwrap(),
+            MetaData {
+                custody_group_count: None,
+                ..metadata.clone()
+            }
+        );
+
+        let v3 = metadata.encode(3);
+        let theirs = MetaDataV3::<MainnetEthSpec>::from_ssz_bytes(&v3).unwrap();
+        assert_eq!(v3.len(), MetaData::V3_LEN);
+        assert_eq!(theirs.custody_group_count, 8);
+        assert_eq!(MetaData::decode(&theirs.as_ssz_bytes(), 3).unwrap(), metadata);
+        assert_eq!(MetaData::decode(&v3, 2), Err(Malformed));
     }
 }
