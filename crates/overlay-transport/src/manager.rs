@@ -951,4 +951,20 @@ mod tests {
         assert!(matches!(cluster.next_event(0).await, PeerEvent::Down(down, None) if down == peer));
         assert!(cluster.live(0).is_empty());
     }
+
+    /// A sidecar restart: the peer goes away and comes back on the same address, and the dial
+    /// task pairs with it again on its own. `Down` first, so T-033 can throw away whatever the
+    /// old connection was still carrying before the new one arrives.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_reconnects_after_restart() {
+        let mut cluster = TestCluster::start(2).await;
+        let peer = cluster.hostname(1);
+        assert!(matches!(cluster.next_event(0).await, PeerEvent::Up(up) if up.hostname == peer));
+
+        cluster.restart(1).await;
+
+        assert!(matches!(cluster.next_event(0).await, PeerEvent::Down(down, _) if down == peer));
+        assert!(matches!(cluster.next_event(0).await, PeerEvent::Up(up) if up.hostname == peer));
+        assert_eq!(cluster.live(0).len(), 1);
+    }
 }
