@@ -265,7 +265,10 @@ mod tests {
         let theirs = MetaDataV3::<MainnetEthSpec>::from_ssz_bytes(&v3).unwrap();
         assert_eq!(v3.len(), MetaData::V3_LEN);
         assert_eq!(theirs.custody_group_count, 8);
-        assert_eq!(MetaData::decode(&theirs.as_ssz_bytes(), 3).unwrap(), metadata);
+        assert_eq!(
+            MetaData::decode(&theirs.as_ssz_bytes(), 3).unwrap(),
+            metadata
+        );
         assert_eq!(MetaData::decode(&v3, 2), Err(Malformed));
     }
 
@@ -273,7 +276,10 @@ mod tests {
     fn ping_and_goodbye_round_trip_against_lighthouse_ssz() {
         let ping = LighthousePing::from_ssz_bytes(&Ping(0x0102_0304_0506_0708).encode()).unwrap();
         assert_eq!(ping.data, 0x0102_0304_0506_0708);
-        assert_eq!(Ping::decode(&ping.as_ssz_bytes()), Ok(Ping(0x0102_0304_0506_0708)));
+        assert_eq!(
+            Ping::decode(&ping.as_ssz_bytes()),
+            Ok(Ping(0x0102_0304_0506_0708))
+        );
 
         let reason = GoodbyeReason::from_ssz_bytes(&Goodbye(129).encode()).unwrap();
         assert_eq!(reason, GoodbyeReason::TooManyPeers);
