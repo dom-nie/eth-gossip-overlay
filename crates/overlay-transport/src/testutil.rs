@@ -316,7 +316,10 @@ impl Builder {
                 kind,
                 endpoint: Some(endpoint),
                 manager: None,
-                events: mpsc::channel(64),
+                events: {
+                    let (sender, receiver) = mpsc::channel(64);
+                    (sender, Some(receiver))
+                },
                 stats: Arc::new(CountingStats::default()),
                 runtime,
                 sink,
@@ -408,7 +411,7 @@ struct Node {
     kind: NodeKind,
     endpoint: Option<quinn::Endpoint>,
     manager: Option<Handle>,
-    events: (mpsc::Sender<PeerEvent>, mpsc::Receiver<PeerEvent>),
+    events: (mpsc::Sender<PeerEvent>, Option<mpsc::Receiver<PeerEvent>>),
     stats: Arc<CountingStats>,
     runtime: Option<tokio::runtime::Runtime>,
     sink: Option<JoinHandle<()>>,
@@ -494,10 +497,35 @@ impl<A: Admission> TestCluster<A> {
         &self.cfg
     }
 
+    /// What node `index` puts in its own HELLO and hands out topic ids from, so a test can
+    /// intern a topic the way the mirror's `Changed` hook would (T-026).
+    pub fn topics(&self, index: usize) -> &Arc<Mutex<OwnTopics>> {
+        &self.nodes[index].topics
+    }
+
+    /// Node `index`'s peer events, for a test that runs a consumer of its own (T-027's
+    /// exchange) instead of reading them here. The cluster's own [`next_event`](Self::next_event)
+    /// has nothing to read for that node afterwards.
+    pub fn take_events(&mut self, index: usize) -> mpsc::Receiver<PeerEvent> {
+        self.nodes[index]
+            .events
+            .1
+            .take()
+            .unwrap_or_else(|| panic!("node {index}'s events have already been taken"))
+    }
+
+    fn events_mut(&mut self, index: usize) -> &mut mpsc::Receiver<PeerEvent> {
+        self.nodes[index]
+            .events
+            .1
+            .as_mut()
+            .unwrap_or_else(|| panic!("node {index}'s events were taken by a consumer of its own"))
+    }
+
     /// The next event from node `index`'s manager, failing the test rather than hanging when
     /// none arrives.
     pub async fn next_event(&mut self, index: usize) -> PeerEvent {
-        tokio::time::timeout(WAIT, self.nodes[index].events.1.recv())
+        tokio::time::timeout(WAIT, self.events_mut(index).recv())
             .await
             .unwrap_or_else(|_| panic!("no peer event from node {index} within {WAIT:?}"))
             .expect("the manager holds the sender for as long as the cluster does")
@@ -505,7 +533,7 @@ impl<A: Admission> TestCluster<A> {
 
     /// An event if one turns up quickly, for asserting that nothing more happens.
     pub async fn try_next_event(&mut self, index: usize) -> Option<PeerEvent> {
-        tokio::time::timeout(SETTLE, self.nodes[index].events.1.recv())
+        tokio::time::timeout(SETTLE, self.events_mut(index).recv())
             .await
             .ok()
             .flatten()
@@ -542,7 +570,9 @@ impl<A: Admission> TestCluster<A> {
         // Every `Up` still queued carries a connection, and a connection holds the endpoint's
         // socket open. A router would have taken them; a test that only watches the other side
         // has to drop them here or the port never comes free.
-        while self.nodes[index].events.1.try_recv().is_ok() {}
+        if let Some(events) = &mut self.nodes[index].events.1 {
+            while events.try_recv().is_ok() {}
+        }
         self.nodes[index].endpoint = None;
         let cfg = Overlay {
             listen: self.hosts[index].addr,
