@@ -347,6 +347,7 @@ mod tests {
         Builder, NodeKind, SETTLE, TestCluster, eventually, subscriptions, topic,
     };
     use bytes::BytesMut;
+    use overlay_core::topic::UNKNOWN_LARGE_THRESHOLD_BYTES;
     use overlay_core::wire::{BatchEntry, BatchFlags, encode_datagram};
 
     /// The gossipsub wire form of `data`: snappy-compressed, which is what a payload has to be
@@ -678,6 +679,98 @@ mod tests {
         let published = cluster.published(1);
         assert_eq!(published[0].payload, payload);
         assert_eq!(published[0].topic, block);
+    }
+
+    /// Nothing on this path waits for the beacon node (DX-N4). With the publish queue full and
+    /// nothing draining it, every stream still completes and the queue drops its oldest entries;
+    /// a receiver that awaited the beacon node would instead leave the peer's streams open and
+    /// its receive window shut.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn receive_path_keeps_draining_when_the_publisher_is_stalled() {
+        let block = topic("beacon_block");
+        let mut cluster = Builder::new(&[NodeKind::Bare, NodeKind::Manager])
+            .start()
+            .await;
+        cluster.start_sidecar_with(1, subscriptions(&[&block], &[]), 2);
+        let peer = cluster
+            .dial_announcing(
+                0,
+                1,
+                &cluster.self_hello(0),
+                vec![(TopicId::new(0), block.to_string())],
+            )
+            .await;
+
+        for message in 0..10 {
+            let payload = payload(format!("message {message}").as_bytes());
+            send(&peer, &[whole(0, &block, &payload)]).await;
+        }
+
+        let sender = cluster.hostname(0);
+        eventually("every stream to complete", || {
+            cluster.stats(1).messages(Direction::In, &sender) == 10
+        })
+        .await;
+        assert_eq!(cluster.published(1).len(), 2);
+        assert_eq!(cluster.publish_drops(1), 8);
+        assert_eq!(cluster.live(1).len(), 1);
+    }
+
+    /// A topic name this release does not know is classified by payload size, because the class
+    /// only picks the transport path and a wrong guess must not cost a fork's worth of traffic
+    /// (D02). Both ends count the same message under the same class.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn metrics_label_class_by_payload_length_for_unknown_kinds() {
+        let unknown = topic("something_this_release_has_never_heard_of");
+        let small = payload(&[7; 240]);
+        // Pseudo-random bytes, which snappy stores as literals, so the payload the class is
+        // read from is about the size it started at, the way signed SSZ is.
+        let mut state = 0x9E37_79B1u32;
+        let large = payload(
+            &(0..20 * 1024)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    state as u8
+                })
+                .collect::<Vec<u8>>(),
+        );
+        assert!(small.len() < UNKNOWN_LARGE_THRESHOLD_BYTES);
+        assert!(large.len() >= UNKNOWN_LARGE_THRESHOLD_BYTES);
+        let mut cluster = TestCluster::start(2).await;
+        for node in 0..2 {
+            cluster.start_sidecar(node, subscriptions(&[&unknown], &[]));
+        }
+        eventually("the pair to subscribe", || {
+            cluster.live(0).subscribers(&unknown).len() == 1
+        })
+        .await;
+
+        assert!(cluster.from_bn(0, &unknown, &small));
+        assert!(cluster.from_bn(0, &unknown, &large));
+
+        eventually("both to be queued", || cluster.published(1).len() == 2).await;
+        let (sender, receiver) = (cluster.hostname(0), cluster.hostname(1));
+        for (class, bytes) in [(Class::Small, small.len()), (Class::Large, large.len())] {
+            assert_eq!(
+                cluster
+                    .stats(0)
+                    .messages_of(Direction::Out, class, &receiver),
+                1
+            );
+            assert_eq!(
+                cluster.stats(1).messages_of(Direction::In, class, &sender),
+                1
+            );
+            assert_eq!(cluster.stats(1).first_seen(class), 1);
+            assert!(
+                cluster
+                    .published(1)
+                    .iter()
+                    .any(|item| { item.class == class && item.payload.len() == bytes })
+            );
+        }
     }
 
     /// The property the whole design rests on (§3 principle 1, §5.5). A sidecar publishes what
