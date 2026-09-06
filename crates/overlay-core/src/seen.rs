@@ -331,9 +331,11 @@ mod tests {
 
         assert!(held_by_ingress.insert(id(1)));
         assert!(!held_by_reader.insert(id(1)));
+        assert!(held_by_reader.insert(id(2)));
 
         assert!(held_by_reader.contains(&id(1)));
-        assert_eq!(held_by_reader.len(), 1);
+        assert!(!held_by_reader.contains(&id(3)));
+        assert_eq!(held_by_reader.len(), 2);
         assert!(!held_by_reader.is_empty());
 
         clock.advance(Duration::from_secs(60));

@@ -304,4 +304,26 @@ mod tests {
 
         assert_eq!(order, vec![1, 0, 2]);
     }
+
+    #[test]
+    fn queue_len_and_is_empty_span_both_lanes() {
+        let mut queue = PublishQueue::new(Arc::new(()));
+        let now = Instant::now();
+        assert!(queue.is_empty());
+
+        queue.push(item(Class::Small, 0, 100), now);
+        assert_eq!(queue.len(), 1);
+        assert!(!queue.is_empty());
+
+        queue.push(item(Class::Large, 1, 100), now);
+        assert_eq!(queue.len(), 2);
+
+        queue.pop(now);
+        assert_eq!(queue.len(), 1);
+        assert!(!queue.is_empty());
+
+        queue.pop(now);
+        assert_eq!(queue.len(), 0);
+        assert!(queue.is_empty());
+    }
 }
