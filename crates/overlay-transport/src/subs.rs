@@ -227,7 +227,7 @@ mod tests {
 
     use crate::hello;
     use crate::manager::PeerInfo;
-    use crate::testutil::{Builder, NodeKind, TestCluster, WAIT};
+    use crate::testutil::{Builder, NodeKind, TestCluster, WAIT, eventually};
     use crate::tls::Role;
 
     fn topic(name: &str) -> Topic {
@@ -360,5 +360,36 @@ mod tests {
             );
             assert_eq!(next_frame(peer).await, Frame::Subs { bitmap: bits(&[0]) });
         }
+    }
+
+    /// The control stream is ordered and this host announces an id before it sets the bit, so
+    /// the normal path never produces it. A peer is free to, though, and a bitmap read against
+    /// a table that has not caught up must be kept rather than dropped: throwing it away would
+    /// leave the peer looking unsubscribed until its beacon node next changed anything.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn subs_arriving_before_topic_add_for_its_ids_is_still_applied() {
+        let block = topic("beacon_block");
+        let (cluster, _sets, mut peers, manager) =
+            exchange(&[&[]], SubscriptionSets::default()).await;
+        let host = cluster.hostname(0);
+
+        peers[0]
+            .control
+            .write_frame(&Frame::Subs { bitmap: bits(&[7]) })
+            .await
+            .unwrap();
+        peers[0]
+            .control
+            .write_frame(&Frame::TopicAdd {
+                id: 7,
+                topic: block.to_string(),
+            })
+            .await
+            .unwrap();
+
+        eventually("the peer to become a subscriber", || {
+            cluster.live(manager).subscribed(&host, &block)
+        })
+        .await;
     }
 }
