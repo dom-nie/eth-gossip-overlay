@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::roster::Hostname;
-use crate::topic::{Topic, TopicError};
+use crate::topic::{SubscriptionSets, Topic, TopicError};
 use crate::wire::Frame;
 
 /// How many topics one table holds, so ids run from 0 to 65,534 and `u16::MAX` is never
@@ -158,6 +158,29 @@ pub enum PeerTableError {
     /// anything that fails came from a peer that is not speaking this protocol.
     #[error("topic id {0} names a string that is not a topic: {1}")]
     Unparsable(TopicId, TopicError),
+}
+
+/// Answers the mirror's `Changed` (T-014): interns everything the sidecar subscribes to and
+/// returns what each live peer is owed, leaving out the peers that are owed nothing. T-027
+/// writes the frames to the control streams.
+///
+/// It reads `local` and not `advertised` because the extra data column topics T-015 adds are
+/// the ones an own proposal's chunks go out on, so their ids have to reach peers even though
+/// the SUBS bitmap leaves those topics out (D06, D12).
+pub fn on_changed<'a>(
+    sets: &SubscriptionSets,
+    peers: impl IntoIterator<Item = &'a Hostname>,
+    table: &mut OwnTopicTable,
+    announcer: &mut Announcer,
+) -> Result<Vec<(&'a Hostname, Vec<Frame>)>, TableFull> {
+    for topic in &sets.local {
+        table.intern(topic)?;
+    }
+    Ok(peers
+        .into_iter()
+        .map(|peer| (peer, announcer.announce(peer, table)))
+        .filter(|(_, owed)| !owed.is_empty())
+        .collect())
 }
 
 /// What each peer has already been told, and the only place a `TOPIC_ADD` is built.
