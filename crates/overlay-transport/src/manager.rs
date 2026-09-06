@@ -990,4 +990,22 @@ mod tests {
         );
         assert_eq!(cluster.live(0).len(), 2);
     }
+
+    /// A reload that drops a host closes it, and says why: the peer reads `RosterRemoved` off
+    /// the close frame and knows not to come back rather than retrying into a refusal.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn roster_reload_removes_a_peer_and_closes_it_with_roster_removed() {
+        let mut cluster = TestCluster::start(2).await;
+        let peer = cluster.hostname(1);
+        assert!(matches!(cluster.next_event(0).await, PeerEvent::Up(up) if up.hostname == peer));
+
+        cluster.set_roster(&[0]);
+
+        let event = cluster.next_event(0).await;
+        assert!(
+            matches!(&event, PeerEvent::Down(down, Some(CloseCode::RosterRemoved)) if *down == peer),
+            "{event:?}"
+        );
+        assert!(cluster.live(0).is_empty());
+    }
 }
