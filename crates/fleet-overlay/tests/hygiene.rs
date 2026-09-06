@@ -87,8 +87,8 @@ fn rust_files(dir: &Path, into: &mut Vec<PathBuf>) -> std::io::Result<()> {
 /// A `mutants::skip` with nothing saying why is the one thing the mutation-testing rule forbids:
 /// the nightly run goes quiet and a reader cannot tell whether the mutant was equivalent or the
 /// test was simply missing. The reason is a comment on the line above the attribute or on the
-/// attribute's own line, and the same goes for the `exclude_re` list that skips the mutants no
-/// attribute can reach.
+/// attribute's own line, and the same goes for the exclusion lists that skip what no attribute
+/// can reach.
 #[test]
 fn every_mutants_skip_carries_a_reason() {
     let root = workspace_root();
@@ -114,12 +114,14 @@ fn every_mutants_skip_carries_a_reason() {
     assert!(bare.is_empty(), "mutants::skip with no reason: {bare:?}");
 
     let config = std::fs::read_to_string(root.join(".cargo/mutants.toml")).unwrap();
-    let introduced_by_a_comment = config
-        .split_once("exclude_re")
-        .and_then(|(before, _)| before.lines().last().map(str::trim_start))
-        .is_some_and(|above| above.starts_with('#'));
-    assert!(
-        !config.contains("exclude_re") || introduced_by_a_comment,
-        "exclude_re in .cargo/mutants.toml has no comment saying why"
-    );
+    for key in ["exclude_re", "exclude_globs"] {
+        let introduced_by_a_comment = config
+            .split_once(key)
+            .and_then(|(before, _)| before.lines().last().map(str::trim_start))
+            .is_some_and(|above| above.starts_with('#'));
+        assert!(
+            !config.contains(key) || introduced_by_a_comment,
+            "{key} in .cargo/mutants.toml has no comment saying why"
+        );
+    }
 }

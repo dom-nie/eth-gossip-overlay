@@ -25,3 +25,10 @@ exclude_re = [
   "replace \\| with \\^ in decode_hex",
   "replace \\| with \\^ in fork_digest",
 ]
+
+# The one file the `#[cfg(test)]` rule above does not cover. `overlay-transport`'s `testutil` is
+# behind `cfg(any(test, feature = "test-util"))`, because E3 and E5 link the same `TestCluster`
+# from their own test binaries, and that `any` is enough for cargo-mutants to read it as
+# production code. It is scaffolding: a mutant in it can only make a fixture wrong, which the
+# suite using the fixture reports as its own failure, or not at all.
+exclude_globs = ["crates/overlay-transport/src/testutil.rs"]
