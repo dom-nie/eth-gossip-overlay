@@ -415,9 +415,7 @@ impl Reloader {
         self.document = document;
         report.applied.extend(applied);
     }
-}
 
-impl Reloader {
     /// Publishes the roster on the watch channel when the file says something new. A file that
     /// does not parse, or one the shrink guard refuses, leaves the roster in force where it is.
     fn apply_roster(&mut self, trigger: Trigger, report: &mut ReloadReport) {
