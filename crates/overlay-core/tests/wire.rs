@@ -7,7 +7,7 @@ use bytes::{Bytes, BytesMut};
 use overlay_core::msgid::MessageId;
 use overlay_core::protocol::MAX_BATCH_ENTRIES;
 use overlay_core::wire::{
-    BatchEntry, BatchFlags, Chunk, ChunkFlags, Frame, Hello, MAX_MISSING_INDICES,
+    BatchEntry, BatchFlags, Chunk, ChunkFlags, DecodeError, Frame, Hello, MAX_MISSING_INDICES,
     MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, RepairReq, RepairResp,
 };
 use proptest::prelude::*;
@@ -140,5 +140,25 @@ proptest! {
 
         prop_assert_eq!(decoded, Ok(frame));
         prop_assert!(buf.is_empty());
+    }
+}
+
+#[test]
+fn truncated_input_is_truncated_error_for_every_variant() {
+    for (name, frame) in common::samples() {
+        let mut out = BytesMut::new();
+        frame.encode(&mut out);
+        let full = out.freeze();
+
+        for len in 0..full.len() {
+            let mut buf = full.slice(..len);
+
+            assert_eq!(
+                Frame::decode(&mut buf),
+                Err(DecodeError::Truncated),
+                "{name} cut to {len} of {} bytes",
+                full.len()
+            );
+        }
     }
 }
