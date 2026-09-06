@@ -1351,6 +1351,12 @@ pub fn peer_state(bindings: &[(u16, &Topic)], bits: &[u16]) -> PeerState {
     PeerState { table, bitmap }
 }
 
+/// A live view of peers a test built entry by entry, for the readers that report the fields a
+/// routing view leaves at their defaults (T-042's `status`).
+pub fn view_of(peers: Vec<(Hostname, LivePeer)>) -> LiveView {
+    LiveView(peers.into_iter().collect())
+}
+
 /// A live view of peers a test has decided the subscriptions of. They share one connection,
 /// because nothing about a subscription or a routing question reads it.
 pub fn view(connection: &quinn::Connection, peers: Vec<(Hostname, PeerState)>) -> LiveView {
@@ -1364,6 +1370,7 @@ pub fn view(connection: &quinn::Connection, peers: Vec<(Hostname, PeerState)>) -
                         region: Region(REGION.to_owned()),
                         site: None,
                         rtt: Duration::ZERO,
+                        connected_since: Instant::now(),
                         instance_id: 0,
                         software_version: "test".to_owned(),
                         negotiated: Negotiated {

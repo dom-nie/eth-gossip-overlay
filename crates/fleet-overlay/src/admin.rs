@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use overlay_bn::compat::BnInfo;
 use overlay_core::roster::{Roster, SelfIdentity};
-use overlay_core::topic::SubscriptionSets;
+use overlay_core::topic::{Class, SubscriptionSets};
 use overlay_transport::manager::LiveSource;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -44,6 +44,60 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         value: Option<bool>,
     },
+    /// Everything an operator looks at during a rollout (D29).
+    Status,
+}
+
+/// What `status` answers: this host, then one entry per live peer in hostname order.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Status {
+    /// This host's name, which is its identity everywhere (Appendix A).
+    pub hostname: String,
+    /// The region this host fans out in.
+    pub region: String,
+    /// This host's site label, `null` when it has none.
+    pub site: Option<String>,
+    /// The kill switch: false means the sidecar observes and reports but publishes nothing.
+    pub inject: bool,
+    /// Every peer with a live connection.
+    pub peers: Vec<Peer>,
+}
+
+/// One live peer. `software_version` and `features` are what a rollout is read off: they show
+/// which hosts are upgraded and which pairs are running the fallback (D29).
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Peer {
+    /// The peer's hostname.
+    pub hostname: String,
+    /// The region the peer declared, which is where its second hop fans out (D15).
+    pub region: String,
+    /// The peer's site label, `null` when it has none.
+    pub site: Option<String>,
+    /// The connection's round-trip estimate when the answer was built.
+    pub rtt_ms: f64,
+    /// How long the connection has been up. An age and not a timestamp: hosts' clocks differ
+    /// and "up for four minutes" is what an operator reads.
+    pub connected_for_ms: u64,
+    /// What this host still has queued for the peer, the same numbers `peer_queue_depth`
+    /// carries (T-033).
+    pub queue: Queue,
+    /// The release the peer is running.
+    pub software_version: String,
+    /// The feature bits the pair negotiated, as a bitset; `fleet-overlayctl` renders the names.
+    pub features: u64,
+}
+
+/// A peer's two send lanes, in both units each is bounded by (§5.7).
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+pub struct Queue {
+    /// Frames waiting in the small lane.
+    pub small_frames: usize,
+    /// Bytes waiting in the small lane.
+    pub small_bytes: usize,
+    /// Frames waiting in the large lane.
+    pub large_frames: usize,
+    /// Bytes waiting in the large lane.
+    pub large_bytes: usize,
 }
 
 /// One line back. `ok` says whether the sidecar ran the command, and at most one of the payload
@@ -58,6 +112,9 @@ pub struct Response {
     /// The kill switch as it stands, after an `inject` command.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inject: Option<bool>,
+    /// What `status` found.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<Status>,
 }
 
 impl Response {
@@ -74,6 +131,15 @@ impl Response {
         Self {
             ok: true,
             inject: Some(value),
+            ..Self::default()
+        }
+    }
+
+    /// What the sidecar looks like right now.
+    fn status(status: Status) -> Self {
+        Self {
+            ok: true,
+            status: Some(status),
             ..Self::default()
         }
     }
@@ -183,6 +249,43 @@ async fn answer(request: Request, state: &State) -> Response {
             }
             Response::inject(state.inject.load(Ordering::Relaxed))
         }
+        Request::Status => Response::status(status(state)),
+    }
+}
+
+/// Reads the live values once, so every line of one answer describes the same moment.
+fn status(state: &State) -> Status {
+    let live = state.live.live();
+    Status {
+        hostname: state.self_id.hostname.0.clone(),
+        region: state.self_id.region.0.clone(),
+        site: state.self_id.site.clone(),
+        inject: state.inject.load(Ordering::Relaxed),
+        peers: live
+            .iter()
+            .map(|(hostname, peer)| {
+                let (small, large) = (
+                    peer.sender.depth(Class::Small),
+                    peer.sender.depth(Class::Large),
+                );
+                Peer {
+                    hostname: hostname.0.clone(),
+                    region: peer.region.0.clone(),
+                    site: peer.site.clone(),
+                    rtt_ms: peer.rtt.as_secs_f64() * 1000.0,
+                    connected_for_ms: u64::try_from(peer.connected_since.elapsed().as_millis())
+                        .unwrap_or(u64::MAX),
+                    queue: Queue {
+                        small_frames: small.frames,
+                        small_bytes: small.bytes,
+                        large_frames: large.frames,
+                        large_bytes: large.bytes,
+                    },
+                    software_version: peer.software_version.clone(),
+                    features: peer.negotiated.features,
+                }
+            })
+            .collect(),
     }
 }
 

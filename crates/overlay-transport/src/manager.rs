@@ -196,6 +196,11 @@ pub struct LivePeer {
     pub rtt: Duration,
     /// The peer's instance id (D15).
     pub instance_id: u64,
+    /// When this connection was adopted, which `fleet-overlayctl status` reports as an age
+    /// (T-042). An [`Instant`] and not a wall time: the manager has no injected clock, two
+    /// hosts' clocks do not agree to the second, and what an operator reads off the table is
+    /// how long the peer has been up rather than when it came up.
+    pub connected_since: Instant,
     /// The release the peer is running.
     pub software_version: String,
     /// What the pair agreed to operate at, which every send path consults before it builds a
@@ -481,6 +486,7 @@ impl Shared {
                 site: info.site.clone(),
                 // Filled in by `live`, from the connection, every time it is asked for.
                 rtt: Duration::ZERO,
+                connected_since: Instant::now(),
                 instance_id: info.instance_id,
                 software_version: info.software_version.clone(),
                 negotiated: info.negotiated,
