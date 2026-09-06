@@ -45,9 +45,9 @@ pub enum EndpointError {
     Connection(#[from] quinn::ConnectionError),
 }
 
-/// The sidecar's endpoint, listening on `overlay.listen` and ready to dial from the same
-/// socket. `server` comes from [`crate::tls::server_config`] and carries the pin table, so
-/// which hosts may connect stays this function's caller's business and not the endpoint's.
+/// The sidecar's endpoint, listening on `overlay.listen` and dialling from the same socket.
+/// `server` comes from [`crate::tls::server_config`] and carries the pin table, so which hosts
+/// are allowed in is decided there and never here.
 pub fn bind(
     cfg: &Overlay,
     mut server: quinn::ServerConfig,
@@ -118,10 +118,13 @@ fn bind_socket(listen: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
     Ok(socket)
 }
 
-/// The parameters every overlay connection runs under, dialled or accepted. One function
-/// because there is one place to change: T-076 adds the inbound stream limits, the receive
-/// windows and the initial congestion window here once there is a benchmark to move them
-/// against, and everything it does not set is quinn's default on purpose.
+/// The parameters every overlay connection runs under, dialled or accepted, in the one place
+/// T-076 edits when it adds the inbound stream limits, the receive windows and the initial
+/// congestion window.
+///
+/// §5.3 also asks for MTU discovery from 1200 bytes upward and for datagrams to carry the small
+/// class, and quinn does both unless a transport config says otherwise. Nothing here says
+/// otherwise; the tests hold quinn to it.
 pub fn transport_config(cfg: &Overlay) -> quinn::TransportConfig {
     let mut transport = quinn::TransportConfig::default();
     transport
