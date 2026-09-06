@@ -556,4 +556,25 @@ mod tests {
                 .unwrap();
         }
     }
+    /// Half of the ticket's question is gone with X.509: there is no subject alternative name
+    /// on this wire to read. The other half stands. Whatever the dialler puts in SNI, and
+    /// whatever a peer would like to be called, the hostname comes from the table.
+    #[test]
+    fn verifiers_never_read_the_server_name() {
+        let seeds = seeds(0x11, None);
+        let pins = pins(&roster(&["bn-a", "bn-b"]), &seeds);
+        let key = presented(&seeds.current, "bn-a");
+        let dialler = DialerVerifier::new(pins.clone(), host("bn-a"));
+        let now = UnixTime::since_unix_epoch(Duration::from_secs(1_800_000_000));
+
+        for name in ["bn-b", PLACEHOLDER_NAME, "10.0.0.1"] {
+            let name = ServerName::try_from(name).unwrap();
+            dialler
+                .verify_server_cert(&key, &[], &name, &[], now)
+                .unwrap();
+        }
+
+        let entry = AcceptorVerifier::new(pins).identify(&key).unwrap();
+        assert_eq!(entry.hostname, host("bn-a"));
+    }
 }
