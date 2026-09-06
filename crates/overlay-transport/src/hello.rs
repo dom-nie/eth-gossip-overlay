@@ -29,6 +29,7 @@ use overlay_core::protocol::{
     MAX_BATCH_ENTRIES, MAX_FRAME_BYTES, PROTOCOL_MINOR, SUPPORTED_FEATURES,
 };
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
+use overlay_core::subs::PeerState;
 use overlay_core::topic::table::{Announcer, OwnTopicTable, PeerTopicTable, TopicId};
 use overlay_core::wire::{Frame, Hello, Read, write_frame};
 
@@ -274,7 +275,7 @@ pub async fn perform(
         negotiated,
         connection,
         control,
-        topics,
+        state: Arc::new(Mutex::new(PeerState::new(topics))),
     })
 }
 
@@ -447,6 +448,7 @@ mod tests {
 
     use super::*;
     use crate::manager::PeerEvent;
+    use crate::subs::state;
     use crate::testlog::LOG;
     use crate::testutil::{
         Builder, CountingStats, NodeKind, REGION, TestCluster, WAIT, eventually,
@@ -620,10 +622,13 @@ mod tests {
 
         let accepted = accepted.unwrap();
         for (id, topic) in ids.iter().zip(&topics) {
-            assert_eq!(accepted.topics.resolve(*id), Some(topic));
+            assert_eq!(state(&accepted.state).table.resolve(*id), Some(topic));
         }
         assert!(
-            dialled.unwrap().topics.resolve(ids[0]).is_none(),
+            state(&dialled.unwrap().state)
+                .table
+                .resolve(ids[0])
+                .is_none(),
             "the acceptor announced no topics and the dialler recorded some anyway"
         );
     }
@@ -1049,7 +1054,12 @@ mod tests {
         );
 
         admitted.expect("the dialler sent a HELLO of its own");
-        assert!(dialled.unwrap().topics.resolve(TopicId::new(0)).is_some());
+        assert!(
+            state(&dialled.unwrap().state)
+                .table
+                .resolve(TopicId::new(0))
+                .is_some()
+        );
         assert!(owed(&topics, &lower).is_empty());
     }
 }

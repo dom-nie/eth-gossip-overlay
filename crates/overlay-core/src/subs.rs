@@ -22,7 +22,8 @@
 
 use bytes::Bytes;
 
-use crate::topic::table::TopicId;
+use crate::topic::table::{OwnTopicTable, PeerTopicTable, TopicId};
+use crate::topic::{SubscriptionSets, Topic};
 
 /// One bit per topic id, dense from id 0. A fleet across a fork transition interns a few
 /// hundred topics, so the whole thing is a handful of words and a `Vec<u64>` beats anything
@@ -91,6 +92,48 @@ impl Bitmap {
                 .collect(),
         )
     }
+}
+
+/// Everything one peer has told this host about what it wants: the ids it assigns and which of
+/// them its beacon node is subscribed to. The two only mean anything together, and they arrive
+/// on the same ordered stream, so they are kept and locked as one thing.
+#[derive(Debug, Default)]
+pub struct PeerState {
+    /// The peer's own topic ids, from its HELLO snapshot and every `TOPIC_ADD` since.
+    pub table: PeerTopicTable,
+    /// Its latest bitmap over those ids. Empty until the peer's first `SUBS`, so a peer that
+    /// has not said what it wants yet is sent nothing rather than everything.
+    pub bitmap: Bitmap,
+}
+
+impl PeerState {
+    /// The state a connection starts with: the table the peer's HELLO carried, and no bitmap.
+    pub fn new(table: PeerTopicTable) -> Self {
+        Self {
+            table,
+            bitmap: Bitmap::new(),
+        }
+    }
+
+    /// Whether the peer's beacon node wants `topic`, which is the question every send path asks
+    /// before it builds a frame (§5.4).
+    pub fn subscribed(&self, topic: &Topic) -> bool {
+        self.table
+            .id_of(topic)
+            .is_some_and(|id| self.bitmap.test(id))
+    }
+}
+
+/// The bitmap this host advertises: one bit per topic in `advertised`, at the id `table` gives
+/// it. A topic with no id yet contributes no bit, which cannot happen once the same change has
+/// been through [`on_changed`](crate::topic::table::on_changed): it interns the whole local set,
+/// and `advertised` is part of it.
+pub fn advertised(sets: &SubscriptionSets, table: &OwnTopicTable) -> Bitmap {
+    let mut bitmap = Bitmap::new();
+    for id in sets.advertised.iter().filter_map(|topic| table.get(topic)) {
+        bitmap.set(id);
+    }
+    bitmap
 }
 
 /// The word holding `id`'s bit, and which bit of it.

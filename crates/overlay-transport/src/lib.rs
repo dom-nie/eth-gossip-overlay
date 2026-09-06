@@ -3,6 +3,7 @@
 pub mod endpoint;
 pub mod hello;
 pub mod manager;
+pub mod subs;
 pub mod tls;
 
 /// A live overlay on loopback, for this crate's tests and for the crates that drive one of

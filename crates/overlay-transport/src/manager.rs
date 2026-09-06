@@ -38,7 +38,8 @@ use ed25519_dalek::SigningKey;
 use overlay_core::backoff::Backoff;
 use overlay_core::config::Overlay;
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
-use overlay_core::topic::table::PeerTopicTable;
+use overlay_core::subs::PeerState;
+use overlay_core::topic::Topic;
 use quinn::VarInt;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
@@ -46,6 +47,7 @@ use tokio::task::{AbortHandle, JoinHandle, JoinSet};
 
 use crate::endpoint::{self, EndpointError};
 use crate::hello::{ControlStream, Negotiated};
+use crate::subs;
 use crate::tls::{self, FailureReason, HandshakeFailure, PinEntry, PinTable, Role, SeedGeneration};
 
 /// §5.3's reconnect floor. The first retry after a peer goes away is quick because the usual
@@ -158,9 +160,9 @@ pub struct PeerInfo {
     pub connection: quinn::Connection,
     /// The stream HELLO travelled on, which stays open as the peer's control stream (T-027).
     pub control: ControlStream,
-    /// The topic ids the peer announced in its HELLO, and the table its later `TOPIC_ADD`s
-    /// extend.
-    pub topics: PeerTopicTable,
+    /// The peer's topic ids and the bitmap over them, shared with the live view: the reader
+    /// task T-027 spawns on `control` is what writes to it, and every route plan reads it.
+    pub state: Arc<Mutex<PeerState>>,
 }
 
 /// What the manager tells the router as connections come and go. T-033 restarts a peer's sender
@@ -200,6 +202,10 @@ pub struct LivePeer {
     pub negotiated: Negotiated,
     /// The connection to send on.
     pub connection: quinn::Connection,
+    /// What the peer has said it wants, as its control stream reader keeps it up to date
+    /// (T-027). Shared rather than copied: a [`LiveView`] is a snapshot taken on every send,
+    /// and a bitmap copied into each one would be stale by the time the send used it.
+    pub state: Arc<Mutex<PeerState>>,
 }
 
 /// Who is connected right now, in hostname order. "The live set is whatever is currently
@@ -236,6 +242,26 @@ impl LiveView {
         self.0
             .iter()
             .filter(|(_, peer)| &peer.region == region)
+            .collect()
+    }
+
+    /// Whether `peer`'s beacon node is subscribed to `topic`, resolved through the ids `peer`
+    /// itself assigned (D13). A peer that is not live wants nothing, because there is nowhere
+    /// to send it.
+    pub fn subscribed(&self, peer: &Hostname, topic: &Topic) -> bool {
+        self.0
+            .get(peer)
+            .is_some_and(|peer| subs::state(&peer.state).subscribed(topic))
+    }
+
+    /// Every live peer whose beacon node wants `topic`, in hostname order, which is the set a
+    /// message on it goes to (§5.4). A `Vec` and not an iterator: the answer comes from a lock
+    /// per peer, and a borrow of those guards cannot outlive the call that took them.
+    pub fn subscribers(&self, topic: &Topic) -> Vec<&Hostname> {
+        self.0
+            .iter()
+            .filter(|(_, peer)| subs::state(&peer.state).subscribed(topic))
+            .map(|(hostname, _)| hostname)
             .collect()
     }
 }
@@ -449,6 +475,7 @@ impl Shared {
                 software_version: info.software_version.clone(),
                 negotiated: info.negotiated,
                 connection: info.connection.clone(),
+                state: info.state.clone(),
             };
             if let Some(Slot::Live(old)) = peers.insert(info.hostname.clone(), Slot::Live(live)) {
                 CloseCode::Superseded.close(&old.connection);
@@ -914,6 +941,9 @@ mod tests {
     use std::collections::BTreeSet;
     use std::net::{IpAddr, Ipv4Addr};
 
+    use overlay_core::subs::Bitmap;
+    use overlay_core::topic::table::{PeerTopicTable, TopicId};
+
     use super::*;
     use crate::testlog::LOG;
     use crate::testutil::{Builder, NodeKind, REGION, TestCluster, WAIT, eventually};
@@ -1159,7 +1189,7 @@ mod tests {
             },
             connection,
             control,
-            topics: PeerTopicTable::new(),
+            state: Arc::new(Mutex::new(PeerState::default())),
         }
     }
 
@@ -1338,7 +1368,9 @@ mod tests {
     /// their own beacon node happened to subscribe, and neither ever reads the other's.
     #[tokio::test(flavor = "multi_thread")]
     async fn subscribed_resolves_through_the_peers_own_table() {
-        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare]).start().await;
+        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare])
+            .start()
+            .await;
         let (connection, _accepted) = cluster.connected_pair(0, 1).await;
         let (peer, wanted) = (cluster.hostname(0), topic("beacon_block"));
 
@@ -1355,7 +1387,9 @@ mod tests {
     /// until it does the frame would go out addressed to a topic nobody named.
     #[tokio::test(flavor = "multi_thread")]
     async fn topic_unknown_to_peer_table_is_not_subscribed() {
-        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare]).start().await;
+        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare])
+            .start()
+            .await;
         let (connection, _accepted) = cluster.connected_pair(0, 1).await;
         let (peer, wanted) = (cluster.hostname(0), topic("beacon_block"));
 
@@ -1369,7 +1403,9 @@ mod tests {
     /// and sending to it would waste a copy on a host that drops it.
     #[tokio::test(flavor = "multi_thread")]
     async fn subscribers_returns_only_peers_with_the_bit_set() {
-        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare]).start().await;
+        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare])
+            .start()
+            .await;
         let (connection, _accepted) = cluster.connected_pair(0, 1).await;
         let wanted = topic("beacon_block");
         let (subscriber, silent, elsewhere) = (host("bn-a"), host("bn-b"), host("bn-c"));
