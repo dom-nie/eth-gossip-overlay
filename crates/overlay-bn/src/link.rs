@@ -216,6 +216,13 @@ impl BnLink {
         let (listen_tx, listen) = watch::channel(None);
         let mut responder = Responder::new();
         responder.set_spec(&spec.borrow());
+        let enr = match node_key.enr(&cfg.listen_addr) {
+            Ok(enr) => Some(enr),
+            Err(err) => {
+                tracing::error!(%err, "no ENR to register; the beacon node cannot dial back");
+                None
+            }
+        };
         let mut swarm = build_swarm(&cfg.gossip, node_key, registry);
         // Before the first dial, so a beacon node that dials back the moment it is registered
         // finds the port open. A sidecar that cannot bind still dials, which is the fast path.
@@ -240,6 +247,8 @@ impl BnLink {
             known_bn: None,
             reconnect: None,
             probe: None,
+            enr,
+            add_peer_error: None,
         };
         Self {
             task: tokio::spawn(link.run()),
@@ -252,6 +261,11 @@ impl BnLink {
 
 /// A future the loop polls only while it is armed.
 type Pending<T> = Option<Pin<Box<dyn Future<Output = T> + Send>>>;
+
+/// What one reconnect step brings back: the beacon node's peer id, and how handing it the
+/// sidecar's ENR went. The second is `None` when there was no peer id to hand it to, or no
+/// ENR to hand over.
+type Reconnect = (Result<PeerId, BnHttpError>, Option<Result<(), BnHttpError>>);
 
 /// The three answers of the connect probe, in the order they are requested.
 type Probe = (
@@ -279,8 +293,15 @@ struct Link {
     /// What the last identity fetch said the beacon node's peer id is. An inbound connection
     /// is only the beacon node's if it comes from this id.
     known_bn: Option<PeerId>,
-    reconnect: Pending<Result<PeerId, BnHttpError>>,
+    reconnect: Pending<Reconnect>,
     probe: Pending<Probe>,
+    /// The record the beacon node dials the sidecar by, or `None` when the listen address
+    /// cannot be put in one, in which case only the beacon node's own startup flag can bring
+    /// it to the sidecar.
+    enr: Option<String>,
+    /// The last registration failure that was warned about, so a beacon node without the
+    /// endpoint costs one line rather than one per reconnect.
+    add_peer_error: Option<String>,
 }
 
 impl Link {
@@ -309,12 +330,21 @@ impl Link {
         }
     }
 
-    /// Fetches the beacon node's peer id after `delay`; the dial happens when it arrives.
+    /// Fetches the beacon node's peer id after `delay` and hands it the sidecar's ENR; the
+    /// dial happens when both are back. Registering first is what covers the case the dial
+    /// cannot: a beacon node whose inbound cap is full accepts the record and dials the
+    /// sidecar from its own side (MD-01).
     fn arm_reconnect(&mut self, delay: Duration) {
         let client = self.bn_client.clone();
+        let enr = self.enr.clone();
         self.reconnect = Some(Box::pin(async move {
             tokio::time::sleep(delay).await;
-            client.peer_id().await
+            let peer_id = client.peer_id().await;
+            let registered = match (&peer_id, &enr) {
+                (Ok(_), Some(enr)) => Some(client.add_peer(enr).await),
+                _ => None,
+            };
+            (peer_id, registered)
         }));
     }
 
@@ -325,7 +355,20 @@ impl Link {
         self.arm_reconnect(delay);
     }
 
-    fn on_identity(&mut self, identity: Result<PeerId, BnHttpError>) {
+    /// A registration that failed is a warning and nothing more: the beacon node may be an
+    /// older one without the endpoint, and the sidecar's own dial is still the fast path.
+    fn on_identity(&mut self, (identity, registered): Reconnect) {
+        match registered {
+            Some(Err(err)) => {
+                let err = err.to_string();
+                if self.add_peer_error.as_ref() != Some(&err) {
+                    tracing::warn!(%err, "the beacon node did not take the sidecar's ENR");
+                    self.add_peer_error = Some(err);
+                }
+            }
+            Some(Ok(())) => self.add_peer_error = None,
+            None => {}
+        }
         let peer_id = match identity {
             Ok(peer_id) => peer_id,
             Err(err) => {
