@@ -270,6 +270,7 @@ mod tests {
     use super::*;
     use crate::rpc::msg::{Ping, Status};
     use crate::rpc::proto::Protocol;
+    use crate::spec::SpecSnapshot;
 
     fn topics(names: &[&str]) -> BTreeSet<Topic> {
         names
@@ -420,6 +421,50 @@ mod tests {
         assert_eq!(all.metadata().custody_group_count, Some(128));
         assert_eq!(none.metadata().custody_group_count, Some(0));
         assert_eq!(all.metadata().attnets, [0; 8]);
+    }
+
+    /// Lighthouse's peer manager refuses a custody group count outside
+    /// `custody_requirement..=number_of_custody_groups` and says goodbye to the peer for it
+    /// (`compute_peer_custody_groups` and `meta_data_response` in
+    /// `beacon_node/lighthouse_network/src/peer_manager/mod.rs`), so what the sidecar reports
+    /// is held inside that range: a beacon node that is syncing subscribes to nothing, and one
+    /// that custodies the minimum subscribes to fewer topics than the minimum count.
+    #[test]
+    fn custody_group_count_stays_inside_the_range_lighthouse_accepts() {
+        let mut responder = Responder::new();
+        let floor = SpecSnapshot::MAINNET.custody_requirement;
+
+        let syncing = responder.metadata().custody_group_count;
+        responder.set_subscriptions(&topics(&["data_column_sidecar_0"]));
+        let one_column = responder.metadata().custody_group_count;
+        responder.set_spec(&SpecSnapshot {
+            custody_requirement: 1,
+            number_of_custody_groups: 1,
+            ..SpecSnapshot::MAINNET
+        });
+
+        assert_eq!(syncing, Some(floor));
+        assert_eq!(one_column, Some(floor));
+        assert_eq!(responder.metadata().custody_group_count, Some(1));
+    }
+
+    /// The sequence number tracks what a peer would read, whichever input moved it: a spec
+    /// that changes the reported count bumps it, and one that does not leaves it alone.
+    #[test]
+    fn seq_number_follows_the_spec_as_well_as_the_subscriptions() {
+        let mut responder = Responder::new();
+        responder.set_subscriptions(&topics(&["data_column_sidecar_0"]));
+        let after_subscriptions = responder.metadata().seq_number;
+
+        responder.set_spec(&SpecSnapshot::MAINNET);
+        let unchanged = responder.metadata().seq_number;
+        responder.set_spec(&SpecSnapshot {
+            custody_requirement: 1,
+            ..SpecSnapshot::MAINNET
+        });
+
+        assert_eq!(unchanged, after_subscriptions);
+        assert_eq!(responder.metadata().seq_number, after_subscriptions + 1);
     }
 
     #[test]
