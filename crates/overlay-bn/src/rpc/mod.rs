@@ -75,9 +75,11 @@ impl Responder {
     }
 
     /// Recomputes the metadata from the beacon node's own subscriptions (the mirror's
-    /// `advertised` set, D12): attestation and sync committee subnets become bits, the data
-    /// column topics are counted as custody groups. The extra column topics the sidecar adds
-    /// on its own are in `local`, not here, so they never inflate the count.
+    /// `advertised` set, D12): attestation and sync committee subnets become bits, and the
+    /// distinct column subnets, however many fork digests each is subscribed under, are the
+    /// custody group count, which is then held inside the range the beacon node's spec gives
+    /// (`publish` below). The extra column topics the sidecar adds on its own are in `local`, not here,
+    /// so they never inflate the count.
     pub fn set_subscriptions(&mut self, advertised: &BTreeSet<Topic>) {
         let mut attnets = [0; 8];
         let mut syncnets = 0;
@@ -142,8 +144,10 @@ impl Responder {
     /// not serve is answered `ResourceUnavailable` whatever arrived on it, because a body
     /// longer than the 92 bytes of the largest request the sidecar serves is routine there (a
     /// by-root request of three roots is 96 bytes) and `InvalidRequest` costs the sidecar
-    /// peer score where `ResourceUnavailable` on a by-root protocol costs nothing
-    /// (`RPCError::ErrorResponse` in `beacon_node/lighthouse_network/src/peer_manager/mod.rs`).
+    /// peer score, while `ResourceUnavailable` costs nothing on the two protocols upstream
+    /// exempts, `BlobsByRoot` and `DataColumnsByRoot` (`RPCError::ErrorResponse` in
+    /// `beacon_node/lighthouse_network/src/peer_manager/mod.rs:559`). On the rest it is the
+    /// module doc's `PeerAction::Fatal`, which is why trust has to be in place.
     pub fn answer(&self, request: &Request) -> Response {
         match request {
             (Protocol::Unsupported, _) => Response::ResourceUnavailable,
@@ -162,7 +166,7 @@ impl Responder {
     /// `finalized_epoch` with a `head_slot` inside `SLOT_IMPORT_TOLERANCE` of its own head is
     /// `FullySynced`, so the beacon node's own fields are the one answer that makes the sidecar
     /// `Synced` by construction, at any slot and on any network, with no chain to consult.
-    pub fn respond(&self, protocol: Protocol, request: &[u8]) -> Response {
+    fn respond(&self, protocol: Protocol, request: &[u8]) -> Response {
         let body = match protocol {
             Protocol::StatusV1 => Status::decode(request, 1).map(|status| status.encode(1)),
             Protocol::StatusV2 => Status::decode(request, 2).map(|status| status.encode(2)),
@@ -603,10 +607,7 @@ mod tests {
         let status = status().encode(2);
         let good = request(&status);
         let responder = Responder::new();
-        let answer = |id: &StreamProtocol, bytes: &[u8]| match read(id, bytes) {
-            (protocol, Ok(body)) => responder.respond(protocol, &body),
-            (_, Err(Malformed)) => Response::InvalidRequest,
-        };
+        let answer = |id: &StreamProtocol, bytes: &[u8]| responder.answer(&read(id, bytes));
 
         let short = request(&status[..Status::V1_LEN]);
         assert_eq!(read(&STATUS_V2, &good), (Protocol::StatusV2, Ok(status)));
@@ -669,9 +670,10 @@ mod tests {
 
     /// A body longer than anything the sidecar serves, on a protocol it does not serve: a
     /// by-root request of three roots is 96 bytes and routine. The protocol decides, not the
-    /// body, because `ResourceUnavailable` on a by-root protocol carries no peer action while
-    /// `InvalidRequest` is a `PeerAction::LowToleranceError`
-    /// (`RPCError::ErrorResponse` in `beacon_node/lighthouse_network/src/peer_manager/mod.rs`).
+    /// body, because `ResourceUnavailable` on `BlobsByRoot` and `DataColumnsByRoot` carries no
+    /// peer action at all while `InvalidRequest` is a `PeerAction::LowToleranceError`
+    /// (`RPCError::ErrorResponse` in
+    /// `beacon_node/lighthouse_network/src/peer_manager/mod.rs:559`).
     #[test]
     fn an_unserved_protocol_is_unavailable_whatever_its_body_was() {
         let id = StreamProtocol::new("/eth2/beacon_chain/req/blob_sidecars_by_root/1/ssz_snappy");
@@ -699,7 +701,7 @@ mod tests {
         }
 
         let protocol = proto::classify(&id);
-        let response = Responder::new().respond(protocol, &request);
+        let response = Responder::new().answer(&(protocol, Ok(request)));
 
         assert_eq!(protocol, Protocol::Unsupported);
         assert_eq!(response, Response::ResourceUnavailable);
