@@ -1201,4 +1201,47 @@ mod tests {
             None
         );
     }
+    /// A peer that stops answering mid-handshake is its own row of
+    /// `handshake_failures_total`, and one an operator reads as a network problem rather than
+    /// as a disagreement about the roster.
+    #[test]
+    fn a_peer_that_stops_answering_is_counted_as_a_timeout() {
+        let failure =
+            HandshakeFailure::from_connection_error(Role::Dial, &quinn::ConnectionError::TimedOut)
+                .unwrap();
+
+        assert_eq!(failure.reason, FailureReason::Timeout);
+    }
+    /// Only `certificate_unknown` means a rejected key. Counting any other crypto alert as one
+    /// would send an operator to the roster and the seeds for a fault that is neither.
+    #[test]
+    fn a_crypto_alert_other_than_a_rejected_key_is_not_a_pin_failure() {
+        let alert =
+            quinn::TransportErrorCode::crypto(u8::from(rustls::AlertDescription::HandshakeFailure));
+
+        let error = quinn::ConnectionError::TransportError(alert.into());
+
+        let failure = HandshakeFailure::from_connection_error(Role::Accept, &error).unwrap();
+
+        assert_eq!(failure.reason, FailureReason::Version);
+    }
+    /// The failure reaches an operator through this string: T-023 logs it, and the alert rustls
+    /// sends the peer carries it as well.
+    #[test]
+    fn a_handshake_failure_reads_as_the_role_and_the_reason() {
+        let accepting = HandshakeFailure {
+            role: Role::Accept,
+            reason: FailureReason::UnknownKey,
+        };
+        let dialling = HandshakeFailure {
+            role: Role::Dial,
+            reason: FailureReason::KeyMismatch,
+        };
+
+        assert_eq!(
+            accepting.to_string(),
+            "accept handshake failed: unknown_key"
+        );
+        assert_eq!(dialling.to_string(), "dial handshake failed: key_mismatch");
+    }
 }
