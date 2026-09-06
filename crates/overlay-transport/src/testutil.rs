@@ -1,11 +1,14 @@
 //! A real overlay on loopback, for this crate's tests and for the crates that need one running:
 //! T-032's fanout and T-051's fleet harness.
 //!
-//! [`TestCluster`] binds an endpoint per host on an ephemeral port, builds the roster from the
-//! ports it got, and then starts a [`ConnectionManager`] on each. Binding first is what lets the
-//! roster hold real addresses without a fixed port anywhere, so several clusters run in parallel
-//! in one test binary. Not every host has to run a manager: a [`NodeKind::Sink`] is an endpoint
-//! that accepts and holds, which is how a test drives one manager from the outside.
+//! [`TestCluster`] binds an endpoint per host, builds the roster from the ports it got, and then
+//! starts a [`ConnectionManager`] on each. Binding first is what lets the roster hold real
+//! addresses with no port written down anywhere, so several clusters run in parallel in one test
+//! binary. The ports come from a range of the harness's own, below every platform's ephemeral
+//! range, rather than from `:0`: a restarted node has to bind the port it had, and with `:0` the
+//! operating system is free to hand that port to another test in the moment in between. Not
+//! every host has to run a manager: a [`NodeKind::Sink`] is an endpoint that accepts and holds,
+//! which is how a test drives one manager from the outside.
 //!
 //! ```ignore
 //! let mut cluster = TestCluster::start(3).await;
