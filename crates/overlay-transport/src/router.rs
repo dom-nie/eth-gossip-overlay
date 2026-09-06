@@ -131,4 +131,26 @@ mod tests {
 
         assert_eq!(plan, RoutePlan::Direct(vec![wants_it]));
     }
+
+    /// The sender is never a recipient of its own message, whatever the view says. A host has
+    /// nothing to connect to itself with, so its own name in the live set means a roster that
+    /// lists it twice, and sending there would hand the message back to the beacon node it came
+    /// from.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn excludes_self_even_if_self_appears_in_view() {
+        let connection = connection().await;
+        let block = topic("beacon_block");
+        let peer = host("bn-a");
+        let live = view(
+            &connection,
+            vec![
+                (peer.clone(), peer_state(&[(1, &block)], &[1])),
+                (me().hostname, peer_state(&[(1, &block)], &[1])),
+            ],
+        );
+
+        let plan = route(&block, Class::Large, &live, &me(), &Fanout::default());
+
+        assert_eq!(plan, RoutePlan::Direct(vec![peer]));
+    }
 }
