@@ -312,6 +312,22 @@ impl Queues {
         self.waiting.notify_one();
     }
 
+    /// Throws away everything queued, counting each frame under the peer that will never get
+    /// it. What was already handed to the transport is gone with the connection and is not
+    /// counted here: it left this queue.
+    fn discard(&self) {
+        while self.ledger.pop(self).is_some() {
+            self.stats
+                .queue_drop(&self.peer, Class::Large, DropReason::PeerDown);
+        }
+        let mut lane = self.lane(Class::Small);
+        while lane.pop().is_some() {
+            self.stats
+                .queue_drop(&self.peer, Class::Small, DropReason::PeerDown);
+        }
+        self.depth(Class::Small, &lane);
+    }
+
     /// The next frame to write: from the large lane while it has one that is still worth
     /// sending at `now`, then from the small lane. Large first, because a block waiting behind
     /// a second of attestations is a block that arrives after the slot it belongs to (D17).
@@ -358,6 +374,7 @@ impl SenderHandle {
         if let Some(task) = self.0.task.get() {
             task.abort();
         }
+        self.0.discard();
     }
 }
 
