@@ -967,4 +967,27 @@ mod tests {
         assert!(matches!(cluster.next_event(0).await, PeerEvent::Up(up) if up.hostname == peer));
         assert_eq!(cluster.live(0).len(), 1);
     }
+
+    /// A reload with a bigger roster dials the new host and leaves the old connection alone:
+    /// the same connection afterwards, not a fresh one that happens to be up again (§5.3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn roster_reload_adds_a_peer_without_dropping_existing_connections() {
+        let mut cluster = Builder::new(&[NodeKind::Manager; 3])
+            .roster(&[0, 1])
+            .start()
+            .await;
+        let (first, added) = (cluster.hostname(1), cluster.hostname(2));
+        assert!(matches!(cluster.next_event(0).await, PeerEvent::Up(up) if up.hostname == first));
+        let before = cluster.live(0).get(&first).unwrap().connection.stable_id();
+
+        cluster.set_roster(&[0, 1, 2]);
+
+        assert!(matches!(cluster.next_event(0).await, PeerEvent::Up(up) if up.hostname == added));
+        let after = cluster.live(0).get(&first).unwrap().connection.stable_id();
+        assert_eq!(
+            before, after,
+            "the reload replaced a connection it did not have to"
+        );
+        assert_eq!(cluster.live(0).len(), 2);
+    }
 }
