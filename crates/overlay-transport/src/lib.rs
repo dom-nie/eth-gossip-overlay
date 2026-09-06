@@ -1,5 +1,6 @@
 //! QUIC transport between sidecars.
 
+pub mod endpoint;
 pub mod tls;
 
 #[cfg(test)]
