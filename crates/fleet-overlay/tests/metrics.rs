@@ -5,7 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use fleet_overlay::metrics::{BnInbound, Metrics, serve};
@@ -728,4 +728,61 @@ fn process_collector_exports_resident_memory() {
     let rss = sample(&registry, "process_resident_memory_bytes", &[]);
 
     assert!(rss.unwrap_or_default() > 0.0, "{rss:?}");
+}
+
+/// Everything `tracing` writes in this binary. One process-wide subscriber rather than a
+/// thread-scoped one: tracing caches a call site's interest from whichever dispatcher first
+/// reaches it, so a `warn!` hit with no subscriber installed would stay silent afterwards.
+static LOG: LazyLock<Log> = LazyLock::new(|| {
+    let log = Log::default();
+    let sink = log.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || sink.clone())
+        .finish();
+    let _ = tracing::subscriber::set_global_default(subscriber);
+    log
+});
+
+/// What the subscriber has written so far.
+#[derive(Clone, Default)]
+struct Log(Arc<Mutex<Vec<u8>>>);
+
+#[allow(clippy::unwrap_used)]
+impl Log {
+    fn len(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+
+    fn since(&self, from: usize) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()[from..]).into_owned()
+    }
+}
+
+#[allow(clippy::unwrap_used)]
+impl std::io::Write for Log {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        std::io::Write::write(&mut *self.0.lock().unwrap(), buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn binding_off_loopback_logs_a_warning() {
+    let mark = LOG.len();
+    let registry = Registry::new();
+    Metrics::new(&registry).unwrap();
+
+    // TEST-NET-1, which no host has configured, so the warning is asserted without opening a
+    // listener anyone else could reach. Whether the bind then succeeds is beside the point.
+    let outcome = serve("192.0.2.1:0".parse().unwrap(), registry, no_gossipsub()).await;
+    if let Ok((_, server)) = outcome {
+        server.abort();
+    }
+
+    let logged = LOG.since(mark);
+    assert!(logged.contains("not a loopback address"), "{logged}");
 }
