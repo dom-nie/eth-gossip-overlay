@@ -469,10 +469,10 @@ impl Shared {
     }
 
     /// Puts `info` in the live slot, closing whatever was there. The whole swap is one critical
-    /// section and nothing in it can block: `close` only queues a frame and `try_send` never
-    /// waits. So the peer goes straight from the old connection to the new one, with no window
-    /// in which the table holds two of them or none, and no await another task could deadlock
-    /// against.
+    /// section and nothing in it can block: `close` only queues a frame, `try_send` never
+    /// waits, and `tokio::spawn` hands the runtime a task and returns. So the peer goes
+    /// straight from the old connection to the new one, with no window in which the table holds
+    /// two of them or none, and no await another task could deadlock against.
     fn adopt(&self, info: PeerInfo) {
         {
             let mut peers = self.peers();
@@ -485,8 +485,6 @@ impl Shared {
                 software_version: info.software_version.clone(),
                 negotiated: info.negotiated,
                 connection: info.connection.clone(),
-                // `tokio::spawn` queues a task and returns, so this is as free of waiting as
-                // the rest of the section the comment above describes.
                 sender: PeerSender::spawn(
                     info.hostname.clone(),
                     info.connection.clone(),
