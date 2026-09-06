@@ -203,7 +203,7 @@ impl Reloader {
         match read_config(&self.config_path) {
             Ok((document, config)) => {
                 self.apply_config(document, config, &mut report);
-                self.apply_roster(&mut report);
+                self.apply_roster(trigger, &mut report);
             }
             // A config the sidecar cannot run with stops the reload before the roster is read:
             // one broken file, one error, and the next reload applies both.
@@ -259,16 +259,39 @@ impl Reloader {
 
 impl Reloader {
     /// Publishes the roster on the watch channel when the file says something new. A file that
-    /// does not parse leaves the roster in force where it is.
-    fn apply_roster(&mut self, report: &mut ReloadReport) {
-        match Roster::load(&self.roster_path) {
-            Ok(roster) if *self.roster.borrow() == roster => {}
-            Ok(roster) => {
-                self.roster.send_replace(roster);
-                report.applied.push("roster".to_owned());
+    /// does not parse, or one the shrink guard refuses, leaves the roster in force where it is.
+    fn apply_roster(&mut self, trigger: Trigger, report: &mut ReloadReport) {
+        let roster = match Roster::load(&self.roster_path) {
+            Ok(roster) => roster,
+            Err(error) => {
+                report.error = Some(ReloadError::Roster(error.to_string()));
+                return;
             }
-            Err(error) => report.error = Some(ReloadError::Roster(error.to_string())),
+        };
+        if *self.roster.borrow() == roster {
+            return;
         }
+        let (before, removed) = {
+            let current = self.roster.borrow();
+            let removed = current
+                .hosts
+                .iter()
+                .filter(|host| roster.get(&host.hostname).is_none())
+                .count();
+            (current.hosts.len(), removed)
+        };
+        // A discovery tool that writes a half-empty roster is likelier to be broken than right,
+        // so an automatic reload stops here; a human who means to halve the fleet says so with
+        // SIGHUP or `fleet-overlayctl roster reload` (D26).
+        if trigger == Trigger::Automatic && removed * 2 > before {
+            report.error = Some(ReloadError::RosterShrinkRejected {
+                before,
+                after: roster.hosts.len(),
+            });
+            return;
+        }
+        self.roster.send_replace(roster);
+        report.applied.push("roster".to_owned());
     }
 }
 
