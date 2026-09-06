@@ -34,7 +34,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use arc_swap::ArcSwap;
 use ed25519_dalek::SigningKey;
@@ -59,6 +59,13 @@ use zeroize::Zeroizing;
 const PKCS8_ED25519_PREFIX: [u8; 16] = [
     0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x04, 0x22, 0x04, 0x20,
 ];
+
+/// The crypto provider the overlay uses, named rather than taken from the process default:
+/// another crate linked into the same binary may have registered a different one, and which
+/// of them answered would then come down to link order. Built once, because both
+/// configurations and every handshake signature reach for it.
+static PROVIDER: LazyLock<Arc<rustls::crypto::CryptoProvider>> =
+    LazyLock::new(|| Arc::new(rustls::crypto::ring::default_provider()));
 
 /// The 12 bytes every Ed25519 `SubjectPublicKeyInfo` starts with. The 32 that follow are the
 /// public key, and the 44 together are what a peer presents in place of a certificate.
@@ -198,9 +205,7 @@ impl Role {
             Self::Accept => "accept",
         }
     }
-}
 
-impl Role {
     /// What a rejected key is called from this side: the acceptor was shown a key belonging
     /// to nobody, the dialler a key belonging to somebody other than its peer.
     fn pin_failure(self) -> FailureReason {
@@ -385,7 +390,7 @@ fn verify_handshake_signature(
         message,
         &SubjectPublicKeyInfoDer::from(presented.as_ref()),
         signature,
-        &rustls::crypto::ring::default_provider().signature_verification_algorithms,
+        &PROVIDER.signature_verification_algorithms,
     )
 }
 
@@ -494,13 +499,6 @@ impl ServerCertVerifier for DialerVerifier {
     }
 }
 
-/// The crypto provider the overlay uses, named rather than taken from the process default:
-/// another crate linked into the same binary may have registered a different one, and which
-/// of them answered would then come down to link order.
-fn provider() -> Arc<rustls::crypto::CryptoProvider> {
-    Arc::new(rustls::crypto::ring::default_provider())
-}
-
 /// What this host dials `peer` with. TLS 1.3 only, because that is all QUIC has; the peer's
 /// key is checked against the pin table and the name in SNI is a placeholder nobody reads.
 pub fn client_config(
@@ -508,7 +506,7 @@ pub fn client_config(
     own_key: &SigningKey,
     peer: &Hostname,
 ) -> Result<quinn::ClientConfig, TlsError> {
-    let mut tls = rustls::ClientConfig::builder_with_provider(provider())
+    let mut tls = rustls::ClientConfig::builder_with_provider(PROVIDER.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(DialerVerifier::new(pins, peer.clone())))
@@ -532,7 +530,7 @@ pub fn server_config(
     pins: Arc<ArcSwap<PinTable>>,
     own_key: &SigningKey,
 ) -> Result<quinn::ServerConfig, TlsError> {
-    let mut tls = rustls::ServerConfig::builder_with_provider(provider())
+    let mut tls = rustls::ServerConfig::builder_with_provider(PROVIDER.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(Arc::new(AcceptorVerifier::new(pins)))
         .with_cert_resolver(Arc::new(AlwaysResolvesServerRawPublicKeys::new(identity(
