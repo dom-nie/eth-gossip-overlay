@@ -738,4 +738,23 @@ mod tests {
         assert_eq!(data, b"a block");
         assert_eq!(bn_id.0[..], id.0[..]);
     }
+
+    /// An operator raises or lowers `bn.publish_rate_limit` and SIGHUPs; the new ceiling is
+    /// what the next message is judged against.
+    #[tokio::test]
+    async fn a_changed_rate_limit_rebuilds_the_buckets() {
+        let mut h = Harness::new();
+        h.rates.send_replace(PublishRateLimit {
+            small_per_s: 1,
+            large_per_s: 1,
+            bytes_per_s: 1024,
+        });
+
+        let first = h.step_accepted(item(Class::Small, 0)).await;
+        let second = h.step_accepted(item(Class::Small, 1)).await;
+
+        assert_eq!(first, Some(PublishOutcome::Published));
+        assert_eq!(second, Some(PublishOutcome::RateLimited));
+        assert_eq!(h.stats.count("rate_limited", Class::Small), 1);
+    }
 }
