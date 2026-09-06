@@ -847,4 +847,69 @@ mod tests {
             FailureReason::KeyMismatch
         );
     }
+    /// One acceptor, one dialler, one configuration each, and a roster that grows in between.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn roster_reload_rebuilds_pin_table_without_rebuilding_config() {
+        let seeds = seeds(0x11, None);
+        let pins = pins(&roster(&["bn-a", "bn-b"]), &seeds);
+        let endpoint = quinn::Endpoint::server(
+            server_config(pins.clone(), &own_key(&seeds, "bn-a")).unwrap(),
+            loopback(),
+        )
+        .unwrap();
+        let addr = endpoint.local_addr().unwrap();
+        let accepting = {
+            let pins = pins.clone();
+            tokio::spawn(async move {
+                let mut outcomes = Vec::new();
+                for _ in 0..2 {
+                    let incoming = endpoint.accept().await.expect("the endpoint is still open");
+                    outcomes.push(match incoming.await {
+                        Ok(connection) => {
+                            peer_identity(&pins.load(), &connection).ok_or(HandshakeFailure {
+                                role: Role::Accept,
+                                reason: FailureReason::UnknownKey,
+                            })
+                        }
+                        Err(error) => Err(HandshakeFailure::from_connection_error(
+                            Role::Accept,
+                            &error,
+                        )),
+                    });
+                }
+                outcomes
+            })
+        };
+        let mut dialler = quinn::Endpoint::client(loopback()).unwrap();
+        dialler.set_default_client_config(
+            client_config(pins.clone(), &own_key(&seeds, "bn-c"), &host("bn-a")).unwrap(),
+        );
+
+        let refused = dialler
+            .connect(addr, PLACEHOLDER_NAME)
+            .unwrap()
+            .await
+            .unwrap();
+        refused.closed().await;
+        pins.store(Arc::new(PinTable::build(
+            &roster(&["bn-a", "bn-b", "bn-c"]),
+            &seeds,
+        )));
+        let admitted = dialler
+            .connect(addr, PLACEHOLDER_NAME)
+            .unwrap()
+            .await
+            .unwrap();
+
+        let outcomes = accepting.await.unwrap();
+        assert_eq!(
+            outcomes[0].as_ref().unwrap_err().reason,
+            FailureReason::UnknownKey
+        );
+        assert_eq!(outcomes[1].as_ref().unwrap().hostname, host("bn-c"));
+        assert_eq!(
+            peer_identity(&pins.load(), &admitted).unwrap().hostname,
+            host("bn-a")
+        );
+    }
 }
