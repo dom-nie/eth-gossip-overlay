@@ -13,7 +13,49 @@ use libp2p::StreamProtocol;
 use libp2p::futures::{AsyncWrite, AsyncWriteExt};
 use libp2p::request_response::Codec;
 
+use crate::rpc::msg::{Malformed, MetaData, Status};
+use crate::rpc::proto::Protocol;
+
 pub mod msg;
+pub mod proto;
+
+/// Answers requests from the sidecar's own state and nothing else: no chain, no clock, no
+/// channels, so the swarm loop calls it inline.
+#[derive(Clone, Debug, Default)]
+pub struct Responder {
+    metadata: MetaData,
+}
+
+impl Responder {
+    /// A responder with empty bitfields at sequence number 0.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// What a `MetaData` request is answered with right now.
+    pub fn metadata(&self) -> &MetaData {
+        &self.metadata
+    }
+
+    /// The response to `request`, received on `protocol`.
+    ///
+    /// Status is echoed. Lighthouse classifies a peer by comparing the peer's Status with its
+    /// own in `remote_sync_type` (`beacon_node/network/src/sync/peer_sync_info.rs`): an equal
+    /// `finalized_epoch` with a `head_slot` inside `SLOT_IMPORT_TOLERANCE` of its own head is
+    /// `FullySynced`, so the beacon node's own fields are the one answer that makes the sidecar
+    /// `Synced` by construction, at any slot and on any network, with no chain to consult.
+    pub fn respond(&self, protocol: Protocol, request: &[u8]) -> Response {
+        let body = match protocol {
+            Protocol::StatusV1 => Status::decode(request, 1).map(|status| status.encode(1)),
+            Protocol::StatusV2 => Status::decode(request, 2).map(|status| status.encode(2)),
+            _ => return Response::ResourceUnavailable,
+        };
+        match body {
+            Ok(body) => Response::Success(body),
+            Err(Malformed) => Response::InvalidRequest,
+        }
+    }
+}
 
 /// What the sidecar sends back for one request. `Goodbye` is the peer's own farewell; nothing
 /// is written for it and the loop closes the connection.
