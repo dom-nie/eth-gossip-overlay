@@ -31,15 +31,15 @@ use std::collections::BTreeMap;
 use std::convert::Infallible;
 use std::io;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use std::task::{Context, Poll};
 
-use hyper::body::{Body, Bytes, Frame, Incoming, SizeHint};
+use http_body_util::Full;
+use hyper::body::{Bytes, Incoming};
 use hyper::header::CONTENT_TYPE;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
 use overlay_bn::compat::CompatStats;
 use overlay_bn::inbound::InboundStats;
 use overlay_bn::publish::PublishStats;
@@ -60,7 +60,7 @@ use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
     Result, TextEncoder,
 };
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tracing::{debug, warn};
 
@@ -831,7 +831,7 @@ pub async fn serve(
                     async move { Ok::<_, Infallible>(response) }
                 });
                 if let Err(err) = http1::Builder::new()
-                    .serve_connection(TokioIo(stream), service)
+                    .serve_connection(TokioIo::new(stream), service)
                     .await
                 {
                     debug!(%err, "scrape connection ended early");
@@ -855,7 +855,7 @@ fn respond(
     req: &Request<Incoming>,
     main: &Registry,
     gossipsub: &Mutex<prometheus_client::registry::Registry>,
-) -> Response<OneShot> {
+) -> Response<Full<Bytes>> {
     if req.method() != Method::GET || req.uri().path() != METRICS_PATH {
         return not_found();
     }
@@ -863,22 +863,22 @@ fn respond(
     match exposition(main, gossipsub) {
         Ok(body) => Response::builder()
             .header(CONTENT_TYPE, TEXT_FORMAT)
-            .body(OneShot::from(body)),
+            .body(Full::new(Bytes::from(body))),
         Err(err) => {
             warn!(%err, "could not encode the metrics registry");
             Response::builder()
                 .status(StatusCode::INTERNAL_SERVER_ERROR)
-                .body(OneShot::from(String::new()))
+                .body(Full::default())
         }
     }
     .unwrap_or_else(|_| {
         // `Response::builder` only fails on a header this function does not build from input.
-        Response::new(OneShot::from(String::new()))
+        Response::new(Full::default())
     })
 }
 
-fn not_found() -> Response<OneShot> {
-    let mut response = Response::new(OneShot::from(String::new()));
+fn not_found() -> Response<Full<Bytes>> {
+    let mut response = Response::new(Full::default());
     *response.status_mut() = StatusCode::NOT_FOUND;
     response
 }
@@ -898,79 +898,4 @@ fn exposition(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     prometheus_client::encoding::text::encode(&mut body, &gossipsub)?;
     Ok(body)
-}
-
-/// The whole response in one frame. `http-body-util`'s `Full` does this and is not a workspace
-/// dependency; the body of a scrape is one buffer either way.
-struct OneShot(Option<Bytes>);
-
-impl From<String> for OneShot {
-    fn from(body: String) -> Self {
-        Self(Some(Bytes::from(body)))
-    }
-}
-
-impl Body for OneShot {
-    type Data = Bytes;
-    type Error = Infallible;
-
-    fn poll_frame(
-        self: Pin<&mut Self>,
-        _: &mut Context<'_>,
-    ) -> Poll<Option<std::result::Result<Frame<Bytes>, Infallible>>> {
-        Poll::Ready(self.get_mut().0.take().map(|body| Ok(Frame::data(body))))
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.0.is_none()
-    }
-
-    /// An exact hint is what gives the response a `Content-Length` instead of chunked framing,
-    /// so a scrape arrives as one body a parser can read without unwrapping chunks.
-    fn size_hint(&self) -> SizeHint {
-        let len = self.0.as_ref().map_or(0, Bytes::len);
-        SizeHint::with_exact(u64::try_from(len).unwrap_or(u64::MAX))
-    }
-}
-
-/// hyper 1 reads and writes through traits of its own and leaves the tokio bridge to
-/// `hyper-util`, which this workspace does not carry. The bridge is these two impls.
-struct TokioIo(TcpStream);
-
-impl hyper::rt::Read for TokioIo {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        mut cursor: hyper::rt::ReadBufCursor<'_>,
-    ) -> Poll<io::Result<()>> {
-        let mut scratch = [0u8; 8192];
-        let wanted = cursor.remaining().min(scratch.len());
-        let mut buf = tokio::io::ReadBuf::new(&mut scratch[..wanted]);
-        match tokio::io::AsyncRead::poll_read(Pin::new(&mut self.0), cx, &mut buf) {
-            Poll::Ready(Ok(())) => {
-                cursor.put_slice(buf.filled());
-                Poll::Ready(Ok(()))
-            }
-            Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
-
-impl hyper::rt::Write for TokioIo {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        tokio::io::AsyncWrite::poll_write(Pin::new(&mut self.0), cx, buf)
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        tokio::io::AsyncWrite::poll_flush(Pin::new(&mut self.0), cx)
-    }
-
-    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
-        tokio::io::AsyncWrite::poll_shutdown(Pin::new(&mut self.0), cx)
-    }
 }

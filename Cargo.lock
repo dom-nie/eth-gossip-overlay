@@ -2260,7 +2260,9 @@ version = "0.1.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "http-body-util",
  "hyper",
+ "hyper-util",
  "overlay-bn",
  "overlay-core",
  "overlay-transport",

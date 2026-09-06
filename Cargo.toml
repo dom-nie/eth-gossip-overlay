@@ -46,7 +46,11 @@ zeroize = "1"
 reed-solomon-simd = "3"
 prometheus = "0.14"
 prometheus-client = "0.24"
+# hyper 1 ships its runtime bridge and its body helpers as separate crates and is not usable
+# as a server without them.
 hyper = "1"
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
