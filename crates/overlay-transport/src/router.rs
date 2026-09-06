@@ -108,4 +108,27 @@ mod tests {
 
         assert_eq!(plan, RoutePlan::Direct(vec![first, second]));
     }
+
+    /// A peer whose beacon node wants other topics but not this one is not a recipient: the copy
+    /// would cost the WAN a message the far end drops (§5.4).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn excludes_peers_not_subscribed() {
+        let connection = connection().await;
+        let (block, attestation) = (topic("beacon_block"), topic("beacon_attestation_3"));
+        let (wants_it, wants_other) = (host("bn-a"), host("bn-b"));
+        let live = view(
+            &connection,
+            vec![
+                (wants_it.clone(), peer_state(&[(1, &block)], &[1])),
+                (
+                    wants_other.clone(),
+                    peer_state(&[(1, &attestation), (2, &block)], &[1]),
+                ),
+            ],
+        );
+
+        let plan = route(&block, Class::Large, &live, &me(), &Fanout::default());
+
+        assert_eq!(plan, RoutePlan::Direct(vec![wants_it]));
+    }
 }
