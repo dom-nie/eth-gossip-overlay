@@ -17,8 +17,8 @@ use overlay_core::msgid::MessageId;
 use overlay_core::protocol::{MAX_BATCH_ENTRIES, MAX_FRAME_BYTES};
 use overlay_core::wire::{
     BatchEntry, BatchFlags, Chunk, ChunkFlags, DecodeError, Frame, FrameType, Hello,
-    MAX_MISSING_INDICES, MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, Read, RepairReq, RepairResp,
-    read_frame, write_frame,
+    MAX_MISSING_INDICES, MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, Read, ReadError, RepairReq,
+    RepairResp, read_frame, write_frame,
 };
 use proptest::prelude::*;
 use tokio::io::AsyncWriteExt;
@@ -455,4 +455,16 @@ async fn read_frame_returns_unknown_for_an_unknown_type_and_the_next_frame_after
 
     assert!(matches!(first, Ok(Read::Unknown(200))));
     assert!(matches!(second, Ok(Read::Frame(got)) if got == hello));
+}
+
+#[tokio::test]
+async fn read_frame_rejects_length_prefix_above_maximum_without_allocating() {
+    let (mut writer, mut reader) = tokio::io::duplex(64);
+
+    within(writer.write_all(&u32::MAX.to_le_bytes()))
+        .await
+        .expect("write");
+    let read = within(read_frame(&mut reader, MAX_FRAME_BYTES)).await;
+
+    assert!(matches!(read, Err(ReadError::TooLarge(u32::MAX))));
 }
