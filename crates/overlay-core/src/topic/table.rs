@@ -67,6 +67,13 @@ impl OwnTopicTable {
         Ok((id, true))
     }
 
+    /// The id already bound to `topic`, or `None`. The send path uses this rather than
+    /// [`Self::intern`]: an id nobody has been told about yet is useless on a frame, so a miss
+    /// here means the message waits for the announcement instead of inventing an id (D12).
+    pub fn get(&self, topic: &Topic) -> Option<TopicId> {
+        self.ids.get(topic).copied()
+    }
+
     /// Every binding this host has made, as HELLO carries it. A peer that applies this knows
     /// every id this host can put on a frame at the moment the HELLO went out.
     pub fn snapshot(&self) -> Vec<(TopicId, String)> {
