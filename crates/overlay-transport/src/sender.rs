@@ -489,6 +489,20 @@ mod tests {
         (sender_on(&ledger, &stats, peer(), link), stats)
     }
 
+    /// Waits for `ready` and fails rather than hanging, and never later than `bound`: the two
+    /// tests about a stalled peer assert wall-clock times, so this one polls the real clock
+    /// tightly enough that the polling is not what they measure.
+    async fn within(bound: Duration, what: &str, mut ready: impl FnMut() -> bool) {
+        let poll = async {
+            while !ready() {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        };
+        tokio::time::timeout(bound, poll)
+            .await
+            .unwrap_or_else(|_| panic!("{what} did not happen within {bound:?}"));
+    }
+
     /// One more sender under the same ledger and counters, for the bounds that span peers.
     fn sender_on(
         ledger: &Arc<LargeLedger>,
@@ -618,5 +632,31 @@ mod tests {
         eventually("what is left to go out", || fast_link.sent().len() == 2).await;
         assert_eq!(fast_link.numbers(), vec![1, 2]);
         assert!(slow_link.sent().is_empty());
+    }
+
+    /// The point of a queue per peer: the sibling that has stopped reading holds up its own
+    /// frames and nobody else's, where one shared writer would have every peer waiting on the
+    /// slowest congestion window (§5.7).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_stalled_peer_does_not_delay_delivery_to_a_fast_peer() {
+        let ledger = Arc::new(LargeLedger::new(LARGE_QUEUED_BYTES_MAX));
+        let stats = Arc::new(CountingStats::default());
+        let (stalled_link, fast_link) = (Link::stalled(), Link::open());
+        let stalled = sender_on(&ledger, &stats, host("bn-01"), &stalled_link);
+        let fast = sender_on(&ledger, &stats, host("bn-02"), &fast_link);
+        let now = Instant::now();
+
+        for n in 0..10 {
+            stalled.push(Class::Large, frame(n), now).unwrap();
+            fast.push(Class::Large, frame(n), now).unwrap();
+        }
+
+        within(
+            Duration::from_millis(50),
+            "the fast peer to get them all",
+            || fast_link.sent().len() == 10,
+        )
+        .await;
+        assert!(stalled_link.sent().is_empty());
     }
 }
