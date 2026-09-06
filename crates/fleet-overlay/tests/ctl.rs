@@ -110,3 +110,17 @@ fn ctl_roster_reload_prints_applied_and_restart_required_fields_and_exits_1_on_e
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("no such file"), "{stderr}");
 }
+
+#[test]
+fn ctl_reports_exit_2_when_socket_is_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("admin.sock");
+
+    let output = ctl(&missing).args(["inject", "status"]).output().unwrap();
+
+    // Nothing to talk to is not the same as a refusal, because it usually means the unit is
+    // not running rather than that the command was wrong.
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains(&missing.display().to_string()), "{stderr}");
+}
