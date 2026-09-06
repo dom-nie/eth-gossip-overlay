@@ -138,8 +138,9 @@ fn array<const N: usize>(bytes: &[u8]) -> [u8; N] {
 
 #[cfg(test)]
 mod tests {
+    use lighthouse_network::rpc::GoodbyeReason;
     use lighthouse_network::rpc::methods::{
-        MetaDataV2, MetaDataV3, StatusMessageV1, StatusMessageV2,
+        MetaDataV2, MetaDataV3, Ping as LighthousePing, StatusMessageV1, StatusMessageV2,
     };
     use ssz::{Decode, Encode};
     use types::{Epoch, Hash256, MainnetEthSpec, Slot};
@@ -224,5 +225,19 @@ mod tests {
         assert_eq!(theirs.custody_group_count, 8);
         assert_eq!(MetaData::decode(&theirs.as_ssz_bytes(), 3).unwrap(), metadata);
         assert_eq!(MetaData::decode(&v3, 2), Err(Malformed));
+    }
+
+    #[test]
+    fn ping_and_goodbye_round_trip_against_lighthouse_ssz() {
+        let ping = LighthousePing::from_ssz_bytes(&Ping(0x0102_0304_0506_0708).encode()).unwrap();
+        assert_eq!(ping.data, 0x0102_0304_0506_0708);
+        assert_eq!(Ping::decode(&ping.as_ssz_bytes()), Ok(Ping(0x0102_0304_0506_0708)));
+
+        let reason = GoodbyeReason::from_ssz_bytes(&Goodbye(129).encode()).unwrap();
+        assert_eq!(reason, GoodbyeReason::TooManyPeers);
+        assert_eq!(Goodbye::decode(&reason.as_ssz_bytes()), Ok(Goodbye(129)));
+
+        assert_eq!(Ping::decode(&[1; 7]), Err(Malformed));
+        assert_eq!(Goodbye::decode(&[1; 9]), Err(Malformed));
     }
 }
