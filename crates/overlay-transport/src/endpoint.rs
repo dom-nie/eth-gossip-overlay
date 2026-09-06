@@ -441,4 +441,28 @@ mod tests {
             host("bn-b")
         );
     }
+    /// `overlay.listen` is the one thing an operator can change here, so the error names it.
+    /// A bare "address already in use" leaves them guessing which of the sidecar's ports it
+    /// means.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bind_failure_reports_address_in_error() {
+        let (seeds, pins) = fleet(&["bn-a"]);
+        let held = endpoint(&config("127.0.0.1:0"), &pins, &seeds, "bn-a");
+        let taken = held.local_addr().unwrap();
+
+        let error = bind(
+            &Overlay {
+                listen: taken,
+                ..Overlay::default()
+            },
+            tls::server_config(pins.clone(), &own_key(&seeds, "bn-a")).unwrap(),
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(&error, EndpointError::Bind { addr, .. } if *addr == taken),
+            "{error}"
+        );
+        assert!(error.to_string().contains(&taken.to_string()), "{error}");
+    }
 }
