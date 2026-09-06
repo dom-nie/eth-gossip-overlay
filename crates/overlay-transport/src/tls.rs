@@ -499,13 +499,13 @@ impl ServerCertVerifier for DialerVerifier {
     }
 }
 
-/// What this host dials `peer` with. TLS 1.3 only, because that is all QUIC has; the peer's
-/// key is checked against the pin table and the name in SNI is a placeholder nobody reads.
-pub fn client_config(
+/// The dialler's rustls configuration, which [`client_config`] wraps for quinn. Kept apart so
+/// that a test can vary one field of the real thing rather than assemble a lookalike.
+fn client_tls(
     pins: Arc<ArcSwap<PinTable>>,
     own_key: &SigningKey,
     peer: &Hostname,
-) -> Result<quinn::ClientConfig, TlsError> {
+) -> Result<rustls::ClientConfig, TlsError> {
     let mut tls = rustls::ClientConfig::builder_with_provider(PROVIDER.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .dangerous()
@@ -514,22 +514,33 @@ pub fn client_config(
             own_key,
         )?)));
     // A ticket is a cached admission decision, and admission is per roster and per seed. A
-    // resumed session skips the certificate state entirely, so the pin check would not run
-    // and a ticket would outlive the roster entry that earned it.
+    // resumed session skips the certificate state entirely, so the pin check would not run and
+    // a ticket would outlive the roster entry that earned it. Early data rides on the same
+    // tickets and must stay off with them.
     tls.resumption = rustls::client::Resumption::disabled();
+    tls.enable_early_data = false;
     tls.alpn_protocols = vec![protocol_alpn()];
+    Ok(tls)
+}
+
+/// What this host dials `peer` with. TLS 1.3 only, because that is all QUIC has; the peer's
+/// key is checked against the pin table and the name in SNI is a placeholder nobody reads.
+pub fn client_config(
+    pins: Arc<ArcSwap<PinTable>>,
+    own_key: &SigningKey,
+    peer: &Hostname,
+) -> Result<quinn::ClientConfig, TlsError> {
     Ok(quinn::ClientConfig::new(Arc::new(
-        QuicClientConfig::try_from(tls)?,
+        QuicClientConfig::try_from(client_tls(pins, own_key, peer)?)?,
     )))
 }
 
-/// What this host accepts on. Client authentication is mandatory: an anonymous connection has
-/// no key to pin, and pinning is the only thing standing between an open UDP port and a
-/// trusted path into a beacon node.
-pub fn server_config(
+/// The acceptor's rustls configuration, which [`server_config`] wraps for quinn. Split out for
+/// the same reason as [`client_tls`].
+fn server_tls(
     pins: Arc<ArcSwap<PinTable>>,
     own_key: &SigningKey,
-) -> Result<quinn::ServerConfig, TlsError> {
+) -> Result<rustls::ServerConfig, TlsError> {
     let mut tls = rustls::ServerConfig::builder_with_provider(PROVIDER.clone())
         .with_protocol_versions(&[&rustls::version::TLS13])?
         .with_client_cert_verifier(Arc::new(AcceptorVerifier::new(pins)))
@@ -539,12 +550,24 @@ pub fn server_config(
     // No tickets to hand out and nothing to resume from. A resumed session restores the peer
     // straight from the ticket without entering the certificate state, so the pin check never
     // runs and a host expelled from the roster would keep its path in until the ticket aged
-    // out. Admission is per roster and per seed; a cached decision cannot be either.
+    // out. Admission is per roster and per seed; a cached decision cannot be either. Early
+    // data is accepted on the strength of the same ticket and stays off with it.
     tls.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
     tls.send_tls13_tickets = 0;
+    tls.max_early_data_size = 0;
     tls.alpn_protocols = vec![protocol_alpn()];
+    Ok(tls)
+}
+
+/// What this host accepts on. Client authentication is mandatory: an anonymous connection has
+/// no key to pin, and pinning is the only thing standing between an open UDP port and a
+/// trusted path into a beacon node.
+pub fn server_config(
+    pins: Arc<ArcSwap<PinTable>>,
+    own_key: &SigningKey,
+) -> Result<quinn::ServerConfig, TlsError> {
     Ok(quinn::ServerConfig::with_crypto(Arc::new(
-        QuicServerConfig::try_from(tls)?,
+        QuicServerConfig::try_from(server_tls(pins, own_key)?)?,
     )))
 }
 
