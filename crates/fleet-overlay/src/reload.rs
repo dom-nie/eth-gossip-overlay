@@ -63,7 +63,7 @@ pub enum Trigger {
 
 /// What one reload did, returned to whoever asked for it and serialized verbatim by T-042's
 /// admin socket.
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ReloadReport {
     /// What asked for this reload.
     pub trigger: Trigger,
@@ -76,7 +76,7 @@ pub struct ReloadReport {
 }
 
 /// Why a reload kept the previous values.
-#[derive(Debug, PartialEq, Eq, Serialize, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, thiserror::Error)]
 pub enum ReloadError {
     /// `config.yaml` could not be read, does not parse, or holds a value the sidecar cannot
     /// run with. Also how an applier reports a file it could not read.
@@ -378,8 +378,8 @@ fn covers(key: &str, path: &str) -> bool {
 mod tests {
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use overlay_core::config::{Log, PublishRateLimit};
     use overlay_core::identity::{FleetSeed, write_secret_file};
@@ -404,6 +404,48 @@ mod tests {
         text
     }
 
+    /// Every report the reloader finished, which is what T-041 binds the two counters to.
+    #[derive(Default)]
+    struct Recorded(Mutex<Vec<ReloadReport>>);
+
+    impl Recorded {
+        /// Reloads that ended in an error, the `outcome="error"` series.
+        fn errors(&self) -> usize {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.error.is_some())
+                .count()
+        }
+
+        /// Reloads that ended clean, the `outcome="ok"` series.
+        fn ok(&self) -> usize {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.error.is_none())
+                .count()
+        }
+
+        /// Rosters the shrink guard refused, `roster_reload_rejected_total`.
+        fn rejected(&self) -> usize {
+            self.0
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| matches!(r.error, Some(ReloadError::RosterShrinkRejected { .. })))
+                .count()
+        }
+    }
+
+    impl ReloadStats for Recorded {
+        fn reloaded(&self, report: &ReloadReport) {
+            self.0.lock().unwrap().push(report.clone());
+        }
+    }
+
     /// A reloader over files in a temp directory, holding the receiving end of every channel
     /// an applier writes to.
     struct Fixture {
@@ -413,6 +455,7 @@ mod tests {
         inject: Arc<AtomicBool>,
         roster: watch::Receiver<Roster>,
         previous_seed: watch::Receiver<Option<FleetSeed>>,
+        stats: Arc<Recorded>,
         reloader: Reloader,
     }
 
@@ -432,6 +475,7 @@ mod tests {
             let (seed_tx, previous_seed) = watch::channel(None);
             let (limits_tx, _) = watch::channel(PublishRateLimit::default());
             let (_, _, log) = testing::subscriber(&Log::default(), false, None);
+            let stats = Arc::new(Recorded::default());
             let reloader = Reloader::new(
                 config_path.clone(),
                 Deps {
@@ -440,7 +484,7 @@ mod tests {
                     previous_seed: seed_tx,
                     limits: limits_tx,
                     log: Arc::new(log),
-                    stats: Arc::new(()),
+                    stats: stats.clone(),
                 },
             )
             .unwrap();
@@ -451,6 +495,7 @@ mod tests {
                 inject,
                 roster: roster_rx,
                 previous_seed,
+                stats,
                 reloader,
             }
         }
@@ -646,5 +691,40 @@ mod tests {
         assert!(report.restart_required.is_empty(), "{report:?}");
         assert!(report.error.is_none(), "{report:?}");
         assert!(!h.roster.has_changed().unwrap());
+    }
+
+    #[test]
+    fn automatic_reload_removing_more_than_half_the_hosts_is_rejected_and_counted() {
+        let mut h = Fixture::new(CONFIG, &roster_yaml(10));
+        h.write_roster(&roster_yaml(4));
+        h.write_config("overlay:\n  roster_file: ROSTER\ninject: false\n");
+
+        let report = h.reloader.reload(Trigger::Automatic);
+
+        assert_eq!(report.applied, ["inject"]);
+        assert_eq!(
+            report.error,
+            Some(ReloadError::RosterShrinkRejected {
+                before: 10,
+                after: 4
+            })
+        );
+        assert_eq!(h.roster.borrow_and_update().hosts.len(), 10);
+        assert!(!h.inject.load(Ordering::Relaxed));
+        assert_eq!(
+            (h.stats.ok(), h.stats.errors(), h.stats.rejected()),
+            (0, 1, 1)
+        );
+
+        h.write_roster(&roster_yaml(5));
+        let report = h.reloader.reload(Trigger::Automatic);
+
+        assert_eq!(report.applied, ["roster"]);
+        assert!(report.error.is_none(), "{report:?}");
+        assert_eq!(h.roster.borrow_and_update().hosts.len(), 5);
+        assert_eq!(
+            (h.stats.ok(), h.stats.errors(), h.stats.rejected()),
+            (1, 1, 1)
+        );
     }
 }
