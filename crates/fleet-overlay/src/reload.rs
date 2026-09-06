@@ -111,7 +111,9 @@ pub struct ReloadReport {
     pub applied: Vec<String>,
     /// Keys that changed in the file but only take effect on a restart.
     pub restart_required: Vec<String>,
-    /// Why the reload did not finish, if it did not. The previous values stay in force.
+    /// Why the reload did not finish, if it did not. The previous values stay in force. One
+    /// slot: a reload that hits two problems reports the later one, which is the roster's,
+    /// because that is the one an alert watches.
     pub error: Option<ReloadError>,
 }
 
@@ -1150,5 +1152,20 @@ mod tests {
         assert_eq!(line["trigger"], "automatic");
         let error = line["error"].to_string();
         assert!(error.contains("10") && error.contains('4'), "{error}");
+    }
+
+    #[test]
+    fn no_reloadable_key_has_two_appliers() {
+        let h = Fixture::new(CONFIG, &roster_yaml(3));
+
+        for path in RELOADABLE {
+            let owners = h
+                .reloader
+                .appliers
+                .iter()
+                .filter(|(key, _)| covers(key, path))
+                .count();
+            assert!(owners <= 1, "{path} is applied by {owners} appliers");
+        }
     }
 }
