@@ -59,8 +59,7 @@ fn every_metric_in_section_12_is_registered() {
     let metrics = Metrics::new(&registry).unwrap();
 
     let expected: BTreeSet<&str> = SECTION_12.iter().copied().collect();
-    let registered = metrics.registered_names();
-    let registered: BTreeSet<&str> = registered.iter().map(String::as_str).collect();
+    let registered: BTreeSet<&str> = metrics.registered_names().collect();
 
     let missing: Vec<&&str> = expected.difference(&registered).collect();
     let unexpected: Vec<&&str> = registered.difference(&expected).collect();
@@ -102,7 +101,10 @@ const LABELS: &[(&str, &[&str])] = &[
     ("overlay_parity_used_total", &[]),
     ("overlay_peer_auth_via_previous_seed_total", &["peer"]),
     ("overlay_peer_queue_depth", &["class", "peer", "unit"]),
-    ("overlay_peer_queue_drops_total", &["class", "peer", "reason"]),
+    (
+        "overlay_peer_queue_drops_total",
+        &["class", "peer", "reason"],
+    ),
     ("overlay_peers_connected", &["region", "site"]),
     ("overlay_peers_roster", &["region", "site"]),
     ("overlay_publish_errors_total", &["class", "reason"]),

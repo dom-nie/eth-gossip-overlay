@@ -26,7 +26,7 @@
 //! zero so the names, the alert rules and the dashboard never wait on a later release; the
 //! ticket that lands the component adds the handle and the trait that feeds it.
 
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
 
 use prometheus::core::Collector;
 use prometheus::{
@@ -161,17 +161,18 @@ pub const REASON_INJECT_OFF: &str = "inject_off";
 /// Control events share the lane counter under a class of their own.
 pub const CLASS_CONTROL: &str = "control";
 
-/// Registers each metric and remembers the name the registry took it under, so the §12
-/// contract test reads the descriptors rather than a second hand-written list.
+/// Registers each metric and remembers the descriptor the registry took it under, so the §12
+/// contract tests read the registered metrics rather than a second hand-written list.
 struct Builder<'a> {
     registry: &'a Registry,
-    names: BTreeSet<String>,
+    registered: BTreeMap<String, Vec<String>>,
 }
 
 impl Builder<'_> {
     fn add<C: Collector + Clone + 'static>(&mut self, metric: C) -> Result<C> {
         for desc in metric.desc() {
-            self.names.insert(desc.fq_name.clone());
+            self.registered
+                .insert(desc.fq_name.clone(), desc.variable_labels.clone());
         }
         self.registry.register(Box::new(metric.clone()))?;
         Ok(metric)
@@ -196,7 +197,7 @@ impl Builder<'_> {
 
 /// Every §12 metric, registered on one `prometheus::Registry`.
 pub struct Metrics {
-    names: BTreeSet<String>,
+    registered: BTreeMap<String, Vec<String>>,
 }
 
 impl Metrics {
@@ -205,7 +206,7 @@ impl Metrics {
     pub fn new(registry: &Registry) -> Result<Self> {
         let mut b = Builder {
             registry,
-            names: BTreeSet::new(),
+            registered: BTreeMap::new(),
         };
 
         let region_site = &[LABEL_REGION, LABEL_SITE];
@@ -393,14 +394,21 @@ impl Metrics {
             prometheus::process_collector::ProcessCollector::for_self(),
         ))?;
 
-        Ok(Self { names: b.names })
+        Ok(Self {
+            registered: b.registered,
+        })
     }
 
     /// The fully qualified name of every metric registered here, taken from the descriptors of
     /// the collectors themselves. The registry prunes families with no series, so gathering an
     /// idle registry would not show a metric that is registered and never touched, which is
     /// exactly what the §12 contract has to see.
-    pub fn registered_names(&self) -> &BTreeSet<String> {
-        &self.names
+    pub fn registered_names(&self) -> impl Iterator<Item = &str> {
+        self.registered.keys().map(String::as_str)
+    }
+
+    /// The label names `metric` was registered with, or `None` if it was not registered here.
+    pub fn label_names(&self, metric: &str) -> Option<&[String]> {
+        self.registered.get(metric).map(Vec::as_slice)
     }
 }
