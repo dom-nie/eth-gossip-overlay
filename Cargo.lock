@@ -2268,9 +2268,11 @@ dependencies = [
  "overlay-transport",
  "prometheus 0.14.0",
  "prometheus-client",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-appender",
  "tracing-subscriber",
 ]
 

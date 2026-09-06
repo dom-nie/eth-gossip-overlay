@@ -54,6 +54,9 @@ http-body-util = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
+# The stdout writer the single log stream goes through, so a slow reader on the other end of
+# the pipe never blocks a receive path (D32).
+tracing-appender = "0.2"
 sd-notify = "0.5"
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"
