@@ -969,6 +969,36 @@ mod tests {
         );
     }
 
+    /// A dial the swarm refuses because it is already connected must not put the link back on
+    /// the backoff: while the beacon node holds the connection it opened, there is nothing to
+    /// dial and nothing to ask the HTTP API for. The one request that may still land is the
+    /// fetch that was already in flight when the connection arrived.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn link_the_bn_dialled_stops_retrying_its_own_dial() {
+        let bn = FakeBn::start().await;
+        let cfg = LinkConfig {
+            libp2p_addr: closed_port(),
+            ..link_config(&bn)
+        };
+        let mut harness = spawn(cfg, &bn);
+        let addr = listen_addr(&harness).await;
+        identity_requests_reach(&bn, 2).await;
+        bn.dial(addr).await;
+        wait_for(&mut harness.link.events, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+        let on_connect = identity_requests(bn.http()).await;
+
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        let later = identity_requests(bn.http()).await;
+        assert!(
+            later <= on_connect + 1,
+            "{on_connect} identity requests on connect, {later} half a second later"
+        );
+    }
+
     /// A connection the sidecar did not open is not a special case: the connect probe runs on
     /// it and gossip flows over it. That the beacon node was also made the explicit peer is
     /// not observable from outside the swarm, so what this shows is everything else
