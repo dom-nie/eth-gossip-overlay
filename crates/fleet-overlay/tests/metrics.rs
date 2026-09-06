@@ -9,6 +9,7 @@ use std::sync::{Arc, LazyLock, Mutex};
 use std::time::Duration;
 
 use fleet_overlay::metrics::{BnInbound, Metrics, serve};
+use fleet_overlay::reload::{ReloadError, ReloadReport, ReloadStats, Trigger};
 use overlay_bn::compat::{self, CompatStats};
 use overlay_bn::inbound::InboundStats;
 use overlay_bn::publish::PublishStats;
@@ -728,6 +729,45 @@ fn sender_stats_reports_queue_depth_in_both_units() {
 /// The process collector is Linux-only in the prometheus crate, so this is the one test the
 /// workspace's other platforms skip rather than fake.
 #[cfg(target_os = "linux")]
+/// A report of one reload, which is all [`ReloadStats`] is given.
+fn report(error: Option<ReloadError>) -> ReloadReport {
+    ReloadReport {
+        trigger: Trigger::Manual,
+        applied: Vec::new(),
+        restart_required: Vec::new(),
+        error,
+    }
+}
+
+#[test]
+fn reload_stats_counts_the_outcome_and_a_rejected_roster() {
+    let registry = Registry::new();
+    let metrics = Metrics::new(&registry).unwrap();
+
+    ReloadStats::reloaded(&metrics, &report(None));
+    ReloadStats::reloaded(
+        &metrics,
+        &report(Some(ReloadError::RosterShrinkRejected {
+            before: 10,
+            after: 4,
+        })),
+    );
+
+    let outcome = |outcome| {
+        sample(
+            &registry,
+            "overlay_config_reload_total",
+            &[("outcome", outcome)],
+        )
+    };
+    assert_eq!(outcome("ok"), Some(1.0));
+    assert_eq!(outcome("error"), Some(1.0));
+    assert_eq!(
+        sample(&registry, "overlay_roster_reload_rejected_total", &[]),
+        Some(1.0)
+    );
+}
+
 #[test]
 fn process_collector_exports_resident_memory() {
     let registry = Registry::new();
