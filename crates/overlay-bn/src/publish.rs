@@ -22,13 +22,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use libp2p::gossipsub::PublishError;
+use overlay_core::config::PublishRateLimit;
 use overlay_core::pubqueue::{
     DropReason, PublishItem, PublishQueue, PublishSink, Pushed, QueueStats,
 };
 use overlay_core::ratelimit::PublishLimits;
 use overlay_core::time::Clock;
 use overlay_core::topic::Class;
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::link::BnCommand;
@@ -145,6 +146,7 @@ pub struct Publisher {
     queue: PublishHandle,
     commands: mpsc::Sender<BnCommand>,
     inject: Arc<AtomicBool>,
+    rates: watch::Receiver<PublishRateLimit>,
     limits: PublishLimits,
     stats: Arc<dyn PublishStats>,
 }
@@ -153,23 +155,23 @@ impl Publisher {
     /// Builds the queue and starts draining it into `commands`. The handle is what T-032,
     /// T-062 and T-074 hold; the task keeps going until the link is gone. `inject` is the
     /// kill switch, shared with whoever flips it (config, SIGHUP, `fleet-overlayctl`); it is
-    /// read per item, so flipping it back on resumes without a restart. `limits` are
-    /// [`PublishLimits::new`] from `bn.publish_rate_limit`.
+    /// read per item, so flipping it back on resumes without a restart. `rates` carries
+    /// `bn.publish_rate_limit`, which T-043 sends a new value on when an operator changes it.
     pub fn spawn(
         commands: mpsc::Sender<BnCommand>,
         inject: Arc<AtomicBool>,
-        limits: PublishLimits,
+        rates: watch::Receiver<PublishRateLimit>,
         stats: Arc<dyn PublishStats>,
         clock: Arc<dyn Clock>,
     ) -> (PublishHandle, JoinHandle<()>) {
-        let (handle, publisher) = Self::new(commands, inject, limits, stats, clock);
+        let (handle, publisher) = Self::new(commands, inject, rates, stats, clock);
         (handle, tokio::spawn(publisher.run()))
     }
 
     fn new(
         commands: mpsc::Sender<BnCommand>,
         inject: Arc<AtomicBool>,
-        limits: PublishLimits,
+        rates: watch::Receiver<PublishRateLimit>,
         stats: Arc<dyn PublishStats>,
         clock: Arc<dyn Clock>,
     ) -> (PublishHandle, Self) {
@@ -180,10 +182,12 @@ impl Publisher {
             wake: Arc::new(Notify::new()),
             clock,
         };
+        let limits = PublishLimits::new(&rates.borrow(), handle.clock.now());
         let publisher = Self {
             queue: handle.clone(),
             commands,
             inject,
+            rates,
             limits,
             stats,
         };
@@ -206,6 +210,7 @@ impl Publisher {
     /// Publishes one item and reports what became of it. `None` means the link is gone:
     /// the command could not be delivered or its reply was dropped.
     async fn step(&mut self, item: PublishItem) -> Option<PublishOutcome> {
+        self.refresh_limits();
         let class = item.class;
         if !self.inject.load(Ordering::Relaxed) {
             self.stats.suppressed_inject_off(class);
@@ -249,6 +254,17 @@ impl Publisher {
         };
         Some(outcome)
     }
+
+    /// Rebuilds the token buckets when an operator changed `bn.publish_rate_limit`. The new
+    /// buckets start full rather than carrying the old level across: a raised ceiling should
+    /// take effect at once instead of waiting out a bucket sized for the old one, and a
+    /// lowered ceiling holds from the next message.
+    fn refresh_limits(&mut self) {
+        if self.rates.has_changed().unwrap_or(false) {
+            let now = self.queue.clock.now();
+            self.limits = PublishLimits::new(&self.rates.borrow_and_update(), now);
+        }
+    }
 }
 
 /// The `reason` label for a gossipsub refusal.
@@ -275,12 +291,10 @@ mod tests {
     use overlay_core::lanes::ClassLanes;
     use overlay_core::msgid::{self, MessageId};
     use overlay_core::pubqueue::{PublishItem, PublishSink};
-    use overlay_core::ratelimit::PublishLimits;
     use overlay_core::time::FakeClock;
     use overlay_core::topic::{Class, SubscriptionSets, Topic};
     use prometheus_client::registry::Registry;
-    use tokio::sync::mpsc;
-    use tokio::sync::watch;
+    use tokio::sync::{mpsc, watch};
     use tokio::task::JoinHandle;
 
     use super::*;
@@ -384,6 +398,7 @@ mod tests {
         publisher: Option<Publisher>,
         commands: mpsc::Receiver<BnCommand>,
         inject: Arc<AtomicBool>,
+        rates: watch::Sender<PublishRateLimit>,
         clock: FakeClock,
         stats: Arc<Recorded>,
     }
@@ -395,11 +410,11 @@ mod tests {
             let clock = FakeClock::new();
             let stats = Arc::new(Recorded::default());
             let inject = Arc::new(AtomicBool::new(true));
-            let limits = PublishLimits::new(&PublishRateLimit::default(), clock.now());
+            let (rates, rates_rx) = watch::channel(PublishRateLimit::default());
             let (handle, publisher) = Publisher::new(
                 commands_tx,
                 inject.clone(),
-                limits,
+                rates_rx,
                 stats.clone(),
                 Arc::new(clock.clone()),
             );
@@ -408,6 +423,7 @@ mod tests {
                 publisher: Some(publisher),
                 commands,
                 inject,
+                rates,
                 clock,
                 stats,
             }
@@ -712,10 +728,11 @@ mod tests {
         bn.wait_for(|e| matches!(e, FakeBnEvent::Subscribed { topic, .. } if topic == BLOCK))
             .await;
         let clock = FakeClock::new();
+        let (_rates, rates) = watch::channel(PublishRateLimit::default());
         let (handle, _task) = Publisher::spawn(
             commands,
             Arc::new(AtomicBool::new(true)),
-            PublishLimits::new(&PublishRateLimit::default(), clock.now()),
+            rates,
             Arc::new(()),
             Arc::new(clock),
         );
