@@ -577,4 +577,20 @@ mod tests {
         let entry = AcceptorVerifier::new(pins).identify(&key).unwrap();
         assert_eq!(entry.hostname, host("bn-a"));
     }
+    #[test]
+    fn previous_seed_key_is_accepted_while_configured_and_rejected_after() {
+        let roster = roster(&["bn-a"]);
+        let old_key = presented(&FleetSeed::from([0x22; 32]), "bn-a");
+
+        let during = AcceptorVerifier::new(pins(&roster, &seeds(0x11, Some(0x22))))
+            .identify(&old_key)
+            .unwrap();
+        let after = AcceptorVerifier::new(pins(&roster, &seeds(0x11, None)))
+            .identify(&old_key)
+            .unwrap_err();
+
+        assert_eq!(during.hostname, host("bn-a"));
+        assert_eq!(during.seed, SeedGeneration::Previous);
+        assert_eq!(after.reason.as_str(), "unknown_key");
+    }
 }
