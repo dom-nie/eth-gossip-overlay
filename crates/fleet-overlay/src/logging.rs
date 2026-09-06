@@ -316,4 +316,28 @@ mod tests {
         );
         assert!(terminal.text().contains("the overlay is up"));
     }
+
+    #[test]
+    fn set_level_and_set_format_take_effect_on_the_next_line() {
+        let sink = capture(&Log::default(), false, None, |handle| {
+            tracing::debug!("below the configured level");
+            handle.set_level("debug");
+            tracing::debug!("above it now");
+            handle.set_format(LogFormat::Text);
+            tracing::debug!("in text now");
+        });
+
+        let lines: Vec<&str> = sink.text().lines().collect();
+        assert_eq!(lines.len(), 2, "{}", sink.text());
+        assert_eq!(
+            serde_json::from_str::<Value>(lines[0]).unwrap()["message"],
+            "above it now"
+        );
+        assert!(
+            serde_json::from_str::<Value>(lines[1]).is_err(),
+            "{}",
+            lines[1]
+        );
+        assert!(lines[1].contains("in text now"), "{}", lines[1]);
+    }
 }
