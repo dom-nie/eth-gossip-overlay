@@ -430,10 +430,27 @@ mod tests {
     use overlay_core::topic::Topic;
 
     use super::*;
-    use crate::testutil::{Builder, NodeKind, WAIT};
+    use crate::testutil::{Builder, NodeKind, REGION, WAIT};
 
     /// A fork digest, as a topic string carries one.
     const DIGEST: [u8; 4] = [0x6a, 0x95, 0xa1, 0xa9];
+
+    /// A HELLO as a peer would send it, which a test then changes one field of to be the peer
+    /// this release has to cope with.
+    fn peer_hello(hostname: &Hostname) -> Hello {
+        Hello {
+            minor: PROTOCOL_MINOR,
+            features: SUPPORTED_FEATURES,
+            max_frame_bytes: MAX_FRAME_BYTES,
+            max_batch_entries: MAX_BATCH_ENTRIES,
+            instance_id: 1,
+            hostname: hostname.0.clone(),
+            region: REGION.to_owned(),
+            site: String::new(),
+            software_version: "1.2.3".to_owned(),
+            topics: Vec::new(),
+        }
+    }
 
     /// One exchange leaves both ends holding the same four facts about the other, none of which
     /// a pinned key can carry: the name the peer runs under, its site label, the release it is
@@ -535,6 +552,50 @@ mod tests {
         assert!(
             dialled.unwrap().topics.resolve(ids[0]).is_none(),
             "the acceptor announced no topics and the dialler recorded some anyway"
+        );
+    }
+
+    /// The pin table already proved whose key this is, so a HELLO naming anyone else is either a
+    /// roster that disagrees with itself or a host trying to be another one. Either way the
+    /// connection goes, and the close code says which of the manager's refusals it was.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hostname_in_hello_not_matching_pinned_identity_closes_with_hostname_mismatch() {
+        let cluster = Builder::new(&[NodeKind::Bare; 2]).start().await;
+        let lower = cluster.hostname(0);
+        let acceptor = cluster.self_hello(1);
+        let (dialling, accepting) = cluster.connected_pair(0, 1).await;
+        let (mut send, _recv) = dialling.open_bi().await.unwrap();
+        let impostor = Hello {
+            hostname: "bn-someone-else".to_owned(),
+            ..peer_hello(&lower)
+        };
+        write_frame(&mut send, &Frame::Hello(impostor))
+            .await
+            .unwrap();
+
+        let refused = perform(
+            accepting,
+            Role::Accept,
+            &acceptor,
+            &lower,
+            Vec::new(),
+            WAIT,
+            &(),
+        )
+        .await
+        .expect_err("the name in HELLO is not the name the key is pinned to");
+
+        assert!(
+            matches!(&refused, HelloError::HostnameMismatch { pinned, declared }
+                if *pinned == lower && declared == "bn-someone-else"),
+            "{refused:?}"
+        );
+        assert_eq!(
+            refused.refusal(Role::Accept),
+            AdmitError {
+                reason: FailureReason::Hostname,
+                close: CloseCode::HostnameMismatch,
+            }
         );
     }
 }
