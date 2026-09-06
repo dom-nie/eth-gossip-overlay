@@ -176,8 +176,12 @@ impl Fanout {
                 continue;
             };
             let allowed = live.negotiated.peer_max_frame_bytes;
-            if bytes + WHOLE_MESSAGE_HEADER_BYTES > allowed as usize {
-                self.warn_oversize(&target, bytes, allowed);
+            if !fits(bytes, allowed) {
+                // Both ends of a v1 pair advertise the same limit, so this is a guard against a
+                // peer that advertised a smaller one rather than a path anything travels (D29).
+                if self.oversize_warned.insert(target.clone()) {
+                    tracing::warn!(peer = %target, bytes, allowed, "message is larger than the peer accepts");
+                }
                 continue;
             }
             let labels = PeerLabels {
@@ -193,15 +197,6 @@ impl Fanout {
                 .message(Direction::Out, outbound.class, labels, bytes);
         }
         while self.tasks.try_join_next().is_some() {}
-    }
-
-    /// One line the first time a peer would refuse a frame for its size. Both ends of a v1 pair
-    /// run the same limit, so this is a guard against a peer that advertised a smaller one
-    /// rather than a path anything travels (D29).
-    fn warn_oversize(&mut self, peer: &Hostname, bytes: usize, allowed: u32) {
-        if self.oversize_warned.insert(peer.clone()) {
-            tracing::warn!(%peer, bytes, allowed, "message is larger than the peer accepts");
-        }
     }
 
     /// The id this host's peers know `topic` by. Never interns: an id nobody has been told about
@@ -236,6 +231,13 @@ impl Fanout {
     }
 }
 
+/// Whether a whole message of `payload_bytes` is within the frame limit the peer advertised in
+/// its HELLO. A sender never exceeds the limits the peer named (D29), and the limit is on the
+/// frame, so the header counts towards it.
+fn fits(payload_bytes: usize, peer_max_frame_bytes: u32) -> bool {
+    payload_bytes + WHOLE_MESSAGE_HEADER_BYTES <= peer_max_frame_bytes as usize
+}
+
 /// One peer's writer: a stream per frame, which is what a whole message travels on (§7).
 async fn write_frames(
     mut frames: mpsc::Receiver<Frame>,
@@ -256,5 +258,36 @@ async fn write_frames(
             return;
         }
         let _ = stream.finish();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::{Bytes, BytesMut};
+    use overlay_core::msgid::MessageId;
+
+    use super::*;
+
+    /// The allowance is arithmetic and the codec is what decides it, so a field added to a chunk
+    /// header without a change here would let a frame past a peer's limit.
+    #[test]
+    fn whole_message_header_is_what_the_codec_writes() {
+        let mut encoded = BytesMut::new();
+        Frame::whole_message(MessageId([0; 20]), 0, Bytes::from_static(b"x")).encode(&mut encoded);
+
+        assert_eq!(encoded.len(), WHOLE_MESSAGE_HEADER_BYTES + 1);
+    }
+
+    /// The limit is on the frame, so a payload that fills it to the byte still has to carry its
+    /// header.
+    #[test]
+    fn a_payload_fits_only_with_room_for_its_header() {
+        let limit = 1024;
+
+        assert!(fits(limit as usize - WHOLE_MESSAGE_HEADER_BYTES, limit));
+        assert!(!fits(
+            limit as usize - WHOLE_MESSAGE_HEADER_BYTES + 1,
+            limit
+        ));
     }
 }
