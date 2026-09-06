@@ -635,4 +635,16 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn unchanged_files_report_nothing_applied() {
+        let mut h = Fixture::new(CONFIG, &roster_yaml(3));
+
+        let report = h.reloader.reload(Trigger::Manual);
+
+        assert!(report.applied.is_empty(), "{report:?}");
+        assert!(report.restart_required.is_empty(), "{report:?}");
+        assert!(report.error.is_none(), "{report:?}");
+        assert!(!h.roster.has_changed().unwrap());
+    }
 }
