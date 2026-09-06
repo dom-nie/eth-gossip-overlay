@@ -344,11 +344,15 @@ impl Ctx {
 mod tests {
     use super::*;
     use crate::testutil::{
-        Builder, NodeKind, SETTLE, TestCluster, eventually, subscriptions, topic,
+        Builder, CountingStats, NodeKind, PublishSpy, SETTLE, TestCluster, WAIT, eventually,
+        subscriptions, topic,
     };
     use bytes::BytesMut;
+    use overlay_core::seen::SeenCache;
+    use overlay_core::time::SystemClock;
     use overlay_core::topic::UNKNOWN_LARGE_THRESHOLD_BYTES;
     use overlay_core::wire::{BatchEntry, BatchFlags, encode_datagram};
+    use tokio::io::AsyncWriteExt;
 
     /// The gossipsub wire form of `data`: snappy-compressed, which is what a payload has to be
     /// for its id to come out of the valid branch (D03).
@@ -771,6 +775,53 @@ mod tests {
                     .any(|item| { item.class == class && item.payload.len() == bytes })
             );
         }
+    }
+
+    /// A peer that opens a stream, says how long its frame is and then stops writing holds a
+    /// receive-window slot until something gives up on it (DX-N3). The reader gives up after
+    /// [`STREAM_READ_TIMEOUT`], stops the stream and ends, so the task goes with it and the rest
+    /// of the connection is untouched.
+    #[tokio::test(start_paused = true)]
+    async fn stalled_stream_is_closed_after_the_2s_read_timeout_without_leaking_a_task() {
+        let block = topic("beacon_block");
+        let published = Arc::new(PublishSpy::new(8));
+        let (_sets, watching) = watch::channel(subscriptions(&[&block], &[]));
+        let stats = Arc::new(CountingStats::default());
+        let ctx = Arc::new(Ctx {
+            peer: Hostname("stalled".to_owned()),
+            region: Region("eu".to_owned()),
+            site: None,
+            state: Arc::new(Mutex::new(PeerState::default())),
+            deps: Deps {
+                seen: SharedSeenCache::new(SeenCache::new(
+                    Duration::from_secs(60),
+                    16,
+                    Arc::new(SystemClock),
+                )),
+                publish: published.clone(),
+                sets: watching,
+                stripes: Arc::new(NoStripes::new(stats.clone())),
+                stats,
+            },
+            warned_invalid: AtomicBool::new(false),
+        });
+        let (mut peer, stream) = tokio::io::duplex(64);
+        // A frame is coming, says the peer, and then nothing does.
+        peer.write_all(&64u32.to_le_bytes()).await.unwrap();
+        let started = tokio::time::Instant::now();
+
+        let reading = tokio::spawn(async move {
+            let mut stream = stream;
+            read_frames(&mut stream, &ctx).await
+        });
+
+        let end = tokio::time::timeout(WAIT, reading)
+            .await
+            .expect("the reader gave up on the stream")
+            .unwrap();
+        assert_eq!(end, StreamEnd::Timeout);
+        assert!(started.elapsed() >= STREAM_READ_TIMEOUT);
+        assert!(published.published().is_empty());
     }
 
     /// The property the whole design rests on (§3 principle 1, §5.5). A sidecar publishes what

@@ -1127,7 +1127,8 @@ pub struct PublishSpy {
 }
 
 impl PublishSpy {
-    fn new(capacity: usize) -> Self {
+    /// A spy that holds `capacity` entries before it starts dropping the oldest.
+    pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
             items: Mutex::new(VecDeque::new()),
