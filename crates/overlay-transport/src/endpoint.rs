@@ -28,11 +28,77 @@ fn idle_timeout(idle: Duration) -> IdleTimeout {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
+    use arc_swap::ArcSwap;
+    use ed25519_dalek::SigningKey;
     use overlay_core::config::Overlay;
+    use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
+    use overlay_core::roster::{HostEntry, Hostname, Region, Roster};
 
     use super::*;
+    use crate::tls::{self, PinTable};
+
+    fn host(name: &str) -> Hostname {
+        Hostname(name.to_owned())
+    }
+
+    /// A fleet of `names` and the pin table both ends of a handshake read, derived from a seed
+    /// the way the sidecar derives its own. Nothing here is a stand-in: a handshake between two
+    /// of these endpoints proves what a handshake between two hosts would.
+    fn fleet(names: &[&str]) -> (Seeds, Arc<ArcSwap<PinTable>>) {
+        let seeds = Seeds {
+            current: FleetSeed::from([0x11; 32]),
+            previous: None,
+        };
+        let roster = Roster {
+            hosts: names
+                .iter()
+                .map(|name| HostEntry {
+                    hostname: host(name),
+                    region: Region("eu".to_owned()),
+                    site: None,
+                    addr: "127.0.0.1:7788".parse().unwrap(),
+                })
+                .collect(),
+        };
+        let pins = Arc::new(ArcSwap::from_pointee(PinTable::build(&roster, &seeds)));
+        (seeds, pins)
+    }
+
+    fn own_key(seeds: &Seeds, name: &str) -> SigningKey {
+        derive_tls_keypair(&seeds.current, &host(name))
+    }
+
+    fn config(listen: &str) -> Overlay {
+        Overlay {
+            listen: listen.parse().unwrap(),
+            ..Overlay::default()
+        }
+    }
+
+    fn endpoint(
+        cfg: &Overlay,
+        pins: &Arc<ArcSwap<PinTable>>,
+        seeds: &Seeds,
+        name: &str,
+    ) -> quinn::Endpoint {
+        bind(
+            cfg,
+            tls::server_config(pins.clone(), &own_key(seeds, name)).unwrap(),
+        )
+        .unwrap()
+    }
+
+    fn dial_config(
+        pins: &Arc<ArcSwap<PinTable>>,
+        seeds: &Seeds,
+        from: &str,
+        to: &str,
+    ) -> quinn::ClientConfig {
+        tls::client_config(pins.clone(), &own_key(seeds, from), &host(to)).unwrap()
+    }
 
     /// quinn's `TransportConfig` has setters and no getters, so its `Debug` output is the only
     /// way to read a value back out. A name that is not in it is a broken test rather than
@@ -78,5 +144,50 @@ mod tests {
             .parse()
             .expect("the upper bound is a UDP payload size");
         assert!(upper > 1200, "discovery probes down from {upper}, not up");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_endpoints_on_loopback_handshake_with_pinned_keys_and_exchange_a_stream() {
+        let (seeds, pins) = fleet(&["bn-a", "bn-b"]);
+        let cfg = config("127.0.0.1:0");
+        let acceptor = endpoint(&cfg, &pins, &seeds, "bn-a");
+        let dialler = endpoint(&cfg, &pins, &seeds, "bn-b");
+        let addr = acceptor.local_addr().unwrap();
+
+        let accepted = tokio::spawn(async move {
+            let connection = acceptor
+                .accept()
+                .await
+                .expect("the endpoint is still open")
+                .await
+                .unwrap();
+            connection
+                .accept_uni()
+                .await
+                .unwrap()
+                .read_to_end(64)
+                .await
+                .unwrap()
+        });
+
+        let connection = connect(
+            &cfg,
+            &dialler,
+            addr,
+            dial_config(&pins, &seeds, "bn-b", "bn-a"),
+        )
+        .await
+        .unwrap();
+        let mut stream = connection.open_uni().await.unwrap();
+        stream.write_all(b"pinned").await.unwrap();
+        stream.finish().unwrap();
+
+        assert_eq!(
+            tls::peer_identity(&pins.load(), &connection)
+                .unwrap()
+                .hostname,
+            host("bn-a")
+        );
+        assert_eq!(accepted.await.unwrap(), b"pinned");
     }
 }
