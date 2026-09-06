@@ -427,8 +427,13 @@ impl Admission for HelloAdmission {
 
 #[cfg(test)]
 mod tests {
+    use overlay_core::topic::Topic;
+
     use super::*;
     use crate::testutil::{Builder, NodeKind, WAIT};
+
+    /// A fork digest, as a topic string carries one.
+    const DIGEST: [u8; 4] = [0x6a, 0x95, 0xa1, 0xa9];
 
     /// One exchange leaves both ends holding the same four facts about the other, none of which
     /// a pinned key can carry: the name the peer runs under, its site label, the release it is
@@ -481,5 +486,55 @@ mod tests {
         assert_eq!(accepted.site.as_deref(), Some("rack-a"));
         assert_eq!(accepted.software_version, env!("CARGO_PKG_VERSION"));
         assert_eq!(accepted.instance_id, 7);
+    }
+
+    /// A peer's ids arrive before anything can travel on them, which is the whole reason the
+    /// table is in HELLO (D12). What the announcer handed over is what the peer ends up holding,
+    /// entry for entry.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn topic_snapshot_from_hello_populates_peer_topic_table() {
+        let cluster = Builder::new(&[NodeKind::Bare; 2]).start().await;
+        let (lower, higher) = (cluster.hostname(0), cluster.hostname(1));
+        let mut own = OwnTopics::default();
+        let topics: Vec<Topic> = (0..3)
+            .map(|index| Topic::data_column(DIGEST, index))
+            .collect();
+        let ids: Vec<TopicId> = topics
+            .iter()
+            .map(|topic| own.table.intern(topic).unwrap().0)
+            .collect();
+        let snapshot = own.announcer.hello_snapshot(&higher, &own.table);
+        let (announcing, silent) = (cluster.self_hello(0), cluster.self_hello(1));
+        let (dialling, accepting) = cluster.connected_pair(0, 1).await;
+
+        let (dialled, accepted) = tokio::join!(
+            perform(
+                dialling,
+                Role::Dial,
+                &announcing,
+                &higher,
+                snapshot,
+                WAIT,
+                &()
+            ),
+            perform(
+                accepting,
+                Role::Accept,
+                &silent,
+                &lower,
+                Vec::new(),
+                WAIT,
+                &()
+            ),
+        );
+
+        let accepted = accepted.unwrap();
+        for (id, topic) in ids.iter().zip(&topics) {
+            assert_eq!(accepted.topics.resolve(*id), Some(topic));
+        }
+        assert!(
+            dialled.unwrap().topics.resolve(ids[0]).is_none(),
+            "the acceptor announced no topics and the dialler recorded some anyway"
+        );
     }
 }
