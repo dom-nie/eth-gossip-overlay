@@ -89,4 +89,23 @@ mod tests {
         assert_eq!(first, (TopicId::new(0), true));
         assert_eq!(second, (TopicId::new(0), false));
     }
+
+    #[test]
+    fn snapshot_round_trips_into_peer_table() {
+        let mut own = OwnTopicTable::new();
+        for index in 0..4 {
+            own.intern(&column(index)).unwrap();
+        }
+        let mut peer = PeerTopicTable::new();
+
+        peer.apply_snapshot(own.snapshot()).unwrap();
+
+        assert_eq!(own.snapshot().len(), 4);
+        for (id, text) in own.snapshot() {
+            let topic = Topic::parse(&text).unwrap();
+
+            assert_eq!(peer.resolve(id), Some(&topic));
+            assert_eq!(peer.id_of(&topic), Some(id));
+        }
+    }
 }
