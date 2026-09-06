@@ -997,6 +997,42 @@ mod tests {
         assert_eq!(lines, 1);
     }
 
+    /// The overlay's half of the win rate (§12): a message this host had not seen, arriving
+    /// from a peer, is logged as an arrival naming that peer, so the query can tell an overlay
+    /// win from the beacon node's own copy.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn first_arrival_from_a_peer_names_the_peer_it_came_from() {
+        let mark = LOG.len();
+        let block = topic("beacon_block");
+        // A payload no other test sends, so its id picks this test's line out of the shared log.
+        let payload = payload(b"a block only the origin test sends");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+
+        send(&peer, &[whole(0, &block, &payload)]).await;
+
+        eventually("the block to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        let id = msgid::compute(&block.to_string(), &payload, wire::MAX_PAYLOAD_BYTES).id;
+        let line = LOG
+            .since(mark)
+            .lines()
+            .find(|line| line.contains(&id.to_string()))
+            .unwrap_or_default()
+            .to_owned();
+        assert!(line.contains(r#"event="first_arrival""#), "{line}");
+        assert!(line.contains(r#"source="overlay""#), "{line}");
+        assert!(
+            line.contains(&format!("origin_peer={}", cluster.hostname(0))),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!("node={}", cluster.hostname(1))),
+            "{line}"
+        );
+    }
+
     /// A peer that reconnects is a new connection, and a sender bound to the old one can only
     /// write into a connection that is gone (D15). The budget close is the one way v1 has to
     /// make a peer come back on a new connection.
