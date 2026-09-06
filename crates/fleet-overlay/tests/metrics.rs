@@ -8,8 +8,22 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use fleet_overlay::metrics::{Metrics, serve};
+use fleet_overlay::metrics::{BnInbound, Metrics, serve};
+use overlay_bn::compat::{self, CompatStats};
+use overlay_bn::inbound::InboundStats;
+use overlay_bn::publish::PublishStats;
+use overlay_core::budget::FanoutKind;
+use overlay_core::lanes::LaneStats;
+use overlay_core::pubqueue::{DropReason as QueueDropReason, QueueStats};
+use overlay_core::roster::{Hostname, Region};
+use overlay_core::seen::SeenStats;
 use overlay_core::topic::Class;
+use overlay_transport::fanout::{Direction, PeerLabels, TrafficStats};
+use overlay_transport::manager::{ManagerStats, PeerCounts};
+use overlay_transport::receive::ReceiveStats;
+use overlay_transport::sender::{DropReason as SendDropReason, SenderStats};
+use overlay_transport::subs::SubsStats;
+use overlay_transport::tls::{FailureReason, HandshakeFailure, Role};
 use prometheus::Registry;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -284,9 +298,392 @@ fn histogram_buckets_cover_1ms_to_2s() {
         .collect();
 
     assert_eq!(bounds.first().copied(), Some(0.001), "{bounds:?}");
-    assert!(bounds.last().copied().unwrap_or_default() >= 2.0, "{bounds:?}");
+    assert!(
+        bounds.last().copied().unwrap_or_default() >= 2.0,
+        "{bounds:?}"
+    );
     let ratio = bounds[1] / bounds[0];
     for pair in bounds.windows(2) {
         assert!((pair[1] / pair[0] - ratio).abs() < 1e-9, "{bounds:?}");
     }
+}
+
+/// The value of one series, or `None` when the registry holds no such series. A missing series
+/// and a zero are different answers here: the compat gauges are specified by which series exist.
+#[allow(clippy::unwrap_used)]
+fn sample(registry: &Registry, name: &str, labels: &[(&str, &str)]) -> Option<f64> {
+    let families = registry.gather();
+    let family = families.iter().find(|family| family.name() == name)?;
+    let metric = family.get_metric().iter().find(|metric| {
+        metric.get_label().len() == labels.len()
+            && labels.iter().all(|(key, value)| {
+                metric
+                    .get_label()
+                    .iter()
+                    .any(|label| label.name() == *key && label.value() == *value)
+            })
+    })?;
+    Some(match family.get_field_type() {
+        prometheus::proto::MetricType::GAUGE => metric.get_gauge().value(),
+        _ => metric.get_counter().value(),
+    })
+}
+
+/// How many series a metric currently has.
+fn series(registry: &Registry, name: &str) -> usize {
+    registry
+        .gather()
+        .iter()
+        .find(|family| family.name() == name)
+        .map_or(0, |family| family.get_metric().len())
+}
+
+fn hostname() -> Hostname {
+    Hostname("bn-ams1-07".to_owned())
+}
+
+#[test]
+fn seen_stats_counts_a_capacity_eviction() {
+    let registry = Registry::new();
+    let metrics = Metrics::new(&registry).unwrap();
+
+    SeenStats::evicted_for_capacity(&metrics, 3);
+
+    let evicted = sample(
+        &registry,
+        "overlay_seen_cache_evicted_total",
+        &[("reason", "capacity")],
+    );
+    assert_eq!(evicted, Some(3.0));
+}
+
+#[test]
+fn lane_stats_counts_bn_events_by_class_and_control() {
+    let registry = Registry::new();
+    let metrics = Metrics::new(&registry).unwrap();
+
+    LaneStats::dropped(&metrics, Class::Large);
+    LaneStats::control_dropped(&metrics);
+
+    let dropped = |class| sample(&registry, "overlay_bn_events_dropped_total", &[("class", class)]);
+    assert_eq!(dropped("large"), Some(1.0));
+    assert_eq!(dropped("control"), Some(1.0));
+    assert_eq!(dropped("small"), None);
+}
+
+#[test]
+fn queue_stats_counts_a_publish_queue_drop() {
+    let registry = Registry::new();
+    let metrics = Metrics::new(&registry).unwrap();
+
+    QueueStats::dropped(&metrics, Class::Small, QueueDropReason::Full);
+
+    let dropped = sample(
+        &registry,
+        "overlay_publish_queue_drops_total",
+        &[("class", "small"), ("reason", "full")],
+    );
+    assert_eq!(dropped, Some(1.0));
+}
+
+#[test]
+fn publish_stats_counts_publishes_suppressions_and_errors() {
+    let registry = Registry::new();
+    let metrics = Metrics::new(&registry).unwrap();
+
+    PublishStats::published(&metrics, Class::Large);
+    PublishStats::suppressed_inject_off(&metrics, Class::Small);
+    PublishStats::rate_limited(&metrics, Class::Small);
+    PublishStats::error(&metrics, Class::Large, "no_subscribers");
+    PublishStats::queue_drop(&metrics, Class::Large, QueueDropReason::Stale);
+
+    // A publish into the beacon node has no overlay peer, so the peer labels are empty.
+    let published = sample(
+        &registry,
+        "overlay_messages_total",
+        &[
+            ("direction", "bn_out"),
+            ("class", "large"),
+            ("peer", ""),
+            ("region", ""),
+            ("site", ""),
+        ],
+    );
+    assert_eq!(published, Some(1.0));
+    assert_eq!(
+        sample(
+            &registry,
+            "overlay_publish_suppressed_total",
+            &[("class", "small"), ("reason", "inject_off")]
+        ),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(&registry, "overlay_rate_limited_total", &[("class", "small")]),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(
+            &registry,
+            "overlay_publish_errors_total",
+            &[("class", "large"), ("reason", "no_subscribers")]
+        ),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(
+            &registry,
+            "overlay_publish_queue_drops_total",
+            &[("class", "large"), ("reason", "stale")]
+        ),
+        Some(1.0)
+    );
+}
+
+#[test]
+fn compat_stats_keeps_one_series_per_bn_gauge() {
+    let registry = Registry::new();
+    let metrics = Metrics::new(&registry).unwrap();
+
+    assert_eq!(series(&registry, "overlay_bn_trusted"), 0);
+
+    CompatStats::set_info(&metrics, "v8.2.2");
+    CompatStats::set_info(&metrics, "v8.3.0");
+    CompatStats::set_compat(&metrics, compat::STATE_UNTESTED);
+    CompatStats::set_compat(&metrics, compat::STATE_SUPPORTED);
+    CompatStats::set_trusted(&metrics, Some(true));
+
+    assert_eq!(series(&registry, "overlay_bn_info"), 1);
+    assert_eq!(
+        sample(&registry, "overlay_bn_info", &[("version", "v8.3.0")]),
+        Some(1.0)
+    );
+    assert_eq!(series(&registry, "overlay_bn_compat"), 1);
+    assert_eq!(
+        sample(
+            &registry,
+            "overlay_bn_compat",
+            &[("state", compat::STATE_SUPPORTED)]
+        ),
+        Some(1.0)
+    );
+    assert_eq!(sample(&registry, "overlay_bn_trusted", &[]), Some(1.0));
+
+    CompatStats::set_trusted(&metrics, None);
+
+    assert_eq!(series(&registry, "overlay_bn_trusted"), 0);
+}
+
+#[test]
+fn inbound_stats_labels_the_beacon_node_as_the_source() {
+    let registry = Registry::new();
+    let metrics = Arc::new(Metrics::new(&registry).unwrap());
+    let inbound = BnInbound(Arc::clone(&metrics));
+
+    inbound.duplicate(Class::Small);
+    inbound.first_seen(Class::Large);
+    inbound.dropped_full(Class::Large);
+    inbound.unknown_kind(Class::Small);
+
+    assert_eq!(
+        sample(
+            &registry,
+            "overlay_duplicates_dropped_total",
+            &[("class", "small"), ("source", "bn")]
+        ),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(
+            &registry,
+            "overlay_first_seen_total",
+            &[("class", "large"), ("source", "bn")]
+        ),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(
+            &registry,
+            "overlay_fanout_lane_dropped_total",
+            &[("class", "large")]
+        ),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(
+            &registry,
+            "overlay_unknown_topic_kind_total",
+            &[("class", "small")]
+        ),
+        Some(1.0)
+    );
+}
+
+#[test]
+fn manager_stats_counts_admission_and_replaces_the_peer_gauges() {
+    let registry = Registry::new();
+    let metrics = Metrics::new(&registry).unwrap();
+    let peer = hostname();
+
+    metrics.handshake_failure(HandshakeFailure {
+        role: Role::Accept,
+        reason: FailureReason::UnknownKey,
+    });
+    metrics.auth_via_previous_seed(&peer);
+    metrics.roster_region_mismatch(&peer);
+    metrics.unknown_frame_type(&peer);
+
+    assert_eq!(
+        sample(
+            &registry,
+            "overlay_handshake_failures_total",
+            &[("role", "accept"), ("reason", "unknown_key")]
+        ),
+        Some(1.0)
+    );
+    for name in [
+        "overlay_peer_auth_via_previous_seed_total",
+        "overlay_roster_region_mismatch_total",
+        "overlay_unknown_frame_type_total",
+    ] {
+        assert_eq!(sample(&registry, name, &[("peer", peer.0.as_str())]), Some(1.0));
+    }
+
+    let mut counts = PeerCounts::new();
+    counts.insert((Region("eu".to_owned()), Some("ams1".to_owned())), 7);
+    metrics.peers_connected(&counts);
+    // A region that goes away must take its series with it, or the health alert reads a count
+    // from a roster that no longer has that region in it.
+    let mut fewer = PeerCounts::new();
+    fewer.insert((Region("us".to_owned()), None), 2);
+    metrics.peers_connected(&fewer);
+
+    assert_eq!(series(&registry, "overlay_peers_connected"), 1);
+    assert_eq!(
+        sample(
+            &registry,
+            "overlay_peers_connected",
+            &[("region", "us"), ("site", "")]
+        ),
+        Some(2.0)
+    );
+}
+
+#[test]
+fn subs_stats_sets_the_subscription_gauge() {
+    let registry = Registry::new();
+    let metrics = Metrics::new(&registry).unwrap();
+
+    SubsStats::bn_subscriptions(&metrics, 96);
+
+    assert_eq!(sample(&registry, "overlay_bn_subscriptions", &[]), Some(96.0));
+}
+
+#[test]
+fn traffic_stats_counts_messages_and_bytes_per_peer() {
+    let registry = Registry::new();
+    let metrics = Metrics::new(&registry).unwrap();
+    let peer = hostname();
+    let region = Region("eu".to_owned());
+
+    metrics.message(
+        Direction::Out,
+        Class::Large,
+        PeerLabels {
+            hostname: &peer,
+            region: &region,
+            site: None,
+        },
+        1500,
+    );
+
+    // A roster host with no site renders as an empty label, the same as the publish path's
+    // absent peer: one rule, so the series never splits.
+    let labels = &[
+        ("direction", "out"),
+        ("class", "large"),
+        ("peer", peer.0.as_str()),
+        ("region", "eu"),
+        ("site", ""),
+    ];
+    assert_eq!(sample(&registry, "overlay_messages_total", labels), Some(1.0));
+    assert_eq!(sample(&registry, "overlay_bytes_total", labels), Some(1500.0));
+}
+
+#[test]
+fn receive_stats_labels_the_overlay_as_the_source() {
+    let registry = Registry::new();
+    let metrics = Metrics::new(&registry).unwrap();
+    let peer = hostname();
+
+    ReceiveStats::first_seen(&metrics, Class::Large);
+    ReceiveStats::duplicate(&metrics, Class::Small);
+    metrics.unknown_topic_id(&peer);
+    metrics.unwanted_topic(&peer);
+    metrics.invalid_payload(&peer);
+    metrics.fanout_suppressed(&peer, FanoutKind::Chunk);
+
+    assert_eq!(
+        sample(
+            &registry,
+            "overlay_first_seen_total",
+            &[("class", "large"), ("source", "overlay")]
+        ),
+        Some(1.0)
+    );
+    assert_eq!(
+        sample(
+            &registry,
+            "overlay_duplicates_dropped_total",
+            &[("class", "small"), ("source", "overlay")]
+        ),
+        Some(1.0)
+    );
+    for name in [
+        "overlay_unknown_topic_id_total",
+        "overlay_unwanted_topic_total",
+        "overlay_invalid_payload_total",
+    ] {
+        assert_eq!(sample(&registry, name, &[("peer", peer.0.as_str())]), Some(1.0));
+    }
+    assert_eq!(
+        sample(
+            &registry,
+            "overlay_fanout_suppressed_total",
+            &[("peer", peer.0.as_str()), ("kind", "chunk")]
+        ),
+        Some(1.0)
+    );
+}
+
+#[test]
+fn sender_stats_reports_queue_depth_in_both_units() {
+    let registry = Registry::new();
+    let metrics = Metrics::new(&registry).unwrap();
+    let peer = hostname();
+
+    metrics.queue_depth(&peer, Class::Small, 12, 4096);
+    metrics.queue_drop(&peer, Class::Small, SendDropReason::PeerDown);
+
+    let depth = |unit| {
+        sample(
+            &registry,
+            "overlay_peer_queue_depth",
+            &[("peer", peer.0.as_str()), ("class", "small"), ("unit", unit)],
+        )
+    };
+    assert_eq!(depth("frames"), Some(12.0));
+    assert_eq!(depth("bytes"), Some(4096.0));
+    assert_eq!(
+        sample(
+            &registry,
+            "overlay_peer_queue_drops_total",
+            &[
+                ("peer", peer.0.as_str()),
+                ("class", "small"),
+                ("reason", "peer_down")
+            ]
+        ),
+        Some(1.0)
+    );
 }
