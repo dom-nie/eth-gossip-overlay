@@ -26,6 +26,27 @@ cargo build --release          # binaries in target/release/{fleet-overlay,fleet
 
 `fleet-overlay peer-id [--config PATH]` prints the libp2p peer id of this host's node key (`bn.node_key_file`, created on first use). That is the id the sidecar hands Lighthouse through `/run/fleet-overlay/lighthouse.env` once T-045 lands, so it is how an operator reads the value ahead of time. It needs neither the seed nor the roster. The node key is per host and unrelated to the seed, so rotating the seed never changes the peer id.
 
+`fleet-overlayctl` talks to a running sidecar over the admin socket in `admin_socket` (`/run/fleet-overlay/admin.sock` by default), which is mode 0660 and local only. `status` is the first thing to look at during a rolling upgrade: it prints the kill switch, the beacon node's version and whether it trusts the sidecar, and one row per live peer with its software version and the feature bits the pair negotiated. `roster reload` re-reads `config.yaml` and `roster.yaml` exactly as SIGHUP does, and applies whatever the files say. Exit codes are meant for configuration management: 0 the command took effect, 1 the sidecar refused it or the reload reported an error, 2 there was no socket to talk to.
+
+```console
+$ fleet-overlayctl --help
+Talk to a running fleet-overlay sidecar over its local admin socket
+
+Usage: fleet-overlayctl [OPTIONS] <COMMAND>
+
+Commands:
+  inject  Turn the inject kill switch on or off, or ask what it is
+  status  Print what the sidecar is doing: the kill switch, the beacon node and every live peer
+  roster  Print the roster the sidecar is using, or make it read the files again
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --socket <SOCKET>  The sidecar's admin socket [default: /run/fleet-overlay/admin.sock]
+      --json             Print the sidecar's answer as it came, one JSON object, for jq and scripts
+  -h, --help             Print help
+  -V, --version          Print version
+```
+
 ## Test
 
 ```sh
