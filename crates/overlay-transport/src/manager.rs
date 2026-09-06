@@ -536,12 +536,16 @@ impl Shared {
     /// was admitted and then went quiet is a sibling going down (§9) and not a handshake
     /// problem, so its timeout is not counted; every other ending is, because a dial that
     /// resolved before the acceptor judged its key is rejected here and nowhere else.
-    fn count_close(&self, role: Role, error: &quinn::ConnectionError, admitted: bool) {
-        if let Some(failure) = HandshakeFailure::from_connection_error(role, error)
-            && !(admitted && failure.reason == FailureReason::Timeout)
-        {
+    ///
+    /// Answers whether the ending was counted, which is also what tells the dial loop that its
+    /// pairing was refused rather than lost.
+    fn count_close(&self, role: Role, error: &quinn::ConnectionError, admitted: bool) -> bool {
+        let counted = HandshakeFailure::from_connection_error(role, error)
+            .filter(|failure| !(admitted && failure.reason == FailureReason::Timeout));
+        if let Some(failure) = counted {
             self.stats.handshake_failure(failure);
         }
+        counted.is_some()
     }
 
     fn warn_once(&self, remote: SocketAddr, reason: FailureReason) {
@@ -737,12 +741,18 @@ async fn dial_loop<A: Admission>(peer: Hostname, shared: Arc<Shared>, admission:
         };
         match dial_once(&peer, &entry, &shared, &admission).await {
             Ok(connection) => {
-                // Admission, not the QUIC connect: a peer that accepts and then rejects would
-                // otherwise be retried at the floor for as long as it kept doing it.
+                // Admission, not the QUIC connect. The two come apart when the acceptor judges
+                // the key after the dial has already resolved: admission passes, the peer
+                // reaches the live set, and the refusal turns up on `closed()`. That was never
+                // a pairing, so the reset is undone rather than left to redial at the floor for
+                // as long as the peer keeps refusing.
+                let unproven = backoff.clone();
                 backoff.reset();
                 warned = false;
                 let error = connection.closed().await;
-                shared.count_close(Role::Dial, &error, true);
+                if shared.count_close(Role::Dial, &error, true) {
+                    backoff = unproven;
+                }
                 shared.down(&peer, &connection, None);
             }
             Err(failure) => {
