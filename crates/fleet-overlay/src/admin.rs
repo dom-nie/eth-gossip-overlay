@@ -364,13 +364,17 @@ mod tests {
         Topic::parse(&format!("/eth2/6a95a1a9/{name}/ssz_snappy")).unwrap()
     }
 
-    /// `n` hosts named `bn-1` upwards, all in one region.
+    /// `n` hosts named `bn-1` upwards, all in one region, the first of them with a site so a
+    /// dump has both answers to show.
     fn roster_yaml(n: usize) -> String {
         let mut text = "hosts:\n".to_owned();
         for i in 1..=n {
             text.push_str(&format!(
                 "  - hostname: bn-{i}\n    region: eu\n    addr: \"127.0.0.{i}:7788\"\n"
             ));
+            if i == 1 {
+                text.push_str("    site: ams1\n");
+            }
         }
         text
     }
@@ -676,5 +680,23 @@ mod tests {
         assert_eq!(trusted.subscriptions, 2);
         assert!(trusted.connected);
         assert!(!gone.connected);
+    }
+
+    #[tokio::test]
+    async fn roster_dump_matches_loaded_roster() {
+        let h = Fixture::start(LiveView::default()).await;
+
+        let dumped = h.send(&Request::Roster).await.roster.expect("a roster");
+
+        let loaded = Roster::from_yaml(&roster_yaml(3)).unwrap();
+        assert_eq!(dumped.len(), 3);
+        for (dumped, host) in dumped.iter().zip(&loaded.hosts) {
+            assert_eq!(dumped.hostname, host.hostname.0);
+            assert_eq!(dumped.region, host.region.0);
+            assert_eq!(dumped.site, host.site);
+            assert_eq!(dumped.addr, host.addr);
+        }
+        assert_eq!(dumped[0].site.as_deref(), Some("ams1"));
+        assert_eq!(dumped[1].site, None);
     }
 }
