@@ -36,6 +36,15 @@ pub mod features {
     /// Chunk and custody-column repair (T-082).
     pub const REPAIR: u64 = bit(2);
 
+    /// Every bit this release defines, with the name `fleet-overlayctl status` prints for it.
+    /// The rendering reads this rather than keeping a list of its own, so a bit added without a
+    /// name here is shown as part of the hex and nothing claims to know what it is (T-042).
+    pub const NAMES: [(&str, u64); 3] = [
+        ("datagram_batches", DATAGRAM_BATCHES),
+        ("striping", STRIPING),
+        ("repair", REPAIR),
+    ];
+
     const fn bit(position: u32) -> u64 {
         1 << position
     }
@@ -81,5 +90,17 @@ mod tests {
         assert_eq!(features::DATAGRAM_BATCHES, 1);
         assert_eq!(features::STRIPING, 2);
         assert_eq!(features::REPAIR, 4);
+    }
+
+    /// A bit with no name would be rendered as hex alone, which reads as an unknown feature
+    /// rather than as one this release defines.
+    #[test]
+    fn every_feature_bit_has_a_name() {
+        let named = features::NAMES.iter().fold(0, |bits, (_, bit)| bits | bit);
+
+        assert_eq!(
+            named,
+            features::DATAGRAM_BATCHES | features::STRIPING | features::REPAIR
+        );
     }
 }

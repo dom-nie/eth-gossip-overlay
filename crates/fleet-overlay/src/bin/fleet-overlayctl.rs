@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use fleet_overlay::admin::{Request, Response};
+use fleet_overlay::admin::{Host, Peer, Request, Response, Status};
+use overlay_core::protocol::features;
 
 /// Where the sidecar puts the socket unless `admin_socket` in `config.yaml` moves it
 /// (Appendix A). A host that moved it passes `--socket`.
@@ -22,13 +23,9 @@ const DAEMON_ERROR: u8 = 1;
 /// There was nothing to talk to: no socket, or no permission to open it.
 const NO_SOCKET: u8 = 2;
 
+/// Talk to a running fleet-overlay sidecar over its local admin socket.
 #[derive(Parser)]
-#[command(
-    version,
-    about,
-    subcommand_required = true,
-    arg_required_else_help = true
-)]
+#[command(version, subcommand_required = true, arg_required_else_help = true)]
 struct Cli {
     /// The sidecar's admin socket.
     #[arg(long, default_value = DEFAULT_SOCKET, global = true)]
@@ -52,6 +49,11 @@ enum Command {
         /// What to do with the kill switch.
         action: InjectAction,
     },
+    /// Print what the sidecar is doing: the kill switch, the beacon node and every live peer.
+    ///
+    /// The peer table is where a rolling upgrade is read off: each peer's software version and
+    /// the feature bits the pair settled on.
+    Status,
     /// Print the roster the sidecar is using, or make it read the files again.
     Roster {
         #[command(subcommand)]
@@ -105,6 +107,7 @@ fn main() -> ExitCode {
         Command::Inject { action } => Request::Inject {
             value: action.value(),
         },
+        Command::Status => Request::Status,
         Command::Roster { action: None } => Request::Roster,
         Command::Roster {
             action: Some(RosterAction::Reload),
@@ -158,12 +161,146 @@ fn render(response: &Response) {
     if let Some(inject) = response.inject {
         println!("inject {}", if inject { "on" } else { "off" });
     }
+    if let Some(status) = &response.status {
+        print_status(status);
+    }
+    if let Some(hosts) = &response.roster {
+        let mut rows = vec![row(["hostname", "region", "site", "addr"])];
+        rows.extend(hosts.iter().map(host_row));
+        print_table(&rows);
+    }
     if let Some(report) = &response.reload {
         println!("applied: {}", names(&report.applied));
         println!("restart required: {}", names(&report.restart_required));
         if let Some(error) = &report.error {
             eprintln!("fleet-overlayctl: {error}");
         }
+    }
+}
+
+/// The head of a status answer, then one row per live peer.
+fn print_status(status: &Status) {
+    println!(
+        "host    {} ({})",
+        status.hostname,
+        place(&status.region, status.site.as_deref())
+    );
+    println!("inject  {}", if status.inject { "on" } else { "off" });
+    println!("bn      {}", bn_line(status));
+    println!();
+    let mut rows = vec![row([
+        "hostname",
+        "region",
+        "site",
+        "rtt",
+        "up",
+        "queue_small",
+        "queue_large",
+        "version",
+        "features",
+    ])];
+    rows.extend(status.peers.iter().map(peer_row));
+    print_table(&rows);
+}
+
+/// One live peer's row.
+fn peer_row(peer: &Peer) -> Vec<String> {
+    vec![
+        peer.hostname.clone(),
+        peer.region.clone(),
+        peer.site.clone().unwrap_or_else(|| "-".to_owned()),
+        format!("{:.1}ms", peer.rtt_ms),
+        age(peer.connected_for_ms),
+        format!("{}f/{}b", peer.queue.small_frames, peer.queue.small_bytes),
+        format!("{}f/{}b", peer.queue.large_frames, peer.queue.large_bytes),
+        peer.software_version.clone(),
+        render_features(peer.features),
+    ]
+}
+
+/// One roster entry's row.
+fn host_row(host: &Host) -> Vec<String> {
+    vec![
+        host.hostname.clone(),
+        host.region.clone(),
+        host.site.clone().unwrap_or_else(|| "-".to_owned()),
+        host.addr.to_string(),
+    ]
+}
+
+/// The beacon node in one line: whether the link is up, what it is running, whether it trusts
+/// the sidecar and how many topics it wants.
+fn bn_line(status: &Status) -> String {
+    let trusted = match status.bn.trusted {
+        Some(true) => "trusted",
+        Some(false) => "NOT TRUSTED",
+        None => "trust unknown",
+    };
+    format!(
+        "{}  {}  {trusted}  {} subscriptions",
+        if status.bn.connected {
+            "connected"
+        } else {
+            "disconnected"
+        },
+        status.bn.version.as_deref().unwrap_or("version unknown"),
+        status.bn.subscriptions,
+    )
+}
+
+/// The negotiated feature bits as the number and the names of the bits that are set. An
+/// unnamed bit stays part of the number: this release does not know what it is.
+fn render_features(features: u64) -> String {
+    let names: Vec<&str> = features::NAMES
+        .iter()
+        .filter(|(_, bit)| features & bit == *bit)
+        .map(|(name, _)| *name)
+        .collect();
+    if names.is_empty() {
+        format!("0x{features:x}")
+    } else {
+        format!("0x{features:x} ({})", names.join(", "))
+    }
+}
+
+/// A region and an optional site, as metrics label them.
+fn place(region: &str, site: Option<&str>) -> String {
+    match site {
+        Some(site) => format!("{region}/{site}"),
+        None => region.to_owned(),
+    }
+}
+
+/// How long a peer has been up, in the units an operator compares against a slot.
+fn age(ms: u64) -> String {
+    let seconds = ms / 1000;
+    match seconds {
+        0..60 => format!("{seconds}s"),
+        60..3600 => format!("{}m{:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h{:02}m", seconds / 3600, (seconds % 3600) / 60),
+    }
+}
+
+/// One row of a table.
+fn row<const N: usize>(cells: [&str; N]) -> Vec<String> {
+    cells.iter().map(|cell| (*cell).to_owned()).collect()
+}
+
+/// A table whose columns are as wide as their widest cell. The first row is the header.
+fn print_table(rows: &[Vec<String>]) {
+    let mut widths = vec![0; rows.first().map_or(0, Vec::len)];
+    for row in rows {
+        for (width, cell) in widths.iter_mut().zip(row) {
+            *width = (*width).max(cell.chars().count());
+        }
+    }
+    for row in rows {
+        let line: Vec<String> = row
+            .iter()
+            .zip(&widths)
+            .map(|(cell, width)| format!("{cell:<width$}"))
+            .collect();
+        println!("{}", line.join("  ").trim_end());
     }
 }
 
