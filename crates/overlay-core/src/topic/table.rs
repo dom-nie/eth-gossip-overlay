@@ -1,4 +1,44 @@
-//! Topic strings to the 16-bit ids that carry them on the wire.
+//! Topic strings to the 16-bit ids that stand in for them on the wire. A topic string runs
+//! forty to sixty bytes and a small-class message is about 240, so repeating the string on
+//! every batch entry and every chunk header would spend a fifth of the small class on saying
+//! the same thing over and over; two bytes spend nothing. Fork digests keep the set of topics
+//! open-ended, so the table cannot be compiled in either.
+//!
+//! # Each sender owns its ids
+//!
+//! Nothing is negotiated. A host hands out ids from its own [`OwnTopicTable`], puts that table
+//! in its HELLO and a `TOPIC_ADD` for every binding it makes later, and encodes every frame it
+//! sends with those ids. A receiver keeps one [`PeerTopicTable`] per peer and decodes a frame
+//! with the table belonging to whoever sent it.
+//!
+//! Suppose `alpha` interned `beacon_block` first and `beacon_attestation_3` second, while
+//! `beta` happened to do it the other way round. `alpha` calls the block topic 0 and `beta`
+//! calls it 1, and neither is wrong: topic id 0 on a chunk from `alpha` is read against
+//! `alpha`'s table and is a block, while the same 0 from `beta` is read against `beta`'s table
+//! and is an attestation. The two can never disagree, because an id is never read outside the
+//! table that minted it.
+//!
+//! # Announced before anything can travel on them
+//!
+//! [`on_changed`] interns the whole local subscription set ([`SubscriptionSets::local`],
+//! `local_subscriptions()` in D12) on every `Changed` from the mirror (T-014), not the
+//! advertised set. The difference is the extra data column topics T-015 subscribes to: a
+//! beacon node publishes every column of its own proposal but subscribes only to the ones it
+//! custodies, so a sibling needs the id of a column topic that the SUBS bitmap never mentions,
+//! the bitmap carrying `advertised` alone (D06). Interning eagerly is what puts those ids in
+//! front of the chunks that use them. Nothing is ever added inline on first use: the send path
+//! asks [`OwnTopicTable::get`] and never `intern`, so a frame can only leave with an id its
+//! peers already hold.
+//!
+//! # When an id arrives too late anyway
+//!
+//! A frame whose id [`PeerTopicTable::resolve`] does not know is dropped and counted as
+//! `unknown_topic_id_total{peer}`. One race outlives the eager announcement: at sidecar start
+//! the control stream and the data streams are read by different tasks, so a batch can reach
+//! the decoder ahead of the `TOPIC_ADD` that explains it. That window is small class only and
+//! public gossip is the backup, which is why D12 took the metric over inline adds. If the
+//! canary ever sees the counter above zero, the recorded fallback is to park an unknown-id
+//! frame for 100 ms and look again, not to let a sender mint ids mid-flight.
 
 use std::collections::HashMap;
 use std::fmt;
