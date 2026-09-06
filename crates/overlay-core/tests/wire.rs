@@ -174,3 +174,26 @@ fn unknown_and_reserved_frame_types_are_unknown_type() {
         );
     }
 }
+
+#[test]
+fn unknown_flag_bits_are_ignored_and_defined_bits_round_trip() {
+    for (name, frame) in common::samples() {
+        let mut out = BytesMut::new();
+        frame.encode(&mut out);
+
+        let expected = match &frame {
+            Frame::Batch { flags, .. } => flags.bits(),
+            Frame::Chunk { flags, .. } => flags.bits(),
+            _ => 0,
+        };
+        assert_eq!(
+            out[1], expected,
+            "{name} wrote a flag byte it does not define"
+        );
+
+        out[1] |= 1 << 7;
+        let mut buf = out.freeze();
+
+        assert_eq!(Frame::decode(&mut buf), Ok(frame), "{name} with bit 7 set");
+    }
+}
