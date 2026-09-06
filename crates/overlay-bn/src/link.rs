@@ -596,7 +596,9 @@ mod tests {
     use crate::gossip::wire;
     use crate::node_key::NodeKey;
     use crate::spec::spec_watch;
-    use crate::testutil::{FakeBn, FakeBnEvent, LOG, RpcAnswer, link_config, node_key, ok_json};
+    use crate::testutil::{
+        FakeBn, FakeBnEvent, IDLE_TIMEOUT, LOG, RpcAnswer, link_config, node_key, ok_json,
+    };
 
     /// Long enough for a dial, a noise handshake and a gossipsub exchange on a loaded CI box,
     /// short enough that a test which waits in vain still ends inside its 5 s budget.
@@ -1274,6 +1276,25 @@ mod tests {
             .collect();
         assert_eq!(farewell.len(), 1, "{text}");
         assert!(farewell[0].contains("reason=129"), "{}", farewell[0]);
+    }
+
+    /// A protocol the sidecar registers so the negotiation succeeds and refuses so the beacon
+    /// node gets a well-formed answer. Lighthouse reads the result code and reports it as an
+    /// error for the request, not as a broken peer.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fake_bn_blocks_by_range_request_gets_resource_unavailable() {
+        let mut bn = FakeBn::start().await;
+        let (harness, mut answers) = connected(&mut bn).await;
+
+        bn.request_blocks_by_range(0, 4).await;
+
+        let answer = next_answer(&mut answers).await;
+        let RpcAnswer::Error(text) = &answer else {
+            panic!("blocks by range was answered: {answer:?}");
+        };
+        assert!(text.contains("ResourceUnavailable"), "{text}");
+        assert!(text.contains("BlocksByRange"), "{text}");
+        drop(harness);
     }
 
     #[test]

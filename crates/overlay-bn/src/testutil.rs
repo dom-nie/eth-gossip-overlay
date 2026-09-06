@@ -26,7 +26,7 @@
 //! bn.request_blocks_by_range(0, 4).await;     // request_blocks_by_range, send_goodbye
 //! match responses.recv().await.unwrap() {
 //!     RpcAnswer::Status(status) => ..,        // Pong(seq), MetaData(..)
-//!     RpcAnswer::Error(text) => ..,           // an error chunk, named by its result code
+//!     RpcAnswer::Error(text) => ..,           // an error chunk, its result code named in it
 //!     _ => ..,
 //! }
 //! // Nothing the sidecar sends of its own accord; test 20 asserts this stays empty.
@@ -227,9 +227,9 @@ pub enum RpcAnswer {
     Pong(u64),
     /// The peer's metadata.
     MetaData(Arc<MetaData<MainnetEthSpec>>),
-    /// An error chunk or a handler failure, as the text Lighthouse would log. Lighthouse keeps
-    /// the handler's error type crate-private, so this is the only shape available; the result
-    /// code is in the text (`RpcErrorResponse`'s `Display`, e.g. "Resource unavailable").
+    /// An error chunk or a handler failure, as text. Lighthouse keeps its handler error type
+    /// crate-private, so text is the only shape available; the result code is in it by name
+    /// (`ErrorResponse(ResourceUnavailable, ..)`), along with the protocol it was sent on.
     Error(String),
 }
 
