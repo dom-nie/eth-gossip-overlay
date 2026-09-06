@@ -221,3 +221,52 @@ fn batch_of(count: u16) -> Bytes {
     }
     out.freeze()
 }
+
+#[test]
+fn chunk_exceeding_max_payload_bytes_is_over_limit() {
+    assert_eq!(
+        Frame::decode(&mut chunk_header(1024, MAX_PAYLOAD_BYTES as u32 + 1)),
+        Err(DecodeError::OverLimit("data"))
+    );
+    assert_eq!(
+        Frame::decode(&mut chunk_header(1024, MAX_PAYLOAD_BYTES as u32)),
+        Err(DecodeError::Truncated),
+        "a length at the maximum is read, not refused"
+    );
+
+    assert_eq!(
+        Frame::decode(&mut chunk_header(MAX_PAYLOAD_BYTES as u32 + 1, 0)),
+        Err(DecodeError::OverLimit("total_len"))
+    );
+    assert_eq!(
+        Frame::decode(&mut chunk_header(MAX_PAYLOAD_BYTES as u32, 0)),
+        Ok(Frame::Chunk {
+            flags: ChunkFlags::NONE,
+            chunk: Chunk {
+                msg_id: MessageId([0; 20]),
+                topic_id: 1,
+                k: 8,
+                m: 1,
+                index: 3,
+                total_len: MAX_PAYLOAD_BYTES as u32,
+                data: Bytes::new(),
+            },
+        })
+    );
+}
+
+/// A chunk frame carrying `data_len` as its length prefix but no data behind it, so a length past
+/// the limit costs the test nothing to build and the decoder nothing to refuse.
+fn chunk_header(total_len: u32, data_len: u32) -> Bytes {
+    let mut out = BytesMut::new();
+    out.put_u8(FrameType::Chunk.id());
+    out.put_u8(0);
+    out.put_slice(&[0u8; 20]);
+    out.put_u16_le(1);
+    out.put_u16_le(8);
+    out.put_u16_le(1);
+    out.put_u16_le(3);
+    out.put_u32_le(total_len);
+    out.put_u32_le(data_len);
+    out.freeze()
+}
