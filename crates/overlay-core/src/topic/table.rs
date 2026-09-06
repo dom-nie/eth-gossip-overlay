@@ -227,4 +227,20 @@ mod tests {
         assert_eq!(peer.resolve(TopicId::new(1)), Some(&column(5)));
         assert_eq!(peer.id_of(&column(5)), Some(TopicId::new(1)));
     }
+
+    #[test]
+    fn apply_add_with_a_string_that_is_not_a_topic_is_unparsable_error() {
+        let mut peer = PeerTopicTable::new();
+
+        let refused = peer.apply_add(TopicId::new(0), "/eth2/6a95a1a9/beacon_block/ssz");
+
+        assert_eq!(
+            refused,
+            Err(PeerTableError::Unparsable(
+                TopicId::new(0),
+                TopicError::Encoding
+            ))
+        );
+        assert_eq!(peer.resolve(TopicId::new(0)), None);
+    }
 }
