@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use overlay_core::roster::Hostname;
@@ -32,6 +32,13 @@ pub const SMALL_LANE_FRAMES: usize = 600;
 /// keeping up can be: past that the frames at the back are for a slot that has moved on and
 /// the beacon node has public gossip for them.
 pub const LARGE_LANE_BYTES: usize = 1024 * 1024;
+
+/// How old a large frame may be when the drain task reaches it. A block that has waited three
+/// seconds is past the point where the beacon node can use it: the slot is over, and public
+/// gossip has had that whole time to deliver the same block. Deliberately a constant and not a
+/// config key; if the canary shows it needs tuning, the recorded fallback is a reloadable
+/// `classes.large.stale_after_ms` mirroring the small class (D17).
+pub const LARGE_STALE_AFTER: Duration = Duration::from_secs(3);
 
 /// Why a frame never went out: the `reason` label of
 /// `peer_queue_drops_total{peer, class, reason}` (§12).
@@ -462,5 +469,31 @@ mod tests {
         assert_eq!(stats.queue_drops(&peer(), Class::Large, DropReason::Full), 1);
         eventually("the lane to drain", || link.sent().len() == 4).await;
         assert_eq!(link.numbers(), vec![1, 2, 3, 4]);
+    }
+
+    /// The age bound is read at dequeue and not at push, because what matters is how old the
+    /// frame is when it would go on the wire (D17). The frame behind it is younger and goes.
+    #[tokio::test(start_paused = true)]
+    async fn large_frame_older_than_3s_at_dequeue_is_dropped_and_counted_stale() {
+        let link = Link::open();
+        let (sender, stats) = sender(&link);
+        let start = tokio::time::Instant::now().into_std();
+
+        sender.push(Class::Large, frame(0), start).unwrap();
+        sender
+            .push(Class::Large, frame(1), start + Duration::from_secs(2))
+            .unwrap();
+        tokio::time::advance(LARGE_STALE_AFTER + Duration::from_millis(1)).await;
+
+        eventually("both frames to be dealt with", || {
+            link.sent().len() as u64 + stats.queue_drops(&peer(), Class::Large, DropReason::Stale)
+                == 2
+        })
+        .await;
+        assert_eq!(link.numbers(), vec![1]);
+        assert_eq!(
+            stats.queue_drops(&peer(), Class::Large, DropReason::Stale),
+            1
+        );
     }
 }
