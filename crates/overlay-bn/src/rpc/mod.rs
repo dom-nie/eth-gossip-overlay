@@ -16,7 +16,7 @@ use libp2p::request_response::Codec;
 use overlay_core::topic::{Topic, TopicKind};
 use snap::read::FrameDecoder;
 
-use crate::rpc::msg::{Malformed, MetaData, Ping, Status};
+use crate::rpc::msg::{Goodbye, Malformed, MetaData, Ping, Status};
 use crate::rpc::proto::Protocol;
 
 pub mod msg;
@@ -72,6 +72,9 @@ impl Responder {
 
     /// The response to `request`, received on `protocol`.
     ///
+    /// A Goodbye is reported rather than answered: there is no chunk to write for it, and the
+    /// caller closes the connection.
+    ///
     /// Status is echoed. Lighthouse classifies a peer by comparing the peer's Status with its
     /// own in `remote_sync_type` (`beacon_node/network/src/sync/peer_sync_info.rs`): an equal
     /// `finalized_epoch` with a `head_slot` inside `SLOT_IMPORT_TOLERANCE` of its own head is
@@ -87,7 +90,13 @@ impl Responder {
             Protocol::MetaDataV1 => Ok(self.metadata.encode(1)),
             Protocol::MetaDataV2 => Ok(self.metadata.encode(2)),
             Protocol::MetaDataV3 => Ok(self.metadata.encode(3)),
-            _ => return Response::ResourceUnavailable,
+            Protocol::GoodbyeV1 => {
+                return match Goodbye::decode(request) {
+                    Ok(Goodbye(reason)) => Response::Goodbye(reason),
+                    Err(Malformed) => Response::InvalidRequest,
+                };
+            }
+            Protocol::Unsupported => return Response::ResourceUnavailable,
         };
         match body {
             Ok(body) => Response::Success(body),
