@@ -360,6 +360,78 @@ mod tests {
         assert!(unset.previous.is_none());
         assert_eq!(set.previous.unwrap().0, seed(0x22).0);
     }
+    #[test]
+    fn secret_file_is_written_as_64_lowercase_hex_and_a_newline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seed");
+        let bytes = std::array::from_fn(|i| i as u8);
+
+        write_secret_file(&path, &bytes).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n"
+        );
+        assert_eq!(*read_secret_file(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn created_secret_file_holds_the_bytes_it_returned() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("seed");
+
+        let drawn = create_secret_file(&path).unwrap();
+
+        assert_eq!(read_secret_file(&path).unwrap(), drawn);
+    }
+
+    #[test]
+    fn two_created_secret_files_differ() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let one = create_secret_file(&dir.path().join("one")).unwrap();
+        let two = create_secret_file(&dir.path().join("two")).unwrap();
+
+        assert_ne!(one, two);
+    }
+
+    /// Configuration management may be halfway through fixing the mode, so a readable seed is
+    /// warned about and still loaded. The warning is the only trace of it, which is why this
+    /// reads the log.
+    #[cfg(unix)]
+    #[test]
+    fn secret_file_readable_by_others_is_warned_about_and_still_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let log = &*crate::testlog::LOG;
+        let dir = tempfile::tempdir().unwrap();
+        let private = seed_file(dir.path(), "private", &"11".repeat(32));
+        let shared = seed_file(dir.path(), "shared", &"22".repeat(32));
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let before = log.len();
+        read_secret_file(&private).unwrap();
+        let loaded = read_secret_file(&shared).unwrap();
+
+        // The log is shared with every other test in this binary, so each line is matched by
+        // the path it names rather than by when it was written.
+        let written = log.since(before);
+        let names = |path: &Path| {
+            written
+                .lines()
+                .find(|line| line.contains(&path.display().to_string()))
+                .unwrap_or_default()
+        };
+        assert_eq!(names(&private), "", "mode 0600 was warned about");
+        let warning = names(&shared);
+        assert!(
+            warning.contains("WARN") && warning.contains("0644"),
+            "{written:?}"
+        );
+        assert_eq!(*loaded, [0x22; 32]);
+    }
+
     /// Freezes the derivation. The value is from the first green run of the tests above and
     /// was recomputed independently before merge; any other HKDF-SHA256 and Ed25519
     /// implementation must reproduce it. If this test ever fails, every sibling's pin table
