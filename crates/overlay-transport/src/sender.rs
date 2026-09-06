@@ -150,6 +150,40 @@ struct Registry {
     lanes: Vec<Weak<Queues>>,
 }
 
+impl Registry {
+    /// Drops the frame that has waited longest anywhere in the fleet, and says whether there
+    /// was one. A scan of every lane rather than a heap: it runs only when the process is at
+    /// its budget, and a few hundred lanes is a few hundred comparisons.
+    fn evict_oldest(&mut self) -> bool {
+        let mut oldest: Option<(Arc<Queues>, Instant)> = None;
+        for weak in &self.lanes {
+            let Some(queues) = weak.upgrade() else {
+                continue;
+            };
+            let front = queues
+                .lane(Class::Large)
+                .frames
+                .front()
+                .map(|queued| queued.enqueued_at);
+            let Some(front) = front else { continue };
+            if oldest.as_ref().is_none_or(|(_, best)| front < *best) {
+                oldest = Some((queues, front));
+            }
+        }
+        let Some((queues, _)) = oldest else {
+            return false;
+        };
+        let Some(dropped) = queues.lane(Class::Large).pop() else {
+            return false;
+        };
+        self.queued -= dropped.frame.len();
+        queues
+            .stats
+            .queue_drop(&queues.peer, Class::Large, DropReason::Full);
+        true
+    }
+}
+
 impl LargeLedger {
     /// An empty ledger holding `cap` bytes across every peer. The sidecar passes
     /// [`LARGE_QUEUED_BYTES_MAX`]; a test passes less, so the eviction is reachable without
@@ -194,6 +228,8 @@ impl LargeLedger {
         }
         registry.queued += queued.frame.len();
         lane.push(queued);
+        drop(lane);
+        while registry.queued > self.cap && registry.evict_oldest() {}
     }
 
     /// Takes the oldest frame off `queues`' large lane.
@@ -242,8 +278,7 @@ impl Queues {
 
     /// Whether this peer's task has stopped, so a push has nowhere to go.
     fn gone(&self) -> bool {
-        self.closed.load(Ordering::Relaxed)
-            || self.task.get().is_some_and(AbortHandle::is_finished)
+        self.closed.load(Ordering::Relaxed) || self.task.get().is_some_and(AbortHandle::is_finished)
     }
 
     fn push(&self, class: Class, frame: Bytes, now: Instant) {
@@ -397,7 +432,9 @@ mod tests {
         }
 
         fn release(&self) {
-            self.0.permits.add_permits(tokio::sync::Semaphore::MAX_PERMITS);
+            self.0
+                .permits
+                .add_permits(tokio::sync::Semaphore::MAX_PERMITS);
         }
 
         fn with_permits(permits: usize) -> Self {
@@ -508,7 +545,10 @@ mod tests {
                 .unwrap();
         }
 
-        assert_eq!(stats.queue_drops(&peer(), Class::Large, DropReason::Full), 1);
+        assert_eq!(
+            stats.queue_drops(&peer(), Class::Large, DropReason::Full),
+            1
+        );
         eventually("the lane to drain", || link.sent().len() == 4).await;
         assert_eq!(link.numbers(), vec![1, 2, 3, 4]);
     }
@@ -557,10 +597,18 @@ mod tests {
             .push(Class::Large, frame_of(0, size), start)
             .unwrap();
         fast_sender
-            .push(Class::Large, frame_of(1, size), start + Duration::from_millis(1))
+            .push(
+                Class::Large,
+                frame_of(1, size),
+                start + Duration::from_millis(1),
+            )
             .unwrap();
         fast_sender
-            .push(Class::Large, frame_of(2, size), start + Duration::from_millis(2))
+            .push(
+                Class::Large,
+                frame_of(2, size),
+                start + Duration::from_millis(2),
+            )
             .unwrap();
 
         assert_eq!(stats.queue_drops(&slow, Class::Large, DropReason::Full), 1);
