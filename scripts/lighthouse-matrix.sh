@@ -5,7 +5,8 @@
 #
 # Downloads the release artefact for this host into ${LIGHTHOUSE_CACHE:-/tmp}/lighthouse-<version>
 # (skipped when it is already there), builds fleet-overlay, starts a beacon node on sepolia with
-# no discovery, no execution layer and the sidecar's peer id as its only trusted peer, and runs
+# no discovery, no execution layer, the sidecar's peer id as its only trusted peer and the
+# sidecar's listen address as a libp2p node to dial (both flags of MD-01's env file), and runs
 # `cargo test -p overlay-bn --test matrix -- --ignored`. Sepolia because its genesis state is
 # built into the binary; the node stays at genesis and syncs nothing, which is all the tests
 # need. --ten-minutes (or MATRIX_TEN_MINUTES=1) turns on the ten-minute assertion T-019 owns.
@@ -13,8 +14,12 @@
 # LIGHTHOUSE_TARGET_PEERS is the beacon node's --target-peers, 1 by default (MD-01): at 0
 # v8.2.2 denies every inbound connection before it knows the peer, trusted or not, with
 # `Exceeded { limit: 0, kind: EstablishedIncoming }`, because libp2p's connection limit is
-# ceil(0.9 * target). At 1 the sidecar has the one slot. Filling that slot and having the
-# beacon node dial the sidecar instead is T-020's test.
+# ceil(0.9 * target). At 1 the sidecar has the one slot. The test that needs that slot taken
+# attaches its own dummy peer to fill it, so the other tests still connect the way they did.
+#
+# --libp2p-addresses is deprecated at v8.2.2 in favour of --boot-nodes, which cannot carry a
+# local peer without replacing the network's boot ENRs. Passing it here is what tells us the
+# day a Lighthouse release removes it: the beacon node refuses to start and the matrix fails.
 set -euo pipefail
 
 version=${1:?usage: $0 <version> [--ten-minutes]}
@@ -63,6 +68,8 @@ free_port() {
 }
 p2p_port=$(free_port)
 http_port=$(free_port)
+listen_port=$(free_port)
+sidecar_listen=/ip4/127.0.0.1/tcp/$listen_port
 
 "$cache/lighthouse" bn \
   --network sepolia \
@@ -78,6 +85,7 @@ http_port=$(free_port)
   --http-port "$http_port" \
   --target-peers "${LIGHTHOUSE_TARGET_PEERS:-1}" \
   --trusted-peers "$peer_id" \
+  --libp2p-addresses "$sidecar_listen/p2p/$peer_id" \
   --execution-endpoint http://127.0.0.1:1 \
   --execution-jwt "$work/jwt.hex" \
   --allow-insecure-genesis-sync \
@@ -101,6 +109,7 @@ curl -fsS -m 2 "http://127.0.0.1:$http_port/eth/v1/node/version"; echo
 export LIGHTHOUSE_HTTP=http://127.0.0.1:$http_port
 export LIGHTHOUSE_P2P=/ip4/127.0.0.1/tcp/$p2p_port
 export SIDECAR_NODE_KEY=$work/node.key
+export SIDECAR_LISTEN=$sidecar_listen
 # The beacon node's own file log, not its stdout: the file logger runs at debug level, where
 # the peer manager records what it does with a peer (metadata refused, goodbye sent), while
 # stdout is at info and never names a peer at all.

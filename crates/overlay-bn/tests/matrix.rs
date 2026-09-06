@@ -2,9 +2,10 @@
 //! release by `scripts/lighthouse-matrix.sh`. Every test is ignored: it needs
 //! `LIGHTHOUSE_HTTP` (the beacon API origin), `LIGHTHOUSE_P2P` (`/ip4/127.0.0.1/tcp/<port>`)
 //! and `SIDECAR_NODE_KEY` (the node key whose peer id the beacon node was given as
-//! `--trusted-peers`); the ten-minute test also reads `LIGHTHOUSE_LOG`, the beacon node's
-//! debug-level file log, and runs only under `MATRIX_TEN_MINUTES=1`, which the nightly job
-//! sets.
+//! `--trusted-peers`); the tests the beacon node has to dial into also read `SIDECAR_LISTEN`,
+//! the address it was given in `--libp2p-addresses`. The ten-minute test also reads
+//! `LIGHTHOUSE_LOG`, the beacon node's debug-level file log, and runs only under
+//! `MATRIX_TEN_MINUTES=1`, which the nightly job sets.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -66,6 +67,12 @@ struct Sidecar {
 }
 
 fn spawn(env: &Env) -> Sidecar {
+    spawn_with(env, &env.key, env.listen.clone(), env.p2p.clone())
+}
+
+/// A link under `key`, listening on `listen` and dialling `libp2p_addr`. The three differ from
+/// the environment's only for the peers a test attaches itself.
+fn spawn_with(env: &Env, key: &NodeKey, listen: Multiaddr, libp2p_addr: Multiaddr) -> Sidecar {
     let (commands, commands_rx) = mpsc::channel(64);
     let (spec_tx, _spec) = spec_watch();
     let (_sets, sets) = watch::channel(SubscriptionSets::default());
@@ -75,15 +82,15 @@ fn spawn(env: &Env) -> Sidecar {
         .unwrap();
     let link = BnLink::spawn(
         LinkConfig {
-            libp2p_addr: env.p2p.clone(),
-            listen_addr: env.listen.clone(),
+            libp2p_addr,
+            listen_addr: listen,
             backoff_min: BACKOFF_MIN,
             backoff_max: BACKOFF_MAX,
             gossip: BnLinkConfig {
                 idontwant_on_publish: true,
             },
         },
-        &env.key,
+        key,
         BnClient::new(identity, Duration::from_secs(5)),
         &mut Registry::default(),
         lanes.pusher(),
@@ -92,7 +99,7 @@ fn spawn(env: &Env) -> Sidecar {
         commands_rx,
     );
     Sidecar {
-        peer_id: env.key.peer_id(),
+        peer_id: key.peer_id(),
         link,
         commands,
         _lanes: lanes,
@@ -175,6 +182,32 @@ impl Sidecar {
         );
         deadline
     }
+}
+
+/// What the beacon node says about who dialled whom, once it has decided. The entry appears a
+/// moment after the connection does, so this polls until `deadline`.
+async fn peer_direction(env: &Env, peer_id: PeerId, deadline: Instant) -> String {
+    tokio::time::timeout_at(deadline.into(), async {
+        loop {
+            if let Some(peer) = lighthouse_peer(env, peer_id).await
+                && let Some(direction) = peer["connection_direction"].as_str()
+            {
+                return direction.to_owned();
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("the beacon node never reported a connection direction for the peer")
+}
+
+/// A loopback port nothing listens on: a link configured with it can never connect by its own
+/// dial, so whatever connects it came from the beacon node.
+fn closed_port() -> Multiaddr {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    format!("/ip4/127.0.0.1/tcp/{port}").parse().unwrap()
 }
 
 /// The sidecar's entry in `GET /lighthouse/peers`, if the beacon node lists it.
@@ -315,4 +348,70 @@ async fn matrix_bn_link_stays_synced_ten_minutes_without_peer_manager_warnings()
         "peer-manager warnings about the sidecar:\n{}",
         warnings.join("\n")
     );
+}
+
+/// MD-01's outbound half, and CL-N2 (1) as it was reworded: with the beacon node's one inbound
+/// slot taken, the sidecar's own dial cannot get in, and the ENR it registers is what makes the
+/// beacon node dial it instead. `connection_direction` is the beacon node's own record of who
+/// dialled whom, so `Outgoing` is the beacon node saying it did.
+///
+/// The dummy that fills the slot is a second link under a throwaway key. It dials the beacon
+/// node the way any peer would, and it answers Status and Ping, which a bare libp2p swarm does
+/// not: an unanswered Status is a fatal peer action, and the slot would be free again within
+/// seconds. Its ENR carries port 0, so the beacon node's own dial to it fails and the
+/// connection it holds stays inbound.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a Lighthouse beacon node: scripts/lighthouse-matrix.sh"]
+async fn matrix_bn_dials_the_listening_sidecar_when_its_inbound_cap_is_full() {
+    let env = env();
+    let dummy_dir = tempfile::tempdir().unwrap();
+    let dummy_key = NodeKey::load_or_create(&dummy_dir.path().join("node.key")).unwrap();
+    let mut dummy = spawn_with(
+        &env,
+        &dummy_key,
+        "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
+        env.p2p.clone(),
+    );
+    let filled = Instant::now() + CONNECT;
+    dummy
+        .wait_for(filled, |e| matches!(e, BnEvent::Connected { .. }))
+        .await;
+    let holding = peer_direction(&env, dummy.peer_id, filled).await;
+    assert_eq!(
+        holding, "Incoming",
+        "the dummy peer is not on the inbound slot"
+    );
+
+    let mut sidecar = spawn(&env);
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    sidecar
+        .wait_for(deadline, |e| matches!(e, BnEvent::Connected { .. }))
+        .await;
+    let direction = peer_direction(&env, sidecar.peer_id, deadline).await;
+    let peer = lighthouse_peer(&env, sidecar.peer_id).await.unwrap();
+    assert_eq!(direction, "Outgoing", "{peer}");
+    assert_eq!(peer["is_trusted"], true, "{peer}");
+    drop(dummy);
+}
+
+/// The beacon node was started with both flags of the env file MD-01 specifies, and the
+/// sidecar's own dial goes to a closed port, so the only way the two can meet is the beacon
+/// node dialling the sidecar's listen address. What actually connects them here is the ENR the
+/// link registers: `--libp2p-addresses` is dialled once when the network service starts, long
+/// before a test process is listening on that port. Its value in this matrix is that the
+/// beacon node accepted the flag at all, which is what breaks the day a release removes it.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a Lighthouse beacon node: scripts/lighthouse-matrix.sh"]
+async fn matrix_bn_startup_flags_dial_the_listening_sidecar() {
+    let env = env();
+    let mut sidecar = spawn_with(&env, &env.key, env.listen.clone(), closed_port());
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    sidecar
+        .wait_for(deadline, |e| matches!(e, BnEvent::Connected { .. }))
+        .await;
+
+    let peer = lighthouse_peer(&env, sidecar.peer_id).await.unwrap();
+    assert_eq!(peer["connection_direction"], "Outgoing", "{peer}");
 }
