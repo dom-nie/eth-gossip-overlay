@@ -6,6 +6,17 @@
 //! length as an unsigned LEB128 varint followed by the SSZ in snappy's framing format, and a
 //! response chunk is a result byte in front of the same. The protocols answered here carry no
 //! context bytes (`ProtocolId::has_context_bytes` in `rpc/protocol.rs`).
+//!
+//! Answering `ResourceUnavailable` is not free on every protocol. For a request the beacon
+//! node made itself on `BlocksByRange` or `BlocksByRoot` it is `PeerAction::Fatal`, an
+//! immediate ban (`RPCError::ErrorResponse` in
+//! `beacon_node/lighthouse_network/src/peer_manager/mod.rs:553-584`), and the Status echo
+//! below is what puts the sidecar in `synced_peers()`, which is where range sync picks the
+//! peers it asks. So the sidecar is a candidate for exactly the requests it refuses. What
+//! keeps that from ending in a ban is trust: `--trusted-peers` exempts it from the score
+//! change, and it must be in place before the first sync request. That is what the
+//! `overlay_bn_trusted` gauge T-018 feeds, and the `OverlayNotTrustedByBn` alert on it
+//! (Architecture.md §12), are for.
 
 use std::collections::BTreeSet;
 use std::io::{self, Read, Write};
@@ -216,8 +227,6 @@ const MAX_REQUEST_BYTES: u64 = 1 + 32 + MAX_REQUEST_LEN as u64 + MAX_REQUEST_LEN
 pub const SUCCESS: u8 = 0;
 /// The result byte of an `InvalidRequest` error chunk (`RpcErrorResponse::as_u8`).
 pub const INVALID_REQUEST: u8 = 1;
-/// The result byte of a `ServerError` error chunk; listed so the codes read as a set.
-pub const SERVER_ERROR: u8 = 2;
 /// The result byte of a `ResourceUnavailable` error chunk.
 pub const RESOURCE_UNAVAILABLE: u8 = 3;
 

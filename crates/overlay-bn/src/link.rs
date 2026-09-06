@@ -49,10 +49,11 @@ pub const BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// noise handshake and the yamux negotiation share it.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long an inbound req/resp stream has to be read and answered, the fork's default.
-/// Lighthouse gives a request 15 s to arrive (`REQUEST_TIMEOUT` in `rpc/protocol.rs`); one
-/// that has not arrived in ten is not coming, and the sidecar's answers are a few bytes it
-/// already holds.
+/// How long an inbound req/resp stream has to be read and answered. The same ten seconds the
+/// pinned fork defaults to, passed explicitly so a change to that default cannot quietly
+/// change how long a half-written request holds a stream open. Lighthouse gives a request
+/// 15 s to arrive (`REQUEST_TIMEOUT` in `rpc/protocol.rs`); one that has not arrived in ten
+/// is not coming, and the sidecar's answers are a few bytes it already holds.
 const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Slots in the control channel. On connect Lighthouse sends its whole subscription set in
