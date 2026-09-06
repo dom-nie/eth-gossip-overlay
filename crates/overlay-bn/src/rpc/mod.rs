@@ -128,7 +128,8 @@ mod tests {
     use libp2p::request_response::Codec;
 
     use super::*;
-    use crate::rpc::msg::Ping;
+    use crate::rpc::msg::{Ping, Status};
+    use crate::rpc::proto::Protocol;
 
     const PING: StreamProtocol = StreamProtocol::new("/eth2/beacon_chain/req/ping/1/ssz_snappy");
 
@@ -166,5 +167,25 @@ mod tests {
 
         assert_eq!(out.len(), 28);
         assert_eq!(out, golden);
+    }
+
+    fn status() -> Status {
+        Status {
+            fork_digest: [1, 2, 3, 4],
+            finalized_root: [0xaa; 32],
+            finalized_epoch: 7,
+            head_root: [0xbb; 32],
+            head_slot: 250,
+            earliest_available_slot: None,
+        }
+    }
+
+    #[test]
+    fn status_response_echoes_the_request_fields() {
+        let request = status().encode(1);
+
+        let response = Responder::new().respond(Protocol::StatusV1, &request);
+
+        assert_eq!(response, Response::Success(request));
     }
 }
