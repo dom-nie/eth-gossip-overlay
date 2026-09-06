@@ -430,6 +430,7 @@ mod tests {
     use overlay_core::topic::Topic;
 
     use super::*;
+    use crate::manager::PeerEvent;
     use crate::testutil::{Builder, CountingStats, NodeKind, REGION, WAIT};
 
     /// A fork digest, as a topic string carries one.
@@ -816,5 +817,40 @@ mod tests {
 
         assert_eq!(peer.hostname, lower);
         assert_eq!(stats.unknown_frame_types(&lower), 1);
+    }
+
+    /// A connection is not a peer (T-023): the manager holds an authenticated connection back
+    /// until HELLO has been through, so nothing downstream is ever told about a peer whose name
+    /// has not been checked.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn manager_announces_up_only_after_successful_hello() {
+        let mut cluster = Builder::new(&[NodeKind::Bare, NodeKind::Manager])
+            .start()
+            .await;
+        let (peer, manager) = (cluster.hostname(0), cluster.hostname(1));
+        let dialler = cluster.self_hello(0);
+        let connection = cluster.dial(0, 1).await.unwrap();
+
+        assert!(cluster.try_next_event(1).await.is_none());
+        assert!(cluster.live(1).is_empty());
+
+        let _dialled = perform(
+            connection,
+            Role::Dial,
+            &dialler,
+            &manager,
+            Vec::new(),
+            WAIT,
+            &(),
+        )
+        .await
+        .unwrap();
+
+        let event = cluster.next_event(1).await;
+        assert!(
+            matches!(&event, PeerEvent::Up(up) if up.hostname == peer),
+            "{event:?}"
+        );
+        assert_eq!(cluster.live(1).len(), 1);
     }
 }
