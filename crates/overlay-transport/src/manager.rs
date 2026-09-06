@@ -879,7 +879,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::testutil::{Builder, NodeKind, TestCluster};
+    use crate::testutil::{Builder, NodeKind, TestCluster, eventually};
 
     fn host(name: &str) -> Hostname {
         Hostname(name.to_owned())
@@ -1007,5 +1007,31 @@ mod tests {
             "{event:?}"
         );
         assert!(cluster.live(0).is_empty());
+    }
+
+    /// A key the fleet seed derives for a name the roster does not have, which is what a host
+    /// expelled from the roster still holds. The acceptor's verifier refuses it inside the
+    /// handshake, so no connection ever reaches the manager and the refusal shows up only in
+    /// the counter.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn incoming_connection_with_a_key_absent_from_the_pin_table_never_reaches_the_manager() {
+        let mut cluster = Builder::new(&[NodeKind::Sink, NodeKind::Manager])
+            .start()
+            .await;
+
+        let refused = cluster
+            .dial_as(&Hostname("bn-expelled".to_owned()), 0, 1)
+            .await;
+
+        eventually("the acceptor counts the refused key", || {
+            cluster
+                .stats(1)
+                .handshake_failures(Role::Accept, FailureReason::UnknownKey)
+                == 1
+        })
+        .await;
+        drop(refused);
+        assert!(cluster.try_next_event(1).await.is_none());
+        assert!(cluster.live(1).is_empty());
     }
 }
