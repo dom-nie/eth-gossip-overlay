@@ -40,7 +40,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
-use overlay_bn::compat::CompatStats;
+use overlay_bn::compat::{self, CompatStats};
 use overlay_bn::inbound::InboundStats;
 use overlay_bn::publish::PublishStats;
 use overlay_core::budget::FanoutKind;
@@ -589,11 +589,19 @@ impl PublishStats for Metrics {
 }
 
 impl CompatStats for Metrics {
+    /// Zero every state, then raise the one that holds. The states are a closed set, so all of
+    /// them stay on the scrape and an alert reads `== 1` on the state it cares about instead of
+    /// working around a series that is simply not there. A state this release does not know
+    /// still gets its own series at 1.
     fn set_compat(&self, state: &'static str) {
-        self.bn_compat.reset();
+        for known in COMPAT_STATES {
+            self.bn_compat.with_label_values(&[known]).set(0);
+        }
         self.bn_compat.with_label_values(&[state]).set(1);
     }
 
+    /// Reset first, unlike the compat states: version strings are unbounded, so the old one has
+    /// to go or the scrape grows a series per beacon node release.
     fn set_info(&self, version: &str) {
         self.bn_info.reset();
         self.bn_info.with_label_values(&[version]).set(1);
@@ -771,6 +779,15 @@ fn set_peer_counts(gauge: &IntGaugeVec, counts: &PeerCounts) {
             .set((*count).try_into().unwrap_or(i64::MAX));
     }
 }
+
+/// Every `overlay_bn_compat` state, so the ones that do not hold can be zeroed rather than
+/// dropped.
+const COMPAT_STATES: [&str; 4] = [
+    compat::STATE_SUPPORTED,
+    compat::STATE_UNTESTED,
+    compat::STATE_UNSUPPORTED,
+    compat::STATE_SIZE_MISMATCH,
+];
 
 /// The one series of a metric that has no labels at all.
 const NO_LABELS: &[&str] = &[];
