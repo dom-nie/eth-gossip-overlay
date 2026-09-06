@@ -1,6 +1,7 @@
 //! QUIC transport between sidecars.
 
 pub mod endpoint;
+pub mod hello;
 pub mod manager;
 pub mod tls;
 
