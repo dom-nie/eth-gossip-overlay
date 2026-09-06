@@ -71,9 +71,8 @@ impl Bitmap {
     /// subscribes to eight topics sends one byte and not the width of its widest id.
     pub fn encode(&self) -> Bytes {
         let mut out: Vec<u8> = self.0.iter().flat_map(|word| word.to_le_bytes()).collect();
-        while out.last() == Some(&0) {
-            out.pop();
-        }
+        let used = out.iter().rposition(|byte| *byte != 0);
+        out.truncate(used.map_or(0, |last| last + 1));
         Bytes::from(out)
     }
 
@@ -186,7 +185,58 @@ mod tests {
         let encoded = bitmap.encode();
 
         assert_eq!(Bitmap::decode(&encoded), bitmap);
-        assert!(encoded.len() < 100, "200 bits took {} bytes", encoded.len());
+        assert_eq!(encoded.len(), 200usize.div_ceil(8));
         assert_eq!(Bitmap::decode(&Bitmap::new().encode()), Bitmap::new());
+    }
+
+    fn topic(name: &str) -> Topic {
+        Topic::parse(&format!("/eth2/6a95a1a9/{name}/ssz_snappy")).unwrap()
+    }
+
+    /// The lookup every send path makes, in the peer's own ids and never in this host's: a bit
+    /// is only an answer once the peer has said which topic that id stands for.
+    #[test]
+    fn subscribed_is_true_only_for_a_topic_the_peer_bound_and_set() {
+        let (block, attestation) = (topic("beacon_block"), topic("beacon_attestation_3"));
+        let mut table = PeerTopicTable::new();
+        table
+            .apply_add(TopicId::new(7), &block.to_string())
+            .unwrap();
+        table
+            .apply_add(TopicId::new(9), &attestation.to_string())
+            .unwrap();
+        let mut state = PeerState::new(table);
+
+        state.bitmap.set(TopicId::new(7));
+
+        assert!(state.subscribed(&block));
+        assert!(!state.subscribed(&attestation));
+        assert!(!state.subscribed(&topic("beacon_aggregate_and_proof")));
+        assert!(!PeerState::default().subscribed(&block));
+    }
+
+    /// D06 in one assertion. The extra column topics T-015 subscribes to are in `local` so that
+    /// they are interned and announced (D12), and out of the bitmap because the beacon node
+    /// never asked for those columns: a sibling reading them as wanted would send this host
+    /// every column of every block.
+    #[test]
+    fn advertised_bitmap_holds_the_advertised_set_and_not_the_local_extras() {
+        let (block, column) = (topic("beacon_block"), topic("data_column_sidecar_9"));
+        let mut table = OwnTopicTable::new();
+        let mut sets = SubscriptionSets::default();
+        sets.advertised.insert(block.clone());
+        sets.local.insert(block.clone());
+        sets.local.insert(column.clone());
+        for topic in &sets.local {
+            table.intern(topic).unwrap();
+        }
+
+        let bitmap = advertised(&sets, &table);
+
+        assert_eq!(
+            bitmap.iter_set().collect::<Vec<_>>(),
+            vec![table.get(&block).unwrap()]
+        );
+        assert!(!bitmap.test(table.get(&column).unwrap()));
     }
 }
