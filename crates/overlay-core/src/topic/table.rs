@@ -5,6 +5,11 @@ use std::fmt;
 
 use crate::topic::{Topic, TopicError};
 
+/// How many topics one table holds, so ids run from 0 to 65,534 and `u16::MAX` is never
+/// assigned. A fleet across a fork transition interns a few hundred, so the ceiling is there to
+/// bound what a peer can make this host allocate, not because anyone reaches it.
+pub const CAPACITY: usize = u16::MAX as usize;
+
 /// A topic's id in one table. Two bytes instead of the fifty a topic string takes, which is what
 /// keeps a batch entry or a chunk header small (§5.4). An id means nothing on its own: it is
 /// only ever read against the table of the peer that assigned it.
@@ -50,6 +55,9 @@ impl OwnTopicTable {
     pub fn intern(&mut self, topic: &Topic) -> Result<(TopicId, bool), TableFull> {
         if let Some(&id) = self.ids.get(topic) {
             return Ok((id, false));
+        }
+        if self.topics.len() >= CAPACITY {
+            return Err(TableFull);
         }
         let id = TopicId(self.topics.len() as u16);
         self.topics.push(topic.to_string());
@@ -147,7 +155,7 @@ pub enum PeerTableError {
 
 /// The table has no id left to assign.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("topic table is full")]
+#[error("topic table is full at {CAPACITY} entries")]
 pub struct TableFull;
 
 #[cfg(test)]
