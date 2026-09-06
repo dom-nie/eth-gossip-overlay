@@ -235,4 +235,21 @@ mod tests {
 
         assert_eq!(plan, RoutePlan::Direct(vec![subscriber]));
     }
+
+    /// v1 sends both classes the same way, so the class changes nothing about the plan. T-072
+    /// rewrites this test: a large message becomes a stripe over the same peers, and the two
+    /// answers stop matching.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn class_does_not_change_v1_plan() {
+        let connection = connection().await;
+        let block = topic("beacon_block");
+        let peer = host("bn-a");
+        let live = view(&connection, vec![(peer, peer_state(&[(1, &block)], &[1]))]);
+
+        let small = route(&block, Class::Small, &live, &me(), &Fanout::default());
+        let large = route(&block, Class::Large, &live, &me(), &Fanout::default());
+
+        assert_eq!(small, RoutePlan::Direct(vec![host("bn-a")]));
+        assert_eq!(small, large);
+    }
 }
