@@ -5,10 +5,14 @@
 
 use std::fmt;
 use std::io::ErrorKind;
+use std::net::IpAddr;
 use std::path::Path;
 
+use enr::Enr;
+use enr::ed25519_dalek::SigningKey;
 pub use libp2p::PeerId;
 use libp2p::identity::{Keypair, ed25519};
+use libp2p::multiaddr::{Multiaddr, Protocol};
 use overlay_core::identity::{SecretFileError, create_secret_file, read_secret_file};
 
 /// The per-host libp2p key. Held as a keypair rather than raw bytes so the secret lives only
@@ -17,6 +21,18 @@ pub struct NodeKey(Keypair);
 
 /// The node key file has the seed file's format, so its errors are the shared reader's.
 pub type NodeKeyError = SecretFileError;
+
+/// Why no ENR could be made for a listen address.
+#[derive(Debug, thiserror::Error)]
+pub enum EnrError {
+    /// An ENR carries an IP and a TCP port and nothing else, so this is every address the
+    /// beacon node could not be asked to dial.
+    #[error("{0} is not an /ip4 or /ip6 address with a /tcp port")]
+    Address(Multiaddr),
+    /// The record came out over the 300-byte limit, which needs a key nobody would configure.
+    #[error("the record was refused: {0}")]
+    Refused(enr::Error),
+}
 
 impl NodeKey {
     /// Reads the key at `path`, or makes one there from the OS random number generator when
@@ -42,6 +58,53 @@ impl NodeKey {
     pub fn peer_id(&self) -> PeerId {
         self.0.public().to_peer_id()
     }
+
+    /// The `enr:`-prefixed record for a sidecar reachable at `listen`, signed by this key, as
+    /// `POST /lighthouse/add_peer` takes it. The key is rebuilt from the node key's own 32
+    /// secret bytes rather than converted from a signing type: the `enr` crate signs with
+    /// ed25519-dalek 2, `overlay-core` derives the overlay TLS key with dalek 3, and the two
+    /// versions share no types. Lighthouse's `CombinedKeyExt::from_libp2p` does the same
+    /// thing with the same bytes, so the record names the peer id in `--trusted-peers`.
+    #[expect(
+        clippy::expect_used,
+        reason = "the node key is Ed25519 by construction (keypair_from), and an Ed25519 \
+                  secret is the 32 bytes SigningKey takes"
+    )]
+    pub fn enr(&self, listen: &Multiaddr) -> Result<String, EnrError> {
+        let (ip, port) =
+            ip_and_tcp_port(listen).ok_or_else(|| EnrError::Address(listen.clone()))?;
+        let secret = self
+            .0
+            .clone()
+            .try_into_ed25519()
+            .expect("an Ed25519 node key")
+            .secret();
+        let key = SigningKey::try_from(secret.as_ref()).expect("a 32-byte Ed25519 secret");
+        let mut builder = Enr::builder();
+        builder.ip(ip);
+        match ip {
+            IpAddr::V4(_) => builder.tcp4(port),
+            IpAddr::V6(_) => builder.tcp6(port),
+        };
+        builder
+            .build(&key)
+            .map(|record: Enr<SigningKey>| record.to_base64())
+            .map_err(EnrError::Refused)
+    }
+}
+
+/// The `/ip4|ip6/<addr>/tcp/<port>` pair an ENR can carry, or `None` for any other address.
+fn ip_and_tcp_port(addr: &Multiaddr) -> Option<(IpAddr, u16)> {
+    let mut parts = addr.iter();
+    let ip = match parts.next()? {
+        Protocol::Ip4(ip) => IpAddr::V4(ip),
+        Protocol::Ip6(ip) => IpAddr::V6(ip),
+        _ => return None,
+    };
+    let Protocol::Tcp(port) = parts.next()? else {
+        return None;
+    };
+    parts.next().is_none().then_some((ip, port))
 }
 
 /// Wraps 32 secret bytes as a libp2p keypair, wiping `bytes` on the way.
@@ -92,7 +155,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = NodeKey::load_or_create(&dir.path().join("node.key")).unwrap();
 
-        let text = key.enr(&"/ip4/127.0.0.1/tcp/7787".parse().unwrap()).unwrap();
+        let text = key
+            .enr(&"/ip4/127.0.0.1/tcp/7787".parse().unwrap())
+            .unwrap();
 
         assert!(text.starts_with("enr:"), "{text}");
         let record: enr::Enr<enr::ed25519_dalek::SigningKey> = text.parse().unwrap();
