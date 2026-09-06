@@ -268,21 +268,29 @@ pub struct HandshakeFailure {
 }
 
 impl HandshakeFailure {
-    /// What T-023 counts when a connection never came up. A rejected key arrives as
-    /// `certificate_unknown`, whether this host sent that alert or received it; a dialler
-    /// cannot tell its own rejection from the peer's, and counting both as a mismatch is the
-    /// honest answer, since either way the two do not agree on who the other is.
+    /// What T-023 counts for a connection that ended, or `None` when there is nothing to
+    /// count. An orderly close is not a handshake failure: a peer that says goodbye and a
+    /// connection this host closed itself are both ordinary, and this is called on
+    /// `closed()` where they are the usual outcome.
+    ///
+    /// A rejected key arrives as `certificate_unknown`, whether this host sent that alert or
+    /// received it; a dialler cannot tell its own rejection from the peer's, and counting
+    /// both as a mismatch is the honest answer, since either way the two do not agree on who
+    /// the other is.
     ///
     /// An ALPN that does not match arrives as `no_application_protocol` and means a peer on
-    /// another protocol major (D29). Everything else the TLS layer refuses is counted with
-    /// it: a pair that cannot finish a handshake has nothing finer left to disagree about.
-    pub fn from_connection_error(role: Role, error: &quinn::ConnectionError) -> Self {
+    /// another protocol major (D29). Everything else that ends a connection short is counted
+    /// with it: a pair that cannot finish a handshake has nothing finer left to disagree
+    /// about.
+    pub fn from_connection_error(role: Role, error: &quinn::ConnectionError) -> Option<Self> {
         let rejected_the_key = |code| {
             code == quinn::TransportErrorCode::crypto(u8::from(
                 rustls::AlertDescription::CertificateUnknown,
             ))
         };
         let reason = match error {
+            quinn::ConnectionError::ApplicationClosed(_)
+            | quinn::ConnectionError::LocallyClosed => return None,
             quinn::ConnectionError::TimedOut => FailureReason::Timeout,
             quinn::ConnectionError::TransportError(error) if rejected_the_key(error.code) => {
                 role.pin_failure()
@@ -294,7 +302,7 @@ impl HandshakeFailure {
             }
             _ => FailureReason::Version,
         };
-        Self { role, reason }
+        Some(Self { role, reason })
     }
 }
 
@@ -770,7 +778,8 @@ mod tests {
                     Err(error) => Err(HandshakeFailure::from_connection_error(
                         Role::Accept,
                         &error,
-                    )),
+                    )
+                    .expect("a refused handshake is a failure")),
                 });
             }
             drop(open);
@@ -846,7 +855,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        let failure = HandshakeFailure::from_connection_error(Role::Dial, &error);
+        let failure = HandshakeFailure::from_connection_error(Role::Dial, &error).unwrap();
         assert_eq!(failure.reason.as_str(), "version");
     }
     /// The half of the classification test 8 cannot reach. Worth doing on a real handshake
@@ -869,7 +878,9 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(
-            HandshakeFailure::from_connection_error(Role::Dial, &refused).reason,
+            HandshakeFailure::from_connection_error(Role::Dial, &refused)
+                .unwrap()
+                .reason,
             FailureReason::KeyMismatch
         );
 
@@ -890,7 +901,9 @@ mod tests {
             FailureReason::UnknownKey
         );
         assert_eq!(
-            HandshakeFailure::from_connection_error(Role::Dial, &connection.closed().await).reason,
+            HandshakeFailure::from_connection_error(Role::Dial, &connection.closed().await)
+                .unwrap()
+                .reason,
             FailureReason::KeyMismatch
         );
     }
