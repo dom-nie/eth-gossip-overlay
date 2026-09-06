@@ -39,6 +39,7 @@ use hyper::header::CONTENT_TYPE;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
+use overlay_core::topic::Class;
 use prometheus::core::Collector;
 use prometheus::{
     HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGauge, IntGaugeVec, Opts, Registry,
@@ -212,6 +213,7 @@ impl Builder<'_> {
 /// Every §12 metric, registered on one `prometheus::Registry`.
 pub struct Metrics {
     registered: BTreeMap<String, Vec<String>>,
+    reconstruct_seconds: HistogramVec,
 }
 
 impl Metrics {
@@ -363,7 +365,9 @@ impl Metrics {
             "Messages that needed a parity chunk to reconstruct.",
         )?;
         b.counter(REPAIR_REQUESTS_TOTAL, "Repair requests sent.")?;
-        b.add(HistogramVec::new(
+        // A millisecond to two seconds, doubling: reassembly either finishes inside a slot or
+        // has already lost the race, so the resolution belongs at the fast end.
+        let reconstruct_seconds = b.add(HistogramVec::new(
             HistogramOpts::new(
                 RECONSTRUCT_SECONDS,
                 "Seconds from a message's first chunk to its reconstruction.",
@@ -409,6 +413,7 @@ impl Metrics {
         ))?;
 
         Ok(Self {
+            reconstruct_seconds,
             registered: b.registered,
         })
     }
@@ -424,6 +429,23 @@ impl Metrics {
     /// The label names `metric` was registered with, or `None` if it was not registered here.
     pub fn label_names(&self, metric: &str) -> Option<&[String]> {
         self.registered.get(metric).map(Vec::as_slice)
+    }
+
+    /// How long a large message took from its first chunk to being whole again. T-074 is the
+    /// caller; the series exists from this release so the dashboard does not wait for it.
+    pub fn reconstructed(&self, class: Class, seconds: f64) {
+        self.reconstruct_seconds
+            .with_label_values(&[class_label(class)])
+            .observe(seconds);
+    }
+}
+
+/// The `class` label. `overlay-core` does not spell its enum out for metrics, and putting a
+/// label method there would move a presentation choice into the crate that must not have one.
+fn class_label(class: Class) -> &'static str {
+    match class {
+        Class::Small => "small",
+        Class::Large => "large",
     }
 }
 
