@@ -174,6 +174,12 @@ impl Announcer {
         Self::default()
     }
 
+    /// Records that `peer` was sent the table's whole snapshot, which is what T-025 puts in the
+    /// HELLO. Everything interned after this call is what that peer is still owed.
+    pub fn hello_sent(&mut self, peer: &Hostname, table: &OwnTopicTable) {
+        self.told.insert(peer.clone(), table.topics.len());
+    }
+
     /// The bindings `peer` has not been told, which this call records as told. T-027 puts them
     /// on that peer's control stream.
     pub fn announce(&mut self, peer: &Hostname, table: &OwnTopicTable) -> Vec<Frame> {
