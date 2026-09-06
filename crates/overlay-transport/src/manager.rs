@@ -52,7 +52,7 @@ use crate::tls::{self, FailureReason, HandshakeFailure, PinEntry, PinTable, Role
 
 /// §5.3's reconnect floor. The first retry after a peer goes away is quick because the usual
 /// cause is a sidecar restart that is already finishing.
-const RECONNECT_MIN: Duration = Duration::from_millis(500);
+pub(crate) const RECONNECT_MIN: Duration = Duration::from_millis(500);
 
 /// §5.3's reconnect ceiling. A host that has been unreachable for a while is retried twice a
 /// minute, which is what keeps a fleet-wide outage from ending in a reconnect storm (§9).

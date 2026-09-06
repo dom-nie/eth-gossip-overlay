@@ -39,6 +39,9 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 use crate::endpoint::{self, EndpointError};
+use overlay_core::topic::table::TopicId;
+use overlay_core::wire::Frame;
+
 use crate::hello::{HelloAdmission, OwnTopics, SelfHello};
 use crate::manager::{
     Admission, CloseCode, ConnectionManager, Handle, LiveView, Local, ManagerStats, PeerCounts,
@@ -89,6 +92,11 @@ pub enum NodeKind {
     /// An endpoint with nothing reading from it, so a test drives both ends of a connection
     /// itself: [`TestCluster::connected_pair`] is what accepts on it.
     Bare,
+    /// A sink that answers HELLO with one topic binding and then binds the same id to another
+    /// topic. That is the protocol error a control stream reader closes a connection for
+    /// (T-027), and it happens again on every redial, which is what a peer whose fault survives
+    /// a reconnect looks like.
+    ConflictingTopicAdd,
     /// A sink with a pin table of its own that is always empty, so it takes the packets of
     /// every dial and refuses the key behind them. A dialler's `connect()` resolves before the
     /// refusal reaches it, which is the one case where a resolved dial is not a peer.
@@ -293,8 +301,12 @@ impl Builder {
             let (endpoint, addr) = bind_reserved(&self.cfg, &node_pins, &key);
             let holding = !matches!(kind, NodeKind::Manager | NodeKind::Bare);
             let sink = holding.then(|| {
-                let held =
-                    hold_connections(endpoint.clone(), node_pins.clone(), self_hello.clone());
+                let held = hold_connections(
+                    endpoint.clone(),
+                    node_pins.clone(),
+                    self_hello.clone(),
+                    kind,
+                );
                 match &runtime {
                     Some(runtime) => runtime.spawn(held),
                     None => tokio::spawn(held),
@@ -377,7 +389,14 @@ async fn hold_connections(
     endpoint: quinn::Endpoint,
     pins: Arc<ArcSwap<PinTable>>,
     self_hello: SelfHello,
+    kind: NodeKind,
 ) {
+    let conflicting = kind == NodeKind::ConflictingTopicAdd;
+    let announced = if conflicting {
+        vec![(TopicId::new(1), topic("beacon_block"))]
+    } else {
+        Vec::new()
+    };
     // The connection keeps the peer's side of it alive; the answer keeps the control stream
     // open, which is what a peer that had a manager of its own would do with it.
     let mut held = Vec::new();
@@ -390,12 +409,20 @@ async fn hold_connections(
                     Role::Accept,
                     &self_hello,
                     &pinned.hostname,
-                    Vec::new(),
+                    announced.clone(),
                     WAIT,
                     &(),
                 )
                 .await
             {
+                let mut peer = peer;
+                if conflicting {
+                    let contradiction = Frame::TopicAdd {
+                        id: 1,
+                        topic: topic("beacon_attestation_3"),
+                    };
+                    let _ = peer.control.write_frame(&contradiction).await;
+                }
                 answered.push(peer);
             }
             held.push(connection);
@@ -700,6 +727,11 @@ impl<A: Admission> Drop for TestCluster<A> {
             }
         }
     }
+}
+
+/// A topic on the one fork digest the harness uses.
+fn topic(name: &str) -> String {
+    format!("/eth2/6a95a1a9/{name}/ssz_snappy")
 }
 
 /// Polls until `ready` holds, failing the test rather than hanging when it never does.

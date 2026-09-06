@@ -217,6 +217,7 @@ pub(crate) fn state(peer: &Mutex<PeerState>) -> MutexGuard<'_, PeerState> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Instant;
 
     use bytes::Bytes;
     use overlay_core::subs::Bitmap;
@@ -226,7 +227,8 @@ mod tests {
     use tokio::sync::watch;
 
     use crate::hello;
-    use crate::manager::PeerInfo;
+    use crate::manager::{PeerInfo, RECONNECT_MIN};
+    use crate::testlog::LOG;
     use crate::testutil::{Builder, NodeKind, TestCluster, WAIT, eventually};
     use crate::tls::Role;
 
@@ -428,5 +430,40 @@ mod tests {
         })
         .await;
         assert!(cluster.live(1).get(&host).is_some());
+    }
+
+    /// T-025 left an admitted dial proven, because HELLO is a round trip that an acceptor about
+    /// to refuse a key never answers. A peer that pairs and is then closed for a protocol error
+    /// is what that leaves: the fault is in what the peer says rather than in the path, so a
+    /// redial at the 500 ms floor would pair again, read the same frame again and close again,
+    /// for as long as both hosts are up.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peer_closed_for_a_protocol_error_is_not_redialled_at_the_floor() {
+        let mark = LOG.len();
+        let mut cluster = Builder::new(&[NodeKind::Manager, NodeKind::ConflictingTopicAdd])
+            .start()
+            .await;
+        let (_sets, watching) = watch::channel(SubscriptionSets::default());
+        super::spawn(
+            cluster.take_events(0),
+            watching,
+            cluster.topics(0).clone(),
+            Arc::new(()),
+        );
+        let peer = cluster.hostname(1);
+
+        eventually("the backoff to grow past its floor", || {
+            cluster
+                .retry_at(0, &peer)
+                .is_some_and(|at| at > Instant::now() + RECONNECT_MIN)
+        })
+        .await;
+
+        let closes = LOG
+            .since(mark)
+            .lines()
+            .filter(|line| line.contains(peer.0.as_str()) && line.contains("contradicts itself"))
+            .count();
+        assert!(closes > 1, "the peer was closed {closes} times");
     }
 }
