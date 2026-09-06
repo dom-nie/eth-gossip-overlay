@@ -912,4 +912,27 @@ mod tests {
             host("bn-a")
         );
     }
+    /// A hostname no name type would take: a slash, a space, no dots. It is a roster key and
+    /// a key-derivation input, and it never reaches the wire.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hostnames_need_not_be_dns_names() {
+        let seeds = seeds(0x11, None);
+        let pins = pins(&roster(&["rack3/bn 01", "bn-b"]), &seeds);
+        let (addr, accepted) = acceptor(&pins, &seeds, "rack3/bn 01");
+        let dialler = quinn::Endpoint::client(loopback()).unwrap();
+        let config =
+            client_config(pins.clone(), &own_key(&seeds, "bn-b"), &host("rack3/bn 01")).unwrap();
+
+        let connection = dialler
+            .connect_with(config, addr, PLACEHOLDER_NAME)
+            .unwrap()
+            .await
+            .unwrap();
+
+        assert_eq!(
+            peer_identity(&pins.load(), &connection).unwrap().hostname,
+            host("rack3/bn 01")
+        );
+        assert_eq!(accepted.await.unwrap().unwrap().hostname, host("bn-b"));
+    }
 }
