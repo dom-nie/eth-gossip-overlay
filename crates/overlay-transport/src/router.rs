@@ -56,6 +56,7 @@ mod tests {
     use overlay_core::topic::{Class, Topic};
 
     use super::{RoutePlan, route};
+    use crate::manager::LiveView;
     use crate::testutil::{Builder, NodeKind, REGION, WAIT, peer_state, view};
 
     fn host(name: &str) -> Hostname {
@@ -153,5 +154,32 @@ mod tests {
         let plan = route(&block, Class::Large, &live, &me(), &Fanout::default());
 
         assert_eq!(plan, RoutePlan::Direct(vec![peer]));
+    }
+
+    /// Nobody to send to is its own plan and not an empty list, so the send path has one thing
+    /// to match on rather than a `Direct` it has to check the length of. A live peer that wants
+    /// another topic and a fleet where every sibling is down both end here (§9).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn empty_recipient_set_is_nothing() {
+        let connection = connection().await;
+        let (block, attestation) = (topic("beacon_block"), topic("beacon_attestation_3"));
+        let live = view(
+            &connection,
+            vec![(host("bn-a"), peer_state(&[(1, &attestation)], &[1]))],
+        );
+
+        let plan = route(&block, Class::Large, &live, &me(), &Fanout::default());
+
+        assert_eq!(plan, RoutePlan::Nothing);
+        assert_eq!(
+            route(
+                &block,
+                Class::Large,
+                &LiveView::default(),
+                &me(),
+                &Fanout::default()
+            ),
+            RoutePlan::Nothing
+        );
     }
 }
