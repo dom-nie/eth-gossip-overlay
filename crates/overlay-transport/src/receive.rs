@@ -476,6 +476,28 @@ mod tests {
         (cluster, peer)
     }
 
+    /// Sends one body as the whole of a datagram, which is how a `BATCH` travels (§7). No
+    /// length prefix: the datagram is the frame (D10), so a body here is a frame on the wire.
+    fn datagram(peer: &PeerInfo, body: Bytes) {
+        peer.connection.send_datagram(body).unwrap();
+    }
+
+    /// A batch of `entries`, as the carrier a batch belongs on carries it.
+    fn batch(entries: Vec<BatchEntry>) -> Bytes {
+        encode_datagram(&Frame::Batch {
+            flags: BatchFlags::NONE,
+            entries,
+        })
+    }
+
+    /// One entry of a batch.
+    fn entry(topic_id: u16, payload: &[u8]) -> BatchEntry {
+        BatchEntry {
+            topic_id,
+            payload: Bytes::copy_from_slice(payload),
+        }
+    }
+
     /// Writes each body on one stream, with the `u32` length prefix a stream carries. Bodies and
     /// not frames, so a test can put a type byte on the wire that no [`Frame`] variant has.
     async fn send(peer: &PeerInfo, bodies: &[Bytes]) {
@@ -498,6 +520,34 @@ mod tests {
             topic_id,
             Bytes::copy_from_slice(payload),
         ))
+    }
+
+    /// A batch keys on its destination and nothing else, so one datagram carries entries for
+    /// every topic the destination wants and each names its own id (D21). The receiver resolves
+    /// them one at a time and publishes each on the topic its id resolved to.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn entries_for_two_topics_in_one_datagram_are_each_published_on_their_own_topic() {
+        let first = topic("beacon_attestation_1");
+        let second = topic("beacon_attestation_2");
+        let one = payload(b"an attestation on the first subnet");
+        let two = payload(b"an attestation on the second subnet");
+        let (cluster, peer) = peer_of(
+            subscriptions(&[&first, &second], &[]),
+            &[(1, &first), (2, &second)],
+        )
+        .await;
+
+        datagram(&peer, batch(vec![entry(1, &one), entry(2, &two)]));
+
+        eventually("both entries to be queued", || {
+            cluster.published(1).len() == 2
+        })
+        .await;
+        let published = cluster.published(1);
+        assert_eq!(published[0].topic, first);
+        assert_eq!(published[0].payload, one);
+        assert_eq!(published[1].topic, second);
+        assert_eq!(published[1].payload, two);
     }
 
     /// An entry id the peer never announced costs that entry and nothing else (D21): the rest of
