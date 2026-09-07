@@ -122,9 +122,10 @@ fn config_yaml(dir: &Path, overlay: SocketAddr) -> String {
     )
 }
 
-/// A loopback address nothing holds. The listener is closed before the caller gets it, so the
-/// port is free rather than taken; a test that needs it taken binds it again itself.
-pub fn free_port() -> SocketAddr {
+/// A loopback address nothing holds. The number comes from a TCP listener that is closed
+/// before the caller gets it, so nothing has ever held it as a UDP port and the sidecar's bind
+/// is a first bind rather than a rebind, which macOS refuses often enough to matter.
+fn free_port() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap()
 }
@@ -135,6 +136,10 @@ pub struct Sidecar {
     child: Child,
     stdout: Output,
     stderr: Output,
+    /// The two reading threads, joined once the child has gone. A pipe is not empty just
+    /// because the writer exited, and a test that read before its reader had been scheduled
+    /// would see a truncated stream on a loaded machine.
+    readers: Vec<std::thread::JoinHandle<()>>,
 }
 
 /// What one of the child's streams has produced so far.
@@ -151,12 +156,13 @@ impl Output {
 impl Sidecar {
     fn start(mut command: Command) -> Self {
         let mut child = command.spawn().unwrap();
-        let stdout = drain(child.stdout.take().unwrap());
-        let stderr = drain(child.stderr.take().unwrap());
+        let (stdout, reading_stdout) = drain(child.stdout.take().unwrap());
+        let (stderr, reading_stderr) = drain(child.stderr.take().unwrap());
         Self {
             child,
             stdout,
             stderr,
+            readers: vec![reading_stdout, reading_stderr],
         }
     }
 
@@ -182,7 +188,11 @@ impl Sidecar {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        panic!("no line holding {needle:?} in:\n{}", self.stdout());
+        panic!(
+            "no line holding {needle:?} in:\n{}\nstderr:\n{}",
+            self.stdout(),
+            self.stderr()
+        );
     }
 
     /// The address the metrics endpoint bound, read out of the startup log.
@@ -198,10 +208,16 @@ impl Sidecar {
     }
 
     /// Waits for the child to exit and returns its status, or panics after [`WAIT`].
+    ///
+    /// Both readers are joined before it returns, so everything the child wrote is in hand by
+    /// the time a caller reads [`stdout`](Self::stdout) or [`stderr`](Self::stderr).
     pub fn wait(&mut self) -> std::process::ExitStatus {
         let deadline = Instant::now() + WAIT;
         while Instant::now() < deadline {
             if let Some(status) = self.child.try_wait().unwrap() {
+                for reader in self.readers.drain(..) {
+                    reader.join().unwrap();
+                }
                 return status;
             }
             std::thread::sleep(Duration::from_millis(5));
@@ -220,17 +236,17 @@ impl Drop for Sidecar {
 
 /// Reads `stream` on a thread of its own until it ends, so the child never blocks on a pipe
 /// nobody is emptying.
-fn drain(stream: impl Read + Send + 'static) -> Output {
+fn drain(stream: impl Read + Send + 'static) -> (Output, std::thread::JoinHandle<()>) {
     let output = Output::default();
     let sink = output.clone();
-    std::thread::spawn(move || {
+    let reading = std::thread::spawn(move || {
         for line in BufReader::new(stream).lines().map_while(Result::ok) {
             let mut held = sink.0.lock().unwrap();
             held.push_str(&line);
             held.push('\n');
         }
     });
-    output
+    (output, reading)
 }
 
 /// The value of a JSON string field in one log line. The fixtures log JSON, so this is enough

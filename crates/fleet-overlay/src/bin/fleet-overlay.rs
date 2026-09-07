@@ -4,7 +4,6 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
-use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use fleet_overlay::version::VERSION;
@@ -24,11 +23,11 @@ struct Cli {
     #[arg(long, global = true, default_value = "/etc/fleet-overlay/config.yaml")]
     config: PathBuf,
 
-    /// Panic in a spawned task this many milliseconds after startup. Hidden because it exists
-    /// for one test: that a panicking task takes the whole process down. A flag rather than a
+    /// Panic in a spawned task as soon as the wiring is up. Hidden because it exists for one
+    /// test: that a panicking task takes the whole process down. A flag rather than a
     /// `cfg(test)` hook, so that test drives the shipped binary and not a build that differs.
     #[arg(long, global = true, hide = true)]
-    test_panic_after_ms: Option<u64>,
+    test_panic: bool,
 }
 
 #[derive(Subcommand)]
@@ -78,12 +77,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?
-                .block_on(app::serve(
-                    cli.config,
-                    cfg,
-                    log,
-                    cli.test_panic_after_ms.map(Duration::from_millis),
-                ))?;
+                .block_on(app::serve(cli.config, cfg, log, cli.test_panic))?;
         }
         Command::PeerId => {
             let key = NodeKey::load_or_create(&Config::load(&cli.config)?.bn.node_key_file)?;

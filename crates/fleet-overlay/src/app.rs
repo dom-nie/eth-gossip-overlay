@@ -593,21 +593,19 @@ fn lock<T>(held: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// Builds the sidecar and runs it until `SIGTERM` or `SIGINT`.
 ///
-/// `panic_after` is the hidden `--test-panic-after-ms` flag: a task that panics on a timer, so
-/// one test can prove that a panicking task takes the process down. It does nothing unless the
-/// flag was given.
+/// `test_panic` is the hidden `--test-panic` flag: a task that panics the moment the wiring is
+/// up, so one test can prove that a panicking task takes the process down. It waits for nothing
+/// and sleeps for nothing, so what the test observes does not depend on how long a loaded
+/// machine took to get here.
 pub async fn serve(
     config_path: PathBuf,
     cfg: Config,
     log: Arc<LogHandle>,
-    panic_after: Option<Duration>,
+    test_panic: bool,
 ) -> Result<(), StartupError> {
     let app = App::build(config_path, cfg, log).await?;
-    if let Some(after) = panic_after {
-        tokio::spawn(async move {
-            tokio::time::sleep(after).await;
-            panic!("--test-panic-after-ms");
-        });
+    if test_panic {
+        tokio::spawn(async { panic!("--test-panic") });
     }
     let terminated = crate::lifecycle::terminated().map_err(|source| StartupError::Bind {
         what: "SIGTERM handler".to_owned(),

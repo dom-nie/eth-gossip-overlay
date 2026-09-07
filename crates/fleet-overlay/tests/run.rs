@@ -129,14 +129,14 @@ fn task_panic_terminates_the_process_non_zero() {
     let fixture = Fixture::new();
 
     let mut sidecar = fixture.run_with(|command| {
-        command.args(["--test-panic-after-ms", "100"]);
+        command.arg("--test-panic");
     });
     let status = sidecar.wait();
 
     assert!(!status.success(), "{status:?}");
     let stderr = sidecar.stderr();
     assert_eq!(stderr.lines().count(), 1, "{stderr:?}");
-    assert!(stderr.contains("--test-panic-after-ms"), "{stderr:?}");
+    assert!(stderr.contains("--test-panic"), "{stderr:?}");
 }
 
 /// The other half of the same rule: an operator who exported `RUST_BACKTRACE` asked for the
@@ -146,15 +146,13 @@ fn a_panic_prints_a_backtrace_when_the_operator_asked_for_one() {
     let fixture = Fixture::new();
 
     let mut sidecar = fixture.run_with(|command| {
-        command
-            .args(["--test-panic-after-ms", "100"])
-            .env("RUST_BACKTRACE", "1");
+        command.arg("--test-panic").env("RUST_BACKTRACE", "1");
     });
     assert!(!sidecar.wait().success());
 
     let stderr = sidecar.stderr();
     assert!(stderr.lines().count() > 1, "{stderr:?}");
-    assert!(stderr.contains("--test-panic-after-ms"), "{stderr:?}");
+    assert!(stderr.contains("--test-panic"), "{stderr:?}");
 }
 
 /// OPS-N5: `READY=1` promises that `fleet-overlayctl` works, so the admin socket has to answer
@@ -168,6 +166,9 @@ fn ready_and_stopping_reach_the_notify_socket() {
     let mut sidecar = fixture.run_with(|command| {
         command.env("NOTIFY_SOCKET", notify.path());
     });
+    // The datagram goes out before the line does, so waiting for the line means the datagram
+    // has already been sent, and a start that never got there says why in its own log.
+    sidecar.wait_for(r#""message":"ready""#);
     notify.wait_for("READY=1");
 
     let answer = common::ask_admin(
