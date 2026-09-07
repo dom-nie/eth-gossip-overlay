@@ -1,6 +1,6 @@
 [Unit]
 Description=Fleet gossip overlay sidecar
-Documentation=https://github.com/dom-nie/eth-bn-gossip-overlay
+Documentation=https://github.com/dom-nie/eth-gossip-overlay
 After=network-online.target
 Wants=network-online.target
 # A pull-in and nothing stronger, so neither unit's restart touches the other. Rename this if

@@ -37,7 +37,7 @@ ENTRYPOINT ["/usr/local/bin/fleet-overlay"]
 
 FROM gcr.io/distroless/cc-debian12:nonroot
 
-LABEL org.opencontainers.image.source="https://github.com/dom-nie/eth-bn-gossip-overlay" \
+LABEL org.opencontainers.image.source="https://github.com/dom-nie/eth-gossip-overlay" \
       org.opencontainers.image.version="0.1.0" \
       org.opencontainers.image.licenses="Apache-2.0"
 

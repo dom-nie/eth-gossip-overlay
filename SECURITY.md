@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Report it privately through GitHub's vulnerability reporting for this repository: https://github.com/dom-nie/eth-bn-gossip-overlay/security/advisories/new. Never open a public issue for a security problem; people run this binary next to validators.
+Report it privately through GitHub's vulnerability reporting for this repository: https://github.com/dom-nie/eth-gossip-overlay/security/advisories/new. Never open a public issue for a security problem; people run this binary next to validators.
 
 The maintainers acknowledge a report within 3 days and triage it within 7. A confirmed high-severity issue gets a fix or a mitigation within 30 days.
 

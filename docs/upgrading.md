@@ -25,7 +25,7 @@ attestation if you want to know which workflow run built it:
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
 gh attestation verify fleet-overlay-<version>-x86_64-unknown-linux-gnu.tar.gz \
-  --repo dom-nie/eth-bn-gossip-overlay
+  --repo dom-nie/eth-gossip-overlay
 ```
 
 Then read the two lines the binary prints about itself. The second one is the same three numbers

@@ -1,6 +1,6 @@
 # Fleet Gossip Overlay
 
-[![CI](https://github.com/dom-nie/eth-bn-gossip-overlay/actions/workflows/ci.yml/badge.svg)](https://github.com/dom-nie/eth-bn-gossip-overlay/actions/workflows/ci.yml)
+[![CI](https://github.com/dom-nie/eth-gossip-overlay/actions/workflows/ci.yml/badge.svg)](https://github.com/dom-nie/eth-gossip-overlay/actions/workflows/ci.yml)
 
 A sidecar for [Lighthouse](https://github.com/sigp/lighthouse) beacon nodes. Drop `fleet-overlay` next to each node you run and the sidecars build a private QUIC overlay between your own machines, so blocks, blobs and columns one of your nodes has already validated reach the others without a second trip through the public gossip mesh. `fleet-overlayctl` talks to a running sidecar over its admin socket.
 
