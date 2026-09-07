@@ -402,4 +402,24 @@ mod tests {
         assert_eq!(rest[0].carrier, Carrier::Datagram);
         assert_eq!(payloads(&rest[0]), vec![payload(1)]);
     }
+
+    #[test]
+    fn stale_payload_is_dropped_at_flush_and_counted() {
+        let clock = FakeClock::new();
+        let mut batcher = batcher();
+        batcher.push(
+            &dest("host-a"),
+            TopicId::new(11),
+            payload(1),
+            MAX_BYTES,
+            clock.now(),
+        );
+
+        clock.advance(STALE_AFTER);
+        let flushes = batcher.tick(clock.now());
+
+        assert_eq!(flushes.len(), 1);
+        assert!(flushes[0].entries.is_empty());
+        assert_eq!(flushes[0].stale_dropped, 1);
+    }
 }
