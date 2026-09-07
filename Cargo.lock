@@ -4358,6 +4358,7 @@ dependencies = [
  "ethereum_ssz",
  "libp2p",
  "lighthouse_network",
+ "overlay-bn",
  "overlay-core",
  "prometheus-client",
  "proptest",

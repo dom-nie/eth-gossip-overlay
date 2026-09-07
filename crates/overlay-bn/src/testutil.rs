@@ -43,8 +43,7 @@
 //! tests that need the protocol code and no beacon node at all.
 
 use std::collections::HashSet;
-use std::io::Write;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 use libp2p::core::transport::MemoryTransport;
@@ -87,6 +86,7 @@ const WAIT: Duration = Duration::from_secs(5);
 /// parallel test with no subscriber on its thread would cache "never" for the call site
 /// a test with a thread-local subscriber is waiting on. A test looks for a string only
 /// it logs.
+#[cfg(test)]
 pub static LOG: LazyLock<Log> = LazyLock::new(|| {
     let log = Log::default();
     let sink = log.clone();
@@ -100,9 +100,11 @@ pub static LOG: LazyLock<Log> = LazyLock::new(|| {
 });
 
 /// The captured log, shared by every test in the binary.
+#[cfg(test)]
 #[derive(Clone, Default)]
-pub struct Log(Arc<Mutex<Vec<u8>>>);
+pub struct Log(Arc<std::sync::Mutex<Vec<u8>>>);
 
+#[cfg(test)]
 impl Log {
     /// Everything logged so far.
     pub fn text(&self) -> String {
@@ -110,7 +112,8 @@ impl Log {
     }
 }
 
-impl Write for Log {
+#[cfg(test)]
+impl std::io::Write for Log {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         self.0.lock().unwrap().write(buf)
     }
@@ -281,6 +284,7 @@ pub struct PublicPeer {
 }
 
 impl PublicPeer {
+    /// The peer's identity, which is what the fake's mesh knows it by.
     pub fn peer_id(&self) -> PeerId {
         self.peer_id
     }
@@ -902,7 +906,9 @@ fn lighthouse_message_id(message: &gossipsub::Message) -> MessageId {
 /// Which of the pair an event came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Side {
+    /// The swarm passed first.
     A,
+    /// The swarm passed second.
     B,
 }
 

@@ -6,32 +6,46 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# `FakeBn` and its helpers, for the fleet harness in `fleet-overlay` (T-051). Lighthouse's own
+# crates come with it, so nothing but a test build may turn it on: the harness enables it
+# through a dev-dependency, which resolver 3 never unifies into a normal build.
+test-util = [
+    "dep:lighthouse_network",
+    "dep:types",
+    "dep:serde_json",
+    "dep:sha2",
+    "dep:tempfile",
+    "dep:wiremock",
+]
+
 [dependencies]
 enr.workspace = true
 libp2p.workspace = true
+lighthouse_network = { workspace = true, optional = true }
 overlay-core.workspace = true
 prometheus-client.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 snap.workspace = true
+tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
 tracing.workspace = true
+types = { workspace = true, optional = true }
 url.workspace = true
+wiremock = { workspace = true, optional = true }
 
 [dev-dependencies]
 ethereum_ssz.workspace = true
-lighthouse_network.workspace = true
+overlay-bn = { workspace = true, features = ["test-util"] }
 proptest.workspace = true
-serde_json.workspace = true
-sha2.workspace = true
 strum.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util", "time"] }
 tracing-subscriber.workspace = true
-types.workspace = true
-wiremock.workspace = true
 
 [lints]
 workspace = true
