@@ -23,6 +23,8 @@ RestartSteps=6
 RestartMaxDelaySec=60
 
 ExecStart=/usr/local/bin/fleet-overlay run
+# systemctl reload re-reads config.yaml and roster.yaml without dropping a connection.
+ExecReload=/bin/kill -HUP $MAINPID
 
 # The seed is read from $CREDENTIALS_DIRECTORY/seed, so no service user owns it and none has to
 # exist. For the encrypted variant run
