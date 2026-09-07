@@ -2,6 +2,7 @@
 //! clock-driven struct so it can be tested without sockets, channels or sleeping.
 
 pub mod backoff;
+pub mod batch;
 pub mod budget;
 pub mod config;
 pub mod events;
