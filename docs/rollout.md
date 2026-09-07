@@ -30,6 +30,13 @@ The dashboard's last row queries Loki and the rest does not, so it is useful wit
 alone. To fill in that row, point a Loki datasource at wherever you ship the sidecar's journal.
 [events.md](events.md) is the schema.
 
+![The dashboard, loaded in the compose demo's Grafana](fleet-overlay-dashboard.png)
+
+That is `examples/compose` running its three sidecars on their own, which is what the demo starts
+on a machine with no room for a testnet. The overview row is live; everything fed by beacon node
+traffic says "No data" because there is none. The red mark on the Loki variable is the same story:
+the demo provisions no Loki datasource, and the rest of the dashboard does not care.
+
 ## The four phases
 
 ### 1. Observe on every candidate
