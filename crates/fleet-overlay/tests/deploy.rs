@@ -98,3 +98,20 @@ fn unit_has_protectsystem_strict_privatetmp_runtimedirectory_and_statedirectory(
         );
     }
 }
+
+/// OPS-N3 and D01: the seed arrives as a systemd credential, which the sidecar reads from
+/// `$CREDENTIALS_DIRECTORY`, so no service user has to own the file and none has to exist.
+#[test]
+fn unit_loads_the_seed_as_a_credential_and_uses_dynamicuser() {
+    let text = read(UNIT);
+
+    for directive in [
+        "LoadCredential=seed:/etc/fleet-overlay/seed",
+        "DynamicUser=yes",
+    ] {
+        assert!(
+            has_directive(&text, directive),
+            "{UNIT} is missing {directive}"
+        );
+    }
+}
