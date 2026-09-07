@@ -50,9 +50,10 @@ pub mod features {
     }
 }
 
-/// What this build puts in HELLO. Zero in v1: it sends whole messages on streams, which every
-/// release can read, so there is nothing for a peer to opt into yet.
-pub const SUPPORTED_FEATURES: u64 = 0;
+/// What this build puts in HELLO. `DATAGRAM_BATCHES` is the one bit it sets: it coalesces the
+/// small class into `BATCH` datagrams for a peer that advertises the bit too, and falls back to
+/// whole messages on streams for every other peer, which is what an older release reads (T-062).
+pub const SUPPORTED_FEATURES: u64 = features::DATAGRAM_BATCHES;
 
 /// The largest frame this build accepts on a stream, which is what it advertises in HELLO. A
 /// whole message plus the chunk header and the room a `REPAIR_RESP` needs around it.

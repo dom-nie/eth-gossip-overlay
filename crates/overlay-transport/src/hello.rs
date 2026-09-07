@@ -778,13 +778,13 @@ mod tests {
         .await
         .unwrap();
 
-        // The literals rather than the constants: this release advertises minor 0 and no
-        // features, and a test that reads the answer out of the same constants it is checking
-        // would still pass if the negotiation stopped happening.
+        // The literals rather than the constants: this release advertises minor 0 and the one
+        // bit it implements, and a test that reads the answer out of the same constants it is
+        // checking would still pass if the negotiation stopped happening.
         assert_eq!(peer.negotiated.minor, 0);
-        assert_eq!(peer.negotiated.features, 0);
+        assert_eq!(peer.negotiated.features, 1);
+        assert!(peer.negotiated.allows(features::DATAGRAM_BATCHES));
         assert!(!peer.negotiated.allows(features::STRIPING));
-        assert!(!peer.negotiated.allows(features::DATAGRAM_BATCHES));
         assert!(!peer.negotiated.allows(features::REPAIR));
     }
 
