@@ -1072,6 +1072,54 @@ mod tests {
         assert_eq!(cluster.stats(1).relayed_batches(), 1);
     }
 
+    /// D21: the relay re-coalesces through its own batcher, so an in-region subscriber gets one
+    /// batch holding the entries it asked for and nothing else. The relay itself wants both
+    /// topics and publishes both; the host beside it wants one and is sent one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_recoalesces_entries_per_in_region_subscriber() {
+        let (wanted, other) = (topic("beacon_attestation_1"), topic("beacon_attestation_2"));
+        let one = payload(b"an attestation on the subnet the sibling wants");
+        let two = payload(b"an attestation on a subnet only the relay wants");
+        let mut cluster = Builder::new(&[NodeKind::Bare, NodeKind::Manager, NodeKind::Manager])
+            .regions(&["us", "eu", "eu"])
+            .start()
+            .await;
+        cluster.start_sidecar(1, subscriptions(&[&wanted, &other], &[]));
+        cluster.start_sidecar(2, subscriptions(&[&wanted], &[]));
+        eventually("the sibling to say which of the two it wants", || {
+            cluster.live(1).subscribers(&wanted).len() == 1
+                && cluster.live(1).subscribers(&other).is_empty()
+        })
+        .await;
+        let peer = cluster
+            .dial_announcing(
+                0,
+                1,
+                &cluster.self_hello(0),
+                vec![
+                    (TopicId::new(3), wanted.to_string()),
+                    (TopicId::new(4), other.to_string()),
+                ],
+            )
+            .await;
+
+        datagram(&peer, relay_batch(vec![entry(3, &one), entry(4, &two)]));
+
+        eventually("the relay to publish both entries", || {
+            cluster.published(1).len() == 2
+        })
+        .await;
+        eventually("the sibling to be given the one it wants", || {
+            cluster.published(2).len() == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(cluster.published(2).len(), 1);
+        assert_eq!(cluster.published(2)[0].topic, wanted);
+        assert_eq!(cluster.published(2)[0].payload, one);
+        assert_eq!(cluster.datagrams_received(2, &cluster.hostname(1)), 1);
+    }
+
     /// §5.4 end to end over two regions: an attestation reaches every subscriber in the remote
     /// one, and the WAN carried one copy per relay rather than one per host. The relay's own
     /// batch goes out with `RELAY` clear, so the hosts it fans to spread nothing further and
