@@ -342,4 +342,37 @@ mod tests {
         assert_eq!(flushes.len(), 1);
         assert_eq!(flushes[0].entries.len(), usize::from(MAX_BATCH_ENTRIES));
     }
+
+    #[test]
+    fn payload_larger_than_max_bytes_is_flushed_alone_with_stream_carrier() {
+        const ROOM_FOR_ONE: usize = BATCH_HEADER_BYTES + BATCH_ENTRY_OVERHEAD_BYTES + PAYLOAD_BYTES;
+        let clock = FakeClock::new();
+        let mut batcher = batcher();
+        let block = Bytes::from(vec![9; ROOM_FOR_ONE]);
+        batcher.push(
+            &dest("host-a"),
+            TopicId::new(11),
+            payload(1),
+            ROOM_FOR_ONE,
+            clock.now(),
+        );
+
+        let flushes = batcher.push(
+            &dest("host-a"),
+            TopicId::new(11),
+            block.clone(),
+            ROOM_FOR_ONE,
+            clock.now(),
+        );
+
+        assert_eq!(flushes.len(), 1);
+        assert_eq!(flushes[0].carrier, Carrier::Stream);
+        assert_eq!(payloads(&flushes[0]), vec![block]);
+
+        clock.advance(WINDOW);
+        let rest = batcher.tick(clock.now());
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].carrier, Carrier::Datagram);
+        assert_eq!(payloads(&rest[0]), vec![payload(1)]);
+    }
 }
