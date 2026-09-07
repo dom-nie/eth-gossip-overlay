@@ -1,9 +1,9 @@
 //! Coalescing small-class payloads into one batch per destination (§5.4, D21).
 //!
-//! Attestations dominate the fleet's traffic at a few thousand a second of about 240 bytes
-//! each, so one datagram per message would be one datagram per message per subscribed host.
-//! Holding what is going to the same host for a few milliseconds turns that into one datagram
-//! carrying a few dozen entries.
+//! Attestations dominate the fleet's traffic at a few thousand a second of about 240 bytes each,
+//! and unbatched each one would be a datagram of its own to every subscribed host. Holding what
+//! is going to the same host for a few milliseconds turns those into one datagram carrying a few
+//! dozen entries (§10).
 //!
 //! The worst case a payload waits here is the window, 10 ms at the shipped default, and it is
 //! only ever the window: a batch that fills up goes at once. §10 puts that against the 8 s an
@@ -110,8 +110,8 @@ impl Open {
         }
     }
 
-    /// Whether one more entry of `cost` bytes still fits a datagram of `max_bytes`, and the
-    /// count the receiver agreed to read.
+    /// Whether one more entry of `cost` bytes fits both bounds: a datagram of `max_bytes`, and
+    /// the entry count the receiver agreed to in HELLO.
     fn fits(&self, cost: usize, max_bytes: usize) -> bool {
         self.bytes + cost <= max_bytes && self.entries.len() < usize::from(MAX_BATCH_ENTRIES)
     }
@@ -211,6 +211,8 @@ impl Batcher {
     }
 }
 
+/// The one walk both stale checks make. Every entry is looked at, because the entries a batch
+/// collected inside its window can straddle the bound.
 fn strip_stale(entries: &mut Vec<Entry>, stale_after: Duration, now: Instant) -> usize {
     let before = entries.len();
     entries.retain(|entry| entry.pushed_at + stale_after > now);
