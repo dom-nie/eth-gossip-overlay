@@ -68,6 +68,7 @@ use eth_gossip_overlay::metrics::{LABEL_DIRECTION, LABEL_PEER, MESSAGES_TOTAL};
 use overlay_bn::node_key::NodeKey;
 use overlay_bn::testutil::{FakeBn, FakeBnEvent};
 use overlay_core::config::{Config, Log, LogFormat, LogLevel};
+use overlay_core::relay;
 use overlay_core::roster::Hostname;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpStream, UnixStream};
@@ -137,11 +138,22 @@ pub fn topic(name: &str) -> String {
 pub struct Settings {
     /// `inject`: whether the sidecars publish what they receive into their beacon nodes.
     pub inject: bool,
+    /// `overlay.fanout.small.relay_min_remote_hosts`: the size a remote region reaches before a
+    /// small-class batch goes to it through relays (D36). A fleet of a few hosts is below the
+    /// shipped twelve, so a scenario about relaying lowers it.
+    pub relay_min_remote_hosts: usize,
+    /// `overlay.fanout.small.relays_per_remote_region`: how many of a remote region's hosts
+    /// carry a batch for it.
+    pub relays_per_remote_region: usize,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { inject: true }
+        Self {
+            inject: true,
+            relay_min_remote_hosts: relay::DEFAULT_RELAY_MIN_REMOTE_HOSTS,
+            relays_per_remote_region: relay::DEFAULT_RELAYS_PER_REMOTE_REGION,
+        }
     }
 }
 
@@ -456,6 +468,8 @@ impl Fleet {
         let yaml = format!(
             "overlay:\n  listen: \"{}\"\n  roster_file: {}\n  fleet_seed_file: {}\n{}\
              \x20 keepalive_ms: 500\n  idle_timeout_ms: 5000\n\
+             \x20 fanout:\n    small:\n      relay_min_remote_hosts: {}\n\
+             \x20     relays_per_remote_region: {}\n\
              bn:\n  node_key_file: {}\n  identity_url: \"{}\"\n  libp2p_addr: \"{}\"\n\
              \x20 listen_addr: \"/ip4/127.0.0.1/tcp/0\"\n\
              inject: {}\nadmin_socket: {}\nmetrics_listen: \"{}\"\n\
@@ -464,6 +478,8 @@ impl Fleet {
             path("roster.yaml"),
             self.dir.path().join("seed").display(),
             previous,
+            self.settings.relay_min_remote_hosts,
+            self.settings.relays_per_remote_region,
             path("node.key"),
             node.bn_http,
             node.bn_addr,
@@ -571,6 +587,21 @@ impl Fleet {
         self.reload_all().await;
         self.wait_for_peers("the cut connections to close", WAIT)
             .await;
+    }
+
+    /// Rewrites every node's `config.yaml` with new relay bounds and reloads it, which is how a
+    /// scenario turns relaying on (D36). It has to happen after [`wait_full_mesh`]: a probe
+    /// round asks every pair to exchange a message directly, and a pair that a relay stands
+    /// between never does.
+    ///
+    /// [`wait_full_mesh`]: Self::wait_full_mesh
+    pub async fn set_relays(&mut self, min_remote_hosts: usize, per_region: usize) {
+        self.settings.relay_min_remote_hosts = min_remote_hosts;
+        self.settings.relays_per_remote_region = per_region;
+        for index in 0..self.nodes.len() {
+            self.write_files(index);
+        }
+        self.reload_all().await;
     }
 
     /// `eth-gossip-overlayctl reload` on every running node, the way `systemctl reload` reaches a

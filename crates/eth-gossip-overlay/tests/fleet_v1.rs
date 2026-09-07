@@ -616,3 +616,53 @@ async fn rolling_upgrade_adding_a_feature_bit_keeps_pairing_and_serves_older_pee
         "the upgraded host should have negotiated the bit"
     );
 }
+
+/// §5.4's WAN saving, measured: one attestation published in `eu` crosses to `us` once per
+/// relay and no more, and every host of the remote region is offered it just the same. Sending
+/// it directly would have cost a WAN copy per subscriber, which is the five this fleet has and
+/// the hundred the deployment §2 describes does.
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_region_small_batches_cost_one_wan_copy_per_relay() {
+    let subnet = topic("beacon_attestation_11");
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", 2), ("us", 5)])
+        .start()
+        .await;
+    for node in fleet.nodes() {
+        node.subscribe(&subnet).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    let relays = 3;
+    fleet.set_relays(4, relays).await;
+    let remote: Vec<String> = (2..fleet.hosts())
+        .map(|node| fleet.node(node).hostname().0.clone())
+        .collect();
+    let sent = |scrape: &Scrape| -> f64 {
+        remote
+            .iter()
+            .map(|peer| {
+                scrape.sum(
+                    MESSAGES_TOTAL,
+                    &[(LABEL_DIRECTION, "out"), (LABEL_PEER, peer)],
+                )
+            })
+            .sum()
+    };
+    let before = sent(&fleet.node(0).metrics().await);
+
+    let payload = b"one attestation for the other region".to_vec();
+    fleet.node(0).bn().publish(&subnet, &payload).await;
+
+    for node in 1..fleet.hosts() {
+        fleet
+            .wait_for(
+                "every other host to import the attestation",
+                WAIT,
+                |fleet| fleet.node(node).bn().count(&subnet, &payload) == 1,
+            )
+            .await;
+    }
+    fleet.settle().await;
+    let after = sent(&fleet.node(0).metrics().await);
+    assert_eq!(after - before, relays as f64, "WAN copies per batch");
+}
