@@ -48,7 +48,7 @@
 //! |---|---|---|
 //! | 10 | two origins with divergent live views publish once, at most 2(k+m) chunks received | T-074 |
 //! | 11 | a chunk arriving before its `TOPIC_ADD` is counted, not crashed, and zero in steady state | T-073 |
-//! | 12 | single-host and two-host regions use whole delivery and the direct small path | T-072, T-063 |
+//! | 12 | single-host and two-host regions use whole delivery and the direct small path | T-072, T-063; T-063 left it whole, because the direct small path alone is not the scenario the name promises and the whole-delivery half waits on T-072's striping |
 //! | 13 | an unsubscribed relay re-fans but does not publish | T-063, written |
 //! | 15 | a wedged beacon node on one host does not delay the second hop to its region | T-063, written for the relay hop; T-073 for the chunk one |
 //! | 16 | one third of a region lost mid-slot completes via parity or repair before the deadline | T-074, T-082 |
