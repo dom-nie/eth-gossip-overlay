@@ -1118,6 +1118,35 @@ mod tests {
         );
     }
 
+    /// The three `overlay.fanout.small` keys reach the router (T-063), one applier for the
+    /// three: the plan is decided from all of them at once, and a file that changed two should
+    /// not rebuild it twice. `large` is left where the running process has it, because its keys
+    /// need a restart and an applier that took the whole section would apply them anyway.
+    #[test]
+    fn reload_publishes_the_new_relay_settings() {
+        let mut h = Fixture::new(CONFIG, &roster_yaml(3));
+        h.write_config(
+            "overlay:\n  roster_file: ROSTER\n  fanout:\n    small:\n      cross_region: direct\n      relays_per_remote_region: 5\n      relay_min_remote_hosts: 6\ninject: true\n",
+        );
+
+        let report = h.reloader.reload(Trigger::Manual);
+
+        assert_eq!(
+            report.applied,
+            [
+                "overlay.fanout.small.cross_region",
+                "overlay.fanout.small.relay_min_remote_hosts",
+                "overlay.fanout.small.relays_per_remote_region"
+            ]
+        );
+        assert!(report.error.is_none(), "{report:?}");
+        let fanout = h.fanout.borrow_and_update();
+        assert_eq!(fanout.small.cross_region, CrossRegion::Direct);
+        assert_eq!(fanout.small.relays_per_remote_region, 5);
+        assert_eq!(fanout.small.relay_min_remote_hosts, 6);
+        assert_eq!(fanout.large, LargeFanout::default());
+    }
+
     /// Waits for `done`, so a test fails on a bound instead of hanging when the task under it
     /// stops working.
     async fn until(mut done: impl FnMut() -> bool) {
