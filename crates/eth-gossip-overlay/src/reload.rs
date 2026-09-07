@@ -1072,6 +1072,33 @@ mod tests {
         assert_eq!((limits.small_per_s, limits.large_per_s), (100, 20));
     }
 
+    /// The two `classes.small` keys reach the batcher (T-062) the way the publish ceilings
+    /// reach the publisher: one applier for the section, because the batcher takes both bounds
+    /// together and a file that changed one should not rebuild it twice.
+    #[test]
+    fn reload_publishes_the_new_small_class_bounds() {
+        let mut h = Fixture::new(CONFIG, &roster_yaml(3));
+        h.write_config(
+            "overlay:\n  roster_file: ROSTER\nclasses:\n  small:\n    batch_window_ms: 25\n    stale_after_ms: 750\ninject: true\n",
+        );
+
+        let report = h.reloader.reload(Trigger::Manual);
+
+        assert_eq!(
+            report.applied,
+            [
+                "classes.small.batch_window_ms",
+                "classes.small.stale_after_ms"
+            ]
+        );
+        assert!(report.error.is_none(), "{report:?}");
+        let small = h.small.borrow_and_update();
+        assert_eq!(
+            (small.batch_window, small.stale_after),
+            (Duration::from_millis(25), Duration::from_millis(750))
+        );
+    }
+
     /// Waits for `done`, so a test fails on a bound instead of hanging when the task under it
     /// stops working.
     async fn until(mut done: impl FnMut() -> bool) {
