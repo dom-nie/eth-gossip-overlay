@@ -50,7 +50,7 @@
 //! | 11 | a chunk arriving before its `TOPIC_ADD` is counted, not crashed, and zero in steady state | T-073 |
 //! | 12 | single-host and two-host regions use whole delivery and the direct small path | T-072, T-063 |
 //! | 13 | an unsubscribed relay re-fans but does not publish | T-063, written |
-//! | 15 | a wedged beacon node on one host does not delay the second hop to its region | T-063, T-073 |
+//! | 15 | a wedged beacon node on one host does not delay the second hop to its region | T-063, written for the relay hop; T-073 for the chunk one |
 //! | 16 | one third of a region lost mid-slot completes via parity or repair before the deadline | T-074, T-082 |
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
@@ -718,6 +718,12 @@ impl Node {
     /// the topic stays bound (D12).
     pub async fn unsubscribe(&self, topic: &str) {
         self.bn().fake.unsubscribe(topic).await;
+    }
+
+    /// Wedges the beacon node: it stops reading its socket and answers nothing, while the
+    /// connection stays open. Nothing on the sidecar's overlay path may wait for it (DX-N4).
+    pub async fn wedge_bn(&self) {
+        self.bn().fake.wedge().await;
     }
 
     /// A `GET /metrics` against this node's scrape endpoint, parsed.

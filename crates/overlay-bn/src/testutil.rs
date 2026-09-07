@@ -244,6 +244,9 @@ pub enum RpcAnswer {
 enum Cmd {
     Subscribe(String),
     Unsubscribe(String),
+    /// Stop polling the swarm, so the fake stops reading its socket and answers nothing, the
+    /// way a beacon node wedged on its own work does.
+    Wedge,
     Publish {
         topic: String,
         data: Vec<u8>,
@@ -439,6 +442,13 @@ impl FakeBn {
             .send(Cmd::Unsubscribe(topic.to_owned()))
             .await
             .unwrap();
+    }
+
+    /// Stops the fake polling its swarm: it reads nothing off its socket and answers nothing,
+    /// which is what a beacon node stuck on its own work looks like to the sidecar next to it.
+    /// It stays wedged for the rest of its life; a test that needs it back starts another.
+    pub async fn wedge(&self) {
+        self.commands.send(Cmd::Wedge).await.unwrap();
     }
 
     /// Publishes `payload` on `topic` the way the beacon node would: uncompressed here, snappy
@@ -697,9 +707,10 @@ async fn drive(mut swarm: Swarm<FakeBnBehaviour>, mut commands: mpsc::Receiver<C
     // Who requests go to: the sidecar, the only non-public peer a test connects to the fake.
     let mut peer = None;
     let mut next_request = 0;
+    let mut wedged = false;
     loop {
         tokio::select! {
-            event = swarm.select_next_some() => match event {
+            event = swarm.select_next_some(), if !wedged => match event {
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
                     if !public.contains(&peer_id) {
                         swarm.behaviour_mut().gossip.add_explicit_peer(&peer_id);
@@ -756,6 +767,7 @@ async fn drive(mut swarm: Swarm<FakeBnBehaviour>, mut commands: mpsc::Receiver<C
                     let gossip = &mut swarm.behaviour_mut().gossip;
                     gossip.subscribe(&IdentTopic::new(topic)).unwrap();
                 }
+                Some(Cmd::Wedge) => wedged = true,
                 Some(Cmd::Unsubscribe(topic)) => {
                     let gossip = &mut swarm.behaviour_mut().gossip;
                     gossip.unsubscribe(&IdentTopic::new(topic));

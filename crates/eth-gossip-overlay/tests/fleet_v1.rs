@@ -723,3 +723,44 @@ async fn unsubscribed_relay_refans_but_does_not_publish() {
     );
     assert!(scrape.sum(RELAYED_BATCHES_TOTAL, &[]) > 0.0);
 }
+
+/// DX-N5 scenario 15 for the relay half, and DX-N4: nothing on the overlay receive path waits
+/// for a beacon node. The host the origin relays through has a beacon node that has stopped
+/// reading its socket, and the region behind it is served all the same: the batch is charged,
+/// re-coalesced and handed to the send lanes without the wedged node being consulted.
+#[tokio::test(flavor = "multi_thread")]
+async fn wedged_bn_on_one_host_does_not_delay_the_second_hop_to_its_region() {
+    let subnet = topic("beacon_attestation_11");
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", 1), ("us", 3)])
+        .start()
+        .await;
+    for node in fleet.nodes() {
+        node.subscribe(&subnet).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    fleet.set_relays(1, 1).await;
+    let pool: Vec<Hostname> = (1..4)
+        .map(|node| fleet.node(node).hostname().clone())
+        .collect();
+    let chosen = relay::select(fleet.node(0).hostname(), &pool, 1);
+    let relay = 1 + pool.iter().position(|host| *host == chosen[0]).unwrap();
+
+    fleet.node(relay).wedge_bn().await;
+    let payload = b"an attestation behind a wedged beacon node".to_vec();
+    fleet.node(0).bn().publish(&subnet, &payload).await;
+
+    for node in (1..4).filter(|node| *node != relay) {
+        fleet
+            .wait_for("the region behind the relay to import it", WAIT, |fleet| {
+                fleet.node(node).bn().count(&subnet, &payload) == 1
+            })
+            .await;
+    }
+    fleet.settle().await;
+    assert_eq!(
+        fleet.node(relay).bn().count(&subnet, &payload),
+        0,
+        "the wedged beacon node cannot have taken anything"
+    );
+}
