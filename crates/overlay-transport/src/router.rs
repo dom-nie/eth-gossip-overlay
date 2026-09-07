@@ -126,7 +126,7 @@ fn pool(view: &LiveView, self_id: &SelfIdentity, region: &Region) -> Vec<Hostnam
 
 #[cfg(test)]
 mod tests {
-    use overlay_core::config::{Fanout, SmallFanout};
+    use overlay_core::config::{CrossRegion, Fanout, SmallFanout};
     use overlay_core::roster::{Hostname, Region, SelfIdentity};
     use overlay_core::subs::PeerState;
     use overlay_core::topic::{Class, Topic};
@@ -368,6 +368,30 @@ mod tests {
                 direct: vec![host("bn-eu-a")],
                 relays: vec![host("bn-us-02"), host("bn-us-03")],
             }
+        );
+    }
+
+    /// A remote region with only a handful of subscribers is sent to directly: three WAN copies
+    /// saved would not pay for the millisecond the relay hop costs every attestation in them
+    /// (D36). The plan is the plain `Direct` a one-region fleet gets.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_remote_region_below_relay_min_remote_hosts_is_direct() {
+        let connection = connection().await;
+        let subnet = topic("beacon_attestation_7");
+        let live = view_in(
+            &connection,
+            vec![
+                ("bn-eu-a", "eu", peer_state(&[(1, &subnet)], &[1])),
+                ("bn-us-01", "us", peer_state(&[(1, &subnet)], &[1])),
+                ("bn-us-02", "us", peer_state(&[(1, &subnet)], &[1])),
+            ],
+        );
+
+        let plan = route(&subnet, Class::Small, &live, &me(), &relaying(3, 2));
+
+        assert_eq!(
+            plan,
+            RoutePlan::Direct(vec![host("bn-eu-a"), host("bn-us-01"), host("bn-us-02")])
         );
     }
 
