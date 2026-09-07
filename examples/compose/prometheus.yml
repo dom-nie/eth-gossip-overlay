@@ -1,0 +1,9 @@
+# Every sidecar on the demo network, at the port D30 fixed. Five seconds because the whole point
+# of watching this demo is seeing a counter move.
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: fleet-overlay
+    static_configs:
+      - targets: ["sc-1:7789", "sc-2:7789", "sc-3:7789"]

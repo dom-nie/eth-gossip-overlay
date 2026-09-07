@@ -1,0 +1,209 @@
+# Three beacon nodes and three sidecars on one machine, in two regions, with Prometheus and
+# Grafana watching them. README.md says how to run it and what to look at.
+#
+# Each pair is one "host": the beacon node joins its sidecar's network namespace, so the two
+# talk over 127.0.0.1 and the flags are the same ones §11 puts in a systemd unit. The sidecars
+# see each other on the demo network at the addresses roster.yaml lists.
+#
+#   docker compose up -d                  the whole demo
+#   docker compose up -d sc-1 sc-2 sc-3   the overlay alone, no beacon nodes and no testnet
+
+name: fleet-overlay-demo
+
+x-sidecar: &sidecar
+  image: ${FLEET_OVERLAY_IMAGE:-fleet-overlay:demo}
+  build:
+    context: ../..
+  depends_on:
+    init:
+      condition: service_completed_successfully
+  environment:
+    # What systemd's RuntimeDirectory= would set. Without it the sidecar tries to write
+    # lighthouse.env into a /run/fleet-overlay no one created.
+    RUNTIME_DIRECTORY: /var/lib/fleet-overlay
+  volumes:
+    - ./config.yaml:/etc/fleet-overlay/config.yaml:ro
+    - ./roster.yaml:/etc/fleet-overlay/roster.yaml:ro
+    - shared:/shared
+  restart: unless-stopped
+
+x-beacon-node: &beacon-node
+  image: sigp/lighthouse:${LIGHTHOUSE_VERSION:-v8.2.2}
+  entrypoint: ["/bin/sh", "-euc"]
+  command:
+    - |
+      peer_id=$$(cat /shared/$$SIDECAR.peerid)
+      exec lighthouse beacon_node \
+        --network "$$NETWORK" \
+        --datadir /data \
+        --checkpoint-sync-url "$$CHECKPOINT_SYNC_URL" \
+        --http --http-address 0.0.0.0 \
+        --disable-deposit-contract-sync \
+        --subscribe-all-subnets \
+        --target-peers 30 \
+        --trusted-peers "$$peer_id" \
+        --libp2p-addresses "/ip4/127.0.0.1/tcp/7787/p2p/$$peer_id" \
+        $$LIGHTHOUSE_EXTRA_ARGS
+  restart: unless-stopped
+
+x-beacon-node-env: &beacon-node-env
+  NETWORK: ${NETWORK:-hoodi}
+  CHECKPOINT_SYNC_URL: ${CHECKPOINT_SYNC_URL:-https://checkpoint-sync.hoodi.ethpandaops.io}
+  # Empty by default, which starts a beacon node with no execution client: it checkpoint syncs
+  # and gossips, and every block it sees stays optimistic. Put --execution-endpoint and
+  # --execution-jwt here to give it one.
+  LIGHTHOUSE_EXTRA_ARGS: ${LIGHTHOUSE_EXTRA_ARGS-}
+
+services:
+  # The fleet seed once, and each sidecar's peer id before any beacon node needs it. Root,
+  # because a named volume arrives owned by root and the sidecars run as fleet-overlay; the
+  # chown at the end is what hands the volumes over.
+  init:
+    image: ${FLEET_OVERLAY_IMAGE:-fleet-overlay:demo}
+    build:
+      context: ../..
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-euc"]
+    command:
+      - |
+        [ -f /shared/seed ] || fleet-overlay gen-seed --out /shared/seed
+        for n in 1 2 3; do
+          sed "s|/var/lib/fleet-overlay/node.key|/keys/$$n/node.key|" \
+            /etc/fleet-overlay/config.yaml > /tmp/config.yaml
+          fleet-overlay peer-id --config /tmp/config.yaml > /shared/sc-$$n.peerid
+        done
+        chown -R fleet-overlay:fleet-overlay /shared /keys/1 /keys/2 /keys/3
+    volumes:
+      - ./config.yaml:/etc/fleet-overlay/config.yaml:ro
+      - shared:/shared
+      - key-1:/keys/1
+      - key-2:/keys/2
+      - key-3:/keys/3
+    networks: [demo]
+
+  sc-1:
+    <<: *sidecar
+    environment:
+      RUNTIME_DIRECTORY: /var/lib/fleet-overlay
+      FLEET_OVERLAY_HOSTNAME: sc-1
+    volumes:
+      - ./config.yaml:/etc/fleet-overlay/config.yaml:ro
+      - ./roster.yaml:/etc/fleet-overlay/roster.yaml:ro
+      - shared:/shared
+      - key-1:/var/lib/fleet-overlay
+    networks:
+      demo:
+        ipv4_address: 10.90.0.11
+    ports:
+      - "127.0.0.1:7789:7789"
+      - "127.0.0.1:5052:5052"
+
+  sc-2:
+    <<: *sidecar
+    environment:
+      RUNTIME_DIRECTORY: /var/lib/fleet-overlay
+      FLEET_OVERLAY_HOSTNAME: sc-2
+    volumes:
+      - ./config.yaml:/etc/fleet-overlay/config.yaml:ro
+      - ./roster.yaml:/etc/fleet-overlay/roster.yaml:ro
+      - shared:/shared
+      - key-2:/var/lib/fleet-overlay
+    networks:
+      demo:
+        ipv4_address: 10.90.0.12
+    ports:
+      - "127.0.0.1:7790:7789"
+      - "127.0.0.1:5053:5052"
+
+  sc-3:
+    <<: *sidecar
+    environment:
+      RUNTIME_DIRECTORY: /var/lib/fleet-overlay
+      FLEET_OVERLAY_HOSTNAME: sc-3
+    volumes:
+      - ./config.yaml:/etc/fleet-overlay/config.yaml:ro
+      - ./roster.yaml:/etc/fleet-overlay/roster.yaml:ro
+      - shared:/shared
+      - key-3:/var/lib/fleet-overlay
+    networks:
+      demo:
+        ipv4_address: 10.90.0.13
+    ports:
+      - "127.0.0.1:7791:7789"
+      - "127.0.0.1:5054:5052"
+
+  bn-1:
+    <<: *beacon-node
+    environment:
+      <<: *beacon-node-env
+      SIDECAR: sc-1
+    network_mode: "service:sc-1"
+    depends_on: [sc-1]
+    volumes:
+      - bn-1:/data
+      - shared:/shared:ro
+
+  bn-2:
+    <<: *beacon-node
+    environment:
+      <<: *beacon-node-env
+      SIDECAR: sc-2
+    network_mode: "service:sc-2"
+    depends_on: [sc-2]
+    volumes:
+      - bn-2:/data
+      - shared:/shared:ro
+
+  bn-3:
+    <<: *beacon-node
+    environment:
+      <<: *beacon-node-env
+      SIDECAR: sc-3
+    network_mode: "service:sc-3"
+    depends_on: [sc-3]
+    volumes:
+      - bn-3:/data
+      - shared:/shared:ro
+
+  prometheus:
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.5.0}
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks: [demo]
+    ports:
+      - "127.0.0.1:9090:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:${GRAFANA_VERSION:-12.0.0}
+    environment:
+      # A demo on a laptop, so no login.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./dashboards:/var/lib/grafana/dashboards:ro
+    networks: [demo]
+    ports:
+      - "127.0.0.1:3000:3000"
+    restart: unless-stopped
+
+networks:
+  demo:
+    ipam:
+      config:
+        - subnet: 10.90.0.0/24
+
+volumes:
+  # One per sidecar, and the reason the demo survives a restart: the node key inside is the
+  # peer id the beacon node was told to trust (D01).
+  key-1:
+  key-2:
+  key-3:
+  # The fleet seed and the three peer ids the init container writes.
+  shared:
+  # Beacon node datadirs, so a restart does not checkpoint sync again.
+  bn-1:
+  bn-2:
+  bn-3:

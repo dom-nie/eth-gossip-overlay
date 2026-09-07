@@ -1,0 +1,9 @@
+# Every dashboard JSON in examples/compose/dashboards is loaded at startup. The directory is
+# empty until T-052's dashboard lands in it.
+apiVersion: 1
+
+providers:
+  - name: fleet-overlay
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

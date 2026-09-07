@@ -1,0 +1,17 @@
+# The three demo hosts. Addresses are the ones docker-compose.yml pins on the demo network, so
+# the two files change together; a test in the workspace holds them to each other.
+#
+# Two regions, because that is what the cross-region fanout in v2 has to have something to do.
+hosts:
+  - hostname: sc-1
+    region: eu
+    site: demo
+    addr: "10.90.0.11:7788"
+  - hostname: sc-2
+    region: eu
+    site: demo
+    addr: "10.90.0.12:7788"
+  - hostname: sc-3
+    region: us
+    site: demo
+    addr: "10.90.0.13:7788"
