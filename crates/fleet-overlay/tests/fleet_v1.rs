@@ -244,3 +244,58 @@ async fn restarted_node_rejoins_and_receives_the_next_message() {
         )
         .await;
 }
+
+/// §9: a beacon node that is down or restarting takes its subscriptions with it. Its sidecar
+/// stays on the overlay and advertises an empty bitmap, so its siblings stop sending to it
+/// instead of queueing for a host that cannot use anything.
+#[tokio::test(flavor = "multi_thread")]
+async fn bn_disconnect_stops_siblings_sending_to_that_node() {
+    let block = topic("beacon_block");
+    let mut fleet = Fleet::builder().regions(&[("eu", 3)]).start().await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    let quiet = fleet.node(1).hostname().0.clone();
+    let sent_to_quiet = |scrape: &Scrape| {
+        scrape.sum(
+            MESSAGES_TOTAL,
+            &[(LABEL_DIRECTION, "out"), (LABEL_PEER, &quiet)],
+        )
+    };
+
+    fleet.stop_bn(1).await;
+    let mut round = 0;
+    let flat = loop {
+        let before = sent_to_quiet(&fleet.node(0).metrics().await);
+        publish_and_wait(&fleet, &block, &format!("draining {round}")).await;
+        let after = sent_to_quiet(&fleet.node(0).metrics().await);
+        if after == before {
+            break after;
+        }
+        round += 1;
+        assert!(
+            round < 20,
+            "node 0 kept sending to a beacon node that is gone"
+        );
+    };
+
+    for message in 0..3 {
+        publish_and_wait(&fleet, &block, &format!("after the disconnect {message}")).await;
+    }
+    let after = sent_to_quiet(&fleet.node(0).metrics().await);
+    assert_eq!(after, flat, "node 0 sent to a node with no subscriptions");
+}
+
+/// Publishes at node 0 and returns once node 2 has imported it, so the counter a scenario reads
+/// afterwards is about a message that has already crossed the fleet.
+async fn publish_and_wait(fleet: &Fleet, topic: &str, text: &str) {
+    let payload = text.as_bytes().to_vec();
+    fleet.node(0).bn().publish(topic, &payload).await;
+    fleet
+        .wait_for("node 2 to import the block", WAIT, |fleet| {
+            fleet.node(2).bn().count(topic, &payload) == 1
+        })
+        .await;
+    fleet.settle().await;
+}
