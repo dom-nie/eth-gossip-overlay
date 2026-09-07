@@ -713,7 +713,7 @@ mod tests {
     use overlay_core::budget::SUSTAINED_VIOLATION;
     use overlay_core::config;
     use overlay_core::seen::SeenCache;
-    use overlay_core::time::SystemClock;
+    use overlay_core::time::{FakeClock, SystemClock};
     use overlay_core::topic::UNKNOWN_LARGE_THRESHOLD_BYTES;
     use overlay_core::wire::{BatchEntry, BatchFlags, encode_datagram};
     use tokio::io::AsyncWriteExt;
@@ -1171,6 +1171,52 @@ mod tests {
             1
         );
         assert_eq!(cluster.stats(1).relayed_batches(), 0);
+    }
+
+    /// A peer that keeps asking past its budget for longer than [`SUSTAINED_VIOLATION`] loses
+    /// the connection with `RateExceeded` (DX-N3, T-023). The ten seconds are the sidecar's
+    /// injected clock, so nothing here waits for them, and the bucket refills at nothing so the
+    /// second batch is refused for the same reason as the first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sustained_budget_violation_closes_the_connection_with_rate_exceeded() {
+        let subnet = topic("beacon_attestation_7");
+        let clock = FakeClock::new();
+        let (cluster, peer) = relay_of(
+            &subnet,
+            relay_cluster()
+                .budget(FanoutBudget::new(0, 1, clock.now()))
+                .clock(Arc::new(clock.clone())),
+        )
+        .await;
+        let origin = cluster.hostname(0);
+
+        datagram(&peer, relay_batch(vec![entry(3, &payload(b"over budget"))]));
+
+        eventually("the first refusal", || {
+            cluster
+                .stats(1)
+                .fanout_suppressed(&origin, FanoutKind::Relay)
+                == 1
+        })
+        .await;
+        assert_eq!(cluster.live(1).len(), 2, "one refusal is not a close");
+
+        clock.advance(SUSTAINED_VIOLATION + Duration::from_secs(1));
+        datagram(
+            &peer,
+            relay_batch(vec![entry(3, &payload(b"still over budget"))]),
+        );
+
+        eventually("the connection to go", || {
+            cluster.live(1).get(&origin).is_none()
+        })
+        .await;
+        assert_eq!(
+            cluster
+                .stats(1)
+                .fanout_suppressed(&origin, FanoutKind::Relay),
+            2
+        );
     }
 
     /// §5.4 end to end over two regions: an attestation reaches every subscriber in the remote
