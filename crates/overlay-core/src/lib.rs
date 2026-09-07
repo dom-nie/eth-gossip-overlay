@@ -9,6 +9,7 @@ pub mod fanout;
 pub mod identity;
 pub mod lanes;
 pub mod msgid;
+pub mod progress;
 pub mod protocol;
 pub mod pubqueue;
 pub mod ratelimit;

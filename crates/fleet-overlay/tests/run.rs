@@ -69,6 +69,8 @@ fn lighthouse_env_is_written_before_any_bind() {
 }
 
 /// The node key this fixture's peer id comes from, created the way an operator creates it.
+// A broken fixture is reported by panicking, which is what the unwraps here are.
+#[allow(clippy::unwrap_used)]
 fn peer_id(fixture: &Fixture) -> String {
     let output = fixture
         .command()

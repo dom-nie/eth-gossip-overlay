@@ -15,7 +15,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use libp2p::core::upgrade::Version;
@@ -27,6 +27,7 @@ use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, multiaddr, noise, tcp, 
 use overlay_core::backoff::Backoff;
 use overlay_core::config::Bn;
 use overlay_core::lanes::LanePusher;
+use overlay_core::progress::PROGRESS_TICK;
 use overlay_core::topic::{Class, SubscriptionSets, UNKNOWN_LARGE_THRESHOLD_BYTES};
 use prometheus_client::registry::Registry;
 use tokio::sync::mpsc::error::TrySendError;
@@ -195,6 +196,8 @@ impl BnLink {
     /// once; every later one waits for the backoff. `registry` receives gossipsub's metrics,
     /// and `sets` is T-014's mirror: every change to the beacon node's own subscriptions is
     /// what the sidecar's `MetaData` answers report.
+    /// `progress` is the watchdog counter the swarm loop owns (OPS-N5): it goes up once per
+    /// iteration, and the tick arm is what keeps it going up between a beacon node's messages.
     #[expect(
         clippy::too_many_arguments,
         reason = "the link's wiring: its config, its identity, and one channel end per \
@@ -210,6 +213,7 @@ impl BnLink {
         spec: watch::Sender<SpecSnapshot>,
         sets: watch::Receiver<SubscriptionSets>,
         commands: mpsc::Receiver<BnCommand>,
+        progress: Arc<AtomicU64>,
     ) -> Self {
         let connected = Arc::new(AtomicBool::new(false));
         let (control, events) = mpsc::channel(CONTROL_CHANNEL_CAPACITY);
@@ -251,7 +255,7 @@ impl BnLink {
             add_peer_error: None,
         };
         Self {
-            task: tokio::spawn(link.run()),
+            task: tokio::spawn(link.run(progress)),
             connected,
             events,
             listen,
@@ -305,10 +309,13 @@ struct Link {
 }
 
 impl Link {
-    async fn run(mut self) {
+    async fn run(mut self, progress: Arc<AtomicU64>) {
         self.arm_reconnect(Duration::ZERO);
+        let mut tick = tokio::time::interval(PROGRESS_TICK);
         loop {
+            progress.fetch_add(1, Ordering::Relaxed);
             tokio::select! {
+                _ = tick.tick() => {}
                 event = self.swarm.select_next_some() => self.on_swarm_event(event),
                 command = self.commands.recv() => match command {
                     Some(command) => self.on_command(command),
@@ -829,6 +836,7 @@ mod tests {
             spec_tx,
             sets_rx,
             commands_rx,
+            Arc::default(),
         );
         Harness {
             peer_id: node_key.peer_id(),
@@ -1678,6 +1686,7 @@ mod tests {
             spec_tx,
             sets_rx,
             commands_rx,
+            Arc::default(),
         );
         let mirror = crate::mirror::run(link.events, commands, sets, spec_rx);
         bn.wait_for(|e| matches!(e, FakeBnEvent::Connected(_)))

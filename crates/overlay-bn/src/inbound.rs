@@ -588,6 +588,7 @@ mod tests {
             spec,
             sets,
             commands_rx,
+            Arc::default(),
         );
         let clock = FakeClock::new();
         let seen = SharedSeenCache::new(SeenCache::new(

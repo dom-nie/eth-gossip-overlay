@@ -1011,6 +1011,7 @@ impl<A: Admission> TestCluster<A> {
                 config::Fanout::default(),
                 node.topics.clone(),
                 stats,
+                Arc::default(),
             ),
         ];
         self.nodes[index].sidecar = Some(Sidecar {
@@ -1114,6 +1115,7 @@ impl<A: Admission> TestCluster<A> {
                 ledger: Arc::new(LargeLedger::new(LARGE_QUEUED_BYTES_MAX)),
                 stats: node.stats.clone(),
             },
+            Arc::default(),
         );
         self.nodes[index].manager = Some(manager);
     }

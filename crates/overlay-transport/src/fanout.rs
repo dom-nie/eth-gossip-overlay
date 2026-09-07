@@ -20,12 +20,14 @@
 //! bytes, because what goes to one peer is what goes to all of them.
 
 use std::collections::HashSet;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use overlay_core::config;
 use overlay_core::fanout::Outbound;
 use overlay_core::lanes::ClassLanes;
+use overlay_core::progress::PROGRESS_TICK;
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
 use overlay_core::topic::table::TopicId;
 use overlay_core::topic::{Class, Topic};
@@ -104,6 +106,9 @@ impl Fanout {
     /// Starts draining `lanes`, which is what T-016's inbound task fills through
     /// [`ClassLanes::pusher`](overlay_core::lanes::ClassLanes::pusher). It runs until aborted,
     /// because the lanes hold their own senders and never close.
+    ///
+    /// `progress` is the watchdog counter this loop owns (OPS-N5): it goes up once per
+    /// iteration, and the tick arm is what keeps it going up on a fleet with no traffic.
     pub fn spawn(
         lanes: ClassLanes<Outbound>,
         live: LiveSource,
@@ -111,6 +116,7 @@ impl Fanout {
         cfg: config::Fanout,
         topics: Arc<Mutex<OwnTopics>>,
         stats: Arc<dyn TrafficStats>,
+        progress: Arc<AtomicU64>,
     ) -> JoinHandle<()> {
         let mut fanout = Self {
             lanes,
@@ -122,9 +128,13 @@ impl Fanout {
             oversize_warned: HashSet::new(),
         };
         tokio::spawn(async move {
+            let mut tick = tokio::time::interval(PROGRESS_TICK);
             loop {
-                let outbound = fanout.lanes.recv().await;
-                fanout.send(outbound);
+                progress.fetch_add(1, Ordering::Relaxed);
+                tokio::select! {
+                    outbound = fanout.lanes.recv() => fanout.send(outbound),
+                    _ = tick.tick() => {}
+                }
             }
         })
     }
@@ -304,6 +314,7 @@ mod tests {
             config::Fanout::default(),
             topics,
             Arc::new(()),
+            Arc::default(),
         );
 
         pusher

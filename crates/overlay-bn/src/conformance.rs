@@ -59,6 +59,7 @@ async fn connected_sidecar(bn: &FakeBn) -> Sidecar {
         spec_tx,
         sets,
         commands_rx,
+        Arc::default(),
     );
     let mut sidecar = Sidecar {
         peer_id: key.peer_id(),

@@ -97,6 +97,7 @@ fn spawn_with(env: &Env, key: &NodeKey, listen: Multiaddr, libp2p_addr: Multiadd
         spec_tx,
         sets,
         commands_rx,
+        Arc::default(),
     );
     Sidecar {
         peer_id: key.peer_id(),

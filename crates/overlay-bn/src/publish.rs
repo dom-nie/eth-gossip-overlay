@@ -18,11 +18,12 @@
 //! at error level. `idontwant_on_publish` is gossipsub's own flag (T-012); nothing here does
 //! anything extra for it (CL-N4).
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use libp2p::gossipsub::PublishError;
 use overlay_core::config::PublishRateLimit;
+use overlay_core::progress::PROGRESS_TICK;
 use overlay_core::pubqueue::{
     DropReason, PublishItem, PublishQueue, PublishSink, Pushed, QueueStats,
 };
@@ -157,15 +158,19 @@ impl Publisher {
     /// kill switch, shared with whoever flips it (config, SIGHUP, `fleet-overlayctl`); it is
     /// read per item, so flipping it back on resumes without a restart. `rates` carries
     /// `bn.publish_rate_limit`, which T-043 sends a new value on when an operator changes it.
+    ///
+    /// `progress` is the watchdog counter this loop owns (OPS-N5): it goes up once per
+    /// iteration, and the tick arm is what keeps it going up while the queue is empty.
     pub fn spawn(
         commands: mpsc::Sender<BnCommand>,
         inject: Arc<AtomicBool>,
         rates: watch::Receiver<PublishRateLimit>,
         stats: Arc<dyn PublishStats>,
         clock: Arc<dyn Clock>,
+        progress: Arc<AtomicU64>,
     ) -> (PublishHandle, JoinHandle<()>) {
         let (handle, publisher) = Self::new(commands, inject, rates, stats, clock);
-        (handle, tokio::spawn(publisher.run()))
+        (handle, tokio::spawn(publisher.run(progress)))
     }
 
     fn new(
@@ -194,15 +199,21 @@ impl Publisher {
         (handle, publisher)
     }
 
-    async fn run(mut self) {
+    async fn run(mut self, progress: Arc<AtomicU64>) {
         loop {
+            progress.fetch_add(1, Ordering::Relaxed);
             match self.queue.pop() {
                 Some(item) => {
                     if self.step(item).await.is_none() {
                         return;
                     }
                 }
-                None => self.queue.wake.notified().await,
+                // The wake is a `notify_one`, which keeps a permit when nobody is waiting, so
+                // a tick that wins the race loses nothing: the next pop takes the item.
+                None => tokio::select! {
+                    () = self.queue.wake.notified() => {}
+                    _ = tokio::time::sleep(PROGRESS_TICK) => {}
+                },
             }
         }
     }
@@ -430,7 +441,12 @@ mod tests {
         }
 
         fn spawn(&mut self) -> JoinHandle<()> {
-            tokio::spawn(self.publisher.take().expect("spawn() is called once").run())
+            tokio::spawn(
+                self.publisher
+                    .take()
+                    .expect("spawn() is called once")
+                    .run(Arc::default()),
+            )
         }
 
         fn publisher(&mut self) -> &mut Publisher {
@@ -707,6 +723,7 @@ mod tests {
             spec,
             sets,
             commands_rx,
+            Arc::default(),
         );
         let mut received = bn.received();
         bn.subscribe(BLOCK).await;
@@ -735,6 +752,7 @@ mod tests {
             rates,
             Arc::new(()),
             Arc::new(clock),
+            Arc::default(),
         );
         let compressed = snap::raw::Encoder::new().compress_vec(b"a block").unwrap();
         let id = msgid::compute(BLOCK, &compressed, wire::MAX_PAYLOAD_SIZE as usize).id;

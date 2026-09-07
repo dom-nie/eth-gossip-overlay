@@ -3,6 +3,7 @@
 
 pub mod admin;
 pub mod app;
+pub mod lifecycle;
 pub mod logging;
 pub mod metrics;
 pub mod reload;

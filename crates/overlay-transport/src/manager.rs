@@ -30,6 +30,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -37,6 +38,7 @@ use arc_swap::ArcSwap;
 use ed25519_dalek::SigningKey;
 use overlay_core::backoff::Backoff;
 use overlay_core::config::Overlay;
+use overlay_core::progress::PROGRESS_TICK;
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::subs::PeerState;
 use overlay_core::topic::Topic;
@@ -656,8 +658,18 @@ pub struct ConnectionManager;
 
 impl ConnectionManager {
     /// Starts accepting on `endpoint` and dialling every roster host this one should dial.
-    /// `stats` stands in for T-041's registry, which does not exist yet, and `senders` is the
-    /// process-wide budget every peer's send queues share (T-033).
+    /// `stats` is T-041's registry and `senders` is the process-wide budget every peer's send
+    /// queues share (T-033).
+    ///
+    /// `progress` is the watchdog counter the supervisor loop owns (OPS-N5): it goes up once
+    /// per iteration, and the tick arm is what keeps it going up on a roster that never
+    /// changes.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the manager's wiring: what this host is, what it listens on, what it dials, \
+                  what it admits, and one channel or handle per consumer. Every parameter has \
+                  its own type, so a call site cannot mix two up"
+    )]
     pub fn spawn<A: Admission>(
         local: Local,
         endpoint: quinn::Endpoint,
@@ -666,6 +678,7 @@ impl ConnectionManager {
         events: mpsc::Sender<PeerEvent>,
         stats: Arc<dyn ManagerStats>,
         senders: sender::Deps,
+        progress: Arc<AtomicU64>,
     ) -> Handle {
         let (stop, _) = watch::channel(false);
         let shared = Arc::new(Shared {
@@ -683,7 +696,7 @@ impl ConnectionManager {
         shared.publish_gauges();
         Handle {
             accept: tokio::spawn(accept_loop(shared.clone(), admission.clone())),
-            supervisor: tokio::spawn(supervise(shared.clone(), admission)),
+            supervisor: tokio::spawn(supervise(shared.clone(), admission, progress)),
             shared,
         }
     }
@@ -977,17 +990,26 @@ async fn dial_once<A: Admission>(
 /// longer has. A reload never touches a peer whose entry did not change, which is what keeps
 /// SIGHUP from dropping connections (§5.3); a changed address takes effect at the next dial,
 /// because the task reads it from the roster on every attempt.
-async fn supervise<A: Admission>(shared: Arc<Shared>, admission: Arc<A>) {
+async fn supervise<A: Admission>(shared: Arc<Shared>, admission: Arc<A>, progress: Arc<AtomicU64>) {
     let mut roster = shared.roster.clone();
     let mut stop = shared.stop.subscribe();
     let mut dials: HashMap<Hostname, AbortHandle> = HashMap::new();
     let mut tasks = JoinSet::new();
+    let mut tick = tokio::time::interval(PROGRESS_TICK);
+    let current = roster.borrow_and_update().clone();
+    reconcile(&shared, &admission, &current, &mut dials, &mut tasks);
     loop {
-        let current = roster.borrow_and_update().clone();
-        reconcile(&shared, &admission, &current, &mut dials, &mut tasks);
+        progress.fetch_add(1, Ordering::Relaxed);
         tokio::select! {
             _ = stop.wait_for(|stop| *stop) => break,
-            changed = roster.changed() => if changed.is_err() { break },
+            changed = roster.changed() => {
+                if changed.is_err() {
+                    break;
+                }
+                let current = roster.borrow_and_update().clone();
+                reconcile(&shared, &admission, &current, &mut dials, &mut tasks);
+            }
+            _ = tick.tick() => {}
         }
     }
     tasks.shutdown().await;

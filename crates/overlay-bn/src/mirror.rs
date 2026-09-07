@@ -350,6 +350,7 @@ mod tests {
             spec,
             watch.clone(),
             commands_rx,
+            Arc::default(),
         );
         run(link.events, commands, sets, spec_rx);
         watch
