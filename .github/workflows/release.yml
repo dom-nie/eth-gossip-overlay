@@ -1,0 +1,242 @@
+name: Release
+
+# A tag is the whole release. Pushing `vX.Y.Z` builds both Linux targets, checksums and attests
+# the tarballs, publishes the image and writes the notes out of CHANGELOG.md. Running this by
+# hand instead is a dry run: it builds and checksums, and publishes nothing.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version to rehearse, without the leading v.
+        required: true
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  binaries:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    # Debian oldstable, glibc 2.31, on a runner of the target's own architecture. The binaries
+    # link glibc, so the oldest glibc they are built against is the oldest distribution they run
+    # on: 2.31 covers Debian 11, Ubuntu 20.04 and RHEL 9 and everything after them. The runner
+    # images themselves are far newer than that, which is why the build happens in here and not
+    # on them; a native runner per architecture is what keeps aarch64 off an emulator.
+    container: rust:1.98-bullseye
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    steps:
+      # Not shallow: build.rs reads the commit out of .git for --version, and its date for
+      # SOURCE_DATE_EPOCH, which is what makes two builds of one tag produce one binary.
+      - uses: actions/checkout@v4
+
+      # The checkout is not owned by the user the container runs as, and git refuses to read a
+      # repository it does not trust, which would leave build.rs with no commit to report.
+      - name: Let git read the checkout from inside the container
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: The version this run is for
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: echo "VERSION=${INPUT_VERSION:-${GITHUB_REF_NAME#v}}" >> "$GITHUB_ENV"
+
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build both binaries
+        run: |
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
+            cargo build --release --locked -p fleet-overlay --bins
+
+      # A tag that says one version and a Cargo.toml that says another produces a release nobody
+      # can reason about. scripts/release.sh moves both together; this is what catches a tag
+      # pushed without it.
+      - name: The binary agrees with the tag
+        run: |
+          built=$(./target/release/fleet-overlay --version | head -1 | cut -d' ' -f2)
+          if [ "$built" != "$VERSION" ]; then
+            echo "the tag says $VERSION and the binary says $built"
+            exit 1
+          fi
+
+      - name: Tarball
+        run: scripts/package.sh "$VERSION" "${{ matrix.target }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  checksums:
+    name: checksums
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tarball-*
+          merge-multiple: true
+          path: dist
+
+      - name: SHA256SUMS
+        working-directory: dist
+        run: |
+          sha256sum -- *.tar.gz | tee SHA256SUMS
+          sha256sum --check SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: checksums
+          path: dist/SHA256SUMS
+          if-no-files-found: error
+
+  publish:
+    name: github release
+    if: github.event_name == 'push'
+    needs: checksums
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: tarball-*
+          merge-multiple: true
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: checksums
+          path: dist
+
+      # The release notes are the changelog section, `Protocol:` line and all. No section, or a
+      # section that does not say what the release means for a mixed-version fleet, is a release
+      # that stops here rather than one an operator has to guess about.
+      - name: Notes from CHANGELOG.md
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          scripts/changelog.sh major "$version" > /dev/null
+          scripts/changelog.sh section "$version" > notes.md
+          test -s notes.md
+          cat notes.md
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.tar.gz
+
+      # A pre-release is not what `gh release list` should offer first, and neither is it what
+      # `:latest` should point at; both follow the hyphen in the version.
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          case $GITHUB_REF_NAME in
+            *-*) prerelease=--prerelease ;;
+            *) prerelease= ;;
+          esac
+          gh release create "$GITHUB_REF_NAME" $prerelease \
+            --title "$GITHUB_REF_NAME" --notes-file notes.md \
+            dist/*.tar.gz dist/SHA256SUMS
+
+  image:
+    name: container image
+    if: github.event_name == 'push'
+    needs: checksums
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: The tags this version takes
+        run: |
+          image=ghcr.io/${GITHUB_REPOSITORY,,}
+          tags=$image:$GITHUB_REF_NAME
+          case $GITHUB_REF_NAME in
+            *-*) ;;
+            *) tags=$tags,$image:latest ;;
+          esac
+          {
+            echo "IMAGE=$image"
+            echo "TAGS=$tags"
+          } >> "$GITHUB_ENV"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/build-push-action@v6
+        id: build
+        with:
+          context: .
+          push: true
+          tags: ${{ env.TAGS }}
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      # published_image_tag_runs_version: what was pushed, pulled back and asked what it is. The
+      # release notes claim a protocol major and a set of feature bits; the binary in the image
+      # prints what it actually speaks, and the two have to be the same thing (D29).
+      - name: The published image agrees with its release notes
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          docker pull "$IMAGE:$GITHUB_REF_NAME"
+          printed=$(docker run --rm "$IMAGE:$GITHUB_REF_NAME" --version)
+          echo "$printed"
+
+          built_version=$(echo "$printed" | head -1 | cut -d' ' -f2)
+          protocol=$(echo "$printed" | sed -n 2p)
+          built_major=${protocol#protocol }
+          built_major=${built_major%%.*}
+          built_features=$(echo "$protocol" | sed 's/.*features=0x//')
+
+          if [ "$built_version" != "$version" ]; then
+            echo "the image is $built_version, the tag is $version"
+            exit 1
+          fi
+          claimed=$(scripts/changelog.sh major "$version")
+          if [ "$built_major" != "$claimed" ]; then
+            echo "the notes claim protocol major $claimed, the image speaks $built_major"
+            exit 1
+          fi
+          for bit in $(scripts/changelog.sh bits "$version"); do
+            if (( (16#$built_features & (1 << bit)) == 0 )); then
+              echo "the notes claim feature bit $bit, the image advertises 0x$built_features"
+              exit 1
+            fi
+          done
+          echo "image $version speaks protocol major $claimed, as the notes say"
