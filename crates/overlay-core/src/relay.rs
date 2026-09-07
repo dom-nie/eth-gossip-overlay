@@ -98,4 +98,13 @@ mod tests {
 
         assert!(used.len() >= 8, "{used:?}");
     }
+
+    /// A region smaller than the relay count is all relays and no host twice. Sending a host the
+    /// same batch two or three times would cost it the WAN copies the relays are there to save.
+    #[test]
+    fn select_with_fewer_remote_hosts_than_n_returns_all() {
+        let relays = select(&host("bn-eu-01"), &pool(2), 3);
+
+        assert_eq!(relays, vec![host("bn-us-01"), host("bn-us-02")]);
+    }
 }
