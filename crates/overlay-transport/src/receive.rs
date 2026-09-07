@@ -786,6 +786,51 @@ mod tests {
         .await;
     }
 
+    /// One hop is structural, not a rule this file follows (§3 principle 1): a receiver holds
+    /// nothing that can send, so a batch asking to be re-fanned is delivered locally and reaches
+    /// nobody else. T-063 gives the receiver a sender and keeps this test for the region a relay
+    /// does not fan into.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_batch_from_a_same_region_peer_is_delivered_locally_and_not_refanned() {
+        let subnet = topic("beacon_attestation_7");
+        let relayed = payload(b"an attestation asking to be spread further");
+        // The bare node is the lowest hostname, so it dials, and the two managers pair with
+        // each other and wait for it: a peer of the test's own on one side of a live pair.
+        let mut cluster = Builder::new(&[NodeKind::Bare, NodeKind::Manager, NodeKind::Manager])
+            .start()
+            .await;
+        for node in [1, 2] {
+            cluster.start_sidecar(node, subscriptions(&[&subnet], &[]));
+        }
+        eventually("the two siblings to pair and subscribe", || {
+            cluster.live(1).subscribers(&subnet).len() == 1
+        })
+        .await;
+        let peer = cluster
+            .dial_announcing(
+                0,
+                1,
+                &cluster.self_hello(0),
+                vec![(TopicId::new(3), subnet.to_string())],
+            )
+            .await;
+
+        datagram(
+            &peer,
+            encode_datagram(&Frame::Batch {
+                flags: BatchFlags::RELAY,
+                entries: vec![entry(3, &relayed)],
+            }),
+        );
+
+        eventually("the host it was sent to to queue it", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert!(cluster.published(2).is_empty());
+    }
+
     /// An entry id the peer never announced costs that entry and nothing else (D21): the rest of
     /// the batch is delivered and the connection carries on, because the sender is one release
     /// ahead or its `TOPIC_ADD` has not arrived yet, neither of which is a protocol error.
