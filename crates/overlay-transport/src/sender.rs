@@ -2,7 +2,19 @@
 //!
 //! Fanout (T-032) hands a frame to every target and moves on. Each peer has a task of its own
 //! that opens a unidirectional stream per frame and writes it, so the sibling with the worst
-//! congestion window delays nobody else (D17). Datagrams are T-062's.
+//! congestion window delays nobody else (D17). A small-class batch goes out of the same task as
+//! an unreliable datagram instead (§5.3), and falls back to a stream when the path turns out not
+//! to hold it.
+//!
+//! # What a lane holds, and why the two carriers differ
+//!
+//! A stream frame is encoded once by whoever routed it, because the same bytes go to every
+//! target, and each lane holds a refcounted clone of them ([`SenderHandle::push`]). A batch is
+//! one destination's alone, so encoding it early would buy nothing and would cost the second
+//! stale check its entries: D21 has the sender walk them again at dequeue, since a flush can
+//! wait here long enough to age out on the way. So [`SenderHandle::push_batch`] queues the
+//! entries and the drain task encodes them, as a datagram with no length prefix or, on a stream,
+//! with one. Either way a lane's byte count is what its contents cost in memory.
 //!
 //! # Nothing on the send path waits for a peer
 //!
@@ -16,8 +28,13 @@ use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use overlay_core::batch::{self, Carrier, Flush};
 use overlay_core::roster::Hostname;
 use overlay_core::topic::Class;
+use overlay_core::wire::{
+    BATCH_ENTRY_OVERHEAD_BYTES, BATCH_HEADER_BYTES, encode_datagram, encode_stream,
+};
+use quinn::SendDatagramError;
 use tokio::sync::Notify;
 use tokio::task::AbortHandle;
 
@@ -69,6 +86,26 @@ impl DropReason {
     }
 }
 
+/// Which of D21's two age checks threw a batch entry away: the `reason` label of
+/// `stale_dropped_total{class, reason}` (§12).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum StaleReason {
+    /// The batcher, on its way to closing the batch.
+    Flush,
+    /// The peer's sender, when it finally reached the batch.
+    Dequeue,
+}
+
+impl StaleReason {
+    /// The label value.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Flush => "flush",
+            Self::Dequeue => "dequeue",
+        }
+    }
+}
+
 /// Where the send queues count, until T-041's registry exists. Every call happens with a lane
 /// locked, so an implementation is a counter or a gauge and nothing slower. `()` counts nothing.
 pub trait SenderStats: Send + Sync {
@@ -78,20 +115,31 @@ pub trait SenderStats: Send + Sync {
 
     /// `peer_queue_drops_total{peer, class, reason}`: one frame that will never be written.
     fn queue_drop(&self, peer: &Hostname, class: Class, reason: DropReason);
+
+    /// `stale_dropped_total{class="small", reason}`: batch entries too old to be worth
+    /// delivering (D21). The class is always the small one, because batching is the small
+    /// class's alone (§5.4), and the count is per check rather than per entry so a batch that
+    /// aged out whole costs one call.
+    fn stale_dropped(&self, reason: StaleReason, entries: usize);
 }
 
 impl SenderStats for () {
     fn queue_depth(&self, _: &Hostname, _: Class, _: usize, _: usize) {}
     fn queue_drop(&self, _: &Hostname, _: Class, _: DropReason) {}
+    fn stale_dropped(&self, _: StaleReason, _: usize) {}
 }
 
 /// What one peer's sender writes on. The connection is behind a trait so a test can hold the
-/// drain and let it go again; [`quinn::Connection`] is what the sidecar runs. One method,
-/// because a stream per frame is all v1 sends (§7).
+/// drain and let it go again; [`quinn::Connection`] is what the sidecar runs.
 pub trait Transport: Send + Sync + 'static {
     /// Writes one encoded frame on a stream of its own. An error means the connection can carry
     /// nothing more and the sender stops.
     fn send(&self, frame: Bytes) -> impl Future<Output = std::io::Result<()>> + Send;
+
+    /// Hands one encoded frame to the path as an unreliable datagram. Not a future: a datagram
+    /// is taken or refused there and then, with no window to wait behind, which is the property
+    /// the small class travels this way for (§5.3).
+    fn send_datagram(&self, frame: Bytes) -> Result<(), SendDatagramError>;
 }
 
 impl Transport for quinn::Connection {
@@ -103,17 +151,45 @@ impl Transport for quinn::Connection {
         let _ = stream.finish();
         Ok(())
     }
+
+    fn send_datagram(&self, frame: Bytes) -> Result<(), SendDatagramError> {
+        quinn::Connection::send_datagram(self, frame)
+    }
 }
 
 /// The push found no queue to put the frame in, because the peer's task has gone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Dropped;
 
-/// A frame waiting its turn, in the bytes it will be written as: fanout encodes once for every
-/// peer a message goes to, and what a lane bounds is what its queue costs in memory.
+/// Something waiting its turn on a lane, and when it started waiting.
 struct Queued {
-    frame: Bytes,
+    waiting: Waiting,
     enqueued_at: Instant,
+}
+
+/// What a lane holds: a frame already encoded for every peer it goes to, or one destination's
+/// batch, still as entries so the second stale check has something to walk (D21).
+enum Waiting {
+    /// The bytes a stream carries, length prefix included.
+    Frame(Bytes),
+    /// A flushed batch and the age bound it was collected under.
+    Batch { flush: Flush, stale_after: Duration },
+}
+
+impl Waiting {
+    /// What it costs in memory, which is what a lane's byte bound and the `unit="bytes"` gauge
+    /// are against. A batch counts what it will encode to, so the two carriers are comparable.
+    fn bytes(&self) -> usize {
+        match self {
+            Self::Frame(frame) => frame.len(),
+            Self::Batch { flush, .. } => flush
+                .entries
+                .iter()
+                .map(|entry| BATCH_ENTRY_OVERHEAD_BYTES + entry.payload.len())
+                .sum::<usize>()
+                .saturating_add(BATCH_HEADER_BYTES),
+        }
+    }
 }
 
 /// What one lane holds, in both units `peer_queue_depth{unit}` carries. The gauge and
@@ -144,13 +220,13 @@ impl Lane {
     }
 
     fn push(&mut self, queued: Queued) {
-        self.bytes += queued.frame.len();
+        self.bytes += queued.waiting.bytes();
         self.frames.push_back(queued);
     }
 
     fn pop(&mut self) -> Option<Queued> {
         let queued = self.frames.pop_front()?;
-        self.bytes -= queued.frame.len();
+        self.bytes -= queued.waiting.bytes();
         Some(queued)
     }
 }
@@ -197,7 +273,7 @@ impl Registry {
         let Some(dropped) = lane.pop() else {
             return false;
         };
-        self.queued -= dropped.frame.len();
+        self.queued -= dropped.waiting.bytes();
         queues
             .stats
             .queue_drop(&queues.peer, Class::Large, DropReason::Full);
@@ -241,14 +317,14 @@ impl LargeLedger {
     fn push(&self, queues: &Queues, queued: Queued) {
         let mut registry = self.registry();
         let mut lane = queues.lane(Class::Large);
-        while lane.bytes + queued.frame.len() > LARGE_LANE_BYTES {
+        while lane.bytes + queued.waiting.bytes() > LARGE_LANE_BYTES {
             let Some(dropped) = lane.pop() else { break };
-            registry.queued -= dropped.frame.len();
+            registry.queued -= dropped.waiting.bytes();
             queues
                 .stats
                 .queue_drop(&queues.peer, Class::Large, DropReason::Full);
         }
-        registry.queued += queued.frame.len();
+        registry.queued += queued.waiting.bytes();
         lane.push(queued);
         queues.depth(Class::Large, &lane);
         drop(lane);
@@ -260,7 +336,7 @@ impl LargeLedger {
         let mut registry = self.registry();
         let mut lane = queues.lane(Class::Large);
         let queued = lane.pop()?;
-        registry.queued -= queued.frame.len();
+        registry.queued -= queued.waiting.bytes();
         queues.depth(Class::Large, &lane);
         Some(queued)
     }
@@ -285,6 +361,9 @@ struct Queues {
     /// Woken by every push, awaited by the task whenever both lanes are empty.
     waiting: Notify,
     closed: AtomicBool,
+    /// Whether this connection has already had its line about a peer that takes no datagrams.
+    /// A misconfigured transport at the other end is one log line, not one per batch.
+    warned_no_datagrams: AtomicBool,
     /// Set once, in [`PeerSender::spawn`], as soon as there is a task to name.
     task: OnceLock<AbortHandle>,
 }
@@ -299,6 +378,7 @@ impl Queues {
             stats: deps.stats,
             waiting: Notify::new(),
             closed: AtomicBool::new(false),
+            warned_no_datagrams: AtomicBool::new(false),
             task: OnceLock::new(),
         }
     }
@@ -326,9 +406,9 @@ impl Queues {
         self.closed.load(Ordering::Relaxed) || self.task.get().is_some_and(AbortHandle::is_finished)
     }
 
-    fn push(&self, class: Class, frame: Bytes, now: Instant) {
+    fn enqueue(&self, class: Class, waiting: Waiting, now: Instant) {
         let queued = Queued {
-            frame,
+            waiting,
             enqueued_at: now,
         };
         match class {
@@ -391,11 +471,34 @@ pub struct SenderHandle(Arc<Queues>);
 impl SenderHandle {
     /// Queues `frame` for `class`'s lane, without waiting for anything. `now` is when the frame
     /// entered, which the age bound reads back when the task reaches it.
+    ///
+    /// The frame arrives encoded, so the fanout encodes once whoever a message is going to and
+    /// every target's lane holds a clone of the same bytes.
     pub fn push(&self, class: Class, frame: Bytes, now: Instant) -> Result<(), Dropped> {
+        self.queue(class, Waiting::Frame(frame), now)
+    }
+
+    /// Queues one flushed batch on the small lane, to go as a datagram when the task reaches it
+    /// (§5.3). `stale_after` is the bound its entries were collected under, which the task
+    /// checks them against again before it sends (D21).
+    ///
+    /// Not encoded here, unlike [`push`](Self::push): a batch goes to the one destination it was
+    /// collected for, so there is nothing to share the bytes with, and the second stale check
+    /// needs the entries.
+    pub fn push_batch(
+        &self,
+        flush: Flush,
+        stale_after: Duration,
+        now: Instant,
+    ) -> Result<(), Dropped> {
+        self.queue(Class::Small, Waiting::Batch { flush, stale_after }, now)
+    }
+
+    fn queue(&self, class: Class, waiting: Waiting, now: Instant) -> Result<(), Dropped> {
         if self.0.gone() {
             return Err(Dropped);
         }
-        self.0.push(class, frame, now);
+        self.0.enqueue(class, waiting, now);
         Ok(())
     }
 
@@ -474,9 +577,60 @@ async fn drain<T: Transport>(queues: Arc<Queues>, transport: T) {
             queues.waiting.notified().await;
             continue;
         };
-        if let Err(error) = transport.send(queued.frame).await {
+        let written = match queued.waiting {
+            Waiting::Frame(frame) => transport.send(frame).await,
+            Waiting::Batch { flush, stale_after } => {
+                send_batch(&transport, &queues, flush, stale_after, now).await
+            }
+        };
+        if let Err(error) = written {
             tracing::debug!(peer = %queues.peer, %error, "connection carries no more frames");
             return;
+        }
+    }
+}
+
+/// One batch, aged again and then written on the carrier it asked for.
+///
+/// The datagram is what the small class is for, and the two ways it can be refused read
+/// differently. `TooLarge` means path MTU dropped between the batcher's check and this send, so
+/// this batch goes on a stream and the next is built against the smaller limit. `Disabled` and
+/// `UnsupportedByPeer` mean a peer whose transport takes no datagram at all: the batch still
+/// goes on a stream, because the payloads are worth as much either way, and the operator gets
+/// one line per connection about a transport that is not configured for what its HELLO
+/// advertised.
+async fn send_batch<T: Transport>(
+    transport: &T,
+    queues: &Queues,
+    mut flush: Flush,
+    stale_after: Duration,
+    now: Instant,
+) -> std::io::Result<()> {
+    let dropped = batch::drop_stale(&mut flush.entries, stale_after, now);
+    if dropped > 0 {
+        queues.stats.stale_dropped(StaleReason::Dequeue, dropped);
+    }
+    if flush.entries.is_empty() {
+        return Ok(());
+    }
+    let carrier = flush.carrier;
+    let frame = flush.into_frame();
+    if carrier == Carrier::Stream {
+        return transport.send(encode_stream(&frame)).await;
+    }
+    match transport.send_datagram(encode_datagram(&frame)) {
+        Ok(()) => Ok(()),
+        Err(SendDatagramError::TooLarge) => transport.send(encode_stream(&frame)).await,
+        Err(SendDatagramError::ConnectionLost(error)) => Err(std::io::Error::other(error)),
+        Err(error) => {
+            if !queues.warned_no_datagrams.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    peer = %queues.peer,
+                    %error,
+                    "peer takes no datagrams; the small class goes to it on streams"
+                );
+            }
+            transport.send(encode_stream(&frame)).await
         }
     }
 }

@@ -75,6 +75,11 @@ pub const BATCH_HEADER_BYTES: usize = 4;
 /// What one entry adds to a `BATCH` beyond its payload: the topic id and the payload length.
 pub const BATCH_ENTRY_OVERHEAD_BYTES: usize = 4;
 
+/// The largest payload one `BATCH` entry can carry, which is what its `u16` length holds. Small
+/// class is by kind and not by size, so a payload past this is a small-class message no batch
+/// can carry and it travels as a whole message instead (D21, T-062).
+pub const MAX_BATCH_ENTRY_BYTES: usize = u16::MAX as usize;
+
 /// The flag bits a `CHUNK` defines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChunkFlags(u8);

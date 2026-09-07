@@ -52,7 +52,7 @@ use overlay_core::topic::Class;
 use overlay_transport::fanout::{Direction, PeerLabels, TrafficStats};
 use overlay_transport::manager::{ManagerStats, PeerCounts};
 use overlay_transport::receive::ReceiveStats;
-use overlay_transport::sender::{DropReason as SendDropReason, SenderStats};
+use overlay_transport::sender::{DropReason as SendDropReason, SenderStats, StaleReason};
 use overlay_transport::subs::SubsStats;
 use overlay_transport::tls::HandshakeFailure;
 
@@ -263,6 +263,7 @@ pub struct Metrics {
     fanout_lane_dropped: IntCounterVec,
     peer_queue_depth: IntGaugeVec,
     peer_queue_drops: IntCounterVec,
+    stale_dropped: IntCounterVec,
     config_reload: IntCounterVec,
     roster_reload_rejected: IntCounter,
     reconstruct_seconds: HistogramVec,
@@ -428,14 +429,15 @@ impl Metrics {
             per_class,
         )?)?;
 
-        // Registered and then let go of: their producers land in v2, v3 and T-043, and each of
-        // those tickets adds the handle it needs. The registry keeps the collector alive, so
-        // the name is on the scrape from this release on.
-        b.counter_vec(
+        let stale_dropped = b.counter_vec(
             STALE_DROPPED_TOTAL,
             "Messages dropped for being too old to be worth handling.",
             class_reason,
         )?;
+
+        // Registered and then let go of: their producers land in v2, v3 and T-043, and each of
+        // those tickets adds the handle it needs. The registry keeps the collector alive, so
+        // the name is on the scrape from this release on.
         b.counter(RELAYED_BATCHES_TOTAL, "Batches re-fanned as a relay.")?;
         b.counter(CHUNKS_SENT_TOTAL, "Chunks written to peers.")?;
         b.counter(CHUNKS_RECEIVED_TOTAL, "Chunks read from peers.")?;
@@ -502,6 +504,7 @@ impl Metrics {
             fanout_lane_dropped,
             peer_queue_depth,
             peer_queue_drops,
+            stale_dropped,
             reconstruct_seconds,
             config_reload,
             roster_reload_rejected,
@@ -753,6 +756,14 @@ impl SenderStats for Metrics {
         self.peer_queue_drops
             .with_label_values(&[&peer.0, class_label(class), reason.as_str()])
             .inc();
+    }
+
+    /// Entries and not calls: `stale_dropped_total` counts messages the beacon nodes never got,
+    /// and one batch that aged out whole is as many of those as it held.
+    fn stale_dropped(&self, reason: StaleReason, entries: usize) {
+        self.stale_dropped
+            .with_label_values(&[class_label(Class::Small), reason.as_str()])
+            .inc_by(entries as u64);
     }
 }
 

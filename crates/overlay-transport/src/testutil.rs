@@ -64,6 +64,7 @@ use overlay_core::wire::MAX_PAYLOAD_BYTES;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
+use crate::batching::Batching;
 use crate::endpoint::{self, EndpointError};
 use crate::fanout::{Direction, Fanout, PeerLabels, TrafficStats};
 use crate::hello::{HelloAdmission, Negotiated, OwnTopics, SelfHello};
@@ -73,7 +74,8 @@ use crate::manager::{
 };
 use crate::receive::{Deps, NoStripes, PeerReceiver, ReceiveStats};
 use crate::sender::{
-    self, DropReason, LARGE_QUEUED_BYTES_MAX, LargeLedger, SenderHandle, SenderStats, Transport,
+    self, DropReason, LARGE_QUEUED_BYTES_MAX, LargeLedger, SenderHandle, SenderStats, StaleReason,
+    Transport,
 };
 use crate::subs::SubsStats;
 use crate::tls::{self, FailureReason, HandshakeFailure, PinTable, Role};
@@ -166,6 +168,7 @@ pub struct CountingStats {
     fanout_suppressed: Mutex<BTreeMap<(Hostname, FanoutKind), u64>>,
     queue_depths: Mutex<HashMap<(Hostname, Class), (usize, usize)>>,
     queue_drops: Mutex<HashMap<(Hostname, Class, DropReason), u64>>,
+    stale_dropped: Mutex<HashMap<StaleReason, u64>>,
 }
 
 impl CountingStats {
@@ -290,6 +293,16 @@ impl CountingStats {
             .unwrap_or_default()
     }
 
+    /// `stale_dropped_total{class="small", reason}`, in entries rather than in calls.
+    pub fn stale_dropped(&self, reason: StaleReason) -> u64 {
+        self.stale_dropped
+            .lock()
+            .unwrap()
+            .get(&reason)
+            .copied()
+            .unwrap_or_default()
+    }
+
     /// `duplicates_dropped_total{class, source="overlay"}`.
     pub fn duplicates(&self, class: Class) -> u64 {
         self.duplicates
@@ -398,6 +411,15 @@ impl SenderStats for CountingStats {
             .entry((peer.clone(), class, reason))
             .or_default() += 1;
     }
+
+    fn stale_dropped(&self, reason: StaleReason, entries: usize) {
+        *self
+            .stale_dropped
+            .lock()
+            .unwrap()
+            .entry(reason)
+            .or_default() += entries as u64;
+    }
 }
 
 impl SubsStats for CountingStats {
@@ -411,6 +433,7 @@ pub struct Builder {
     kinds: Vec<NodeKind>,
     cfg: Overlay,
     roster: Option<Vec<usize>>,
+    small: config::SmallClass,
 }
 
 impl Builder {
@@ -427,6 +450,7 @@ impl Builder {
                 ..Overlay::default()
             },
             roster: None,
+            small: config::SmallClass::default(),
         }
     }
 
@@ -441,6 +465,14 @@ impl Builder {
     /// smaller set is how a test reloads one in later.
     pub fn roster(mut self, hosts: &[usize]) -> Self {
         self.roster = Some(hosts.to_vec());
+        self
+    }
+
+    /// The batching window and stale bound every sidecar in the cluster runs under. The shipped
+    /// defaults otherwise; a test that has to put several payloads in one window widens it
+    /// rather than racing the scheduler for 10 ms.
+    pub fn small(mut self, small: config::SmallClass) -> Self {
+        self.small = small;
         self
     }
 
@@ -559,6 +591,7 @@ impl Builder {
             hosts,
             nodes,
             admission: Box::new(admission),
+            small: watch::channel(self.small).0,
         };
         let initial = self
             .roster
@@ -675,6 +708,10 @@ pub struct TestCluster<A: Admission = HelloAdmission> {
     hosts: Vec<HostEntry>,
     nodes: Vec<Node>,
     admission: NodeAdmission<A>,
+    /// What every sidecar's batcher runs under, on the channel a reload would publish on
+    /// (T-043). Every node in a cluster shares it, the way every host in a fleet runs one
+    /// `config.yaml`.
+    small: watch::Sender<config::SmallClass>,
 }
 
 /// How a cluster builds a node's admission, which it does again whenever a node restarts.
@@ -1010,6 +1047,7 @@ impl<A: Admission> TestCluster<A> {
         let (to_exchange, exchanged) = mpsc::channel(64);
         let lanes = ClassLanes::new(Arc::new(()));
         let to_fanout = lanes.pusher();
+        let (small, batching) = Batching::spawn(self.small.subscribe(), stats.clone());
         let tasks = vec![
             crate::subs::spawn(exchanged, watching, node.topics.clone(), stats.clone()),
             tokio::spawn(receive_peers(events, to_exchange, deps, receivers.clone())),
@@ -1019,9 +1057,11 @@ impl<A: Admission> TestCluster<A> {
                 identity,
                 config::Fanout::default(),
                 node.topics.clone(),
+                small,
                 stats,
                 Arc::default(),
             ),
+            batching,
         ];
         self.nodes[index].sidecar = Some(Sidecar {
             seen,
@@ -1250,6 +1290,7 @@ pub struct SendSpy(Arc<SpyState>);
 struct SpyState {
     permits: tokio::sync::Semaphore,
     sent: Mutex<Vec<Bytes>>,
+    datagrams: Mutex<Vec<Bytes>>,
 }
 
 impl SendSpy {
@@ -1273,6 +1314,7 @@ impl SendSpy {
         Self(Arc::new(SpyState {
             permits: tokio::sync::Semaphore::new(permits),
             sent: Mutex::new(Vec::new()),
+            datagrams: Mutex::new(Vec::new()),
         }))
     }
 
@@ -1283,9 +1325,15 @@ impl SendSpy {
             .add_permits(tokio::sync::Semaphore::MAX_PERMITS);
     }
 
-    /// The frames written so far, in the order they went.
+    /// The frames written on streams so far, in the order they went.
     pub fn sent(&self) -> Vec<Bytes> {
         self.0.sent.lock().unwrap().clone()
+    }
+
+    /// The frames handed to the path as datagrams. A datagram waits for no permit, because a
+    /// real one waits for no window either.
+    pub fn datagrams(&self) -> Vec<Bytes> {
+        self.0.datagrams.lock().unwrap().clone()
     }
 }
 
@@ -1298,6 +1346,11 @@ impl Transport for SendSpy {
             .map_err(std::io::Error::other)?
             .forget();
         self.0.sent.lock().unwrap().push(frame);
+        Ok(())
+    }
+
+    fn send_datagram(&self, frame: Bytes) -> Result<(), quinn::SendDatagramError> {
+        self.0.datagrams.lock().unwrap().push(frame);
         Ok(())
     }
 }
@@ -1400,6 +1453,50 @@ pub fn view(connection: &quinn::Connection, peers: Vec<(Hostname, PeerState)>) -
             })
             .collect(),
     )
+}
+
+/// The datagram limit one host's batcher fills a batch to, for T-062's fallback test.
+///
+/// A `TooLarge` from `send_datagram` is path MTU dropping between the batcher's check and the
+/// send, and nothing a test can do to a loopback connection makes quinn's answer to
+/// `max_datagram_size` disagree with what the same connection will then take. So the fanout
+/// reads the limit through here, and a host set to a limit larger than its path really holds
+/// builds exactly the batch that case produces.
+///
+/// ```ignore
+/// datagram_limit::set(&cluster.hostname(0), Some(8192));
+/// ```
+pub mod datagram_limit {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
+
+    use overlay_core::roster::Hostname;
+
+    static FORCED: LazyLock<Mutex<HashMap<Hostname, usize>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    fn forced_limits() -> MutexGuard<'static, HashMap<Hostname, usize>> {
+        FORCED.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Makes `host` batch to `max_bytes` whatever its connections hold, or gives it quinn's own
+    /// answer back with `None`.
+    pub fn set(host: &Hostname, max_bytes: Option<usize>) {
+        match max_bytes {
+            Some(max_bytes) => {
+                forced_limits().insert(host.clone(), max_bytes);
+            }
+            None => {
+                forced_limits().remove(host);
+            }
+        }
+    }
+
+    /// What `host` has been told to batch to, if anything. Nothing for every host outside the
+    /// fallback test.
+    pub(crate) fn forced(host: &Hostname) -> Option<usize> {
+        forced_limits().get(host).copied()
+    }
 }
 
 /// A byte rate one host reads its peers' data streams at, for T-051's scenario 14.

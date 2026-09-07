@@ -143,9 +143,9 @@ impl Batcher {
     /// Removes the entries that have aged out of `entries` and answers how many went, for the
     /// caller to count as `stale_dropped_total`.
     ///
-    /// A flush runs this on its way out, and T-062's sender runs it again when it dequeues one,
-    /// because a flush can wait in a per-peer send lane long enough to age out on the way
-    /// (D21).
+    /// A flush runs this on its way out. The second check, when a per-peer send lane finally
+    /// reaches the flush (D21), runs [`drop_stale`] instead: the batcher is one task's and the
+    /// lanes are a task per peer, so the bound travels with the batch rather than the batcher.
     pub fn drop_stale(&self, entries: &mut Vec<Entry>, now: Instant) -> usize {
         strip_stale(entries, self.stale_after, now)
     }
@@ -219,6 +219,17 @@ impl Batcher {
         });
         flushes
     }
+}
+
+/// Removes the entries of an already flushed batch that have aged out under `stale_after`, and
+/// answers how many went.
+///
+/// The second of D21's two checks, for the sender that dequeues a flush (T-062). It takes the
+/// bound rather than reading a batcher's, because the batch left the batcher when it was
+/// flushed: what decides it is the bound the entries were collected under, not whatever a
+/// reload has put in force by the time the lane reaches them.
+pub fn drop_stale(entries: &mut Vec<Entry>, stale_after: Duration, now: Instant) -> usize {
+    strip_stale(entries, stale_after, now)
 }
 
 /// The one walk both stale checks make. Every entry is looked at, because the entries a batch

@@ -43,6 +43,7 @@ use overlay_core::roster::{Hostname, Roster, SelfIdentity, resolve_self};
 use overlay_core::seen::{SEEN_CAPACITY, SEEN_TTL, SeenCache, SharedSeenCache};
 use overlay_core::time::SystemClock;
 use overlay_core::topic::SubscriptionSets;
+use overlay_transport::batching::Batching;
 use overlay_transport::endpoint;
 use overlay_transport::fanout::Fanout;
 use overlay_transport::hello::{HelloAdmission, OwnTopics, SelfHello};
@@ -376,12 +377,15 @@ impl App {
             },
         ));
         let exchange = subs::spawn(exchanged, sets_rx.clone(), topics.clone(), metrics.clone());
+        let (batches, batching) =
+            Batching::spawn(watch::channel(cfg.classes.small.clone()).1, metrics.clone());
         let fanout = Fanout::spawn(
             fanout_lanes,
             manager.live_source(),
             me.self_id.clone(),
             cfg.overlay.fanout.clone(),
             topics,
+            batches,
             metrics.clone(),
             progress.fanout.clone(),
         );
@@ -446,6 +450,7 @@ impl App {
                 receivers,
                 exchange,
                 fanout,
+                batching,
                 pin_table,
                 reload_task,
                 hangups,

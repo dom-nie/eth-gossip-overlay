@@ -1,11 +1,18 @@
 //! What the beacon node hands this host, on its way to the peers that want it.
 //!
-//! The task drains T-016's lanes, asks the router where each message goes (T-031) and writes one
-//! whole-message frame per target: a `CHUNK` with `k = 1, m = 0` on a unidirectional stream of
-//! its own. `BATCH` cannot carry one, because its entries have a `u16` length that a block does
-//! not fit in (D21), and the same whole-message form is what a v2 sender falls back to toward a
-//! peer that advertised neither `STRIPING` nor `DATAGRAM_BATCHES` (D29), so this path stays for
-//! every release.
+//! The task drains T-016's lanes, asks the router where each message goes (T-031) and hands each
+//! target what it can read.
+//!
+//! | Message | Carrier |
+//! |---|---|
+//! | small class, toward a peer that advertised `DATAGRAM_BATCHES` and takes datagrams | the batcher (T-061), then one `BATCH` datagram per window ([`crate::batching`]) |
+//! | everything else | a `CHUNK` with `k = 1, m = 0` on a unidirectional stream of its own |
+//!
+//! The whole-message form is what every release can read, so it is both v1's only path and what
+//! a v2 sender falls back to toward a peer that advertised neither `STRIPING` nor
+//! `DATAGRAM_BATCHES` (D29), which is what makes the upgrade a rolling one. It also carries the
+//! small-class payloads no `BATCH` can: an entry's length is a `u16` and small class is decided
+//! by kind, so an `AttesterSlashing` runs past what a batch entry holds (D21).
 //!
 //! Only what the beacon node sent comes through here. A message that arrived from the overlay is
 //! published locally and never sent on (§3 principle 1), which is what bounds duplicates to the
@@ -24,18 +31,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use bytes::Bytes;
 use overlay_core::config;
 use overlay_core::fanout::Outbound;
 use overlay_core::lanes::ClassLanes;
 use overlay_core::progress::PROGRESS_TICK;
+use overlay_core::protocol::features;
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
 use overlay_core::topic::table::TopicId;
 use overlay_core::topic::{Class, Topic};
-use overlay_core::wire::{Frame, encode_stream};
+use overlay_core::wire::{Frame, MAX_BATCH_ENTRY_BYTES, encode_stream};
 use tokio::task::JoinHandle;
 
+use crate::batching::{BatchHandle, Small};
 use crate::hello::{OwnTopics, lock};
-use crate::manager::LiveSource;
+use crate::manager::{LivePeer, LiveSource};
 use crate::router::{RoutePlan, route};
 
 /// What a whole message costs on the wire besides its payload: the `type` and `flags` bytes and
@@ -96,6 +106,7 @@ pub struct Fanout {
     self_id: SelfIdentity,
     cfg: config::Fanout,
     topics: Arc<Mutex<OwnTopics>>,
+    batches: BatchHandle,
     stats: Arc<dyn TrafficStats>,
     /// Peers already warned about a frame they would refuse. In v1 both ends run the same limit,
     /// so this is a guard rather than a path, and one line per peer per process is plenty.
@@ -109,12 +120,19 @@ impl Fanout {
     ///
     /// `progress` is the watchdog counter this loop owns (OPS-N5): it goes up once per
     /// iteration, and the tick arm is what keeps it going up on a fleet with no traffic.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the fanout's wiring: where messages come from, where they go, who this host \
+                  is, and one handle per consumer. Every parameter has its own type, so a call \
+                  site cannot mix two up"
+    )]
     pub fn spawn(
         lanes: ClassLanes<Outbound>,
         live: LiveSource,
         self_id: SelfIdentity,
         cfg: config::Fanout,
         topics: Arc<Mutex<OwnTopics>>,
+        batches: BatchHandle,
         stats: Arc<dyn TrafficStats>,
         progress: Arc<AtomicU64>,
     ) -> JoinHandle<()> {
@@ -124,6 +142,7 @@ impl Fanout {
             self_id,
             cfg,
             topics,
+            batches,
             stats,
             oversize_warned: HashSet::new(),
         };
@@ -161,11 +180,10 @@ impl Fanout {
             return;
         };
         let bytes = outbound.payload.len();
-        let frame = encode_stream(&Frame::whole_message(
-            outbound.id,
-            topic_id.get(),
-            outbound.payload,
-        ));
+        // Encoded at most once, and only if some target is being sent a whole message: the
+        // batched targets share nothing, because a batch belongs to the destination it was
+        // collected for.
+        let mut whole: Option<Bytes> = None;
         let now = Instant::now();
         for target in targets {
             // A peer can leave the live set between the plan and the send, and the send is what
@@ -187,17 +205,63 @@ impl Fanout {
                 region: &live.region,
                 site: live.site.as_deref(),
             };
-            if live
-                .sender
-                .push(outbound.class, frame.clone(), now)
-                .is_err()
-            {
+            let queued = match self.batch_bytes(outbound.class, bytes, live) {
+                Some(max_bytes) => self.batches.push(Small {
+                    dest: target.clone(),
+                    topic_id,
+                    payload: outbound.payload.clone(),
+                    max_bytes,
+                    sender: live.sender.clone(),
+                }),
+                None => {
+                    let frame = whole.get_or_insert_with(|| {
+                        encode_stream(&Frame::whole_message(
+                            outbound.id,
+                            topic_id.get(),
+                            outbound.payload.clone(),
+                        ))
+                    });
+                    live.sender.push(outbound.class, frame.clone(), now)
+                }
+            };
+            if queued.is_err() {
                 tracing::debug!(peer = %target, "peer has no sender to queue the message on");
                 continue;
             }
             self.stats
                 .message(Direction::Out, outbound.class, labels, bytes);
         }
+    }
+
+    /// The datagram a batch for `live` may fill, or nothing when this payload does not travel in
+    /// one.
+    ///
+    /// Three things have to hold. The class has to be the small one, since only it is batched
+    /// (§5.4). The peer has to have advertised `DATAGRAM_BATCHES`, or it is running a release
+    /// that reads nothing but whole messages (D29). And the payload has to fit the `u16` length a
+    /// `BATCH` entry carries, which a small-class `AttesterSlashing` need not: small class is by
+    /// kind, and `wire`'s narrowing would stop a debug build and write a frame that decodes as
+    /// something else in a release one (D21).
+    fn batch_bytes(&self, class: Class, bytes: usize, live: &LivePeer) -> Option<usize> {
+        (class == Class::Small
+            && live.negotiated.allows(features::DATAGRAM_BATCHES)
+            && bytes <= MAX_BATCH_ENTRY_BYTES)
+            .then(|| self.datagram_limit(live))
+            .flatten()
+    }
+
+    /// What a datagram to `live` currently holds, which moves with path MTU discovery, or
+    /// nothing when the peer's transport takes no datagram at all and the whole-message path is
+    /// the only one it has.
+    fn datagram_limit(&self, live: &LivePeer) -> Option<usize> {
+        // The one seam a test has into this number. `send_datagram` refuses a batch built
+        // against a limit the path does not hold, and nothing a test can do to a loopback
+        // connection makes quinn's own answer disagree with it (T-062 test 7).
+        #[cfg(any(test, feature = "test-util"))]
+        if let Some(forced) = crate::testutil::datagram_limit::forced(&self.self_id.hostname) {
+            return Some(forced);
+        }
+        live.connection.max_datagram_size()
     }
 
     /// The id this host's peers know `topic` by. Never interns: an id nobody has been told about
@@ -227,8 +291,8 @@ mod tests {
     use crate::manager::LiveSource;
     use crate::sender::{LARGE_QUEUED_BYTES_MAX, LargeLedger, PeerSender};
     use crate::testutil::{
-        Builder, NodeKind, REGION, SendSpy, TestCluster, WAIT, eventually, peer_state,
-        subscriptions, topic, view, within,
+        Builder, NodeKind, REGION, SendSpy, WAIT, eventually, peer_state, subscriptions, topic,
+        view, within,
     };
 
     /// The gossipsub wire form of an attestation nothing else in a test will produce, so ten of
@@ -274,10 +338,20 @@ mod tests {
     /// the destination publishes ten payloads. That is the whole point of batching, and the two
     /// halves of it are what an operator sees on either end: one frame on the wire, ten
     /// messages in the counters.
+    ///
+    /// The window is the test's rather than the shipped 10 ms, because what is being asserted is
+    /// what one window does and not how much of one a loaded machine has to spare. T-051's burst
+    /// scenario runs at the default.
     #[tokio::test(flavor = "multi_thread")]
     async fn ten_attestations_pushed_within_the_window_arrive_as_one_datagram_and_ten_publishes() {
         let subnet = topic("beacon_attestation_7");
-        let mut cluster = TestCluster::start(2).await;
+        let mut cluster = Builder::new(&[NodeKind::Manager; 2])
+            .small(config::SmallClass {
+                batch_window: Duration::from_millis(200),
+                ..config::SmallClass::default()
+            })
+            .start()
+            .await;
         for node in 0..2 {
             cluster.start_sidecar(node, subscriptions(&[&subnet], &[]));
         }
@@ -350,6 +424,11 @@ mod tests {
             },
             config::Fanout::default(),
             topics,
+            crate::batching::Batching::spawn(
+                tokio::sync::watch::channel(config::SmallClass::default()).1,
+                Arc::new(()),
+            )
+            .0,
             Arc::new(()),
             Arc::default(),
         );
