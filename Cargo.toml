@@ -63,8 +63,9 @@ thiserror = "2"
 rand = "0.10"
 
 proptest = "1"
-# Raising a real SIGHUP at a test process, which is the only way to prove the signal loop is
-# wired to the handler. A dev-dependency of fleet-overlay alone.
+# `gethostname` for the sidecar's own identity (T-003 keeps it out of overlay-core), and raising
+# a real SIGHUP at a test process, which is the only way to prove the signal loop is wired to
+# the handler. fleet-overlay alone.
 nix = { version = "0.29", features = ["signal"] }
 # The no-op #[mutants::skip] attribute cargo-mutants reads (T-009). A dev-dependency, not a
 # normal one: every use is inside cfg_attr(test, ...), so nothing but a test build sees it.

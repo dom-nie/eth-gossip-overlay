@@ -147,7 +147,10 @@ fn check_config_with_valid_files_exits_0_and_prints_hostname_region_and_peer_id(
         .map(|_| peer_id_of(&fixture))
         .unwrap();
     for expected in [common::HOSTNAME, common::REGION, common::SITE, &peer_id] {
-        assert!(printed.contains(expected), "{expected} missing from {printed}");
+        assert!(
+            printed.contains(expected),
+            "{expected} missing from {printed}"
+        );
     }
 }
 
@@ -190,6 +193,8 @@ fn check_config_with_hostname_not_in_roster_exits_1() {
 
 /// The peer id `peer-id` prints for this fixture's node key, which is what `check-config` has to
 /// agree with.
+// A broken fixture is reported by panicking, which is what the unwraps here are.
+#[allow(clippy::unwrap_used)]
 fn peer_id_of(fixture: &common::Fixture) -> String {
     let output = fixture
         .command()

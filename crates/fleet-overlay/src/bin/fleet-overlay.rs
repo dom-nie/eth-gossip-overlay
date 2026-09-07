@@ -1,10 +1,11 @@
-//! The sidecar. The `run` subcommand and the wiring arrive with T-045; until then the binary
-//! only serves the two identity commands an operator needs before the first start.
+//! The sidecar. Argument parsing and the fatal-error line; every subcommand's work lives in
+//! the library, so this file stays short enough to read in one go.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use fleet_overlay::app;
 use overlay_bn::node_key::NodeKey;
 use overlay_core::config::Config;
 use overlay_core::identity::create_secret_file;
@@ -28,6 +29,16 @@ enum Command {
     /// Reads only bn.node_key_file from the config; no seed or roster is needed, so it works
     /// on a host that has neither yet.
     PeerId {
+        /// The sidecar's config.yaml.
+        #[arg(long, default_value = "/etc/fleet-overlay/config.yaml")]
+        config: PathBuf,
+    },
+    /// Check that the sidecar would start with these files, without starting it.
+    ///
+    /// Parses the config and roster, resolves this host, loads the seed and derives its TLS
+    /// key, loads or creates the node key, and prints the identity and the memory budget a
+    /// start would run under.
+    CheckConfig {
         /// The sidecar's config.yaml.
         #[arg(long, default_value = "/etc/fleet-overlay/config.yaml")]
         config: PathBuf,
@@ -59,6 +70,9 @@ fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
             let config = Config::load(&config)?;
             let key = NodeKey::load_or_create(&config.bn.node_key_file)?;
             println!("{}", key.peer_id());
+        }
+        Command::CheckConfig { config } => {
+            print!("{}", app::check_config(&config)?);
         }
         Command::GenSeed { out } => {
             create_secret_file(&out)?;

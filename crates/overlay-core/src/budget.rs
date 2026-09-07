@@ -14,9 +14,12 @@
 //! `now` is a parameter everywhere, so the bucket holds no clock and a test drives it with plain
 //! `Instant` arithmetic.
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::pubqueue::{PUBLISH_LARGE_LANE_BYTES, PUBLISH_SMALL_LANE_ENTRIES};
 use crate::ratelimit::TokenBucket;
+use crate::seen::SEEN_CAPACITY;
 
 /// How long a peer may stay over its budget before the connection is closed with
 /// `RateExceeded` (DX-N3).
@@ -114,6 +117,114 @@ impl FanoutBudget {
         } else {
             Charge::Suppressed
         }
+    }
+}
+
+/// The cgroup v2 file holding the memory ceiling this process runs under. Absent on a host
+/// without cgroup v2, which includes every developer machine that is not Linux.
+const CGROUP_MEMORY_MAX: &str = "/sys/fs/cgroup/memory.max";
+
+/// What one seen-cache entry costs: the 20-byte id in the set, the same id and an `Instant` in
+/// the order queue, and the slack a hash table carries around its live entries.
+pub const SEEN_ENTRY_BYTES: u64 = 64;
+
+/// What one queued small message is taken to cost: §10's ~240-byte attestation with the frame
+/// header and allocator rounding around it. An estimate the budget is derived from, not a limit
+/// anything is measured against.
+pub const SMALL_MESSAGE_BYTES: u64 = 512;
+
+/// The headroom OPS-N4 asks the budget to leave under `MemoryMax`, as a percentage.
+pub const HEADROOM_PERCENT: u64 = 25;
+
+/// The per-peer send-lane bounds (T-033). They live in `overlay-transport`, which this crate
+/// must not depend on, so the wiring passes them in rather than this reaching for them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SendLaneBounds {
+    /// Frames one peer's small lane holds before it drops.
+    pub small_frames: usize,
+    /// Bytes one peer's large lane holds before it drops.
+    pub large_bytes: usize,
+    /// Bytes every peer's large lanes hold between them, which is the process-wide cap.
+    pub large_bytes_max: usize,
+}
+
+/// What the sidecar's bounded structures hold at once in the worst case, which is the number an
+/// operator sizes `MemoryMax` against (OPS-N4).
+///
+/// Every row is a structure with a bound in code, so the sum is a ceiling rather than a
+/// measurement: nothing here grows with traffic. T-076 owns the table in `docs/performance.md`
+/// and adds a row as each remaining structure lands (the recent store, the reassembler, the
+/// by-root cache, gossipsub's duplicate cache and message cache, and the QUIC receive windows
+/// once it sets them); this release has the three that exist.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryBudget {
+    /// Each structure's worst case, in the order the startup line prints them.
+    pub rows: Vec<(&'static str, u64)>,
+    /// The rows added up.
+    pub bounded_bytes: u64,
+    /// [`bounded_bytes`](Self::bounded_bytes) plus [`HEADROOM_PERCENT`], which is what a
+    /// `MemoryMax` has to hold.
+    pub total_bytes: u64,
+}
+
+impl MemoryBudget {
+    /// The budget for a fleet of `roster_size` hosts, this one included.
+    pub fn compute(roster_size: usize, lanes: SendLaneBounds) -> Self {
+        let peers = roster_size.saturating_sub(1) as u64;
+        let rows = vec![
+            ("seen_cache", SEEN_CAPACITY as u64 * SEEN_ENTRY_BYTES),
+            (
+                "publish_queue",
+                PUBLISH_SMALL_LANE_ENTRIES as u64 * SMALL_MESSAGE_BYTES
+                    + PUBLISH_LARGE_LANE_BYTES as u64,
+            ),
+            (
+                "peer_send_lanes",
+                peers * lanes.small_frames as u64 * SMALL_MESSAGE_BYTES
+                    + (peers * lanes.large_bytes as u64).min(lanes.large_bytes_max as u64),
+            ),
+        ];
+        let bounded_bytes = rows.iter().map(|(_, bytes)| bytes).sum();
+        Self {
+            bounded_bytes,
+            total_bytes: bounded_bytes + bounded_bytes * HEADROOM_PERCENT / 100,
+            rows,
+        }
+    }
+}
+
+/// The memory ceiling this process runs under, from cgroup v2. `None` where the file is absent
+/// or holds `max`, which is a host with no ceiling to compare the budget against.
+pub fn cgroup_memory_max() -> Option<u64> {
+    read_memory_max(Path::new(CGROUP_MEMORY_MAX))
+}
+
+/// [`cgroup_memory_max`] with the path passed in, so a test can stage a file without a cgroup.
+pub fn read_memory_max(path: &Path) -> Option<u64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Logs the budget at info and warns when it does not fit under `limit`.
+///
+/// A warning is all it is: a sidecar that would exceed its ceiling still starts, because the
+/// estimate is a worst case that a real fleet does not reach, and refusing to start would take
+/// a beacon node's overlay away over arithmetic.
+pub fn check(budget: &MemoryBudget, limit: Option<u64>) {
+    let ceiling = limit.map_or_else(|| "none".to_owned(), |bytes| bytes.to_string());
+    tracing::info!(
+        bounded_bytes = budget.bounded_bytes,
+        total_bytes = budget.total_bytes,
+        headroom_percent = HEADROOM_PERCENT,
+        memory_max = ceiling,
+        rows = ?budget.rows,
+        "memory budget"
+    );
+    if limit.is_some_and(|limit| budget.total_bytes > limit) {
+        tracing::warn!(
+            total_bytes = budget.total_bytes,
+            memory_max = ceiling,
+            "memory budget is above the cgroup limit; raise MemoryMax or shrink the roster"
+        );
     }
 }
 

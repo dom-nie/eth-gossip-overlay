@@ -16,6 +16,15 @@ use std::time::{Duration, Instant};
 use crate::msgid::MessageId;
 use crate::time::Clock;
 
+/// How long an id is remembered (§5.5). Twice this is gossipsub's own duplicate cache time on
+/// the beacon node link, which is the backstop behind it.
+pub const SEEN_TTL: Duration = Duration::from_secs(60);
+
+/// Ids the cache holds before the oldest goes to make room. §10 puts unique gossip at ~3k
+/// messages per second network-wide, so a fleet host sees at most ~180k of them inside the TTL
+/// and the bound only bites during a flood.
+pub const SEEN_CAPACITY: usize = 200_000;
+
 /// Where capacity evictions are counted, so `overlay-core` stays free of the metrics crate.
 /// T-041 implements it on `seen_cache_evicted_total{reason="capacity"}`.
 ///

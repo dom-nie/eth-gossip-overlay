@@ -2,6 +2,7 @@
 //! test needs to reach lives here.
 
 pub mod admin;
+pub mod app;
 pub mod logging;
 pub mod metrics;
 pub mod reload;
