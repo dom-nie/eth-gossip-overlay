@@ -1006,12 +1006,15 @@ mod tests {
 
     /// A relay in `eu` with one in-region subscriber beside it, and a peer of the test's own in
     /// `us` to send `RELAY` batches from. Node 1 is the relay, node 2 the host it fans out to,
-    /// and the returned peer is node 0, the lowest hostname and so the one that dials.
-    async fn relay_of(subnet: &Topic) -> (TestCluster, PeerInfo) {
-        let mut cluster = Builder::new(&[NodeKind::Bare, NodeKind::Manager, NodeKind::Manager])
+    /// and node 0 is the lowest hostname and so the one that dials.
+    fn relay_cluster() -> Builder {
+        Builder::new(&[NodeKind::Bare, NodeKind::Manager, NodeKind::Manager])
             .regions(&["us", "eu", "eu"])
-            .start()
-            .await;
+    }
+
+    /// That cluster started, with the peer of the test's own dialled and its topic announced.
+    async fn relay_of(subnet: &Topic, builder: Builder) -> (TestCluster, PeerInfo) {
+        let mut cluster = builder.start().await;
         for node in [1, 2] {
             cluster.start_sidecar(node, subscriptions(&[subnet], &[]));
         }
@@ -1051,7 +1054,7 @@ mod tests {
         let subnet = topic("beacon_attestation_7");
         let held = payload(b"an attestation the relay is already holding");
         let fresh = payload(b"an attestation the relay has not seen");
-        let (cluster, peer) = relay_of(&subnet).await;
+        let (cluster, peer) = relay_of(&subnet, relay_cluster()).await;
         assert!(cluster.seen(1).insert(id_of(&subnet, &held)));
 
         datagram(&peer, relay_batch(vec![entry(3, &held), entry(3, &fresh)]));
@@ -1127,7 +1130,7 @@ mod tests {
     async fn relay_clear_batch_from_remote_peer_is_not_forwarded() {
         let subnet = topic("beacon_attestation_7");
         let payload = payload(b"an attestation sent across the WAN directly");
-        let (cluster, peer) = relay_of(&subnet).await;
+        let (cluster, peer) = relay_of(&subnet, relay_cluster()).await;
 
         datagram(&peer, batch(vec![entry(3, &payload)]));
 
@@ -1137,6 +1140,36 @@ mod tests {
         .await;
         tokio::time::sleep(SETTLE).await;
         assert!(cluster.published(2).is_empty());
+        assert_eq!(cluster.stats(1).relayed_batches(), 0);
+    }
+
+    /// DX-N3: re-fanning is fan-out a remote peer asked for, so it is metered per peer. Over
+    /// budget the batch is still delivered here, because the payloads are good and this host
+    /// wants them; what the peer does not get is a region fanned out on its say-so.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_batches_over_the_budget_are_delivered_locally_and_not_refanned() {
+        let subnet = topic("beacon_attestation_7");
+        let payload = payload(b"an attestation from a peer asking for too much");
+        let (cluster, peer) = relay_of(
+            &subnet,
+            relay_cluster().budget(FanoutBudget::new(1, 1, Instant::now())),
+        )
+        .await;
+
+        datagram(&peer, relay_batch(vec![entry(3, &payload)]));
+
+        eventually("the relay to queue it for its own beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert!(cluster.published(2).is_empty(), "it was re-fanned anyway");
+        assert_eq!(
+            cluster
+                .stats(1)
+                .fanout_suppressed(&cluster.hostname(0), FanoutKind::Relay),
+            1
+        );
         assert_eq!(cluster.stats(1).relayed_batches(), 0);
     }
 
