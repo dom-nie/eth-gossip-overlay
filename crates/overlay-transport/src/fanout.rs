@@ -413,6 +413,32 @@ mod tests {
         assert_eq!(cluster.datagrams_received(1, &cluster.hostname(0)), 0);
     }
 
+    /// The large class is untouched by any of this (§5.4). A block is a whole message on a
+    /// stream, as v1 sent it, until T-073 stripes it: a `BATCH` entry could not carry one
+    /// anyway, since its length is a `u16` (D21).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn large_class_message_still_uses_a_stream_and_is_not_batched() {
+        let block = topic("beacon_block");
+        let payload = incompressible(4096);
+        let mut cluster = TestCluster::start(2).await;
+        for node in 0..2 {
+            cluster.start_sidecar(node, subscriptions(&[&block], &[]));
+        }
+        eventually("the sibling to say it wants blocks", || {
+            cluster.live(0).subscribers(&block).len() == 1
+        })
+        .await;
+
+        assert!(cluster.from_bn(0, &block, &payload));
+
+        eventually("the sibling to queue it", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert_eq!(cluster.published(1)[0].class, Class::Large);
+        assert_eq!(cluster.datagrams_received(1, &cluster.hostname(0)), 0);
+    }
+
     /// The invariant the module is shaped around (§5.7): a message that goes to a hundred peers
     /// with one of them stalled is done for the other ninety-nine at once. The loop hands each
     /// peer's queue a frame and waits for none of them.
