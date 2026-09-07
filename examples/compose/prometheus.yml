@@ -2,6 +2,13 @@
 # of watching this demo is seeing a counter move.
 global:
   scrape_interval: 5s
+  # Fast enough that an alert this demo is meant to show goes pending while you are watching.
+  evaluation_interval: 5s
+
+# deploy/prometheus/alerts.yml, mounted by docker-compose.yml. The rules and their state are at
+# http://127.0.0.1:9090/alerts.
+rule_files:
+  - /etc/prometheus/rules/fleet-overlay.yml
 
 scrape_configs:
   - job_name: fleet-overlay

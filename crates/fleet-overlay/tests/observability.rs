@@ -18,6 +18,7 @@ use serde::Deserialize;
 const ALERTS_DIR: &str = "deploy/prometheus";
 const ALERTS_FILE: &str = "alerts.yml";
 const DASHBOARD: &str = "deploy/grafana/fleet-overlay.json";
+const COMPOSE: &str = "examples/compose/docker-compose.yml";
 
 /// The image `promtool` comes out of where the host has no local one. Pinned to a tag rather
 /// than a digest on purpose: the check is "does a current Prometheus accept these rules".
@@ -406,17 +407,18 @@ fn dashboard_json_is_valid_and_references_only_known_metrics() {
     }
 }
 
-/// The demo's Grafana provisions every dashboard under `examples/compose/dashboards`, and the
-/// dashboard lives in `deploy/` where an operator finds it. A second copy in the demo would rot
-/// the first time either changed, so the compose file mounts the real file into that directory.
+/// The demo's Grafana provisions every dashboard under `examples/compose/dashboards` and its
+/// Prometheus loads the rules mounted beside its config. Both files live in `deploy/`, where an
+/// operator finds them; a second copy in the demo would be wrong the first time either changed,
+/// and a symlink would point outside the directory the compose file mounts.
 #[test]
-fn the_compose_demo_mounts_the_shipped_dashboard() {
-    let compose = read("examples/compose/docker-compose.yml");
-    let mount =
-        "../../deploy/grafana/fleet-overlay.json:/var/lib/grafana/dashboards/fleet-overlay.json:ro";
+fn the_compose_demo_mounts_the_shipped_dashboard_and_alert_rules() {
+    let compose = read(COMPOSE);
 
-    assert!(
-        compose.contains(mount),
-        "examples/compose/docker-compose.yml does not mount {DASHBOARD}"
-    );
+    for mount in [
+        "../../deploy/grafana/fleet-overlay.json:/var/lib/grafana/dashboards/fleet-overlay.json:ro",
+        "../../deploy/prometheus/alerts.yml:/etc/prometheus/rules/fleet-overlay.yml:ro",
+    ] {
+        assert!(compose.contains(mount), "{COMPOSE} does not mount {mount}");
+    }
 }
