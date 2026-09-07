@@ -497,7 +497,7 @@ impl Ctx {
             return After::Carry;
         }
         let bytes = entries.iter().map(|entry| entry.payload.len()).sum();
-        let charge = self.charge(FanoutKind::Relay, bytes, Instant::now());
+        let charge = self.charge(FanoutKind::Relay, bytes, self.deps.clock.now());
         if charge != Charge::Allowed {
             self.deliver_all(entries, arrived);
             return match charge {

@@ -55,7 +55,7 @@ use overlay_core::pubqueue::{PublishItem, PublishSink};
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::seen::{SeenCache, SharedSeenCache};
 use overlay_core::subs::{Bitmap, PeerState};
-use overlay_core::time::SystemClock;
+use overlay_core::time::{Clock, SystemClock};
 use overlay_core::topic::Topic;
 use overlay_core::topic::table::{PeerTopicTable, TopicId};
 use overlay_core::topic::{Class, SubscriptionSets};
@@ -457,6 +457,7 @@ pub struct Builder {
     fanout: config::Fanout,
     regions: Vec<Region>,
     budget: Option<FanoutBudget>,
+    clock: Arc<dyn Clock>,
     advertised: BTreeMap<usize, u64>,
 }
 
@@ -478,6 +479,7 @@ impl Builder {
             fanout: config::Fanout::default(),
             regions: vec![Region(REGION.to_owned()); kinds.len()],
             budget: None,
+            clock: Arc::new(SystemClock),
             advertised: BTreeMap::new(),
         }
     }
@@ -504,6 +506,13 @@ impl Builder {
     /// slot otherwise, which no test can spend in one batch.
     pub fn budget(mut self, budget: FanoutBudget) -> Self {
         self.budget = Some(budget);
+        self
+    }
+
+    /// The clock every sidecar's receive path reads, for a test that has to put ten seconds
+    /// between two frames without waiting for them.
+    pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
+        self.clock = clock;
         self
     }
 
@@ -657,6 +666,7 @@ impl Builder {
             small: watch::channel(self.small).0,
             fanout: watch::channel(self.fanout).0,
             budget: self.budget,
+            clock: self.clock,
         };
         let initial = self
             .roster
@@ -782,6 +792,8 @@ pub struct TestCluster<A: Admission = HelloAdmission> {
     fanout: watch::Sender<config::Fanout>,
     /// The fan-out budget a test decided, or the fleet's own share of a slot.
     budget: Option<FanoutBudget>,
+    /// The clock every sidecar's receive path reads.
+    clock: Arc<dyn Clock>,
 }
 
 /// How a cluster builds a node's admission, which it does again whenever a node restarts.
@@ -1104,7 +1116,7 @@ impl<A: Admission> TestCluster<A> {
             stripes: Arc::new(NoStripes::new(stats.clone())),
             stats: stats.clone(),
             node: Arc::new(identity.clone()),
-            clock: Arc::new(SystemClock),
+            clock: self.clock.clone(),
             // The slot length comes from the beacon node's spec snapshot in production
             // (CL-N3); a cluster has no beacon node, so it runs at mainnet's.
             budget: self.budget.clone().unwrap_or_else(|| {
