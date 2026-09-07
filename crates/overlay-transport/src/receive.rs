@@ -614,6 +614,31 @@ mod tests {
         assert_eq!(published[1].payload, two);
     }
 
+    /// The same rule on the carrier the small class really travels on: an id this host cannot
+    /// resolve costs that entry, and the entries around it in the datagram are published (D21).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn entry_with_unknown_topic_id_is_dropped_and_the_rest_of_the_batch_is_published() {
+        let subnet = topic("beacon_attestation_7");
+        let wanted = payload(b"the entry under an id this host holds");
+        let (cluster, peer) = peer_of(subscriptions(&[&subnet], &[]), &[(3, &subnet)]).await;
+
+        datagram(
+            &peer,
+            batch(vec![
+                entry(31, b"an id nobody announced"),
+                entry(3, &wanted),
+                entry(32, b"another one"),
+            ]),
+        );
+
+        eventually("the readable entry to be queued", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert_eq!(cluster.published(1)[0].payload, wanted);
+        assert_eq!(cluster.stats(1).unknown_topic_ids(&cluster.hostname(0)), 2);
+    }
+
     /// An entry id the peer never announced costs that entry and nothing else (D21): the rest of
     /// the batch is delivered and the connection carries on, because the sender is one release
     /// ahead or its `TOPIC_ADD` has not arrived yet, neither of which is a protocol error.
