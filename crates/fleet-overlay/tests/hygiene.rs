@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+use overlay_core::protocol::features;
+
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -14,6 +16,7 @@ fn all_required_top_level_files_exist() {
         "LICENSE",
         "README.md",
         "CONTRIBUTING.md",
+        "CHANGELOG.md",
         "SECURITY.md",
         "CODE_OF_CONDUCT.md",
         "COMPATIBILITY.md",
@@ -124,4 +127,75 @@ fn every_mutants_skip_carries_a_reason() {
             "{key} in .cargo/mutants.toml has no comment saying why"
         );
     }
+}
+
+/// The `## [...]` sections of a changelog, as heading and body. The heading keeps its brackets,
+/// which is what tells a version section from any other second-level heading the file grows.
+fn changelog_sections(text: &str) -> Vec<(&str, &str)> {
+    text.split("\n## ")
+        .skip(1)
+        .filter(|section| section.starts_with('['))
+        .map(|section| section.split_once('\n').unwrap_or((section, "")))
+        .collect()
+}
+
+/// `Protocol: major unchanged (1); features added: none`, or `major 1 → 2`, or a comma-separated
+/// list of `NAME (bit N)` in place of `none`.
+fn protocol_line_is_well_formed(line: &str) -> bool {
+    let Some(rest) = line.strip_prefix("Protocol: major ") else {
+        return false;
+    };
+    let Some((major, features)) = rest.split_once("; features added: ") else {
+        return false;
+    };
+    let major_reads = match major
+        .strip_prefix("unchanged (")
+        .and_then(|m| m.strip_suffix(')'))
+    {
+        Some(current) => current.parse::<u8>().is_ok(),
+        None => major
+            .split_once(" → ")
+            .is_some_and(|(from, to)| from.parse::<u8>().is_ok() && to.parse::<u8>().is_ok()),
+    };
+    major_reads && (features == "none" || features.split(", ").all(names_a_feature_bit))
+}
+
+/// `STRIPING (bit 1)`, held against the protocol's own list of bits: a release note that names
+/// a feature no build advertises is worse than one that names none.
+fn names_a_feature_bit(item: &str) -> bool {
+    let Some((name, position)) = item.split_once(" (bit ") else {
+        return false;
+    };
+    let Some(Ok(position)) = position.strip_suffix(')').map(str::parse::<u32>) else {
+        return false;
+    };
+    features::NAMES.iter().any(|(known, bit)| {
+        *known == name.to_lowercase() && Some(*bit) == 1u64.checked_shl(position)
+    })
+}
+
+/// D29: `Protocol:` is the one line that says whether a release splits the fleet into two
+/// populations or rolls through it, so every section carries one in a shape a machine reads.
+/// `Unreleased` carries one too, because it is the section a release is cut from.
+#[test]
+fn changelog_has_unreleased_section_and_every_release_section_has_a_protocol_line() {
+    let text = std::fs::read_to_string(workspace_root().join("CHANGELOG.md")).unwrap();
+    let sections = changelog_sections(&text);
+
+    assert!(
+        sections
+            .iter()
+            .any(|(heading, _)| *heading == "[Unreleased]"),
+        "no Unreleased section in CHANGELOG.md"
+    );
+
+    let without: Vec<&str> = sections
+        .iter()
+        .filter(|(_, body)| !body.lines().any(protocol_line_is_well_formed))
+        .map(|(heading, _)| *heading)
+        .collect();
+    assert!(
+        without.is_empty(),
+        "no well-formed `Protocol:` line under {without:?}"
+    );
 }
