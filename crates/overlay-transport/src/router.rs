@@ -4,20 +4,24 @@
 //! nothing to ask (§3). The answer is an enum and not a list of hosts so that the send path
 //! (T-032) matches on one thing however the class ends up being carried.
 //!
-//! v1 has one plan to make: the whole message to every live peer whose beacon node is subscribed
-//! to the topic (§5.4), in hostname order and this host aside, or [`RoutePlan::Nothing`] when that
-//! leaves nobody. T-072 adds the stripe a large message takes over a region, T-063 the relays a
-//! small-class batch crosses a region through, and both are variants of this enum, so neither has
-//! to touch what already calls it.
+//! The default plan is the whole message to every live peer whose beacon node is subscribed to
+//! the topic (§5.4), in hostname order and this host aside, or [`RoutePlan::Nothing`] when that
+//! leaves nobody. A small-class message crossing to a region large enough to be worth the hop
+//! gets [`RoutePlan::SmallRelayed`] instead: the region's own subscribers reached through a few
+//! of its hosts rather than one WAN copy each (D20, D36). T-072 adds the stripe a large message
+//! takes over a region as a variant of the same enum.
 //!
-//! `_class` and `_cfg` are the arguments those two read. v1 reads neither, so a small message and
-//! a large one on the same topic get the same plan.
+//! `class` and `cfg` are what tell those apart. A large message is routed the way v1 routed
+//! everything until T-072, and so is a small one under `small.cross_region: direct`.
 
-use overlay_core::config::Fanout;
-use overlay_core::roster::{Hostname, SelfIdentity};
+use std::collections::{BTreeMap, BTreeSet};
+
+use overlay_core::config::{CrossRegion, Fanout};
+use overlay_core::relay;
+use overlay_core::roster::{Hostname, Region, SelfIdentity};
 use overlay_core::topic::{Class, Topic};
 
-use crate::manager::LiveView;
+use crate::manager::{LivePeer, LiveView};
 use crate::subs;
 
 /// What a sender does with one message.
@@ -25,6 +29,16 @@ use crate::subs;
 pub enum RoutePlan {
     /// The whole message to each of these hosts, in hostname order.
     Direct(Vec<Hostname>),
+    /// A small-class batch to `direct` as usual, and to `relays` with the `RELAY` bit set so
+    /// each of them fans it out inside its own region (D11).
+    SmallRelayed {
+        /// The subscribers this host reaches itself: its own region, and every remote region
+        /// too small for the relay hop to pay for itself. In hostname order.
+        direct: Vec<Hostname>,
+        /// The hosts that carry the batch for the rest of their region, in region and then
+        /// hostname order. None of them need be subscribed to the topic (D20).
+        relays: Vec<Hostname>,
+    },
     /// No live peer wants it, so it goes nowhere.
     Nothing,
 }
@@ -38,22 +52,76 @@ pub enum RoutePlan {
 /// every message takes.
 pub fn route(
     topic: &Topic,
-    _class: Class,
+    class: Class,
     view: &LiveView,
     self_id: &SelfIdentity,
-    _cfg: &Fanout,
+    cfg: &Fanout,
 ) -> RoutePlan {
-    let targets: Vec<Hostname> = view
-        .iter()
-        .filter(|(hostname, _)| **hostname != self_id.hostname)
-        .filter(|(_, peer)| subs::state(&peer.state).subscribed(topic))
+    let subscribed = |peer: &LivePeer| subs::state(&peer.state).subscribed(topic);
+    let others = || {
+        view.iter()
+            .filter(|(hostname, _)| **hostname != self_id.hostname)
+    };
+    let relaying: BTreeSet<&Region> =
+        match class == Class::Small && cfg.small.cross_region == CrossRegion::Relays {
+            true => relaying_regions(view, self_id, &subscribed, cfg.small.relay_min_remote_hosts),
+            false => BTreeSet::new(),
+        };
+    let direct: Vec<Hostname> = others()
+        .filter(|(_, peer)| subscribed(peer) && !relaying.contains(&peer.region))
         .map(|(hostname, _)| hostname.clone())
         .collect();
-    if targets.is_empty() {
-        RoutePlan::Nothing
-    } else {
-        RoutePlan::Direct(targets)
+    let relays: Vec<Hostname> = relaying
+        .into_iter()
+        .flat_map(|region| {
+            relay::select(
+                &self_id.hostname,
+                &pool(view, self_id, region),
+                cfg.small.relays_per_remote_region,
+            )
+        })
+        .collect();
+    match (direct.is_empty(), relays.is_empty()) {
+        (true, true) => RoutePlan::Nothing,
+        (_, true) => RoutePlan::Direct(direct),
+        _ => RoutePlan::SmallRelayed { direct, relays },
     }
+}
+
+/// The remote regions whose subscribers are reached through relays: the ones holding at least
+/// `relay_min_remote_hosts` of them. Below that the WAN copies saved do not pay for the extra
+/// in-region hop, so the region is sent to directly (D36).
+fn relaying_regions<'a>(
+    view: &'a LiveView,
+    self_id: &SelfIdentity,
+    subscribed: &impl Fn(&LivePeer) -> bool,
+    relay_min_remote_hosts: usize,
+) -> BTreeSet<&'a Region> {
+    let mut per_region: BTreeMap<&Region, usize> = BTreeMap::new();
+    for (_, peer) in view
+        .iter()
+        .filter(|(hostname, _)| **hostname != self_id.hostname)
+        .filter(|(_, peer)| peer.region != self_id.region && subscribed(peer))
+    {
+        *per_region.entry(&peer.region).or_default() += 1;
+    }
+    per_region
+        .into_iter()
+        .filter(|(_, subscribers)| *subscribers >= relay_min_remote_hosts)
+        .map(|(region, _)| region)
+        .collect()
+}
+
+/// The hosts of `region` a relay may be chosen from: every live one that has told this host
+/// what it wants, in hostname order. Subscription to the topic is not part of it, because a
+/// relay fans the batch out for its region and need not want anything in it itself (D20).
+fn pool(view: &LiveView, self_id: &SelfIdentity, region: &Region) -> Vec<Hostname> {
+    view.in_region(region)
+        .into_iter()
+        .filter(|(hostname, _)| **hostname != self_id.hostname)
+        .filter(|(_, peer)| !subs::state(&peer.state).bitmap.is_empty())
+        .map(|(hostname, _)| hostname.clone())
+        .collect()
 }
 
 #[cfg(test)]

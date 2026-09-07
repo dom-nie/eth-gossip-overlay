@@ -54,6 +54,13 @@ impl Bitmap {
         self.0.get(word).is_some_and(|word| word & (1 << bit) != 0)
     }
 
+    /// Whether no bit is set at all, which is what a peer looks like before its first `SUBS`
+    /// and again while its beacon node is down (§9). A relay pool is built from it: a host that
+    /// has said nothing is not one to hand a region's batch to (D20).
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(|word| *word == 0)
+    }
+
     /// Every id whose bit is set, in ascending order.
     pub fn iter_set(&self) -> impl Iterator<Item = TopicId> + '_ {
         self.0.iter().enumerate().flat_map(|(word, bits)| {
