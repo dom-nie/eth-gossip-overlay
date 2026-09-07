@@ -48,6 +48,9 @@ fn read(relative: &str) -> String {
 }
 
 /// Every series the sidecar exports: T-041's registry, plus the process collector's names.
+/// Registering twice on one registry is the only way this fails, which would be a broken
+/// fixture, so it is reported by panicking.
+#[allow(clippy::unwrap_used)]
 fn exported_metrics() -> BTreeSet<String> {
     let registry = Registry::new();
     let metrics = Metrics::new(&registry).unwrap();
@@ -464,7 +467,7 @@ fn logql_queries() -> Vec<String> {
 /// with the runtime.
 fn scratch() -> PathBuf {
     let dir = workspace_root().join("target/t052");
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir_all(&dir).unwrap_or_else(|err| panic!("{}: {err}", dir.display()));
     dir
 }
 
