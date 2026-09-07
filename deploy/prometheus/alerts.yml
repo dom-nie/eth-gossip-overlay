@@ -1,0 +1,139 @@
+# Alert rules for the sidecar, Architecture.md §12's list plus the five the design panel added.
+# Load them into your own Prometheus:
+#
+#   rule_files:
+#     - /etc/prometheus/rules/fleet-overlay.yml
+#
+# Every `overlay_*` series here comes from the sidecar alone, so those rules need no job
+# selector. The two `process_*` rules do, because every other target with a process collector
+# exports the same names; they assume the scrape job is called `fleet-overlay`, and changing
+# that name means changing them.
+#
+# The windows are starting points for a fleet of a couple of hundred hosts on a slot time of
+# twelve seconds. docs/rollout.md says which of them to watch on day one and what each one is
+# really telling you; docs/troubleshooting.md is where each `runbook` annotation points.
+
+groups:
+  - name: fleet-overlay
+    rules:
+      # §12: the ratio of live peers to roster hosts. Both gauges are per region and site, so
+      # each is summed back to one number per host before they are compared. A roster of one
+      # host has neither peers nor roster entries and never fires.
+      - alert: OverlayPeersLow
+        expr: |
+          sum by (instance) (overlay_peers_connected)
+            < 0.8 * sum by (instance) (overlay_peers_roster)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} is connected to under 80% of its roster"
+          runbook: docs/troubleshooting.md#overlaypeerslow
+
+      # The beacon node link. Nothing crosses the overlay into this host's beacon node while it
+      # is down, and the sidecar is reconnecting with backoff throughout.
+      - alert: OverlayBnDisconnected
+        expr: overlay_bn_connected == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }} has no beacon node link"
+          runbook: docs/troubleshooting.md#overlaybndisconnected
+
+      # D09. The series is absent, not zero, while the beacon node has not said, so a node whose
+      # HTTP API does not answer the trusted-peer probe stays quiet here.
+      - alert: OverlayNotTrustedByBn
+        expr: overlay_bn_trusted == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.instance }}'s beacon node does not list the sidecar as trusted"
+          runbook: docs/troubleshooting.md#overlaynottrustedbybn
+
+      # D14: a sustained rate, not a single failure. One peer restarting fails a handshake or
+      # two and stops. A rolling upgrade across a protocol major fails them for as long as the
+      # rollout lasts, which is why the window is long enough to sit through one.
+      - alert: OverlayHandshakeFailures
+        expr: sum by (instance) (rate(overlay_handshake_failures_total[10m])) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} keeps failing overlay handshakes"
+          runbook: docs/troubleshooting.md#overlayhandshakefailures
+
+      # §13's second success criterion, as an alert: over half of the large messages a host sees
+      # should reach it over the overlay before its own beacon node has them. A host with no
+      # large traffic divides by zero and never fires.
+      - alert: OverlayWinRateFalling
+        expr: |
+          sum by (instance) (rate(overlay_first_seen_total{class="large",source="overlay"}[30m]))
+            / sum by (instance) (rate(overlay_first_seen_total{class="large"}[30m]))
+            < 0.5
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} wins under half of its large messages on the overlay"
+          runbook: docs/troubleshooting.md#overlaywinratefalling
+
+      # DX-N3: any increase. A peer over its fan-out budget is a peer sending more second-hop
+      # work than the roster and the chunk size can account for, so the counter should not move
+      # at all on a healthy fleet.
+      - alert: OverlayFanoutSuppressed
+        expr: sum by (instance) (increase(overlay_fanout_suppressed_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} is refusing second-hop work from a peer over budget"
+          runbook: docs/troubleshooting.md#overlayfanoutsuppressed
+
+      # D26: the shrink guard refused an automatic roster reload, which says the discovery tool
+      # wrote a roster missing more than half the fleet. The sidecar kept the old one.
+      - alert: OverlayRosterReloadRejected
+        expr: increase(overlay_roster_reload_rejected_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} refused an automatic roster reload"
+          runbook: docs/troubleshooting.md#overlayrosterreloadrejected
+
+      # OPS-N4, at 80% of the ceiling. Prometheus cannot read the unit's MemoryMax, so 512M is
+      # the literal here and it is the value deploy/systemd/fleet-overlay.service sets. Raise or
+      # lower MemoryMax and this number has to move with it (docs/rollout.md says so too).
+      - alert: OverlayMemoryHigh
+        expr: process_resident_memory_bytes{job="fleet-overlay"} / (512 * 1024 * 1024) > 0.8
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} is over 80% of the unit's 512M MemoryMax"
+          runbook: docs/troubleshooting.md#overlaymemoryhigh
+
+      # §12: restarts. The unit restarts always and backs a crash loop off to a minute, so a
+      # sidecar that keeps dying stays invisible in `systemctl status` unless something counts
+      # the starts. Two in an hour is a bad afternoon; three is a loop.
+      - alert: OverlaySidecarRestarting
+        expr: changes(process_start_time_seconds{job="fleet-overlay"}[1h]) > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} has restarted more than twice in an hour"
+          runbook: docs/troubleshooting.md#overlaysidecarrestarting
+
+      # §12, and silent until v3: T-082 is what makes this counter move. The series is registered
+      # at zero from v1 so the rule can ship with the rest rather than wait for the release that
+      # gives it a producer.
+      - alert: OverlayRepairRateRising
+        expr: sum by (instance) (rate(overlay_repair_requests_total[15m])) > 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} is asking peers to repair chunks it did not receive"
+          runbook: docs/troubleshooting.md#overlayrepairraterising

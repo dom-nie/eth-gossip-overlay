@@ -17,6 +17,7 @@ operator documentation. Commands run from this directory, on the host.
 | `sysctl/90-fleet-overlay.conf` | socket buffers, `fq`, the RFS flow table | recommended |
 | `nftables/fleet-overlay.nft.j2` | UDP 7788 allowlist from the roster | recommended |
 | `nftables/fleet-overlay.nft.example` | the template rendered from `examples/roster.yaml` | example |
+| `prometheus/alerts.yml` | the ten alert rules, for your own Prometheus | recommended |
 
 The fleet seed at `/etc/fleet-overlay/seed` is required and is not in this directory: you
 generate it once for the fleet.

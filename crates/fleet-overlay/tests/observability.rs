@@ -182,11 +182,18 @@ fn metric_names(expr: &str) -> BTreeSet<String> {
                 while after < chars.len() && chars[after].is_whitespace() {
                     after += 1;
                 }
-                let call = chars.get(after) == Some(&'(');
+                let open = chars.get(after) == Some(&'(');
+                // `sum(x)` and `sum by (instance) (x)` are both the aggregation, so a label
+                // list where the argument would be says the word before it was one too.
+                let next: String = chars[after..]
+                    .iter()
+                    .take_while(|c| is_name_char(**c))
+                    .collect();
+                let applied = open || LABEL_LISTS.contains(&next.as_str());
 
-                if call && LABEL_LISTS.contains(&word.as_str()) {
+                if open && LABEL_LISTS.contains(&word.as_str()) {
                     i = past(&chars, after, ')');
-                } else if !call && !KEYWORDS.contains(&word.as_str()) {
+                } else if !applied && !KEYWORDS.contains(&word.as_str()) {
                     names.insert(word);
                 }
             }
@@ -254,9 +261,17 @@ fn alert_rules_reference_only_metric_names_exported_by_the_binary() {
     let exported = exported_metrics();
 
     for rule in alert_rules() {
-        let unknown: Vec<String> = metric_names(&rule.expr)
-            .into_iter()
-            .filter(|name| !exported.contains(name))
+        let named = metric_names(&rule.expr);
+        assert!(
+            !named.is_empty(),
+            "{}: no series read out of {:?}",
+            rule.alert,
+            rule.expr
+        );
+
+        let unknown: Vec<&String> = named
+            .iter()
+            .filter(|name| !exported.contains(*name))
             .collect();
 
         assert!(
