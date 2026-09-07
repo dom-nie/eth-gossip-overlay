@@ -92,6 +92,25 @@ jobs:
       - name: Image and compose checks
         run: scripts/container-checks.sh
 
+  changelog:
+    name: changelog
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      # The whole history, because the check is a diff against the base commit.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # A change to a crate's src/ that says nothing in CHANGELOG.md leaves the release notes
+      # with a hole in them. skip-changelog on the pull request is the way to say there is
+      # nothing an operator would read.
+      - name: A change to the code is a change an operator can read about
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ' ') }}
+        run: scripts/changelog.sh check "$BASE" HEAD
+
   deny:
     name: cargo deny
     runs-on: ubuntu-latest
