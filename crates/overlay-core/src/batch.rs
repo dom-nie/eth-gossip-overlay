@@ -38,6 +38,17 @@ pub struct Entry {
     pub pushed_at: Instant,
 }
 
+/// How a flushed batch reaches its destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Carrier {
+    /// An unreliable datagram, which is what the small class is for: public gossip is the
+    /// backup for anything the path drops (§5.4).
+    Datagram,
+    /// A stream, for the one payload that no datagram on this path can hold. It still travels
+    /// alone rather than being split, because only the large class is chunked (D21).
+    Stream,
+}
+
 /// A batch that is done collecting.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Flush {
@@ -45,6 +56,8 @@ pub struct Flush {
     pub dest: Hostname,
     /// The entries, in the order they were pushed.
     pub entries: Vec<Entry>,
+    /// What carries them.
+    pub carrier: Carrier,
 }
 
 /// The open batches, one per destination.
@@ -82,6 +95,7 @@ impl Open {
         Flush {
             dest: dest.clone(),
             entries: std::mem::take(&mut self.entries),
+            carrier: Carrier::Datagram,
         }
     }
 }
@@ -101,7 +115,10 @@ impl Batcher {
     /// out while nothing was being pushed to them.
     ///
     /// `max_bytes` is the destination's current datagram limit, which moves with path MTU
-    /// discovery and so arrives with every push rather than at construction.
+    /// discovery and so arrives with every push rather than at construction. A payload that
+    /// would not fit a datagram of its own is flushed on the spot with [`Carrier::Stream`],
+    /// which leaves the open batch collecting: the two carriers keep no order between them
+    /// anyway.
     pub fn push(
         &mut self,
         dest: &Hostname,
@@ -112,6 +129,20 @@ impl Batcher {
     ) -> Vec<Flush> {
         let mut flushes = self.tick(now);
         let cost = BATCH_ENTRY_OVERHEAD_BYTES + payload.len();
+        let entry = Entry {
+            topic_id,
+            payload,
+            pushed_at: now,
+        };
+
+        if BATCH_HEADER_BYTES + cost > max_bytes {
+            flushes.push(Flush {
+                dest: dest.clone(),
+                entries: vec![entry],
+                carrier: Carrier::Stream,
+            });
+            return flushes;
+        }
 
         let mut open = self.open.remove(dest).unwrap_or_else(|| Open::new(now));
         if !open.fits(cost, max_bytes) {
@@ -119,11 +150,7 @@ impl Batcher {
             open = Open::new(now);
         }
         open.bytes += cost;
-        open.entries.push(Entry {
-            topic_id,
-            payload,
-            pushed_at: now,
-        });
+        open.entries.push(entry);
         self.open.insert(dest.clone(), open);
         flushes
     }
