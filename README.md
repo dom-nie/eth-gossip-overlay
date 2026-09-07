@@ -20,6 +20,25 @@ cargo build --release          # binaries in target/release/{fleet-overlay,fleet
 
 `overlay-bn` links `libp2p` from Lighthouse's fork (`sigp/rust-libp2p`) at the revision Lighthouse **v8.2.2** pins, through the `[patch]` table in the root `Cargo.toml`. Bumping Lighthouse means updating that tag, the rev next to it, and rerunning T-018's compatibility matrix.
 
+## Container
+
+`Dockerfile` builds an image with the two binaries, a libc and a non-root user that owns
+`/var/lib/fleet-overlay`. Run it with `--network host` and give it a volume for that directory:
+it holds the node key, which is the peer id the beacon node trusts, so without one every
+restart is a new identity.
+
+```sh
+docker build -t fleet-overlay .
+docker run -d --network host \
+  -v /etc/fleet-overlay:/etc/fleet-overlay:ro \
+  -v fleet-overlay-state:/var/lib/fleet-overlay \
+  fleet-overlay
+```
+
+`examples/compose/` starts three sidecars and three Lighthouse beacon nodes on one machine, with
+Prometheus and Grafana, so you can watch the overlay carry a message between your own nodes
+without owning a fleet. Its README says what to look at.
+
 ## Subcommands
 
 `fleet-overlay gen-seed [--out PATH]` writes a new fleet seed: 32 bytes from the OS random number generator as 64 hex characters, mode 0600, default `/etc/fleet-overlay/seed`. It refuses to overwrite an existing file. Run it once per fleet and copy the file to every host over a secure channel; every host's overlay TLS key derives from it and its hostname.
