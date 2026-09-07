@@ -28,7 +28,7 @@ const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 /// arithmetic is a function a test can ask a question of.
 pub fn select(origin: &Hostname, pool_sorted: &[Hostname], n: usize) -> Vec<Hostname> {
     let start = (fnv1a64(origin.0.as_bytes()) % pool_sorted.len() as u64) as usize;
-    (start..start + n)
+    (start..start + n.min(pool_sorted.len()))
         .map(|step| pool_sorted[step % pool_sorted.len()].clone())
         .collect()
 }
