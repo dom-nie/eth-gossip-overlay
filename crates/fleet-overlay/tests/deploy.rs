@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use overlay_core::config::Config;
+use overlay_core::config::{Config, LogFormat, LogLevel, Steering};
 use overlay_core::roster::Roster;
 
 const UNIT: &str = "deploy/systemd/fleet-overlay.service";
@@ -223,4 +223,27 @@ fn example_config_and_roster_load_with_the_real_parsers() {
     config.unwrap_or_else(|err| panic!("{CONFIG}: {err}"));
     let roster = roster.unwrap_or_else(|err| panic!("{ROSTER}: {err}"));
     assert_eq!(roster.hosts.len(), 3, "{ROSTER}");
+}
+
+/// D30: what an operator gets when they copy the example and change nothing. Kernel tuning off,
+/// metrics on loopback, and neither of the two keys the panel removed, which a copy of an older
+/// config would still carry and the parser would then reject.
+#[test]
+fn example_config_has_the_shipped_defaults() {
+    let text = read(CONFIG);
+    let config = Config::from_yaml(&text).unwrap_or_else(|err| panic!("{CONFIG}: {err}"));
+
+    assert_eq!(config.metrics_listen.to_string(), "127.0.0.1:7789");
+    assert_eq!(config.overlay.io_thread.pin_cpu, None);
+    assert!(!config.overlay.io_thread.prefer_busy_poll);
+    assert_eq!(config.overlay.io_thread.steering, Steering::Off);
+    assert_eq!(
+        config.bn.node_key_file,
+        Path::new("/var/lib/fleet-overlay/node.key")
+    );
+    assert_eq!(config.log.level, LogLevel::Info);
+    assert_eq!(config.log.format, LogFormat::Auto);
+    for removed in ["auth:", "relay_selection"] {
+        assert!(!text.contains(removed), "{CONFIG} still has {removed}");
+    }
 }
