@@ -689,7 +689,10 @@ mod tests {
         tokio::time::sleep(SETTLE).await;
         assert_eq!(cluster.published(1).len(), 1);
         assert_eq!(cluster.published(1)[0].payload, wanted);
-        assert_eq!(cluster.stats(1).unknown_frame_types(&cluster.hostname(0)), 1);
+        assert_eq!(
+            cluster.stats(1).unknown_frame_types(&cluster.hostname(0)),
+            1
+        );
     }
 
     /// The seen cache is asked per payload and not per frame (D08), so a batch that carries the
@@ -710,6 +713,30 @@ mod tests {
         tokio::time::sleep(SETTLE).await;
         assert_eq!(cluster.published(1).len(), 1);
         assert_eq!(cluster.stats(1).duplicates(Class::Small), 1);
+    }
+
+    /// `messages_total` counts payloads, not frames (§12). A batch is a saving on the wire and
+    /// not a message of its own, so an operator reading the counter sees the attestations that
+    /// crossed the connection rather than the datagrams they were packed into.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn metrics_count_payloads_not_batches() {
+        let subnet = topic("beacon_attestation_7");
+        let payloads = [
+            payload(b"the first attestation"),
+            payload(b"the second attestation"),
+            payload(b"the third attestation"),
+        ];
+        let (cluster, peer) = peer_of(subscriptions(&[&subnet], &[]), &[(3, &subnet)]).await;
+
+        datagram(&peer, batch(payloads.iter().map(|p| entry(3, p)).collect()));
+
+        let sender = cluster.hostname(0);
+        eventually("all three to be queued", || cluster.published(1).len() == 3).await;
+        assert_eq!(cluster.stats(1).messages(Direction::In, &sender), 3);
+        assert_eq!(
+            cluster.stats(1).bytes(Direction::In, &sender),
+            payloads.iter().map(|p| p.len() as u64).sum::<u64>()
+        );
     }
 
     /// An entry id the peer never announced costs that entry and nothing else (D21): the rest of
