@@ -188,7 +188,7 @@ impl PeerReceiver {
             connection: connection.clone(),
             budget,
             stats,
-            task: tokio::spawn(accept(connection, ctx)),
+            task: tokio::spawn(read_peer(connection, ctx)),
         }
     }
 
@@ -245,6 +245,37 @@ struct Ctx {
     /// Whether this connection has already had its line about a payload that did not check out.
     /// A peer sending a stream of them costs one line, and a reconnect gets a fresh one.
     warned_invalid: AtomicBool,
+}
+
+/// Both carriers of one peer, in one task. They end together, because both end when the
+/// connection does, and neither can hold the other up: a stream is read by a task of its own
+/// and a datagram is one frame that is already whole when [`read_datagram`] answers.
+///
+/// [`read_datagram`]: quinn::Connection::read_datagram
+async fn read_peer(connection: quinn::Connection, ctx: Arc<Ctx>) {
+    tokio::join!(
+        accept(connection.clone(), ctx.clone()),
+        datagrams(connection, ctx)
+    );
+}
+
+/// This peer's datagrams, which is where the small class arrives (§5.3). Each one is exactly one
+/// frame with no length prefix (D10), so there is nothing to resynchronise and a datagram that
+/// does not decode costs only itself.
+///
+/// Reading never waits for the beacon node: [`Ctx::deliver`] ends in a `try_send` into the
+/// publish queue (DX-N4), so a queue nothing is draining costs queue drops and the loop keeps
+/// taking datagrams off the connection.
+async fn datagrams(connection: quinn::Connection, ctx: Arc<Ctx>) {
+    loop {
+        match connection.read_datagram().await {
+            Ok(datagram) => ctx.datagram(datagram),
+            Err(error) => {
+                tracing::debug!(peer = %ctx.peer, %error, "peer sends no more datagrams");
+                return;
+            }
+        }
+    }
 }
 
 /// Accepts this peer's streams, each read by a task of its own so one stalled stream holds up
@@ -342,6 +373,39 @@ impl Ctx {
                 frame = ?other.frame_type(),
                 "frame that does not belong on a data stream"
             ),
+        }
+    }
+
+    /// One datagram, which carries one `BATCH` or nothing this release will act on. Anything
+    /// else is dropped whole and counted `unknown_frame_type_total{peer}`: a type from a newer
+    /// release, and a type that belongs on a stream, are the same thing here, since a datagram
+    /// has no length prefix to skip a frame by (D10).
+    fn datagram(&self, datagram: Bytes) {
+        let arrived = self.deps.clock.wall();
+        match wire::decode_datagram(datagram) {
+            // `RELAY` asks the receiver to re-fan the batch inside its own region, which is
+            // T-063's to act on. This release delivers the entries locally and lets the flag be
+            // (D11, D20).
+            Ok(Frame::Batch { entries, .. }) => {
+                for entry in entries {
+                    self.deliver(entry.topic_id, entry.payload, None, arrived);
+                }
+            }
+            Ok(other) => {
+                tracing::debug!(
+                    peer = %self.peer,
+                    frame = ?other.frame_type(),
+                    "frame that does not belong in a datagram"
+                );
+                self.deps.stats.unknown_frame_type(&self.peer);
+            }
+            Err(wire::DecodeError::UnknownType(frame_type)) => {
+                tracing::debug!(peer = %self.peer, frame_type, "datagram from a newer peer");
+                self.deps.stats.unknown_frame_type(&self.peer);
+            }
+            Err(error) => {
+                tracing::debug!(peer = %self.peer, %error, "datagram that does not decode");
+            }
         }
     }
 
