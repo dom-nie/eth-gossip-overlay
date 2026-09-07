@@ -11,6 +11,8 @@ use serde::{Deserialize, Deserializer};
 use serde_yaml_bw as yaml;
 use url::Url;
 
+use crate::relay;
+
 /// The whole `config.yaml`, one field per key.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -318,8 +320,8 @@ impl Default for SmallFanout {
         Self {
             in_region: InRegion::Direct,
             cross_region: CrossRegion::Relays,
-            relays_per_remote_region: 3,
-            relay_min_remote_hosts: 12,
+            relays_per_remote_region: relay::DEFAULT_RELAYS_PER_REMOTE_REGION,
+            relay_min_remote_hosts: relay::DEFAULT_RELAY_MIN_REMOTE_HOSTS,
         }
     }
 }

@@ -20,6 +20,17 @@ const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 /// FNV-1a's 64-bit prime.
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
+/// `overlay.fanout.small.relays_per_remote_region`'s default: how many hosts of a remote region
+/// carry a batch for it. §14 has the number open, "three to start", against a canary that will
+/// say what the WAN saving is worth next to the extra in-region hop.
+pub const DEFAULT_RELAYS_PER_REMOTE_REGION: usize = 3;
+
+/// `overlay.fanout.small.relay_min_remote_hosts`'s default: the size a remote region has to
+/// reach before a batch goes to it through relays rather than to every subscriber. Twelve to
+/// start, and open in §14 alongside the relay count: below it the copies saved do not pay for
+/// the hop (D36).
+pub const DEFAULT_RELAY_MIN_REMOTE_HOSTS: usize = 12;
+
 /// The `relays_per_remote_region` hosts of `pool_sorted` that carry a batch from `origin`: the
 /// window of `n` hosts starting where the origin's hash lands.
 ///
