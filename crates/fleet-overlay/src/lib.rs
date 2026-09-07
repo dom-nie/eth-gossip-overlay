@@ -6,3 +6,4 @@ pub mod app;
 pub mod logging;
 pub mod metrics;
 pub mod reload;
+pub mod version;

@@ -6,13 +6,14 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use fleet_overlay::app;
+use fleet_overlay::version::VERSION;
 use overlay_bn::node_key::NodeKey;
 use overlay_core::config::Config;
 use overlay_core::identity::create_secret_file;
 
 #[derive(Parser)]
 #[command(
-    version,
+    version = VERSION.as_str(),
     about,
     subcommand_required = true,
     arg_required_else_help = true
