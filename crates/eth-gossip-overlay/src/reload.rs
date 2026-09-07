@@ -32,9 +32,11 @@
 //!   the outgoing seed for as long as the file is configured (DX-N2).
 //! - `log.level` and `log.format`: T-044's [`LogHandle`], which leaves the level alone while
 //!   `RUST_LOG` is set and says so (D32).
-//! - `overlay.fanout.small.relay_min_remote_hosts` (D36) and `classes.large.repair_deadline_ms`
-//!   (D24) have no applier: their consumers arrive with T-063 and T-082, which register one
-//!   each. Until then a change is still applied, in that [`Reloader::config`] answers with it.
+//! - `overlay.fanout.small.relay_min_remote_hosts` (D36), `classes.large.repair_deadline_ms`
+//!   (D24) and the two `classes.small` keys the batcher reads, `batch_window_ms` and
+//!   `stale_after_ms` (T-061), have no applier: their consumers arrive with T-063, T-082 and
+//!   T-062, which register one each. Until then a change is still applied, in that
+//!   [`Reloader::config`] answers with it.
 //!
 //! The roster is not a config key and has no applier. It goes on its own watch channel, which
 //! T-023's connection manager and [`spawn_pin_table`] follow, and is the one entry in
@@ -73,6 +75,8 @@ pub const RELOADABLE: &[&str] = &[
     "bn.publish_rate_limit.large_per_s",
     "bn.publish_rate_limit.small_per_s",
     "classes.large.repair_deadline_ms",
+    "classes.small.batch_window_ms",
+    "classes.small.stale_after_ms",
     "inject",
     "log.format",
     "log.level",
