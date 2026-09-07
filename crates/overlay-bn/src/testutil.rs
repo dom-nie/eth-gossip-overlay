@@ -136,7 +136,7 @@ pub struct FakeBn {
     http: MockServer,
     commands: mpsc::Sender<Cmd>,
     received: Option<mpsc::Receiver<Received>>,
-    events: mpsc::Receiver<FakeBnEvent>,
+    events: Option<mpsc::Receiver<FakeBnEvent>>,
     answers: Option<mpsc::Receiver<RpcAnswer>>,
     inbound: Option<mpsc::Receiver<Protocol>>,
     responses: Responses,
@@ -364,7 +364,7 @@ impl FakeBn {
             http,
             commands,
             received: Some(received),
-            events,
+            events: Some(events),
             answers: Some(answers),
             inbound: Some(inbound),
             responses: Responses::default(),
@@ -527,7 +527,14 @@ impl FakeBn {
 
     /// Skips the fake's events until one satisfies `wanted`.
     pub async fn wait_for(&mut self, wanted: impl FnMut(&FakeBnEvent) -> bool) -> FakeBnEvent {
-        wait_for(&mut self.events, wanted).await
+        wait_for(self.events.as_mut().expect("events() is not taken"), wanted).await
+    }
+
+    /// Everything the fake's swarm saw, in order, for a caller that counts connections rather
+    /// than waiting for one. Taken once per fake, and [`wait_for`](Self::wait_for) has nothing
+    /// left to read afterwards.
+    pub fn events(&mut self) -> mpsc::Receiver<FakeBnEvent> {
+        self.events.take().expect("events() is taken once")
     }
 
     /// The peers in the fake's mesh for `topic` right now.
