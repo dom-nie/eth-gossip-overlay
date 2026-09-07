@@ -42,6 +42,8 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::roster::Hostname;
 
@@ -81,5 +83,19 @@ mod tests {
             relays,
             vec![host("bn-us-03"), host("bn-us-04"), host("bn-us-01")]
         );
+    }
+
+    /// What the hash is for (D20): the relays of a whole region of origins land on the whole
+    /// remote region, not on three hosts that then carry every batch the WAN brings. Twenty
+    /// origins over a pool of nine leave at most one host unused.
+    #[test]
+    fn different_origins_spread_across_all_remote_hosts() {
+        let pool = pool(9);
+
+        let used: BTreeSet<Hostname> = (1..=20)
+            .flat_map(|n| select(&host(&format!("bn-eu-{n:02}")), &pool, 3))
+            .collect();
+
+        assert!(used.len() >= 8, "{used:?}");
     }
 }
