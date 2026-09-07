@@ -195,6 +195,10 @@ impl MemoryBudget {
 
 /// The memory ceiling this process runs under, from cgroup v2. `None` where the file is absent
 /// or holds `max`, which is a host with no ceiling to compare the budget against.
+// mutants::skip: the whole body is one absolute path no test can stage, and what the answer is
+// on the machine running the suite is the machine's, not the code's. `read_memory_max` is the
+// half that decides anything and it is under test with a file of its own.
+#[cfg_attr(test, mutants::skip)]
 pub fn cgroup_memory_max() -> Option<u64> {
     read_memory_max(Path::new(CGROUP_MEMORY_MAX))
 }
