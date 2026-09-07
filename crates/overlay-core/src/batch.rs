@@ -508,4 +508,27 @@ mod tests {
         assert_eq!(dropped, 1);
         assert_eq!(payloads(&flushes[0]), vec![payload(2)]);
     }
+
+    #[test]
+    fn flush_preserves_push_order() {
+        let clock = FakeClock::new();
+        let mut batcher = batcher();
+        for byte in 1..=4 {
+            batcher.push(
+                &dest("host-a"),
+                TopicId::new(u16::from(byte)),
+                payload(byte),
+                MAX_BYTES,
+                clock.now(),
+            );
+        }
+
+        clock.advance(WINDOW);
+        let flushes = batcher.tick(clock.now());
+
+        assert_eq!(
+            payloads(&flushes[0]),
+            (1..=4).map(payload).collect::<Vec<Bytes>>()
+        );
+    }
 }
