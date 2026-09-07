@@ -65,6 +65,7 @@ use std::time::{Duration, Instant};
 
 use fleet_overlay::app::App;
 use fleet_overlay::logging::{self, LogHandle};
+use fleet_overlay::metrics::{LABEL_DIRECTION, LABEL_PEER, MESSAGES_TOTAL};
 use overlay_bn::node_key::NodeKey;
 use overlay_bn::testutil::{FakeBn, FakeBnEvent};
 use overlay_core::config::{Config, Log, LogFormat, LogLevel};
@@ -211,13 +212,12 @@ fn scaled(mut regions: Vec<(String, usize)>) -> Vec<(String, usize)> {
     else {
         return regions;
     };
-    let mut hosts: usize = regions.iter().map(|(_, hosts)| hosts).sum();
     let count = regions.len();
-    for round in 0.. {
-        if hosts >= target || count == 0 {
-            return regions;
-        }
+    let mut hosts: usize = regions.iter().map(|(_, hosts)| hosts).sum();
+    let mut round = 0;
+    while count > 0 && hosts < target {
         regions[round % count].1 += 1;
+        round += 1;
         hosts += 1;
     }
     regions
@@ -368,8 +368,11 @@ impl Fleet {
                 (0..self.nodes.len())
                     .map(|from| {
                         scrapes[to].sum(
-                            "overlay_messages_total",
-                            &[("direction", "in"), ("peer", &self.nodes[from].hostname.0)],
+                            MESSAGES_TOTAL,
+                            &[
+                                (LABEL_DIRECTION, "in"),
+                                (LABEL_PEER, &self.nodes[from].hostname.0),
+                            ],
                         )
                     })
                     .collect()
@@ -377,6 +380,9 @@ impl Fleet {
             .collect()
     }
 
+    /// Whether every pair that should be exchanging messages has taken one since `before` was
+    /// read. A pair that was already talking is not enough: after a restart the counters are
+    /// where the last round left them, so what a round proves is the rise.
     async fn crossed_every_pair(&self, before: &[Vec<f64>]) -> bool {
         let now = self.crossings().await;
         (0..self.nodes.len()).all(|to| {
