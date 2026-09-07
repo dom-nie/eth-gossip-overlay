@@ -239,3 +239,50 @@ fn peer_id_needs_only_the_node_key() {
     assert!(second.status.success(), "{second:?}");
     assert_eq!(second.stdout, first.stdout);
 }
+
+/// D29: the first line identifies the build, the second says what it can pair with. T-048
+/// asserts on both from the released artefacts, so their shape is fixed here.
+#[test]
+fn version_prints_crate_version_sha_build_date_and_protocol_line() {
+    let output = fleet_overlay().arg("--version").output().unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let printed = String::from_utf8(output.stdout).unwrap();
+    let mut lines = printed.lines();
+
+    let build = lines.next().unwrap();
+    assert!(
+        build.contains(env!("CARGO_PKG_VERSION")),
+        "no crate version in {build:?}"
+    );
+    let words: Vec<&str> = build.split_whitespace().collect();
+    assert_eq!(
+        words.len(),
+        4,
+        "expected name, version, sha and date: {build:?}"
+    );
+    let date = words[3];
+    assert!(
+        date.len() == 10 && date.split('-').count() == 3,
+        "no yyyy-mm-dd build date in {build:?}"
+    );
+
+    let protocol = lines.next().unwrap();
+    let (version, features) = protocol
+        .strip_prefix("protocol ")
+        .and_then(|rest| rest.split_once(" features=0x"))
+        .unwrap_or_else(|| panic!("{protocol:?}"));
+    let (major, minor) = version.split_once('.').unwrap();
+    assert!(
+        major.parse::<u8>().is_ok() && minor.parse::<u16>().is_ok(),
+        "{version}"
+    );
+    assert!(
+        !features.is_empty()
+            && features
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
+        "{features}"
+    );
+    assert_eq!(lines.next(), None, "{printed}");
+}
