@@ -692,6 +692,26 @@ mod tests {
         assert_eq!(cluster.stats(1).unknown_frame_types(&cluster.hostname(0)), 1);
     }
 
+    /// The seen cache is asked per payload and not per frame (D08), so a batch that carries the
+    /// same attestation twice, which two origins reaching one relay will produce from T-063 on,
+    /// costs the beacon node one publish.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn datagram_receive_path_deduplicates_per_payload() {
+        let subnet = topic("beacon_attestation_7");
+        let twice = payload(b"one attestation, two entries");
+        let (cluster, peer) = peer_of(subscriptions(&[&subnet], &[]), &[(3, &subnet)]).await;
+
+        datagram(&peer, batch(vec![entry(3, &twice), entry(3, &twice)]));
+
+        eventually("the first entry to be queued", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(cluster.published(1).len(), 1);
+        assert_eq!(cluster.stats(1).duplicates(Class::Small), 1);
+    }
+
     /// An entry id the peer never announced costs that entry and nothing else (D21): the rest of
     /// the batch is delivered and the connection carries on, because the sender is one release
     /// ahead or its `TOPIC_ADD` has not arrived yet, neither of which is a protocol error.
