@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
+use crate::protocol::MAX_BATCH_ENTRIES;
 use crate::roster::Hostname;
 use crate::topic::table::TopicId;
 use crate::wire::{BATCH_ENTRY_OVERHEAD_BYTES, BATCH_HEADER_BYTES};
@@ -71,9 +72,10 @@ impl Open {
         }
     }
 
-    /// Whether one more entry of `cost` bytes still fits a datagram of `max_bytes`.
+    /// Whether one more entry of `cost` bytes still fits a datagram of `max_bytes`, and the
+    /// count the receiver agreed to read.
     fn fits(&self, cost: usize, max_bytes: usize) -> bool {
-        self.bytes + cost <= max_bytes
+        self.bytes + cost <= max_bytes && self.entries.len() < usize::from(MAX_BATCH_ENTRIES)
     }
 
     fn take(&mut self, dest: &Hostname) -> Flush {
