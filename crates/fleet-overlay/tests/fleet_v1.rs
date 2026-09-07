@@ -217,3 +217,30 @@ async fn message_takes_one_overlay_hop_only() {
     fleet.settle().await;
     assert_eq!(fleet.node(2).bn().count(&block, &payload), 0, "second hop");
 }
+
+/// §9: a sidecar that crashes or is upgraded comes back on the same node key and the same
+/// address, redials its peers and is a full member of the fleet again. Nothing it missed while
+/// it was down is replayed, so what the scenario checks is the next message.
+#[tokio::test(flavor = "multi_thread")]
+async fn restarted_node_rejoins_and_receives_the_next_message() {
+    let block = topic("beacon_block");
+    let mut fleet = Fleet::builder().regions(&[("eu", 3)]).start().await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+
+    fleet.restart_node(2).await;
+    fleet.wait_full_mesh(WAIT).await;
+
+    let payload = b"a block after the restart".to_vec();
+    fleet.node(0).bn().publish(&block, &payload).await;
+
+    fleet
+        .wait_for(
+            "the restarted node to import the next block",
+            WAIT,
+            |fleet| fleet.node(2).bn().count(&block, &payload) == 1,
+        )
+        .await;
+}
