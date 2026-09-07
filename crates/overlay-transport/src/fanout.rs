@@ -291,8 +291,8 @@ mod tests {
     use crate::manager::LiveSource;
     use crate::sender::{LARGE_QUEUED_BYTES_MAX, LargeLedger, PeerSender};
     use crate::testutil::{
-        Builder, NodeKind, REGION, SendSpy, TestCluster, WAIT, eventually, peer_state,
-        subscriptions, topic, view, within,
+        Builder, NodeKind, REGION, SendSpy, TestCluster, WAIT, datagram_limit, eventually,
+        peer_state, subscriptions, topic, view, within,
     };
 
     /// The gossipsub wire form of an attestation nothing else in a test will produce, so ten of
@@ -501,6 +501,37 @@ mod tests {
         assert!(cluster.from_bn(0, &subnet, &payload));
 
         eventually("the older sibling to queue it", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert_eq!(cluster.published(1)[0].payload, payload);
+        assert_eq!(cluster.datagrams_received(1, &cluster.hostname(0)), 0);
+    }
+
+    /// Path MTU discovery can lower what a path holds between the batcher's check and the send,
+    /// and quinn answers `TooLarge` (§5.3). The batch is not lost for it: it goes on a stream,
+    /// which is what carries a payload no datagram ever held either.
+    ///
+    /// The only way to make quinn's own answer disagree with what the same connection will take
+    /// is to build the batch against a different number, so the test sets the limit the sending
+    /// node batches to above what its loopback path really holds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn too_large_error_falls_back_to_stream_and_the_batch_still_arrives() {
+        let subnet = topic("beacon_attestation_7");
+        let payload = incompressible(4096);
+        let mut cluster = TestCluster::start(2).await;
+        datagram_limit::set(&cluster.hostname(0), Some(8192));
+        for node in 0..2 {
+            cluster.start_sidecar(node, subscriptions(&[&subnet], &[]));
+        }
+        eventually("the sibling to say it wants the subnet", || {
+            cluster.live(0).subscribers(&subnet).len() == 1
+        })
+        .await;
+
+        assert!(cluster.from_bn(0, &subnet, &payload));
+
+        eventually("the sibling to queue it", || {
             cluster.published(1).len() == 1
         })
         .await;
