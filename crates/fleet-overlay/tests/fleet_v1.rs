@@ -1,7 +1,8 @@
 //! The system-level properties of a running fleet (T-051). Every test here drives whole
 //! sidecars: the wiring `fleet-overlay run` builds, with only the beacon node replaced.
 
-use harness::{Fleet, WAIT, topic};
+use fleet_overlay::metrics::{LABEL_DIRECTION, LABEL_PEER, MESSAGES_TOTAL};
+use harness::{Fleet, Scrape, WAIT, topic};
 
 mod harness;
 
@@ -32,4 +33,122 @@ async fn block_from_one_bn_reaches_every_other_bn_exactly_once() {
     for i in 1..5 {
         assert_eq!(fleet.node(i).bn().count(&block, &payload), 1, "node {i}");
     }
+}
+
+/// D13 and the subscription bitmap: a sender routes from its own view of what each peer asked
+/// for, so a beacon node that never subscribed to a subnet is not sent that subnet's traffic at
+/// all. Nothing is filtered at the far end, because nothing is sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn attestation_on_subnet_reaches_only_subscribed_bns() {
+    let subnet = topic("beacon_attestation_5");
+    let mut fleet = Fleet::builder().regions(&[("eu", 4)]).start().await;
+    for index in 0..3 {
+        fleet.node(index).subscribe(&subnet).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    fleet.settle().await;
+
+    let unsubscribed = fleet.node(3).hostname().0.clone();
+    let sent_to_unsubscribed = |fleet: &Fleet, scrape: &Scrape| {
+        let _ = fleet;
+        scrape.sum(
+            MESSAGES_TOTAL,
+            &[(LABEL_DIRECTION, "out"), (LABEL_PEER, &unsubscribed)],
+        )
+    };
+    let before = sent_to_unsubscribed(&fleet, &fleet.node(0).metrics().await);
+    let payload = b"an attestation on subnet 5".to_vec();
+    fleet.node(0).bn().publish(&subnet, &payload).await;
+
+    fleet
+        .wait_for("both subscribed beacon nodes to import it", WAIT, |fleet| {
+            (1..3).all(|i| fleet.node(i).bn().count(&subnet, &payload) == 1)
+        })
+        .await;
+    fleet.settle().await;
+    assert_eq!(
+        fleet.node(3).bn().count(&subnet, &payload),
+        0,
+        "unsubscribed"
+    );
+    let after = sent_to_unsubscribed(&fleet, &fleet.node(0).metrics().await);
+    assert_eq!(after, before, "the attestation was sent to node 3 anyway");
+}
+
+/// §5.5: two beacon nodes validating the same message from public gossip is the normal case,
+/// and the seen cache is what turns the two copies into one publish at every other host.
+#[tokio::test(flavor = "multi_thread")]
+async fn same_message_from_two_origins_is_published_once_everywhere() {
+    let block = topic("beacon_block");
+    let mut fleet = Fleet::builder().regions(&[("eu", 4)]).start().await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+
+    let payload = b"one block, two origins".to_vec();
+    fleet.node(0).bn().publish(&block, &payload).await;
+    fleet.node(1).bn().publish(&block, &payload).await;
+
+    fleet
+        .wait_for("both other beacon nodes to import it", WAIT, |fleet| {
+            (2..4).all(|i| fleet.node(i).bn().count(&block, &payload) == 1)
+        })
+        .await;
+    fleet.settle().await;
+    for index in 2..4 {
+        assert_eq!(fleet.node(index).bn().count(&block, &payload), 1, "{index}");
+    }
+    for index in 0..2 {
+        assert_eq!(fleet.node(index).bn().count(&block, &payload), 0, "{index}");
+    }
+}
+
+/// D27: a region is a label, not a topology. One region is a whole fleet and the fanout has no
+/// remote half to plan for.
+#[tokio::test(flavor = "multi_thread")]
+async fn single_region_fleet_works() {
+    let block = topic("beacon_block");
+    let mut fleet = Fleet::builder().regions(&[("eu", 4)]).start().await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+
+    let payload = b"a block in a one-region fleet".to_vec();
+    fleet.node(0).bn().publish(&block, &payload).await;
+
+    fleet
+        .wait_for(
+            "every other beacon node to import the block",
+            WAIT,
+            |fleet| (1..4).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
+        )
+        .await;
+}
+
+/// The other end of D27: three regions, and v1 reaches every one of them directly because a
+/// whole message goes to every live subscribed peer wherever it is (§5.4).
+#[tokio::test(flavor = "multi_thread")]
+async fn three_region_fleet_works() {
+    let block = topic("beacon_block");
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", 2), ("us", 2), ("ap", 2)])
+        .start()
+        .await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+
+    let payload = b"a block across three regions".to_vec();
+    fleet.node(0).bn().publish(&block, &payload).await;
+
+    fleet
+        .wait_for(
+            "every other beacon node to import the block",
+            WAIT,
+            |fleet| (1..6).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
+        )
+        .await;
 }
