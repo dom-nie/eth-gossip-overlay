@@ -1,0 +1,13 @@
+# Renders /etc/fleet-overlay/roster.yaml from an Ansible inventory, with no generated values:
+# every host in the beacon_nodes group, the region it fans out in and the address its siblings
+# dial. The same loop fills the nftables allowlist, so membership, firewall and key pinning all
+# come from one inventory.
+hosts:
+{% for h in groups['beacon_nodes'] | sort %}
+  - hostname: {{ h }}
+    region: {{ hostvars[h].region }}
+{% if hostvars[h].site is defined %}
+    site: {{ hostvars[h].site }}
+{% endif %}
+    addr: "{{ hostvars[h].overlay_addr | default(hostvars[h].ansible_host) }}:7788"
+{% endfor %}
