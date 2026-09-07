@@ -5,8 +5,9 @@ use std::time::{Duration, Instant};
 
 use fleet_overlay::metrics::{
     FIRST_SEEN_TOTAL, LABEL_CLASS, LABEL_DIRECTION, LABEL_PEER, LABEL_REASON, LABEL_SOURCE,
-    LABEL_UNIT, MESSAGES_TOTAL, PEER_QUEUE_DEPTH, PEER_QUEUE_DROPS_TOTAL, PUBLISH_SUPPRESSED_TOTAL,
-    REASON_INJECT_OFF, SOURCE_OVERLAY, UNIT_BYTES,
+    LABEL_UNIT, MESSAGES_TOTAL, PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL, PEER_QUEUE_DEPTH,
+    PEER_QUEUE_DROPS_TOTAL, PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF, SOURCE_OVERLAY,
+    UNIT_BYTES,
 };
 use harness::{Fleet, Scrape, WAIT, topic};
 use overlay_transport::sender::{DropReason, LARGE_LANE_BYTES};
@@ -391,4 +392,72 @@ fn incompressible(seed: u64, bytes: usize) -> Vec<u8> {
             (state >> 33) as u8
         })
         .collect()
+}
+
+/// DX-N2 and D01: rotating the fleet seed is a rolling operation on the sidecars alone. Every
+/// host accepts both seeds while the rotation runs, the sidecars restart one at a time onto the
+/// new one, and the beacon nodes see a reconnect from their own sidecar and nothing else,
+/// because the libp2p node key is a file on the host rather than something the seed derives.
+#[tokio::test(flavor = "multi_thread")]
+async fn seed_rotation_with_host_by_host_sidecar_restarts_keeps_the_full_mesh_and_never_restarts_a_bn()
+ {
+    let block = topic("beacon_block");
+    let mut fleet = Fleet::builder().regions(&[("eu", 3)]).start().await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+
+    let identities: Vec<(String, Vec<u8>)> = fleet
+        .nodes()
+        .iter()
+        .map(|node| (node.peer_id().to_owned(), node.lighthouse_env()))
+        .collect();
+    let connects: Vec<usize> = fleet
+        .nodes()
+        .iter()
+        .map(|node| node.bn().connects())
+        .collect();
+    let via_previous_seed = |scrapes: &[Scrape]| -> f64 {
+        scrapes
+            .iter()
+            .map(|scrape| scrape.sum(PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL, &[]))
+            .sum()
+    };
+    let before = via_previous_seed(&fleet.metrics().await);
+
+    fleet.rotate_seed([0x22; 32]).await;
+    for index in 0..3 {
+        fleet.restart_node(index).await;
+        fleet.wait_full_mesh(WAIT).await;
+    }
+    let during = via_previous_seed(&fleet.metrics().await);
+    assert!(during > before, "no pairing in the walk used the old seed");
+
+    fleet.retire_previous_seed().await;
+    fleet.wait_full_mesh(WAIT).await;
+    assert_eq!(
+        via_previous_seed(&fleet.metrics().await),
+        during,
+        "the retired seed still let a peer in"
+    );
+
+    let payload = b"a block on the new seed".to_vec();
+    fleet.node(0).bn().publish(&block, &payload).await;
+    fleet
+        .wait_for("the rotated fleet to still deliver", WAIT, |fleet| {
+            (1..3).all(|index| fleet.node(index).bn().count(&block, &payload) == 1)
+        })
+        .await;
+
+    for (index, (peer_id, env)) in identities.iter().enumerate() {
+        assert_eq!(fleet.node(index).peer_id(), peer_id, "node {index} peer id");
+        assert_eq!(&fleet.node(index).lighthouse_env(), env, "node {index} env");
+        assert_eq!(
+            fleet.node(index).bn().connects(),
+            connects[index] + 1,
+            "node {index} beacon node saw more than one reconnect"
+        );
+        assert_eq!(fleet.node(index).bn().disconnects(), 1, "node {index}");
+    }
 }
