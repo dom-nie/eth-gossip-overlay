@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 const UNIT: &str = "deploy/systemd/fleet-overlay.service";
 const DROP_IN: &str = "deploy/systemd/lighthouse-bn.service.d/10-fleet-overlay-trusted-peer.conf";
+const SYSCTL: &str = "deploy/sysctl/90-fleet-overlay.conf";
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -139,4 +140,25 @@ fn drop_in_contains_only_after_and_optional_environmentfile() {
     for forbidden in ["ExecStartPre", "Wants", "Requires"] {
         assert!(!text.contains(forbidden), "{DROP_IN} has {forbidden}=");
     }
+}
+
+/// §11: 16 MB socket buffers, so the endpoint's own 8 MiB request is granted rather than capped,
+/// `fq` for pacing and the flow table the RFS fallback steers with. `net.core.busy_poll` is
+/// system wide, so setting it would make the beacon node's epoll busy-poll too; it stays out.
+#[test]
+fn sysctl_file_has_the_four_keys_and_not_busy_poll() {
+    let text = read(SYSCTL);
+
+    for setting in [
+        "net.core.rmem_max = 16777216",
+        "net.core.wmem_max = 16777216",
+        "net.core.default_qdisc = fq",
+        "net.core.rps_sock_flow_entries = 32768",
+    ] {
+        assert!(
+            has_directive(&text, setting),
+            "{SYSCTL} is missing {setting}"
+        );
+    }
+    assert!(!text.contains("busy_poll"), "{SYSCTL} sets busy_poll");
 }
