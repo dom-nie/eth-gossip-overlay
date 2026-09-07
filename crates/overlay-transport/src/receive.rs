@@ -1120,6 +1120,26 @@ mod tests {
         assert_eq!(cluster.datagrams_received(2, &cluster.hostname(1)), 1);
     }
 
+    /// The bit is what asks for the second hop, and without it a batch from another region is
+    /// this host's alone. Without that rule `small.cross_region: direct` would have every host
+    /// in a region forward every batch the WAN brought it (D11).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_clear_batch_from_remote_peer_is_not_forwarded() {
+        let subnet = topic("beacon_attestation_7");
+        let payload = payload(b"an attestation sent across the WAN directly");
+        let (cluster, peer) = relay_of(&subnet).await;
+
+        datagram(&peer, batch(vec![entry(3, &payload)]));
+
+        eventually("the host it was sent to to queue it", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert!(cluster.published(2).is_empty());
+        assert_eq!(cluster.stats(1).relayed_batches(), 0);
+    }
+
     /// §5.4 end to end over two regions: an attestation reaches every subscriber in the remote
     /// one, and the WAN carried one copy per relay rather than one per host. The relay's own
     /// batch goes out with `RELAY` clear, so the hosts it fans to spread nothing further and
