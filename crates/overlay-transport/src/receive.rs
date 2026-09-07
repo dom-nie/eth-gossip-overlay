@@ -502,8 +502,8 @@ mod tests {
     use super::*;
     use crate::testlog::LOG;
     use crate::testutil::{
-        Builder, CountingStats, NodeKind, PublishSpy, SETTLE, TestCluster, WAIT, eventually,
-        subscriptions, topic,
+        Builder, CountingStats, NodeKind, PUBLISHED_MAX, PublishSpy, SETTLE, TestCluster, WAIT,
+        eventually, subscriptions, topic,
     };
     use bytes::BytesMut;
     use overlay_core::budget::SUSTAINED_VIOLATION;
@@ -526,10 +526,20 @@ mod tests {
         sets: SubscriptionSets,
         announced: &[(u16, &Topic)],
     ) -> (TestCluster, PeerInfo) {
+        peer_of_queueing(sets, announced, PUBLISHED_MAX).await
+    }
+
+    /// The same with a publish queue of `published_max` entries, for the one test about a beacon
+    /// node that has stopped draining.
+    async fn peer_of_queueing(
+        sets: SubscriptionSets,
+        announced: &[(u16, &Topic)],
+        published_max: usize,
+    ) -> (TestCluster, PeerInfo) {
         let mut cluster = Builder::new(&[NodeKind::Bare, NodeKind::Manager])
             .start()
             .await;
-        cluster.start_sidecar(1, sets);
+        cluster.start_sidecar_with(1, sets, published_max);
         let announced = announced
             .iter()
             .map(|(id, topic)| (TopicId::new(*id), topic.to_string()))
@@ -737,6 +747,43 @@ mod tests {
             cluster.stats(1).bytes(Direction::In, &sender),
             payloads.iter().map(|p| p.len() as u64).sum::<u64>()
         );
+    }
+
+    /// Nothing on this path waits for the beacon node (DX-N4). A queue with nothing draining it
+    /// costs queue drops, and the datagram loop keeps taking datagrams off the connection while
+    /// it fills, so a wedged beacon node on one host never stalls the socket it shares with the
+    /// stream acceptor.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn receive_loop_keeps_draining_when_the_publish_queue_is_full() {
+        let subnet = topic("beacon_attestation_7");
+        let queue = 4;
+        let (cluster, peer) =
+            peer_of_queueing(subscriptions(&[&subnet], &[]), &[(3, &subnet)], queue).await;
+        let attestations: Vec<Vec<u8>> = (0..12)
+            .map(|n| payload(format!("attestation {n}").as_bytes()))
+            .collect();
+
+        for chunk in attestations.chunks(4) {
+            datagram(&peer, batch(chunk.iter().map(|p| entry(3, p)).collect()));
+        }
+
+        eventually("the queue to start dropping", || {
+            cluster.publish_drops(1) > 0
+        })
+        .await;
+        eventually("every entry to be read off the connection", || {
+            cluster.publish_drops(1) == (attestations.len() - queue) as u64
+        })
+        .await;
+
+        let after = payload(b"a whole message on a stream once the queue is full");
+        send(&peer, &[whole(3, &subnet, &after)]).await;
+
+        eventually("the stream acceptor to deliver as well", || {
+            cluster.published(1).last().map(|item| item.payload.clone())
+                == Some(after.clone().into())
+        })
+        .await;
     }
 
     /// An entry id the peer never announced costs that entry and nothing else (D21): the rest of
