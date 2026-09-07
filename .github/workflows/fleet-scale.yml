@@ -2,8 +2,8 @@ name: Fleet at scale
 
 # The nightly runs: too slow, or too dependent on a public network, for a pull request.
 #
-# T-051's fleet harness with thirty hosts per scenario instead of three to six, and the compose
-# demo with the three real beacon nodes a newcomer starts.
+# T-051's fleet harness with thirty hosts per scenario instead of three to six, the compose demo
+# with the three real beacon nodes a newcomer starts, and the alert rules against that demo.
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -45,3 +45,16 @@ jobs:
       # runner comfortably holds, so a failure here is worth reading before it is believed.
       - name: The demo with real beacon nodes
         run: scripts/container-checks.sh --with-beacon-nodes
+
+  alerts:
+    name: alerts fire in the compose demo
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # T-052 check 6. Breaks the demo in two ways the rules are meant to notice and waits for
+      # each alert to go pending: one sidecar stopped, and beacon nodes started without the
+      # trusted-peer flags the drop-in would give them. The second needs a testnet, which is why
+      # this is here rather than on every pull request.
+      - name: Stop a sidecar and untrust a beacon node
+        run: scripts/alert-checks.sh --with-beacon-nodes
