@@ -140,16 +140,6 @@ impl Batcher {
         }
     }
 
-    /// Removes the entries that have aged out of `entries` and answers how many went, for the
-    /// caller to count as `stale_dropped_total`.
-    ///
-    /// A flush runs this on its way out. The second check, when a per-peer send lane finally
-    /// reaches the flush (D21), runs [`drop_stale`] instead: the batcher is one task's and the
-    /// lanes are a task per peer, so the bound travels with the batch rather than the batcher.
-    pub fn drop_stale(&self, entries: &mut Vec<Entry>, now: Instant) -> usize {
-        strip_stale(entries, self.stale_after, now)
-    }
-
     /// Adds `payload` to the batch for `dest`, and returns the batches this push completed:
     /// the one for `dest` when the payload no longer fits `max_bytes`, and any whose window ran
     /// out while nothing was being pushed to them.
@@ -221,13 +211,14 @@ impl Batcher {
     }
 }
 
-/// Removes the entries of an already flushed batch that have aged out under `stale_after`, and
-/// answers how many went.
+/// Removes the entries of an already flushed batch that have aged out under `stale_after` and
+/// answers how many went, for the caller to count as `stale_dropped_total`.
 ///
-/// The second of D21's two checks, for the sender that dequeues a flush (T-062). It takes the
-/// bound rather than reading a batcher's, because the batch left the batcher when it was
-/// flushed: what decides it is the bound the entries were collected under, not whatever a
-/// reload has put in force by the time the lane reaches them.
+/// The second of D21's two checks, for the per-peer send lane that finally reaches a flush
+/// (T-062); a flush runs the same walk on its way out of the batcher. It takes the bound rather
+/// than reading a batcher's, because the batch left the batcher when it was flushed: what
+/// decides it is the bound the entries were collected under, not whatever a reload has put in
+/// force by the time the lane reaches them.
 pub fn drop_stale(entries: &mut Vec<Entry>, stale_after: Duration, now: Instant) -> usize {
     strip_stale(entries, stale_after, now)
 }
@@ -542,7 +533,7 @@ mod tests {
         assert_eq!(flushes[0].stale_dropped, 0);
 
         clock.advance(STALE_AFTER - WINDOW);
-        let dropped = batcher.drop_stale(&mut flushes[0].entries, clock.now());
+        let dropped = drop_stale(&mut flushes[0].entries, STALE_AFTER, clock.now());
 
         assert_eq!(dropped, 1);
         assert_eq!(payloads(&flushes[0]), vec![payload(2)]);
