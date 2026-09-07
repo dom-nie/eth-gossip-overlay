@@ -16,13 +16,13 @@ examples:
 | File | Where it goes |
 |---|---|
 | [`deploy/prometheus/alerts.yml`](../deploy/prometheus/alerts.yml) | your Prometheus, through `rule_files:` |
-| [`deploy/grafana/fleet-overlay.json`](../deploy/grafana/fleet-overlay.json) | your Grafana, imported or provisioned |
+| [`deploy/grafana/eth-gossip-overlay.json`](../deploy/grafana/eth-gossip-overlay.json) | your Grafana, imported or provisioned |
 
 Two things about the rules. `OverlayMemoryHigh` and `OverlaySidecarRestarting` read `process_*`
 series, which every target with a process collector exports, so they select on
 `job="eth-gossip-overlay"`; if your scrape job has another name, change theirs. And `OverlayMemoryHigh`
 carries `512M` as a literal, because Prometheus cannot see the unit's `MemoryMax`. If you change
-`MemoryMax` in `deploy/systemd/fleet-overlay.service`, change the rule and the dashboard's
+`MemoryMax` in `deploy/systemd/eth-gossip-overlay.service`, change the rule and the dashboard's
 threshold lines to match, or the alert goes off at the wrong number in whichever direction you
 moved.
 
@@ -60,7 +60,7 @@ count(overlay_bn_trusted == 0)
 ```
 
 Zero, or the alert `OverlayNotTrustedByBn` will tell you the same thing in two minutes. A host at 0
-has a beacon node that never got `$FLEET_OVERLAY_TRUSTED_PEER_ARGS` onto its `ExecStart=`, or was
+has a beacon node that never got `$ETH_GOSSIP_OVERLAY_TRUSTED_PEER_ARGS` onto its `ExecStart=`, or was
 not restarted after it did. A host with no series at all has a beacon node whose HTTP API did not
 answer the probe.
 
@@ -85,7 +85,7 @@ sum by (instance) (overlay_peers_roster) - sum by (instance) (overlay_peers_conn
 Turn injection on for the canary group only:
 
 ```sh
-ansible canary -b -a 'fleet-overlayctl inject on'
+ansible canary -b -a 'eth-gossip-overlayctl inject on'
 ```
 
 Set `inject: true` in the canary's `config.yaml` and reload, so a restart does not quietly take
@@ -205,7 +205,7 @@ Two steps, in this order.
 Stop injecting, everywhere:
 
 ```sh
-ansible beacon_nodes -b -a 'fleet-overlayctl inject off'
+ansible beacon_nodes -b -a 'eth-gossip-overlayctl inject off'
 ```
 
 This takes effect immediately and needs no restart. From that moment nothing the overlay carries
@@ -216,10 +216,10 @@ reload to make it survive a restart.
 Then stop the unit:
 
 ```sh
-ansible beacon_nodes -b -a 'systemctl stop fleet-overlay'
+ansible beacon_nodes -b -a 'systemctl stop eth-gossip-overlay'
 ```
 
 The beacon nodes keep every public peer throughout and lose only the trusted peer, which is
 exactly a fleet without the overlay. Nothing has to be migrated back and no beacon node has to be
 restarted. `deploy/README.md` has the full uninstall, including taking
-`$FLEET_OVERLAY_TRUSTED_PEER_ARGS` back out of the Lighthouse unit.
+`$ETH_GOSSIP_OVERLAY_TRUSTED_PEER_ARGS` back out of the Lighthouse unit.

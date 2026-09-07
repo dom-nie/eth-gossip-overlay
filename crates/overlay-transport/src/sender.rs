@@ -118,7 +118,7 @@ struct Queued {
 
 /// What one lane holds, in both units `peer_queue_depth{unit}` carries. The gauge and
 /// [`SenderHandle::depth`] are the two readers and both take it from the same lane, so
-/// `fleet-overlayctl status` and the dashboard cannot disagree about a peer (T-042).
+/// `eth-gossip-overlayctl status` and the dashboard cannot disagree about a peer (T-042).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Depth {
     /// Whole frames waiting.
@@ -400,7 +400,7 @@ impl SenderHandle {
     }
 
     /// What `class`'s lane holds now, the numbers `peer_queue_depth` last reported for it.
-    /// `fleet-overlayctl status` shows them per peer, so an operator can see which sibling is
+    /// `eth-gossip-overlayctl status` shows them per peer, so an operator can see which sibling is
     /// behind before the drops start (T-042).
     pub fn depth(&self, class: Class) -> Depth {
         self.0.lane(class).depth()
@@ -560,7 +560,7 @@ mod tests {
         assert_eq!(DropReason::PeerDown.as_str(), "peer_down");
     }
 
-    /// `fleet-overlayctl status` reads a peer's queue depth off the handle and
+    /// `eth-gossip-overlayctl status` reads a peer's queue depth off the handle and
     /// `peer_queue_depth` is set from the same lane, so the two can never disagree about a peer
     /// (T-042). Nothing is awaited between the pushes and the reads, so the drain task has not
     /// run and what the lanes hold is what was put in them.

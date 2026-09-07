@@ -192,7 +192,7 @@ pub struct Hello {
     pub region: String,
     /// The sender's site, a label for metrics and failure-domain reporting only.
     pub site: String,
-    /// The sender's `CARGO_PKG_VERSION`, for `fleet-overlayctl status` and upgrade reporting.
+    /// The sender's `CARGO_PKG_VERSION`, for `eth-gossip-overlayctl status` and upgrade reporting.
     pub software_version: String,
     /// The sender's whole topic table, as `(id, topic)`, so ids reach the peer before any payload
     /// on them (§5.4).

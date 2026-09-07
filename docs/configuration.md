@@ -1,20 +1,20 @@
 # Configuration
 
-One `config.yaml`, the same on every host, at `/etc/fleet-overlay/config.yaml` unless `--config`
+One `config.yaml`, the same on every host, at `/etc/eth-gossip-overlay/config.yaml` unless `--config`
 says otherwise. Every key has a default, so a file naming only what you change is valid, and
 [`deploy/examples/config.yaml`](../deploy/examples/config.yaml) is that file with every default
 written out. A key the sidecar does not know, or a misspelled one, stops the start rather than
-being ignored: run `fleet-overlay check-config` after pushing a file and configuration management
+being ignored: run `eth-gossip-overlay check-config` after pushing a file and configuration management
 finds out before systemd does.
 
 ## Reload or restart
 
-`systemctl reload fleet-overlay`, `SIGHUP` and `fleet-overlayctl roster reload` all re-read
+`systemctl reload eth-gossip-overlay`, `SIGHUP` and `eth-gossip-overlayctl roster reload` all re-read
 `config.yaml` and `roster.yaml` without dropping a connection. The reload report says what took
 effect and what did not:
 
 ```console
-$ sudo fleet-overlayctl roster reload
+$ sudo eth-gossip-overlayctl roster reload
 applied: inject, roster
 restart required: overlay.listen
 ```
@@ -27,9 +27,9 @@ in the document, so rewriting the file behind a path a key already names does no
 ## Who this host is
 
 The hostname is the identity everywhere: the roster key, the input to the overlay TLS key, the
-connection tie-break. It is `gethostname()` unless `FLEET_OVERLAY_HOSTNAME` says otherwise, and
+connection tie-break. It is `gethostname()` unless `ETH_GOSSIP_OVERLAY_HOSTNAME` says otherwise, and
 configuration management should always set it from the inventory name so the two cannot drift.
-`FLEET_OVERLAY_REGION` and `FLEET_OVERLAY_SITE` override the roster's answer for this host.
+`ETH_GOSSIP_OVERLAY_REGION` and `ETH_GOSSIP_OVERLAY_SITE` override the roster's answer for this host.
 
 `roster.yaml` is the fleet, one entry per host, and is not part of `config.yaml`:
 
@@ -45,7 +45,7 @@ Every host carries the same roster, and `region` is what the fan-out treats as a
 latency domain. Have your discovery tool write `roster.yaml`; the sidecar notices a changed file
 within 10 seconds and reloads it. Such an automatic reload is refused if it would drop more than
 half of the hosts the sidecar currently has, on the grounds that a truncated file is more likely
-than half a fleet leaving at once. `fleet-overlayctl roster reload` applies the file anyway,
+than half a fleet leaving at once. `eth-gossip-overlayctl roster reload` applies the file anyway,
 which is how a genuine shrink is done.
 
 ## The seed, the node key and the logs
@@ -75,8 +75,8 @@ in its own row, since the table is generated from the same doc comments the code
 | Key | Default | On change | What it is |
 |---|---|---|---|
 | `overlay.listen` | `[::]:7788` | restart | the address the QUIC endpoint binds. `[::]` listens dual-stack. |
-| `overlay.roster_file` | `/etc/fleet-overlay/roster.yaml` | restart | the fleet roster, re-read on SIGHUP and whenever the file changes. |
-| `overlay.fleet_seed_file` | `/etc/fleet-overlay/seed` | restart | the shared secret every overlay TLS key derives from. |
+| `overlay.roster_file` | `/etc/eth-gossip-overlay/roster.yaml` | restart | the fleet roster, re-read on SIGHUP and whenever the file changes. |
+| `overlay.fleet_seed_file` | `/etc/eth-gossip-overlay/seed` | restart | the shared secret every overlay TLS key derives from. |
 | `overlay.fleet_seed_previous_file` | unset | reload | the outgoing seed while a rotation is in progress, so peers still on it keep pairing. Absent or `null` otherwise. |
 | `overlay.keepalive_ms` | `1000` | restart | the QUIC keepalive interval. Shorter than `idle_timeout_ms`, or every quiet connection would drop. |
 | `overlay.idle_timeout_ms` | `5000` | restart | how long a silent connection lives before QUIC closes it. |
@@ -95,7 +95,7 @@ in its own row, since the table is generated from the same doc comments the code
 | `bn.identity_url` | `http://127.0.0.1:5052/eth/v1/node/identity` | restart | the beacon API endpoint that reports the node's peer id. |
 | `bn.events_url` | `http://127.0.0.1:5052/eth/v1/events?topics=block` | restart | the beacon API event stream. |
 | `bn.libp2p_addr` | `/ip4/127.0.0.1/tcp/9000` | restart | the multiaddr the sidecar dials to join the beacon node's gossipsub. |
-| `bn.node_key_file` | `/var/lib/fleet-overlay/node.key` | restart | the sidecar's own libp2p identity, per host, created on first start. |
+| `bn.node_key_file` | `/var/lib/eth-gossip-overlay/node.key` | restart | the sidecar's own libp2p identity, per host, created on first start. |
 | `bn.listen_addr` | `/ip4/127.0.0.1/tcp/7787` | restart | where the sidecar listens for the beacon node's own dial. Lighthouse caps inbound connections before it knows who is connecting, so a sidecar that only dialled would wait for peer churn on a busy node (MD-01). Restart-required: the beacon node is given this address in its command line. |
 | `bn.publish_rate_limit.small_per_s` | `8000` | reload | small-class messages per second. |
 | `bn.publish_rate_limit.large_per_s` | `300` | reload | large-class messages per second. |
@@ -107,7 +107,7 @@ in its own row, since the table is generated from the same doc comments the code
 | `classes.large.parity_ratio` | `0.1` | restart | parity chunks as a fraction of data chunks. |
 | `classes.large.repair_deadline_ms` | `250` | reload | how long after the first chunk a receiver waits before asking peers for the missing ones. |
 | `inject` | `true` | reload | whether the sidecar publishes what it receives into the beacon node. `false` is the kill switch: the sidecar keeps observing and reporting but changes nothing. |
-| `admin_socket` | `/run/fleet-overlay/admin.sock` | restart | the Unix socket `fleet-overlayctl` connects to. |
+| `admin_socket` | `/run/eth-gossip-overlay/admin.sock` | restart | the Unix socket `eth-gossip-overlayctl` connects to. |
 | `metrics_listen` | `127.0.0.1:7789` | restart | where the Prometheus scrape endpoint binds. |
 | `log.level` | `info` | reload | the least severe level that is emitted. `RUST_LOG` overrides it. One of `trace`, `debug`, `info`, `warn`, `error`. |
 | `log.format` | `auto` | reload | how the log stream is rendered. One of `auto`, `json`, `text`. |

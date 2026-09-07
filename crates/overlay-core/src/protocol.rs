@@ -36,7 +36,7 @@ pub mod features {
     /// Chunk and custody-column repair (T-082).
     pub const REPAIR: u64 = bit(2);
 
-    /// Every bit this release defines, with the name `fleet-overlayctl status` prints for it.
+    /// Every bit this release defines, with the name `eth-gossip-overlayctl status` prints for it.
     /// The rendering reads this rather than keeping a list of its own, so a bit added without a
     /// name here is shown as part of the hex and nothing claims to know what it is (T-042).
     pub const NAMES: [(&str, u64); 3] = [

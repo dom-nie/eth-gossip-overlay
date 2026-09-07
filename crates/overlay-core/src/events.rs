@@ -6,7 +6,7 @@
 //! second writer to configure and no metric label carrying a message id. `docs/events.md` holds
 //! the schema and the queries.
 //!
-//! The subscriber itself belongs to the binary (`fleet_overlay::logging`); emitting is plain
+//! The subscriber itself belongs to the binary (`eth_gossip_overlay::logging`); emitting is plain
 //! `tracing`, so the two callsites in `overlay-bn` and `overlay-transport` reach it without
 //! either of them depending on the binary crate.
 

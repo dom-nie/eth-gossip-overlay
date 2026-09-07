@@ -16,12 +16,12 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 bindir=${3:-$root/target/release}
 outdir=${4:-$root/dist}
 
-name=fleet-overlay-$version-$triple
+name=eth-gossip-overlay-$version-$triple
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
 
 mkdir -p "$stage/$name" "$outdir"
-install -m 755 "$bindir/fleet-overlay" "$bindir/fleet-overlayctl" "$stage/$name/"
+install -m 755 "$bindir/eth-gossip-overlay" "$bindir/eth-gossip-overlayctl" "$stage/$name/"
 install -m 644 "$root/LICENSE" "$stage/$name/"
 cp -R "$root/deploy" "$stage/$name/deploy"
 
@@ -32,7 +32,7 @@ tar -czf "$tarball" -C "$stage" "$name"
 # under, and every deployment example the repository ships, with nothing else along for the ride.
 expected=$(
   {
-    printf '%s\n' fleet-overlay fleet-overlayctl LICENSE
+    printf '%s\n' eth-gossip-overlay eth-gossip-overlayctl LICENSE
     (cd "$root" && find deploy -type f)
   } | sed "s|^|$name/|" | sort
 )

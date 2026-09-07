@@ -622,7 +622,7 @@ impl Link {
 /// sidecar restart (MD-01).
 pub fn lighthouse_env_line(peer_id: &PeerId, listen: &Multiaddr) -> String {
     format!(
-        "FLEET_OVERLAY_TRUSTED_PEER_ARGS=--trusted-peers {peer_id} \
+        "ETH_GOSSIP_OVERLAY_TRUSTED_PEER_ARGS=--trusted-peers {peer_id} \
          --libp2p-addresses {listen}/p2p/{peer_id}"
     )
 }
@@ -1802,7 +1802,7 @@ mod tests {
         assert_eq!(next_answer(&mut answers).await, RpcAnswer::Pong(0));
     }
 
-    /// The one line T-045 writes to `/run/fleet-overlay/lighthouse.env`, which the Lighthouse
+    /// The one line T-045 writes to `/run/eth-gossip-overlay/lighthouse.env`, which the Lighthouse
     /// unit reads with `EnvironmentFile=-` and the operator appends to `ExecStart`.
     #[test]
     fn env_line_carries_both_flags() {
@@ -1814,7 +1814,7 @@ mod tests {
         assert_eq!(
             line,
             format!(
-                "FLEET_OVERLAY_TRUSTED_PEER_ARGS=--trusted-peers {peer_id} \
+                "ETH_GOSSIP_OVERLAY_TRUSTED_PEER_ARGS=--trusted-peers {peer_id} \
                  --libp2p-addresses /ip4/127.0.0.1/tcp/7787/p2p/{peer_id}"
             )
         );

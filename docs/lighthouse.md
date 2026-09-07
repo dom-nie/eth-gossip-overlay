@@ -5,24 +5,24 @@ changes, and nothing here can stop the beacon node starting.
 
 ## The drop-in
 
-`/etc/systemd/system/<your-lighthouse-unit>.service.d/10-fleet-overlay-trusted-peer.conf`, the
+`/etc/systemd/system/<your-lighthouse-unit>.service.d/10-eth-gossip-overlay-trusted-peer.conf`, the
 file [`deploy/systemd/`](../deploy/README.md) ships:
 
 ```ini
 # Order the beacon node after the sidecar, so the peer id the sidecar writes is on disk when
-# the beacon node reads it, and read that file. Append $FLEET_OVERLAY_TRUSTED_PEER_ARGS,
+# the beacon node reads it, and read that file. Append $ETH_GOSSIP_OVERLAY_TRUSTED_PEER_ARGS,
 # unquoted, to your own ExecStart= line.
 #
 # The dash keeps the file optional: with no sidecar the beacon node starts without a trusted
 # peer, which is exactly a fleet without the overlay.
 [Unit]
-After=fleet-overlay.service
+After=eth-gossip-overlay.service
 
 [Service]
-EnvironmentFile=-/run/fleet-overlay/lighthouse.env
+EnvironmentFile=-/run/eth-gossip-overlay/lighthouse.env
 ```
 
-Then append `$FLEET_OVERLAY_TRUSTED_PEER_ARGS` to the end of your own `ExecStart=` line,
+Then append `$ETH_GOSSIP_OVERLAY_TRUSTED_PEER_ARGS` to the end of your own `ExecStart=` line,
 unquoted, so systemd splits it into the two flags it holds. That is the only edit to a file you
 own.
 
@@ -34,11 +34,11 @@ trusted peer, and you have exactly the fleet you had before the overlay. There i
 ## What the two flags are
 
 The sidecar writes the file before it binds anything, so the peer id is on disk by the time
-`After=fleet-overlay.service` lets the beacon node read it:
+`After=eth-gossip-overlay.service` lets the beacon node read it:
 
 ```console
-$ cat /run/fleet-overlay/lighthouse.env
-FLEET_OVERLAY_TRUSTED_PEER_ARGS=--trusted-peers 12D3KooWJ6JBbaSGzLK7jZj7qtey7W9wc36Wq8qhkid7Rgpy854b --libp2p-addresses /ip4/127.0.0.1/tcp/7787/p2p/12D3KooWJ6JBbaSGzLK7jZj7qtey7W9wc36Wq8qhkid7Rgpy854b
+$ cat /run/eth-gossip-overlay/lighthouse.env
+ETH_GOSSIP_OVERLAY_TRUSTED_PEER_ARGS=--trusted-peers 12D3KooWJ6JBbaSGzLK7jZj7qtey7W9wc36Wq8qhkid7Rgpy854b --libp2p-addresses /ip4/127.0.0.1/tcp/7787/p2p/12D3KooWJ6JBbaSGzLK7jZj7qtey7W9wc36Wq8qhkid7Rgpy854b
 ```
 
 `--trusted-peers` is what stops the beacon node scoring and pruning the sidecar like an ordinary
@@ -86,7 +86,7 @@ epoch, and the overlay carries correspondingly less.
 Three views of the same fact, in the order to try them:
 
 ```sh
-sudo fleet-overlayctl status
+sudo eth-gossip-overlayctl status
 curl -fsS 127.0.0.1:7789/metrics | grep '^overlay_bn_trusted'
 curl -fsS 127.0.0.1:5052/lighthouse/peers | jq '.[] | select(.peer_info.is_trusted)'
 ```

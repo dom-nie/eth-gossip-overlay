@@ -37,7 +37,7 @@ A surviving mutant is one of three things, and each has an answer.
 - It is equivalent, changing nothing anyone can observe. Skip it.
 - Its only possible test would assert an implementation detail, a log line's wording, or a branch no public entry point can reach. Skip it.
 
-A skip carries its reason, always. Put `#[cfg_attr(test, mutants::skip)]` on the item with a comment above saying why; the attribute comes from the `mutants` dev-dependency and compiles to nothing. When the mutant is on an expression that cannot carry an attribute, add a regex to `exclude_re` in `.cargo/mutants.toml` with the same comment. A bare skip is not a way to make the run quiet, and `overlay-bn` and `fleet-overlay` are not configured yet.
+A skip carries its reason, always. Put `#[cfg_attr(test, mutants::skip)]` on the item with a comment above saying why; the attribute comes from the `mutants` dev-dependency and compiles to nothing. When the mutant is on an expression that cannot carry an attribute, add a regex to `exclude_re` in `.cargo/mutants.toml` with the same comment. A bare skip is not a way to make the run quiet, and `overlay-bn` and `eth-gossip-overlay` are not configured yet.
 
 A mutant that reveals a real bug rather than a missing test is a bug report, and gets fixed on its own branch.
 

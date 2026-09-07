@@ -5,9 +5,9 @@ Things that are worth looking into and that no rule in
 healthy value is a judgement call or because they show up once, on a first install, and never
 again. [troubleshooting.md](troubleshooting.md) is the other half: one section per alert.
 
-The same three commands answer most of these. `fleet-overlayctl status` says what the sidecar
+The same three commands answer most of these. `eth-gossip-overlayctl status` says what the sidecar
 thinks is true, `curl -s 127.0.0.1:7789/metrics` says what it is reporting, and
-`journalctl -u fleet-overlay -o cat | jq .` says what it did.
+`journalctl -u eth-gossip-overlay -o cat | jq .` says what it did.
 
 ## Nothing has ever arrived over the overlay
 
@@ -18,7 +18,7 @@ is usually one of three things rather than a fault.
 Check that the peers are actually there (`overlay_peers_connected` against the roster size),
 that the beacon nodes are synced, since a syncing node subscribes to nothing and there is
 nothing to mirror, and that inject is on at the *other* hosts as well as this one:
-`fleet-overlayctl inject status` on each. After that, the honest possibility is that this host's public
+`eth-gossip-overlayctl inject status` on each. After that, the honest possibility is that this host's public
 gossip is simply beating the overlay, which is a measurement rather than a fault and is what
 [rollout.md](rollout.md) is for. On a two-host fleet expect that often; on a hundred, rarely.
 
@@ -83,9 +83,9 @@ under the request means the kernel capped it at `net.core.rmem_max` or `net.core
 almost always means the sysctl file never landed on this host.
 
 ```sh
-sudo install -m 644 90-fleet-overlay.conf /etc/sysctl.d/
+sudo install -m 644 90-eth-gossip-overlay.conf /etc/sysctl.d/
 sudo sysctl --system
-sudo systemctl restart fleet-overlay
+sudo systemctl restart eth-gossip-overlay
 ```
 
 The buffers are read at bind time, so the restart is what picks the new limits up. Linux reports

@@ -64,9 +64,9 @@ key. Keep it out of the service's reach by handing it to the process as a system
 The shipped unit does this already:
 
 ```ini
-LoadCredential=seed:/etc/fleet-overlay/seed
+LoadCredential=seed:/etc/eth-gossip-overlay/seed
 DynamicUser=yes
-StateDirectory=fleet-overlay
+StateDirectory=eth-gossip-overlay
 ```
 
 `DynamicUser=yes` means no service account owns anything, and the seed is readable only through
@@ -78,12 +78,12 @@ For a host where a plain file at rest is too much, encrypt it to the host's TPM 
 key and drop the plaintext:
 
 ```sh
-sudo systemd-creds encrypt --name=seed seed /etc/fleet-overlay/seed.cred
-sudo rm /etc/fleet-overlay/seed
+sudo systemd-creds encrypt --name=seed seed /etc/eth-gossip-overlay/seed.cred
+sudo rm /etc/eth-gossip-overlay/seed
 ```
 
 then replace the line in the unit with
-`LoadCredentialEncrypted=seed:/etc/fleet-overlay/seed.cred`. Nothing else changes: the sidecar
+`LoadCredentialEncrypted=seed:/etc/eth-gossip-overlay/seed.cred`. Nothing else changes: the sidecar
 reads the same place either way.
 
 The node key in `bn.node_key_file` is a different secret with a much smaller blast radius. It is
@@ -111,25 +111,25 @@ applies a key only when its value changes in the document, so a key that is alre
 nothing when the file behind it is rewritten.
 
 **Step 1. Every host accepts both seeds.** Push the *new* seed to
-`/etc/fleet-overlay/seed.previous`, leaving `/etc/fleet-overlay/seed` as the old one, and add the
+`/etc/eth-gossip-overlay/seed.previous`, leaving `/etc/eth-gossip-overlay/seed` as the old one, and add the
 key that names it:
 
 ```yaml
 overlay:
-  fleet_seed_previous_file: /etc/fleet-overlay/seed.previous
+  fleet_seed_previous_file: /etc/eth-gossip-overlay/seed.previous
 ```
 
 Then reload everywhere and check the report says it applied:
 
 ```sh
-sudo systemctl reload fleet-overlay
+sudo systemctl reload eth-gossip-overlay
 ```
 
 Every running sidecar now derives its own key from the old seed and admits keys from either.
 Nothing has moved yet, and the mesh is untouched.
 
 **Step 2. Lay the files out for the restarts, and do not reload.** Push the new seed as
-`/etc/fleet-overlay/seed` and the old one as `/etc/fleet-overlay/seed.previous`, swapping the two
+`/etc/eth-gossip-overlay/seed` and the old one as `/etc/eth-gossip-overlay/seed.previous`, swapping the two
 files. Leave the config key exactly where it is.
 
 This is the step to get right. A sidecar that is running keeps the pair it already loaded, both
@@ -142,7 +142,7 @@ would then refuse every host that had already restarted.
 **Step 3. Restart the sidecars, one host at a time.**
 
 ```sh
-sudo systemctl restart fleet-overlay
+sudo systemctl restart eth-gossip-overlay
 ```
 
 Wait for the host to come back to a full peer count before doing the next one.
@@ -154,4 +154,4 @@ are a working pair at every point in this procedure.
 **Step 4. Retire the old seed.** Take `overlay.fleet_seed_previous_file` back out of
 `config.yaml` and reload everywhere. Every host is now pinning the new seed alone, and
 `overlay_peer_auth_via_previous_seed_total` stops moving for good. Only then delete
-`/etc/fleet-overlay/seed.previous`, and destroy the old seed wherever you kept it.
+`/etc/eth-gossip-overlay/seed.previous`, and destroy the old seed wherever you kept it.

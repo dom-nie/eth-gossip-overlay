@@ -24,7 +24,7 @@ pub struct Config {
     /// `inject`: whether the sidecar publishes what it receives into the beacon node. `false`
     /// is the kill switch: the sidecar keeps observing and reporting but changes nothing.
     pub inject: bool,
-    /// `admin_socket`: the Unix socket `fleet-overlayctl` connects to.
+    /// `admin_socket`: the Unix socket `eth-gossip-overlayctl` connects to.
     pub admin_socket: PathBuf,
     /// `metrics_listen`: where the Prometheus scrape endpoint binds.
     pub metrics_listen: SocketAddr,
@@ -280,7 +280,7 @@ impl Default for Config {
             bn: Bn::default(),
             classes: Classes::default(),
             inject: true,
-            admin_socket: PathBuf::from("/run/fleet-overlay/admin.sock"),
+            admin_socket: PathBuf::from("/run/eth-gossip-overlay/admin.sock"),
             metrics_listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 7789)),
             log: Log::default(),
         }
@@ -291,8 +291,8 @@ impl Default for Overlay {
     fn default() -> Self {
         Self {
             listen: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 7788)),
-            roster_file: PathBuf::from("/etc/fleet-overlay/roster.yaml"),
-            fleet_seed_file: PathBuf::from("/etc/fleet-overlay/seed"),
+            roster_file: PathBuf::from("/etc/eth-gossip-overlay/roster.yaml"),
+            fleet_seed_file: PathBuf::from("/etc/eth-gossip-overlay/seed"),
             fleet_seed_previous_file: None,
             keepalive: Duration::from_millis(1000),
             idle_timeout: Duration::from_millis(5000),
@@ -341,7 +341,7 @@ impl Default for Bn {
             identity_url: url("http://127.0.0.1:5052/eth/v1/node/identity"),
             events_url: url("http://127.0.0.1:5052/eth/v1/events?topics=block"),
             libp2p_addr: "/ip4/127.0.0.1/tcp/9000".to_owned(),
-            node_key_file: PathBuf::from("/var/lib/fleet-overlay/node.key"),
+            node_key_file: PathBuf::from("/var/lib/eth-gossip-overlay/node.key"),
             listen_addr: "/ip4/127.0.0.1/tcp/7787".to_owned(),
             publish_rate_limit: PublishRateLimit::default(),
             idontwant_on_publish: true,
@@ -568,9 +568,9 @@ mod tests {
     const APPENDIX_A: &str = r#"
 overlay:
   listen: "[::]:7788"           # dual-stack, default public interface, no interface selection
-  roster_file: /etc/fleet-overlay/roster.yaml   # re-read on SIGHUP and within 10 s of a change
-  fleet_seed_file: /etc/fleet-overlay/seed      # $CREDENTIALS_DIRECTORY/seed wins when the unit uses LoadCredential=
-  # fleet_seed_previous_file: /etc/fleet-overlay/seed.previous   # optional, set only while a seed rotation is in progress
+  roster_file: /etc/eth-gossip-overlay/roster.yaml   # re-read on SIGHUP and within 10 s of a change
+  fleet_seed_file: /etc/eth-gossip-overlay/seed      # $CREDENTIALS_DIRECTORY/seed wins when the unit uses LoadCredential=
+  # fleet_seed_previous_file: /etc/eth-gossip-overlay/seed.previous   # optional, set only while a seed rotation is in progress
   keepalive_ms: 1000
   idle_timeout_ms: 5000
   initial_window_bytes: 4000000
@@ -593,7 +593,7 @@ bn:
   identity_url: http://127.0.0.1:5052/eth/v1/node/identity
   events_url: http://127.0.0.1:5052/eth/v1/events?topics=block
   libp2p_addr: /ip4/127.0.0.1/tcp/9000
-  node_key_file: /var/lib/fleet-overlay/node.key   # per-host libp2p identity, created on first start
+  node_key_file: /var/lib/eth-gossip-overlay/node.key   # per-host libp2p identity, created on first start
   listen_addr: /ip4/127.0.0.1/tcp/7787            # where the beacon node dials the sidecar (MD-01); restart-required
   publish_rate_limit:
     small_per_s: 8000
@@ -609,7 +609,7 @@ classes:
     parity_ratio: 0.10
     repair_deadline_ms: 250     # measured from the first chunk
 inject: true
-admin_socket: /run/fleet-overlay/admin.sock
+admin_socket: /run/eth-gossip-overlay/admin.sock
 metrics_listen: 127.0.0.1:7789
 log:
   level: info
@@ -637,7 +637,7 @@ log:
         assert_eq!(cfg.metrics_listen, addr("127.0.0.1:7789"));
         assert_eq!(
             cfg.bn.node_key_file,
-            PathBuf::from("/var/lib/fleet-overlay/node.key")
+            PathBuf::from("/var/lib/eth-gossip-overlay/node.key")
         );
         assert_eq!(cfg.bn.publish_rate_limit.small_per_s, 8000);
         assert_eq!(cfg.log.format, LogFormat::Auto);
@@ -695,14 +695,14 @@ log:
     fn previous_seed_file_is_none_unless_set() {
         let absent = Config::from_yaml("{}").unwrap();
         let set = Config::from_yaml(
-            "overlay: { fleet_seed_previous_file: /etc/fleet-overlay/seed.previous }",
+            "overlay: { fleet_seed_previous_file: /etc/eth-gossip-overlay/seed.previous }",
         )
         .unwrap();
 
         assert_eq!(absent.overlay.fleet_seed_previous_file, None);
         assert_eq!(
             set.overlay.fleet_seed_previous_file,
-            Some(PathBuf::from("/etc/fleet-overlay/seed.previous"))
+            Some(PathBuf::from("/etc/eth-gossip-overlay/seed.previous"))
         );
     }
 
@@ -877,13 +877,13 @@ log:
 
     #[test]
     fn load_reports_path_when_file_missing() {
-        let path = Path::new("/nonexistent/fleet-overlay/config.yaml");
+        let path = Path::new("/nonexistent/eth-gossip-overlay/config.yaml");
 
         let err = Config::load(path).unwrap_err();
 
         assert!(
             err.to_string()
-                .contains("/nonexistent/fleet-overlay/config.yaml"),
+                .contains("/nonexistent/eth-gossip-overlay/config.yaml"),
             "{err}"
         );
     }

@@ -29,7 +29,7 @@ jobs:
       # One scenario at a time: thirty sidecars and thirty fake beacon nodes is enough for one
       # runner to hold, and eleven of those at once is not.
       - name: Scenarios at thirty hosts
-        run: cargo test -p fleet-overlay --test fleet_v1 -- --test-threads=1
+        run: cargo test -p eth-gossip-overlay --test fleet_v1 -- --test-threads=1
         env:
           FLEET_NODES: 30
 

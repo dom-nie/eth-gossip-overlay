@@ -1,0 +1,1133 @@
+{
+  "uid": "eth-gossip-overlay",
+  "title": "Fleet gossip overlay",
+  "description": "The sidecar's own view: the overlay mesh, what crosses it, whether it wins and what the guardrails are doing. The last row needs a Loki datasource and the rest do not.",
+  "tags": [
+    "eth-gossip-overlay"
+  ],
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "timezone": "browser",
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "prom",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      },
+      {
+        "name": "loki",
+        "label": "Loki (optional)",
+        "type": "datasource",
+        "query": "loki",
+        "current": {},
+        "hide": 0,
+        "refresh": 1
+      },
+      {
+        "name": "instance",
+        "label": "Host",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${prom}"
+        },
+        "query": "label_values(overlay_build_info, instance)",
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {},
+        "options": []
+      }
+    ]
+  },
+  "panels": [
+    {
+      "type": "row",
+      "title": "Overview",
+      "id": 1,
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Peers connected and roster",
+      "id": 2,
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prom}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (instance) (overlay_peers_connected{instance=~\"$instance\"})",
+          "refId": "A",
+          "legendFormat": "{{instance}} connected"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (instance) (overlay_peers_roster{instance=~\"$instance\"})",
+          "refId": "B",
+          "legendFormat": "{{instance}} roster"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "OverlayPeersLow fires when the first line sits under 80% of the second for five minutes."
+    },
+    {
+      "type": "stat",
+      "title": "Beacon node link and trust",
+      "id": 3,
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 12,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prom}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "overlay_bn_connected{instance=~\"$instance\"}",
+          "refId": "A",
+          "legendFormat": "{{instance}} link"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "overlay_bn_trusted{instance=~\"$instance\"}",
+          "refId": "B",
+          "legendFormat": "{{instance}} trusted"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "overlay_bn_subscriptions{instance=~\"$instance\"}",
+          "refId": "C",
+          "legendFormat": "{{instance}} subscriptions"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value_and_name"
+      },
+      "description": "Link and trust are 1 or 0. Trust missing altogether means the beacon node's HTTP API did not answer the probe, which is not the same as a 0."
+    },
+    {
+      "type": "stat",
+      "title": "Beacon node version",
+      "id": 4,
+      "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 12,
+        "h": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prom}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "overlay_bn_info{instance=~\"$instance\"}",
+          "refId": "A",
+          "legendFormat": "{{instance}} {{version}}",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "horizontal",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "name"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Traffic",
+      "id": 5,
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Messages per second, by class and direction",
+      "id": 6,
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prom}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (class, direction) (rate(overlay_messages_total{instance=~\"$instance\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{class}} {{direction}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Payload bytes per second, by class and direction",
+      "id": 7,
+      "gridPos": {
+        "x": 12,
+        "y": 10,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prom}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (class, direction) (rate(overlay_bytes_total{instance=~\"$instance\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{class}} {{direction}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "Bps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Effectiveness",
+      "id": 8,
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 18,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Overlay win rate, large class",
+      "id": 9,
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prom}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum(rate(overlay_first_seen_total{instance=~\"$instance\",class=\"large\",source=\"overlay\"}[5m]))\n  / sum(rate(overlay_first_seen_total{instance=~\"$instance\",class=\"large\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "win rate"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0.5
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "The share of large messages a fleet peer delivered before the local beacon node had them. Above 0.5 is the second of the three canary criteria."
+    },
+    {
+      "type": "timeseries",
+      "title": "Duplicates dropped per second",
+      "id": 10,
+      "gridPos": {
+        "x": 12,
+        "y": 19,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prom}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (class, source) (rate(overlay_duplicates_dropped_total{instance=~\"$instance\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{class}} from {{source}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Every message the overlay wins arrives twice. These are the copies the seen cache threw away, so the line is the overlay working rather than a fault."
+    },
+    {
+      "type": "row",
+      "title": "Health",
+      "id": 11,
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Deepest peer send lane",
+      "id": 12,
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prom}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "max by (unit) (overlay_peer_queue_depth{instance=~\"$instance\"})",
+          "refId": "A",
+          "legendFormat": "{{unit}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Frames and bytes on one axis, because what matters is that neither is sitting near its bound. Which peer it is comes from eth-gossip-overlayctl status."
+    },
+    {
+      "type": "timeseries",
+      "title": "Dropped per second, by lane",
+      "id": 13,
+      "gridPos": {
+        "x": 12,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prom}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (reason) (rate(overlay_peer_queue_drops_total{instance=~\"$instance\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "peer lane {{reason}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (reason) (rate(overlay_publish_queue_drops_total{instance=~\"$instance\"}[5m]))",
+          "refId": "B",
+          "legendFormat": "publish queue {{reason}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (class) (rate(overlay_fanout_lane_dropped_total{instance=~\"$instance\"}[5m]))",
+          "refId": "C",
+          "legendFormat": "fanout lane {{class}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (class) (rate(overlay_bn_events_dropped_total{instance=~\"$instance\"}[5m]))",
+          "refId": "D",
+          "legendFormat": "beacon node lane {{class}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Guardrails per second",
+      "id": 14,
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prom}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (reason) (rate(overlay_stale_dropped_total{instance=~\"$instance\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "stale {{reason}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (class) (rate(overlay_rate_limited_total{instance=~\"$instance\"}[5m]))",
+          "refId": "B",
+          "legendFormat": "rate limited {{class}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (reason) (rate(overlay_publish_errors_total{instance=~\"$instance\"}[5m]))",
+          "refId": "C",
+          "legendFormat": "publish error {{reason}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (reason) (rate(overlay_publish_suppressed_total{instance=~\"$instance\"}[5m]))",
+          "refId": "D",
+          "legendFormat": "suppressed {{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "publish_errors_total{reason=\"no_subscribers\"} is the SUBS race, not an error, and suppressed{reason=\"inject_off\"} is the kill switch doing its job."
+    },
+    {
+      "type": "timeseries",
+      "title": "Handshake failures per second, by reason",
+      "id": 15,
+      "gridPos": {
+        "x": 12,
+        "y": 36,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prom}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (role, reason) (rate(overlay_handshake_failures_total{instance=~\"$instance\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{role}} {{reason}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "reason=\"version\" during a rolling upgrade across a protocol major is expected and stops when the last host is done (docs/upgrading.md)."
+    },
+    {
+      "type": "timeseries",
+      "title": "Fan-out budget and rejected roster reloads",
+      "id": 16,
+      "gridPos": {
+        "x": 0,
+        "y": 44,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prom}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (peer, kind) (rate(overlay_fanout_suppressed_total{instance=~\"$instance\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "suppressed {{peer}} {{kind}}"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (instance) (rate(overlay_roster_reload_rejected_total{instance=~\"$instance\"}[5m]))",
+          "refId": "B",
+          "legendFormat": "{{instance}} roster reload rejected"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "Neither line should move on a healthy fleet. Both have an alert on any increase at all."
+    },
+    {
+      "type": "row",
+      "title": "Process",
+      "id": 17,
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 52,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Resident memory against MemoryMax",
+      "id": 18,
+      "gridPos": {
+        "x": 0,
+        "y": 53,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prom}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "process_resident_memory_bytes{job=\"eth-gossip-overlay\",instance=~\"$instance\"}",
+          "refId": "A",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true,
+            "thresholdsStyle": {
+              "mode": "line"
+            }
+          },
+          "unit": "bytes",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 429496730
+              },
+              {
+                "color": "red",
+                "value": 536870912
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "description": "The lines are 80% of the shipped unit's MemoryMax and MemoryMax itself, both 512M. Change MemoryMax and these thresholds and OverlayMemoryHigh's literal have to change with it."
+    },
+    {
+      "type": "timeseries",
+      "title": "CPU seconds per second",
+      "id": 19,
+      "gridPos": {
+        "x": 8,
+        "y": 53,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prom}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "rate(process_cpu_seconds_total{job=\"eth-gossip-overlay\",instance=~\"$instance\"}[5m])",
+          "refId": "A",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Open file descriptors",
+      "id": 20,
+      "gridPos": {
+        "x": 16,
+        "y": 53,
+        "w": 8,
+        "h": 8
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${prom}"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "process_open_fds{job=\"eth-gossip-overlay\",instance=~\"$instance\"}",
+          "refId": "A",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never",
+            "spanNulls": true
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "row",
+      "title": "Fleet spread and arrival (optional, needs a Loki datasource)",
+      "id": 23,
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 61,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "type": "timeseries",
+          "title": "Fleet spread per block (ms)",
+          "id": 21,
+          "gridPos": {
+            "x": 0,
+            "y": 62,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "${loki}"
+              },
+              "expr": "avg((\n  max by (msg_id) (max_over_time({unit=\"eth-gossip-overlay.service\"} | json | event=\"first_arrival\" | topic=~\".*beacon_block.*\" | unwrap first_arrival_ns [5m]))\n  -\n  min by (msg_id) (min_over_time({unit=\"eth-gossip-overlay.service\"} | json | event=\"first_arrival\" | topic=~\".*beacon_block.*\" | unwrap first_arrival_ns [5m]))\n) / 1e6)",
+              "refId": "A",
+              "legendFormat": "mean"
+            },
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "${loki}"
+              },
+              "expr": "max((\n  max by (msg_id) (max_over_time({unit=\"eth-gossip-overlay.service\"} | json | event=\"first_arrival\" | topic=~\".*beacon_block.*\" | unwrap first_arrival_ns [5m]))\n  -\n  min by (msg_id) (min_over_time({unit=\"eth-gossip-overlay.service\"} | json | event=\"first_arrival\" | topic=~\".*beacon_block.*\" | unwrap first_arrival_ns [5m]))\n) / 1e6)",
+              "refId": "B",
+              "legendFormat": "worst host pair"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              },
+              "unit": "ms"
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "description": "First arrival to last arrival of one block across the fleet, the first canary criterion. LogQL has no quantile across series, so the panel shows the mean and the worst block; docs/rollout.md says how to get the p50 and p99 the criterion is written in."
+        },
+        {
+          "type": "timeseries",
+          "title": "Arrival to import (v3)",
+          "id": 22,
+          "gridPos": {
+            "x": 12,
+            "y": 62,
+            "w": 12,
+            "h": 8
+          },
+          "datasource": {
+            "type": "loki",
+            "uid": "${loki}"
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "${loki}"
+              },
+              "expr": "sum(count_over_time({unit=\"eth-gossip-overlay.service\"} | json | event=\"import\" [5m]))",
+              "refId": "A",
+              "legendFormat": "import events"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 8,
+                "showPoints": "never",
+                "spanNulls": true
+              }
+            },
+            "overrides": []
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          },
+          "description": "Import time comes from the beacon node's event stream in v3 (T-084) as a second event joined by msg_id. Until that ships this panel counts import events, and there are none."
+        }
+      ]
+    }
+  ]
+}

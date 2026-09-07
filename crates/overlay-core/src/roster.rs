@@ -218,12 +218,12 @@ pub struct SelfIdentity {
     pub site: Option<String>,
 }
 
-const HOSTNAME_ENV: &str = "FLEET_OVERLAY_HOSTNAME";
-const REGION_ENV: &str = "FLEET_OVERLAY_REGION";
-const SITE_ENV: &str = "FLEET_OVERLAY_SITE";
+const HOSTNAME_ENV: &str = "ETH_GOSSIP_OVERLAY_HOSTNAME";
+const REGION_ENV: &str = "ETH_GOSSIP_OVERLAY_REGION";
+const SITE_ENV: &str = "ETH_GOSSIP_OVERLAY_SITE";
 
-/// Works out who this process is: `FLEET_OVERLAY_HOSTNAME` if set, else `gethostname`, looked
-/// up in `roster`. `FLEET_OVERLAY_REGION` and `FLEET_OVERLAY_SITE` override the entry's
+/// Works out who this process is: `ETH_GOSSIP_OVERLAY_HOSTNAME` if set, else `gethostname`, looked
+/// up in `roster`. `ETH_GOSSIP_OVERLAY_REGION` and `ETH_GOSSIP_OVERLAY_SITE` override the entry's
 /// values, and with the region set a host missing from the roster still resolves, with no site
 /// unless the environment gives one. Both sources are passed in so this crate never reads the
 /// real environment and a test can stage any combination.
@@ -438,7 +438,7 @@ hosts:
 
         let me = resolve_self(
             &roster,
-            &env(&[("FLEET_OVERLAY_HOSTNAME", "bn-nyc1-01")]),
+            &env(&[("ETH_GOSSIP_OVERLAY_HOSTNAME", "bn-nyc1-01")]),
             &gethostname,
         )
         .unwrap();
@@ -466,8 +466,8 @@ hosts:
         let me = resolve_self(
             &roster,
             &env(&[
-                ("FLEET_OVERLAY_HOSTNAME", "bn-nyc1-01"),
-                ("FLEET_OVERLAY_REGION", "eu"),
+                ("ETH_GOSSIP_OVERLAY_HOSTNAME", "bn-nyc1-01"),
+                ("ETH_GOSSIP_OVERLAY_REGION", "eu"),
             ]),
             &gethostname,
         )
@@ -483,7 +483,7 @@ hosts:
 
         let err = resolve_self(
             &roster,
-            &env(&[("FLEET_OVERLAY_HOSTNAME", "bn-lon1-03")]),
+            &env(&[("ETH_GOSSIP_OVERLAY_HOSTNAME", "bn-lon1-03")]),
             &gethostname,
         )
         .unwrap_err();
@@ -493,7 +493,7 @@ hosts:
         );
         let message = err.to_string();
         assert!(
-            message.contains("bn-lon1-03") && message.contains("FLEET_OVERLAY_REGION"),
+            message.contains("bn-lon1-03") && message.contains("ETH_GOSSIP_OVERLAY_REGION"),
             "{message}"
         );
     }
@@ -505,8 +505,8 @@ hosts:
         let me = resolve_self(
             &roster,
             &env(&[
-                ("FLEET_OVERLAY_HOSTNAME", "bn-lon1-03"),
-                ("FLEET_OVERLAY_REGION", "eu"),
+                ("ETH_GOSSIP_OVERLAY_HOSTNAME", "bn-lon1-03"),
+                ("ETH_GOSSIP_OVERLAY_REGION", "eu"),
             ]),
             &gethostname,
         )
@@ -523,7 +523,7 @@ hosts:
 
         let me = resolve_self(
             &roster,
-            &env(&[("FLEET_OVERLAY_SITE", "ams2")]),
+            &env(&[("ETH_GOSSIP_OVERLAY_SITE", "ams2")]),
             &gethostname,
         )
         .unwrap();

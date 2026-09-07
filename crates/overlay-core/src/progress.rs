@@ -8,7 +8,7 @@
 //! and systemd restarts the process.
 //!
 //! The counter is the whole contract, which is why it is a bare atomic rather than a type: the
-//! crates that own the loops know nothing about systemd, and `fleet-overlay` is where the four
+//! crates that own the loops know nothing about systemd, and `eth-gossip-overlay` is where the four
 //! are read together.
 
 use std::time::Duration;

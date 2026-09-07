@@ -14,13 +14,13 @@
 #                          would give them. Needs a testnet and minutes of checkpoint sync, so it
 #                          runs only with --with-beacon-nodes, which is the nightly job.
 #
-# IMAGE          the sidecar image, fleet-overlay:demo by default
+# IMAGE          the sidecar image, eth-gossip-overlay:demo by default
 # TOOLBOX        the Dockerfile's toolbox stage, which the demo's setup step needs
 # ALERT_TIMEOUT  seconds an alert has to go pending, 120 by default
 set -euo pipefail
 
-IMAGE=${IMAGE:-fleet-overlay:demo}
-TOOLBOX=${TOOLBOX:-fleet-overlay:toolbox}
+IMAGE=${IMAGE:-eth-gossip-overlay:demo}
+TOOLBOX=${TOOLBOX:-eth-gossip-overlay:toolbox}
 ALERT_TIMEOUT=${ALERT_TIMEOUT:-120}
 MESH_TIMEOUT=${MESH_TIMEOUT:-120}
 TRUST_TIMEOUT=${TRUST_TIMEOUT:-900}
@@ -42,7 +42,7 @@ fail() {
 }
 
 compose() {
-  FLEET_OVERLAY_IMAGE=$IMAGE FLEET_OVERLAY_TOOLBOX_IMAGE=$TOOLBOX \
+  ETH_GOSSIP_OVERLAY_IMAGE=$IMAGE ETH_GOSSIP_OVERLAY_TOOLBOX_IMAGE=$TOOLBOX \
     docker compose -f "$demo/docker-compose.yml" "$@"
 }
 

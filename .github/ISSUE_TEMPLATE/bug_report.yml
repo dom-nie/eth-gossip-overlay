@@ -6,7 +6,7 @@ body:
     id: sidecar-version
     attributes:
       label: Sidecar version
-      description: Output of `fleet-overlay --version`
+      description: Output of `eth-gossip-overlay --version`
     validations:
       required: true
   - type: input

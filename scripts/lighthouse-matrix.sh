@@ -4,10 +4,10 @@
 #   scripts/lighthouse-matrix.sh <version> [--ten-minutes]
 #
 # Downloads the release artefact for this host into ${LIGHTHOUSE_CACHE:-/tmp}/lighthouse-<version>
-# (skipped when it is already there), builds fleet-overlay, starts a beacon node on sepolia with
+# (skipped when it is already there), builds eth-gossip-overlay, starts a beacon node on sepolia with
 # no discovery, no execution layer, the sidecar's peer id as its only trusted peer and the
 # sidecar's listen address as a libp2p node to dial (both flags of MD-01's env file), and runs
-# `cargo test -p overlay-bn --test matrix -- --ignored`. It then runs the fleet-overlay binary
+# `cargo test -p overlay-bn --test matrix -- --ignored`. It then runs the eth-gossip-overlay binary
 # against the same node and waits for the node to call it trusted, which is the only check here
 # that covers what the shipped binary is built from rather than what a test build links.
 # Sepolia because its genesis state is built into the binary; the node stays at genesis and
@@ -49,7 +49,7 @@ fi
 "$cache/lighthouse" --version | head -1
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-cargo build --manifest-path "$root/Cargo.toml" -p fleet-overlay --bin fleet-overlay
+cargo build --manifest-path "$root/Cargo.toml" -p eth-gossip-overlay --bin eth-gossip-overlay
 
 work=$(mktemp -d)
 bn_pid=
@@ -68,7 +68,7 @@ cleanup() {
 trap cleanup EXIT
 
 printf 'bn: { node_key_file: %s }\n' "$work/node.key" > "$work/config.yaml"
-peer_id=$("$root/target/debug/fleet-overlay" peer-id --config "$work/config.yaml")
+peer_id=$("$root/target/debug/eth-gossip-overlay" peer-id --config "$work/config.yaml")
 od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > "$work/jwt.hex"
 
 free_port() {
@@ -128,12 +128,12 @@ cargo test --manifest-path "$root/Cargo.toml" -p overlay-bn --test matrix -- --i
 
 # The one thing the tests above cannot check: the shipped binary. They link lighthouse_network,
 # which turns libp2p's secp256k1 feature on for a test build, so they pass whether or not
-# fleet-overlay itself can decode a Lighthouse identity. This runs the binary an operator runs,
+# eth-gossip-overlay itself can decode a Lighthouse identity. This runs the binary an operator runs,
 # against the same beacon node, and asks the beacon node whether it arrived. It comes last so it
 # takes the peer slot only once the tests are done with it.
 overlay_port=$(free_port)
 metrics_port=$(free_port)
-"$root/target/debug/fleet-overlay" gen-seed --out "$work/seed" > /dev/null
+"$root/target/debug/eth-gossip-overlay" gen-seed --out "$work/seed" > /dev/null
 cat > "$work/roster.yaml" <<ROSTER
 hosts:
   - hostname: matrix
@@ -158,7 +158,7 @@ bn:
 admin_socket: $work/admin.sock
 metrics_listen: 127.0.0.1:$metrics_port
 CONF
-FLEET_OVERLAY_HOSTNAME=matrix "$root/target/debug/fleet-overlay" run --config "$work/sidecar.yaml" \
+ETH_GOSSIP_OVERLAY_HOSTNAME=matrix "$root/target/debug/eth-gossip-overlay" run --config "$work/sidecar.yaml" \
   > "$work/sidecar.log" 2>&1 &
 sidecar_pid=$!
 
@@ -178,7 +178,7 @@ if [[ $trusted == 1 ]]; then
   echo "the shipped binary paired with the beacon node, which lists it as trusted"
 else
   cat >&2 <<'WHY'
-the shipped fleet-overlay binary never paired with the beacon node.
+the shipped eth-gossip-overlay binary never paired with the beacon node.
 The tests above cannot see this: they link lighthouse_network, which turns libp2p's secp256k1
 feature on for a test build, while the binary is built without it. A dial ending in `Invalid
 public key` means the workspace Cargo.toml's libp2p is missing the secp256k1 feature.

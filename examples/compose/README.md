@@ -47,7 +47,7 @@ volume so the beacon nodes have their `--trusted-peers` value before they start.
 sidecar warns at startup that the endpoint is not on loopback, and that warning is correct: on
 a real host it stays on `127.0.0.1` and only the local scraper reaches it.
 
-Grafana loads `deploy/grafana/fleet-overlay.json`, mounted from the repository rather than
+Grafana loads `deploy/grafana/eth-gossip-overlay.json`, mounted from the repository rather than
 copied here, so the dashboard an operator installs is the one the demo shows. Drop your own JSON
 into `dashboards/` and it is loaded beside it. Prometheus loads `deploy/prometheus/alerts.yml`
 the same way, and their state is at <http://127.0.0.1:9090/alerts>.
@@ -90,7 +90,7 @@ docker compose logs --no-log-prefix sc-1 | jq 'select(.event == "first_arrival")
 And what the sidecar itself says it is doing:
 
 ```sh
-docker compose exec sc-1 fleet-overlayctl --socket /var/lib/fleet-overlay/admin.sock status
+docker compose exec sc-1 eth-gossip-overlayctl --socket /var/lib/eth-gossip-overlay/admin.sock status
 ```
 
 ## The overlay on its own
@@ -110,7 +110,7 @@ along with the other checks the image has to pass.
 ```sh
 docker compose down            # keeps the volumes, so a restart keeps the peer ids
 docker compose down -v         # removes them too: new node keys, new seed, a fresh sync
-docker image rm fleet-overlay:demo
+docker image rm eth-gossip-overlay:demo
 ```
 
 Keeping the volumes is the interesting case. The node key is the peer id the beacon node was
@@ -145,11 +145,11 @@ and hides path MTU discovery from the endpoint. The demo uses a bridge network a
 on one machine none of that matters.
 
 ```sh
-docker build -t fleet-overlay ../..
-docker run -d --name fleet-overlay --network host \
-  -v /etc/fleet-overlay:/etc/fleet-overlay:ro \
-  -v fleet-overlay-state:/var/lib/fleet-overlay \
-  fleet-overlay
+docker build -t eth-gossip-overlay ../..
+docker run -d --name eth-gossip-overlay --network host \
+  -v /etc/eth-gossip-overlay:/etc/eth-gossip-overlay:ro \
+  -v eth-gossip-overlay-state:/var/lib/eth-gossip-overlay \
+  eth-gossip-overlay
 ```
 
 There is no published image to pull yet; the release pipeline is the ticket after this one.

@@ -16,9 +16,9 @@ no execution client and no database of its own.
 ## 1. Install the binaries
 
 ```sh
-tar xzf fleet-overlay-0.1.0-x86_64-unknown-linux-gnu.tar.gz
-sudo install -m 755 fleet-overlay fleet-overlayctl /usr/local/bin/
-fleet-overlay --version
+tar xzf eth-gossip-overlay-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+sudo install -m 755 eth-gossip-overlay eth-gossip-overlayctl /usr/local/bin/
+eth-gossip-overlay --version
 ```
 
 [upgrading.md](upgrading.md) has the checksum and provenance commands, and what the second
@@ -29,7 +29,7 @@ fleet-overlay --version
 Once, anywhere, then copy the file to both hosts over a channel you trust:
 
 ```sh
-fleet-overlay gen-seed --out ./seed
+eth-gossip-overlay gen-seed --out ./seed
 ```
 
 Every host's overlay TLS key is derived from this seed and its own hostname, which is how the
@@ -57,11 +57,11 @@ defaults are what a bare-metal host wants, and [configuration.md](configuration.
 when you want to change one.
 
 ```sh
-sudo install -d -m 755 /etc/fleet-overlay
-sudo install -m 600 seed /etc/fleet-overlay/seed
-sudo install -m 644 config.yaml /etc/fleet-overlay/config.yaml
-sudo install -m 644 roster.yaml /etc/fleet-overlay/roster.yaml
-echo "FLEET_OVERLAY_HOSTNAME=$(hostname)" | sudo tee /etc/fleet-overlay/fleet-overlay.env
+sudo install -d -m 755 /etc/eth-gossip-overlay
+sudo install -m 600 seed /etc/eth-gossip-overlay/seed
+sudo install -m 644 config.yaml /etc/eth-gossip-overlay/config.yaml
+sudo install -m 644 roster.yaml /etc/eth-gossip-overlay/roster.yaml
+echo "ETH_GOSSIP_OVERLAY_HOSTNAME=$(hostname)" | sudo tee /etc/eth-gossip-overlay/eth-gossip-overlay.env
 ```
 
 The hostname in that last file has to be the `hostname:` of this host's roster entry. It is the
@@ -74,23 +74,23 @@ Rehearse the start first. `check-config` reads the same files in the same order 
 prints who this host turned out to be:
 
 ```sh
-sudo fleet-overlay check-config
+sudo eth-gossip-overlay check-config
 ```
 
 If your roster names this host something other than `hostname` reports, put
-`FLEET_OVERLAY_HOSTNAME=` in front of that command with the value the unit's environment file
+`ETH_GOSSIP_OVERLAY_HOSTNAME=` in front of that command with the value the unit's environment file
 carries; `check-config` reads the environment the same way a start does.
 
 Then install the unit from [`deploy/systemd/`](../deploy/README.md) and start it:
 
 ```sh
-sudo install -m 644 fleet-overlay.service /etc/systemd/system/
+sudo install -m 644 eth-gossip-overlay.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now fleet-overlay
+sudo systemctl enable --now eth-gossip-overlay
 ```
 
 On its first start the sidecar creates its libp2p node key, and before it binds anything it
-writes `/run/fleet-overlay/lighthouse.env` with the peer id that key gives it. That file is how
+writes `/run/eth-gossip-overlay/lighthouse.env` with the peer id that key gives it. That file is how
 the beacon node learns which peer to trust.
 
 Do both hosts before going on. Two sidecars make a mesh; one makes nothing.
@@ -102,11 +102,11 @@ own `ExecStart=` line passes the flags on:
 
 ```sh
 sudo install -d -m 755 /etc/systemd/system/lighthouse-bn.service.d
-sudo install -m 644 10-fleet-overlay-trusted-peer.conf \
+sudo install -m 644 10-eth-gossip-overlay-trusted-peer.conf \
   /etc/systemd/system/lighthouse-bn.service.d/
 ```
 
-Append `$FLEET_OVERLAY_TRUSTED_PEER_ARGS`, unquoted, to the end of the `ExecStart=` line in your
+Append `$ETH_GOSSIP_OVERLAY_TRUSTED_PEER_ARGS`, unquoted, to the end of the `ExecStart=` line in your
 Lighthouse unit, then:
 
 ```sh
@@ -124,7 +124,7 @@ The sidecar's own account of itself. `bn` should say `connected` and `trusted`, 
 roster host should have a row:
 
 ```sh
-sudo fleet-overlayctl status
+sudo eth-gossip-overlayctl status
 ```
 
 ```console
@@ -148,7 +148,7 @@ host, and `"source":"overlay"` on a line means a sibling delivered it before the
 did:
 
 ```sh
-journalctl -u fleet-overlay -o cat | jq 'select(.event == "first_arrival")'
+journalctl -u eth-gossip-overlay -o cat | jq 'select(.event == "first_arrival")'
 ```
 
 ```console

@@ -1,0 +1,11 @@
+# Every dashboard JSON under /var/lib/grafana/dashboards is loaded at startup, subdirectories
+# included. docker-compose.yml mounts two of them there: `shipped` is deploy/grafana, which is
+# where the project's own dashboard lives, and `local` is examples/compose/dashboards, which is
+# yours to drop files into.
+apiVersion: 1
+
+providers:
+  - name: eth-gossip-overlay
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

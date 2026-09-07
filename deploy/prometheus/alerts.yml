@@ -2,11 +2,11 @@
 # Load them into your own Prometheus:
 #
 #   rule_files:
-#     - /etc/prometheus/rules/fleet-overlay.yml
+#     - /etc/prometheus/rules/eth-gossip-overlay.yml
 #
 # Every `overlay_*` series here comes from the sidecar alone, so those rules need no job
 # selector. The two `process_*` rules do, because every other target with a process collector
-# exports the same names; they assume the scrape job is called `fleet-overlay`, and changing
+# exports the same names; they assume the scrape job is called `eth-gossip-overlay`, and changing
 # that name means changing them.
 #
 # The windows are starting points for a fleet of a couple of hundred hosts on a slot time of
@@ -14,7 +14,7 @@
 # really telling you; docs/troubleshooting.md is where each `runbook` annotation points.
 
 groups:
-  - name: fleet-overlay
+  - name: eth-gossip-overlay
     rules:
       # §12: the ratio of live peers to roster hosts. Both gauges are per region and site, so
       # each is summed back to one number per host before they are compared. A roster of one
@@ -103,7 +103,7 @@ groups:
           runbook: docs/troubleshooting.md#overlayrosterreloadrejected
 
       # OPS-N4, at 80% of the ceiling. Prometheus cannot read the unit's MemoryMax, so 512M is
-      # the literal here and it is the value deploy/systemd/fleet-overlay.service sets. Raise or
+      # the literal here and it is the value deploy/systemd/eth-gossip-overlay.service sets. Raise or
       # lower MemoryMax and this number has to move with it (docs/rollout.md says so too).
       - alert: OverlayMemoryHigh
         expr: process_resident_memory_bytes{job="eth-gossip-overlay"} / (512 * 1024 * 1024) > 0.8

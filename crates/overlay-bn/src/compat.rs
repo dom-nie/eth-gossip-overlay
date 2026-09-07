@@ -96,7 +96,7 @@ impl CompatStats for () {
 }
 
 /// What the last connect probe said about the beacon node, for the readers that need the
-/// values rather than the gauges: `fleet-overlayctl status` shows the version an operator is
+/// values rather than the gauges: `eth-gossip-overlayctl status` shows the version an operator is
 /// rolling out and the `trusted` flag the `OverlayNotTrustedByBn` alert watches (D09, T-042).
 ///
 /// Every field is `None` until the beacon node has said, which is what `status` renders as
@@ -154,7 +154,7 @@ impl Watch {
         }
     }
 
-    /// Follows what the beacon node last said, which is where `fleet-overlayctl status` reads
+    /// Follows what the beacon node last said, which is where `eth-gossip-overlayctl status` reads
     /// the version and the trust flag (T-042).
     pub fn info(&self) -> watch::Receiver<BnInfo> {
         self.info.subscribe()

@@ -1,8 +1,8 @@
 overlay:
   listen: "[::]:7788"           # dual-stack, default public interface, no interface selection
-  roster_file: /etc/fleet-overlay/roster.yaml   # re-read on SIGHUP and within 10 s of a change
-  fleet_seed_file: /etc/fleet-overlay/seed      # $CREDENTIALS_DIRECTORY/seed wins when the unit uses LoadCredential=
-  # fleet_seed_previous_file: /etc/fleet-overlay/seed.previous   # optional, set only while a seed rotation is in progress
+  roster_file: /etc/eth-gossip-overlay/roster.yaml   # re-read on SIGHUP and within 10 s of a change
+  fleet_seed_file: /etc/eth-gossip-overlay/seed      # $CREDENTIALS_DIRECTORY/seed wins when the unit uses LoadCredential=
+  # fleet_seed_previous_file: /etc/eth-gossip-overlay/seed.previous   # optional, set only while a seed rotation is in progress
   keepalive_ms: 1000
   idle_timeout_ms: 5000
   initial_window_bytes: 4000000
@@ -25,7 +25,7 @@ bn:
   identity_url: http://127.0.0.1:5052/eth/v1/node/identity
   events_url: http://127.0.0.1:5052/eth/v1/events?topics=block
   libp2p_addr: /ip4/127.0.0.1/tcp/9000
-  node_key_file: /var/lib/fleet-overlay/node.key   # per-host libp2p identity, created on first start
+  node_key_file: /var/lib/eth-gossip-overlay/node.key   # per-host libp2p identity, created on first start
   listen_addr: /ip4/127.0.0.1/tcp/7787            # where the beacon node dials the sidecar (MD-01); restart-required
   publish_rate_limit:
     small_per_s: 8000
@@ -41,7 +41,7 @@ classes:
     parity_ratio: 0.10
     repair_deadline_ms: 250     # measured from the first chunk
 inject: true
-admin_socket: /run/fleet-overlay/admin.sock
+admin_socket: /run/eth-gossip-overlay/admin.sock
 metrics_listen: 127.0.0.1:7789
 log:
   level: info

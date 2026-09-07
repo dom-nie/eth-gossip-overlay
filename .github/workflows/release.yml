@@ -62,14 +62,14 @@ jobs:
       - name: Build both binaries
         run: |
           SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
-            cargo build --release --locked -p fleet-overlay --bins
+            cargo build --release --locked -p eth-gossip-overlay --bins
 
       # A tag that says one version and a Cargo.toml that says another produces a release nobody
       # can reason about. scripts/release.sh moves both together; this is what catches a tag
       # pushed without it.
       - name: The binary agrees with the tag
         run: |
-          built=$(./target/release/fleet-overlay --version | head -1 | cut -d' ' -f2)
+          built=$(./target/release/eth-gossip-overlay --version | head -1 | cut -d' ' -f2)
           if [ "$built" != "$VERSION" ]; then
             echo "the tag says $VERSION and the binary says $built"
             exit 1

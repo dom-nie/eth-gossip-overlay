@@ -24,7 +24,7 @@ attestation if you want to know which workflow run built it:
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
-gh attestation verify fleet-overlay-<version>-x86_64-unknown-linux-gnu.tar.gz \
+gh attestation verify eth-gossip-overlay-<version>-x86_64-unknown-linux-gnu.tar.gz \
   --repo dom-nie/eth-gossip-overlay
 ```
 
@@ -32,8 +32,8 @@ Then read the two lines the binary prints about itself. The second one is the sa
 the release notes are written from:
 
 ```console
-$ ./fleet-overlay --version
-fleet-overlay 0.1.0 9e5e500d46d6 2026-09-07
+$ ./eth-gossip-overlay --version
+eth-gossip-overlay 0.1.0 9e5e500d46d6 2026-09-07
 protocol 1.0 features=0x0
 ```
 
@@ -42,15 +42,15 @@ protocol 1.0 features=0x0
 Nothing to plan. One host at a time, or all of them at once:
 
 ```sh
-sudo install -m 755 fleet-overlay fleet-overlayctl /usr/local/bin/
-sudo systemctl restart fleet-overlay
+sudo install -m 755 eth-gossip-overlay eth-gossip-overlayctl /usr/local/bin/
+sudo systemctl restart eth-gossip-overlay
 ```
 
 The host reconnects to every peer as it comes back, old and new alike. What to watch, from any
 host:
 
 ```console
-$ fleet-overlayctl status
+$ eth-gossip-overlayctl status
 hostname    region  site  rtt     up   queue_small  queue_large  version  features
 bn-ams1-07  eu      ams1  1.2ms   3d   0f/0b        0f/0b        0.1.0    0x0
 bn-ams1-08  eu      ams1  1.1ms   2m   0f/0b        0f/0b        0.2.0    0x0
@@ -81,7 +81,7 @@ While the skew lasts, expect on every host:
   not on it being non-zero at all.
 - `overlay_peers_connected` down to the size of this host's own population, and back to the
   whole roster at the end.
-- `fleet-overlayctl status` listing only the peers on this host's major.
+- `eth-gossip-overlayctl status` listing only the peers on this host's major.
 
 Do not leave a fleet split across a major for longer than the rollout needs. Two half-size
 overlays are not broken, but neither half is what you deployed.
@@ -91,8 +91,8 @@ overlays are not broken, but neither half is what you deployed.
 Reinstall the previous binary and restart:
 
 ```sh
-sudo install -m 755 /path/to/previous/fleet-overlay /usr/local/bin/fleet-overlay
-sudo systemctl restart fleet-overlay
+sudo install -m 755 /path/to/previous/eth-gossip-overlay /usr/local/bin/eth-gossip-overlay
+sudo systemctl restart eth-gossip-overlay
 ```
 
 There is nothing to migrate. The sidecar keeps no persistent state of its own: the seen cache,
@@ -105,7 +105,7 @@ Two things to know:
 
 - If the release you are leaving added a configuration key and you started using it, the older
   binary will refuse the file: unknown keys are an error, not a warning. Run
-  `fleet-overlay check-config` with the older binary before you restart it, and take the new
+  `eth-gossip-overlay check-config` with the older binary before you restart it, and take the new
   keys back out if it complains.
 - Rolling back across a major bump is the major-bump procedure again, in the other direction,
   with the same two populations while it lasts.

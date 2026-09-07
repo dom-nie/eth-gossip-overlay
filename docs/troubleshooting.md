@@ -8,9 +8,9 @@ at the section below it, so the link in the notification lands on the right para
 no rule fires on, because the healthy value is a judgement call or because they only ever happen
 on a first install.
 
-Three commands answer most of these. `fleet-overlayctl status` says what the sidecar thinks is
+Three commands answer most of these. `eth-gossip-overlayctl status` says what the sidecar thinks is
 true, `curl -s 127.0.0.1:7789/metrics` says what it is reporting, and
-`journalctl -u fleet-overlay -o cat | jq .` says what it did. Run them in that order.
+`journalctl -u eth-gossip-overlay -o cat | jq .` says what it did. Run them in that order.
 
 ## OverlayPeersLow
 
@@ -18,7 +18,7 @@ Fewer than 80% of the roster's other hosts have a live overlay connection, for f
 sidecar keeps dialling the missing ones with a jittered backoff throughout, so this is about why
 those dials are not landing rather than about the sidecar giving up.
 
-Start with `fleet-overlayctl status` on the host that alerted and on one of the hosts missing
+Start with `eth-gossip-overlayctl status` on the host that alerted and on one of the hosts missing
 from its list. If both sides agree they cannot see each other, the path is the suspect: UDP 7788
 between those two addresses, the nftables allowlist that was regenerated when the roster changed,
 and whether the roster's address for that host is still the address it listens on. If the dials
@@ -47,10 +47,10 @@ untrusted sidecar is scored and pruned like any other peer, so it gets dropped u
 pressure and the overlay quietly stops delivering.
 
 This is a drop-in problem, not a network one. The sidecar writes
-`/run/fleet-overlay/lighthouse.env` at startup and the beacon node reads it through the drop-in;
-the two flags only take effect if `$FLEET_OVERLAY_TRUSTED_PEER_ARGS` is on the beacon node's own
+`/run/eth-gossip-overlay/lighthouse.env` at startup and the beacon node reads it through the drop-in;
+the two flags only take effect if `$ETH_GOSSIP_OVERLAY_TRUSTED_PEER_ARGS` is on the beacon node's own
 `ExecStart=` line, unquoted, and the beacon node has been restarted since. Check that file exists,
-that its peer id matches `fleet-overlay peer-id`, and that the running beacon node's command line
+that its peer id matches `eth-gossip-overlay peer-id`, and that the running beacon node's command line
 carries both flags. A sidecar that lost its node key has a new peer id and the beacon node is
 still trusting the old one, which looks the same from here.
 
@@ -76,7 +76,7 @@ so treat this as a measurement before treating it as a fault.
 
 A host that is behind on peers wins less, so check `OverlayPeersLow` first. After that, the honest
 possibilities are that this host's public gossip is unusually fast, that the fleet's other hosts
-are not injecting (`fleet-overlayctl status` shows the kill switch), or that the sidecar is
+are not injecting (`eth-gossip-overlayctl status` shows the kill switch), or that the sidecar is
 dropping what it receives before it can publish, which shows up in the guardrail panels rather
 than here. A win rate that falls across the whole fleet at once is worth reading as a change on the
 public network, not on your hosts.
@@ -102,7 +102,7 @@ Something wrote a truncated `roster.yaml`. Usually the discovery tool ran agains
 inventory, or a templating step failed halfway and left a valid file with a short list. Compare
 the file on disk with what you expect, fix the generator, and let the next automatic reload pick
 it up. A genuine fleet shrink of more than half is applied with a manual reload, which the guard
-does not touch: `fleet-overlayctl roster reload`.
+does not touch: `eth-gossip-overlayctl roster reload`.
 
 ## OverlayMemoryHigh
 
@@ -110,7 +110,7 @@ Resident memory has been over 80% of the unit's `MemoryMax` for ten minutes. At 
 kills the process and systemd restarts it, which costs the beacon node its trusted peer for a few
 seconds.
 
-`fleet-overlay check-config` prints the memory budget the sidecar computed from the effective
+`eth-gossip-overlay check-config` prints the memory budget the sidecar computed from the effective
 config and roster size, which is what it expects to hold; comparing that number with the ceiling
 says whether the ceiling is simply too low for this fleet. If the budget is well under the ceiling
 and resident memory is not, look at the peer send lanes and the publish queue in the dashboard: a
@@ -123,11 +123,11 @@ The process started more than twice in the last hour. The unit restarts always a
 loop off to a minute, so a sidecar that keeps dying looks healthy in `systemctl status` between
 restarts and this counter is what notices.
 
-`journalctl -u fleet-overlay` covers the restarts and the reason is usually in the last lines
+`journalctl -u eth-gossip-overlay` covers the restarts and the reason is usually in the last lines
 before each one. Two causes account for most of it: the watchdog firing because a core loop
 stopped making progress, and the cgroup killing the process on memory, which `OverlayMemoryHigh`
 would have called first. A configuration or roster file that no longer parses stops the sidecar at
-startup rather than looping it, and `fleet-overlay check-config` says so in one line.
+startup rather than looping it, and `eth-gossip-overlay check-config` says so in one line.
 
 ## OverlayRepairRateRising
 

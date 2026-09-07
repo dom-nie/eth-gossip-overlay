@@ -6,19 +6,19 @@
 
 overlay:
   # One seed for the fleet, on the volume the init container writes it to. On a real host this
-  # is /etc/fleet-overlay/seed, delivered as a systemd credential.
+  # is /etc/eth-gossip-overlay/seed, delivered as a systemd credential.
   fleet_seed_file: /shared/seed
 
 bn:
   # The libp2p identity the beacon node trusts. It is on a named volume, so a restarted
   # container keeps its peer id and the beacon node keeps trusting it (D01). This is also the
   # default path; the demo says it out loud because the volume is the point.
-  node_key_file: /var/lib/fleet-overlay/node.key
+  node_key_file: /var/lib/eth-gossip-overlay/node.key
 
-# systemd gives the sidecar a writable /run/fleet-overlay; a container does not, so both the
+# systemd gives the sidecar a writable /run/eth-gossip-overlay; a container does not, so both the
 # admin socket and the lighthouse.env file go on the node key's volume instead. RUNTIME_DIRECTORY
 # in docker-compose.yml points the second one there.
-admin_socket: /var/lib/fleet-overlay/admin.sock
+admin_socket: /var/lib/eth-gossip-overlay/admin.sock
 
 # Prometheus scrapes from its own container, so the endpoint cannot be on loopback. The sidecar
 # warns about that at startup and it is the right warning: only the demo's private bridge

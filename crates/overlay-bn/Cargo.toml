@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-# `FakeBn` and its helpers, for the fleet harness in `fleet-overlay` (T-051). Lighthouse's own
+# `FakeBn` and its helpers, for the fleet harness in `eth-gossip-overlay` (T-051). Lighthouse's own
 # crates come with it, so nothing but a test build may turn it on: the harness enables it
 # through a dev-dependency, which resolver 3 never unifies into a normal build.
 test-util = [

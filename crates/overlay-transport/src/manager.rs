@@ -155,7 +155,7 @@ pub struct PeerInfo {
     /// Random per process start, so a second connection from the same host tells a restart from
     /// a changed path (D15).
     pub instance_id: u64,
-    /// The peer's `CARGO_PKG_VERSION`, for `fleet-overlayctl status` (T-042).
+    /// The peer's `CARGO_PKG_VERSION`, for `eth-gossip-overlayctl status` (T-042).
     pub software_version: String,
     /// What the pair agreed to operate at.
     pub negotiated: Negotiated,
@@ -198,7 +198,7 @@ pub struct LivePeer {
     pub rtt: Duration,
     /// The peer's instance id (D15).
     pub instance_id: u64,
-    /// When this connection was adopted, which `fleet-overlayctl status` reports as an age
+    /// When this connection was adopted, which `eth-gossip-overlayctl status` reports as an age
     /// (T-042). An [`Instant`] and not a wall time: the manager has no injected clock, two
     /// hosts' clocks do not agree to the second, and what an operator reads off the table is
     /// how long the peer has been up rather than when it came up.

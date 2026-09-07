@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/dom-nie/eth-gossip-overlay/actions/workflows/ci.yml/badge.svg)](https://github.com/dom-nie/eth-gossip-overlay/actions/workflows/ci.yml)
 
-A sidecar for [Lighthouse](https://github.com/sigp/lighthouse) beacon nodes. Drop `fleet-overlay` next to each node you run and the sidecars build a private QUIC overlay between your own machines, so blocks, blobs and columns one of your nodes has already validated reach the others without a second trip through the public gossip mesh. `fleet-overlayctl` talks to a running sidecar over its admin socket.
+A sidecar for [Lighthouse](https://github.com/sigp/lighthouse) beacon nodes. Drop `eth-gossip-overlay` next to each node you run and the sidecars build a private QUIC overlay between your own machines, so blocks, blobs and columns one of your nodes has already validated reach the others without a second trip through the public gossip mesh. `eth-gossip-overlayctl` talks to a running sidecar over its admin socket.
 
 It is for operators who run several Lighthouse beacon nodes they control, whether that is three hosts in one rack or a few hundred spread over regions. Only your own hosts join the overlay: admission is a key derived from a seed you generate once and copy to every host.
 
@@ -32,7 +32,7 @@ The alert rules and the Grafana dashboard the runbook refers to are in [`deploy/
 Rust is pinned by `rust-toolchain.toml`; rustup picks it up on the first `cargo` call.
 
 ```sh
-cargo build --release          # binaries in target/release/{fleet-overlay,fleet-overlayctl}
+cargo build --release          # binaries in target/release/{eth-gossip-overlay,eth-gossip-overlayctl}
 ```
 
 `overlay-bn` links `libp2p` from Lighthouse's fork (`sigp/rust-libp2p`) at the revision Lighthouse **v8.2.2** pins, through the `[patch]` table in the root `Cargo.toml`. Bumping Lighthouse means updating that tag, the rev next to it, and rerunning T-018's compatibility matrix.
@@ -40,16 +40,16 @@ cargo build --release          # binaries in target/release/{fleet-overlay,fleet
 ## Container
 
 `Dockerfile` builds an image with the two binaries, a libc and a non-root user that owns
-`/var/lib/fleet-overlay`. Run it with `--network host` and give it a volume for that directory:
+`/var/lib/eth-gossip-overlay`. Run it with `--network host` and give it a volume for that directory:
 it holds the node key, which is the peer id the beacon node trusts, so without one every
 restart is a new identity.
 
 ```sh
-docker build -t fleet-overlay .
+docker build -t eth-gossip-overlay .
 docker run -d --network host \
-  -v /etc/fleet-overlay:/etc/fleet-overlay:ro \
-  -v fleet-overlay-state:/var/lib/fleet-overlay \
-  fleet-overlay
+  -v /etc/eth-gossip-overlay:/etc/eth-gossip-overlay:ro \
+  -v eth-gossip-overlay-state:/var/lib/eth-gossip-overlay \
+  eth-gossip-overlay
 ```
 
 `examples/compose/` starts three sidecars and three Lighthouse beacon nodes on one machine, with
@@ -58,19 +58,19 @@ without owning a fleet. Its README says what to look at.
 
 ## Subcommands
 
-`fleet-overlay gen-seed [--out PATH]` writes a new fleet seed: 32 bytes from the OS random number generator as 64 hex characters, mode 0600, default `/etc/fleet-overlay/seed`. It refuses to overwrite an existing file. Run it once per fleet and copy the file to every host over a secure channel; every host's overlay TLS key derives from it and its hostname.
+`eth-gossip-overlay gen-seed [--out PATH]` writes a new fleet seed: 32 bytes from the OS random number generator as 64 hex characters, mode 0600, default `/etc/eth-gossip-overlay/seed`. It refuses to overwrite an existing file. Run it once per fleet and copy the file to every host over a secure channel; every host's overlay TLS key derives from it and its hostname.
 
-`fleet-overlay peer-id [--config PATH]` prints the libp2p peer id of this host's node key (`bn.node_key_file`, created on first use). That is the id the sidecar hands Lighthouse through `/run/fleet-overlay/lighthouse.env`, so it is how an operator reads the value ahead of the first start. It needs neither the seed nor the roster. The node key is per host and unrelated to the seed, so rotating the seed never changes the peer id.
+`eth-gossip-overlay peer-id [--config PATH]` prints the libp2p peer id of this host's node key (`bn.node_key_file`, created on first use). That is the id the sidecar hands Lighthouse through `/run/eth-gossip-overlay/lighthouse.env`, so it is how an operator reads the value ahead of the first start. It needs neither the seed nor the roster. The node key is per host and unrelated to the seed, so rotating the seed never changes the peer id.
 
-`fleet-overlay run [--config PATH]`, which is also what happens with no subcommand, is the sidecar itself. It reads the config, roster and seed, writes `lighthouse.env` before it binds anything, and then serves the overlay until `SIGTERM`. `SIGHUP` re-reads both files. Under systemd it is a `Type=notify` unit: readiness is sent once the admin socket answers, and the watchdog is fed only while all four core loops are going round. Without `NOTIFY_SOCKET` all of that is skipped, so the same binary runs under `docker run`.
+`eth-gossip-overlay run [--config PATH]`, which is also what happens with no subcommand, is the sidecar itself. It reads the config, roster and seed, writes `lighthouse.env` before it binds anything, and then serves the overlay until `SIGTERM`. `SIGHUP` re-reads both files. Under systemd it is a `Type=notify` unit: readiness is sent once the admin socket answers, and the watchdog is fed only while all four core loops are going round. Without `NOTIFY_SOCKET` all of that is skipped, so the same binary runs under `docker run`.
 
-`fleet-overlay check-config [--config PATH]` rehearses a start without starting one. It reads the same files in the same order, derives the same keys, and prints who this host is and what the sidecar's bounded structures would hold. Exit 1 with one line on stderr if anything a start needs is missing or wrong, which makes it the check to run from configuration management after pushing a roster.
+`eth-gossip-overlay check-config [--config PATH]` rehearses a start without starting one. It reads the same files in the same order, derives the same keys, and prints who this host is and what the sidecar's bounded structures would hold. Exit 1 with one line on stderr if anything a start needs is missing or wrong, which makes it the check to run from configuration management after pushing a roster.
 
 ```console
-$ fleet-overlay --help
+$ eth-gossip-overlay --help
 Sidecar binary for a private gossip overlay between Lighthouse beacon nodes.
 
-Usage: fleet-overlay [OPTIONS] [COMMAND]
+Usage: eth-gossip-overlay [OPTIONS] [COMMAND]
 
 Commands:
   run           Run the sidecar, which is what happens with no subcommand at all
@@ -80,15 +80,15 @@ Commands:
   help          Print this message or the help of the given subcommand(s)
 
 Options:
-      --config <CONFIG>  The sidecar's config.yaml [default: /etc/fleet-overlay/config.yaml]
+      --config <CONFIG>  The sidecar's config.yaml [default: /etc/eth-gossip-overlay/config.yaml]
   -h, --help             Print help
   -V, --version          Print version
 
-$ fleet-overlay --version
-fleet-overlay 0.1.0 9e5e500d46d6 2026-09-07
+$ eth-gossip-overlay --version
+eth-gossip-overlay 0.1.0 9e5e500d46d6 2026-09-07
 protocol 1.0 features=0x0
 
-$ fleet-overlay check-config
+$ eth-gossip-overlay check-config
 hostname: bn-ams1-07
 region: eu
 site: ams1
@@ -99,13 +99,13 @@ memory budget: 61 MiB (49 MiB in bounded structures plus 25% headroom)
 
 The second `--version` line is the compatibility one: the major travels in the overlay's ALPN and the minor and feature bits in `HELLO`, so a pair runs at the lower minor and the intersection of the bits. Two sidecars on the same major always pair.
 
-`fleet-overlayctl` talks to a running sidecar over the admin socket in `admin_socket` (`/run/fleet-overlay/admin.sock` by default), which is mode 0660 and local only. `status` is the first thing to look at during a rolling upgrade: it prints the kill switch, the beacon node's version and whether it trusts the sidecar, and one row per live peer with its software version and the feature bits the pair negotiated. `roster reload` re-reads `config.yaml` and `roster.yaml` exactly as SIGHUP does, and applies whatever the files say. Exit codes are meant for configuration management: 0 the command took effect, 1 the sidecar refused it or the reload reported an error, 2 there was no socket to talk to.
+`eth-gossip-overlayctl` talks to a running sidecar over the admin socket in `admin_socket` (`/run/eth-gossip-overlay/admin.sock` by default), which is mode 0660 and local only. `status` is the first thing to look at during a rolling upgrade: it prints the kill switch, the beacon node's version and whether it trusts the sidecar, and one row per live peer with its software version and the feature bits the pair negotiated. `roster reload` re-reads `config.yaml` and `roster.yaml` exactly as SIGHUP does, and applies whatever the files say. Exit codes are meant for configuration management: 0 the command took effect, 1 the sidecar refused it or the reload reported an error, 2 there was no socket to talk to.
 
 ```console
-$ fleet-overlayctl --help
-Talk to a running fleet-overlay sidecar over its local admin socket
+$ eth-gossip-overlayctl --help
+Talk to a running eth-gossip-overlay sidecar over its local admin socket
 
-Usage: fleet-overlayctl [OPTIONS] <COMMAND>
+Usage: eth-gossip-overlayctl [OPTIONS] <COMMAND>
 
 Commands:
   inject  Turn the inject kill switch on or off, or ask what it is
@@ -114,7 +114,7 @@ Commands:
   help    Print this message or the help of the given subcommand(s)
 
 Options:
-      --socket <SOCKET>  The sidecar's admin socket [default: /run/fleet-overlay/admin.sock]
+      --socket <SOCKET>  The sidecar's admin socket [default: /run/eth-gossip-overlay/admin.sock]
       --json             Print the sidecar's answer as it came, one JSON object, for jq and scripts
   -h, --help             Print help
   -V, --version          Print version
@@ -136,7 +136,7 @@ cargo fmt --all --check
 | `crates/overlay-core` | pure logic: clock, backoff, and later routing, codecs, batching |
 | `crates/overlay-transport` | QUIC between sidecars |
 | `crates/overlay-bn` | the link to the local beacon node |
-| `crates/fleet-overlay` | the two binaries and their wiring |
+| `crates/eth-gossip-overlay` | the two binaries and their wiring |
 
 ## Contributing and policies
 

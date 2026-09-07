@@ -155,7 +155,7 @@ pub struct Publisher {
 impl Publisher {
     /// Builds the queue and starts draining it into `commands`. The handle is what T-032,
     /// T-062 and T-074 hold; the task keeps going until the link is gone. `inject` is the
-    /// kill switch, shared with whoever flips it (config, SIGHUP, `fleet-overlayctl`); it is
+    /// kill switch, shared with whoever flips it (config, SIGHUP, `eth-gossip-overlayctl`); it is
     /// read per item, so flipping it back on resumes without a restart. `rates` carries
     /// `bn.publish_rate_limit`, which T-043 sends a new value on when an operator changes it.
     ///

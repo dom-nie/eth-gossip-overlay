@@ -8,10 +8,10 @@
 #   docker compose up -d                  the whole demo
 #   docker compose up -d sc-1 sc-2 sc-3   the overlay alone, no beacon nodes and no testnet
 
-name: fleet-overlay-demo
+name: eth-gossip-overlay-demo
 
 x-sidecar: &sidecar
-  image: ${FLEET_OVERLAY_IMAGE:-fleet-overlay:demo}
+  image: ${ETH_GOSSIP_OVERLAY_IMAGE:-eth-gossip-overlay:demo}
   build:
     context: ../..
   depends_on:
@@ -19,11 +19,11 @@ x-sidecar: &sidecar
       condition: service_completed_successfully
   environment:
     # What systemd's RuntimeDirectory= would set. Without it the sidecar tries to write
-    # lighthouse.env into a /run/fleet-overlay no one created.
-    RUNTIME_DIRECTORY: /var/lib/fleet-overlay
+    # lighthouse.env into a /run/eth-gossip-overlay no one created.
+    RUNTIME_DIRECTORY: /var/lib/eth-gossip-overlay
   volumes:
-    - ./config.yaml:/etc/fleet-overlay/config.yaml:ro
-    - ./roster.yaml:/etc/fleet-overlay/roster.yaml:ro
+    - ./config.yaml:/etc/eth-gossip-overlay/config.yaml:ro
+    - ./roster.yaml:/etc/eth-gossip-overlay/roster.yaml:ro
     - shared:/shared
   restart: unless-stopped
 
@@ -69,7 +69,7 @@ services:
   # shell and the shipped image has none. Root, because a named volume arrives owned by root;
   # 65532 is the uid the sidecars run as and the chown is what hands the volumes over.
   init:
-    image: ${FLEET_OVERLAY_TOOLBOX_IMAGE:-fleet-overlay:toolbox}
+    image: ${ETH_GOSSIP_OVERLAY_TOOLBOX_IMAGE:-eth-gossip-overlay:toolbox}
     build:
       context: ../..
       target: toolbox
@@ -77,15 +77,15 @@ services:
     entrypoint: ["/bin/sh", "-euc"]
     command:
       - |
-        [ -f /shared/seed ] || fleet-overlay gen-seed --out /shared/seed
+        [ -f /shared/seed ] || eth-gossip-overlay gen-seed --out /shared/seed
         for n in 1 2 3; do
-          sed "s|/var/lib/fleet-overlay/node.key|/keys/$$n/node.key|" \
-            /etc/fleet-overlay/config.yaml > /tmp/config.yaml
-          fleet-overlay peer-id --config /tmp/config.yaml > /shared/sc-$$n.peerid
+          sed "s|/var/lib/eth-gossip-overlay/node.key|/keys/$$n/node.key|" \
+            /etc/eth-gossip-overlay/config.yaml > /tmp/config.yaml
+          eth-gossip-overlay peer-id --config /tmp/config.yaml > /shared/sc-$$n.peerid
         done
         chown -R 65532:65532 /shared /keys/1 /keys/2 /keys/3
     volumes:
-      - ./config.yaml:/etc/fleet-overlay/config.yaml:ro
+      - ./config.yaml:/etc/eth-gossip-overlay/config.yaml:ro
       - shared:/shared
       - key-1:/keys/1
       - key-2:/keys/2
@@ -95,13 +95,13 @@ services:
   sc-1:
     <<: *sidecar
     environment:
-      RUNTIME_DIRECTORY: /var/lib/fleet-overlay
-      FLEET_OVERLAY_HOSTNAME: sc-1
+      RUNTIME_DIRECTORY: /var/lib/eth-gossip-overlay
+      ETH_GOSSIP_OVERLAY_HOSTNAME: sc-1
     volumes:
-      - ./config.yaml:/etc/fleet-overlay/config.yaml:ro
-      - ./roster.yaml:/etc/fleet-overlay/roster.yaml:ro
+      - ./config.yaml:/etc/eth-gossip-overlay/config.yaml:ro
+      - ./roster.yaml:/etc/eth-gossip-overlay/roster.yaml:ro
       - shared:/shared
-      - key-1:/var/lib/fleet-overlay
+      - key-1:/var/lib/eth-gossip-overlay
     networks:
       demo:
         ipv4_address: 10.90.0.11
@@ -112,13 +112,13 @@ services:
   sc-2:
     <<: *sidecar
     environment:
-      RUNTIME_DIRECTORY: /var/lib/fleet-overlay
-      FLEET_OVERLAY_HOSTNAME: sc-2
+      RUNTIME_DIRECTORY: /var/lib/eth-gossip-overlay
+      ETH_GOSSIP_OVERLAY_HOSTNAME: sc-2
     volumes:
-      - ./config.yaml:/etc/fleet-overlay/config.yaml:ro
-      - ./roster.yaml:/etc/fleet-overlay/roster.yaml:ro
+      - ./config.yaml:/etc/eth-gossip-overlay/config.yaml:ro
+      - ./roster.yaml:/etc/eth-gossip-overlay/roster.yaml:ro
       - shared:/shared
-      - key-2:/var/lib/fleet-overlay
+      - key-2:/var/lib/eth-gossip-overlay
     networks:
       demo:
         ipv4_address: 10.90.0.12
@@ -129,13 +129,13 @@ services:
   sc-3:
     <<: *sidecar
     environment:
-      RUNTIME_DIRECTORY: /var/lib/fleet-overlay
-      FLEET_OVERLAY_HOSTNAME: sc-3
+      RUNTIME_DIRECTORY: /var/lib/eth-gossip-overlay
+      ETH_GOSSIP_OVERLAY_HOSTNAME: sc-3
     volumes:
-      - ./config.yaml:/etc/fleet-overlay/config.yaml:ro
-      - ./roster.yaml:/etc/fleet-overlay/roster.yaml:ro
+      - ./config.yaml:/etc/eth-gossip-overlay/config.yaml:ro
+      - ./roster.yaml:/etc/eth-gossip-overlay/roster.yaml:ro
       - shared:/shared
-      - key-3:/var/lib/fleet-overlay
+      - key-3:/var/lib/eth-gossip-overlay
     networks:
       demo:
         ipv4_address: 10.90.0.13
@@ -180,7 +180,7 @@ services:
     image: prom/prometheus:${PROMETHEUS_VERSION:-v3.5.0}
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ../../deploy/prometheus/alerts.yml:/etc/prometheus/rules/fleet-overlay.yml:ro
+      - ../../deploy/prometheus/alerts.yml:/etc/prometheus/rules/eth-gossip-overlay.yml:ro
     networks: [demo]
     ports:
       - "127.0.0.1:9090:9090"
