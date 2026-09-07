@@ -16,9 +16,10 @@ use bytes::{BufMut, Bytes, BytesMut};
 use overlay_core::msgid::MessageId;
 use overlay_core::protocol::{MAX_BATCH_ENTRIES, MAX_FRAME_BYTES};
 use overlay_core::wire::{
-    BatchEntry, BatchFlags, Chunk, ChunkFlags, DecodeError, Frame, FrameType, Hello,
-    MAX_MISSING_INDICES, MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, MAX_TOPIC_SNAPSHOT_ENTRIES, Read,
-    ReadError, RepairReq, RepairResp, decode_datagram, encode_datagram, read_frame, write_frame,
+    BATCH_ENTRY_OVERHEAD_BYTES, BATCH_HEADER_BYTES, BatchEntry, BatchFlags, Chunk, ChunkFlags,
+    DecodeError, Frame, FrameType, Hello, MAX_MISSING_INDICES, MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES,
+    MAX_TOPIC_SNAPSHOT_ENTRIES, Read, ReadError, RepairReq, RepairResp, decode_datagram,
+    encode_datagram, read_frame, write_frame,
 };
 use proptest::prelude::*;
 use tokio::io::AsyncWriteExt;
@@ -213,6 +214,32 @@ fn unknown_flag_bits_are_ignored_and_defined_bits_round_trip() {
 
         assert_eq!(Frame::decode(&mut buf), Ok(frame), "{name} with bit 7 set");
     }
+}
+
+/// What T-061's batcher budgets a datagram with. It fills a batch to the path MTU without
+/// encoding anything, so a `BATCH` that grew a field and left these behind would be a batch the
+/// path fragments or refuses.
+#[test]
+fn batch_overheads_are_what_the_encoder_writes() {
+    let empty = encode_datagram(&Frame::Batch {
+        flags: BatchFlags::NONE,
+        entries: Vec::new(),
+    });
+    assert_eq!(empty.len(), BATCH_HEADER_BYTES);
+
+    let payload = Bytes::from(vec![7; 240]);
+    let one = encode_datagram(&Frame::Batch {
+        flags: BatchFlags::NONE,
+        entries: vec![BatchEntry {
+            topic_id: 3,
+            payload: payload.clone(),
+        }],
+    });
+
+    assert_eq!(
+        one.len(),
+        BATCH_HEADER_BYTES + BATCH_ENTRY_OVERHEAD_BYTES + payload.len()
+    );
 }
 
 #[test]
