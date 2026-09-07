@@ -1190,12 +1190,12 @@ mod tests {
         }
     }
 
-    /// One hop is structural, not a rule this file follows (§3 principle 1): a receiver holds
-    /// nothing that can send, so a batch asking to be re-fanned is delivered locally and reaches
-    /// nobody else. T-063 gives the receiver a sender and keeps this test for the region a relay
-    /// does not fan into.
+    /// A relay fans out for the region on the other side of the WAN, never for its own: a
+    /// `RELAY` batch from a peer in this host's region is a peer breaking the protocol, and
+    /// honouring it would have every host in a region spread what its neighbours already have.
+    /// The batch is counted, delivered here and forwarded nowhere (D20).
     #[tokio::test(flavor = "multi_thread")]
-    async fn relay_batch_from_a_same_region_peer_is_delivered_locally_and_not_refanned() {
+    async fn relay_set_from_same_region_peer_is_counted_and_not_forwarded() {
         let subnet = topic("beacon_attestation_7");
         let relayed = payload(b"an attestation asking to be spread further");
         // The bare node is the lowest hostname, so it dials, and the two managers pair with
@@ -1233,6 +1233,12 @@ mod tests {
         .await;
         tokio::time::sleep(SETTLE).await;
         assert!(cluster.published(2).is_empty());
+        assert_eq!(
+            cluster.stats(1).relay_same_region(&cluster.hostname(0)),
+            1,
+            "a same-region relay batch was not counted"
+        );
+        assert_eq!(cluster.stats(1).relayed_batches(), 0);
     }
 
     /// An entry id the peer never announced costs that entry and nothing else (D21): the rest of
