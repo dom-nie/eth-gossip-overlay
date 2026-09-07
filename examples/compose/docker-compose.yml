@@ -55,13 +55,15 @@ x-beacon-node-env: &beacon-node-env
   LIGHTHOUSE_EXTRA_ARGS: ${LIGHTHOUSE_EXTRA_ARGS-}
 
 services:
-  # The fleet seed once, and each sidecar's peer id before any beacon node needs it. Root,
-  # because a named volume arrives owned by root and the sidecars run as fleet-overlay; the
-  # chown at the end is what hands the volumes over.
+  # The fleet seed once, and each sidecar's peer id before any beacon node needs it. This is the
+  # Dockerfile's toolbox stage rather than the image the sidecars run, because the setup needs a
+  # shell and the shipped image has none. Root, because a named volume arrives owned by root;
+  # 65532 is the uid the sidecars run as and the chown is what hands the volumes over.
   init:
-    image: ${FLEET_OVERLAY_IMAGE:-fleet-overlay:demo}
+    image: ${FLEET_OVERLAY_TOOLBOX_IMAGE:-fleet-overlay:toolbox}
     build:
       context: ../..
+      target: toolbox
     user: "0:0"
     entrypoint: ["/bin/sh", "-euc"]
     command:
@@ -72,7 +74,7 @@ services:
             /etc/fleet-overlay/config.yaml > /tmp/config.yaml
           fleet-overlay peer-id --config /tmp/config.yaml > /shared/sc-$$n.peerid
         done
-        chown -R fleet-overlay:fleet-overlay /shared /keys/1 /keys/2 /keys/3
+        chown -R 65532:65532 /shared /keys/1 /keys/2 /keys/3
     volumes:
       - ./config.yaml:/etc/fleet-overlay/config.yaml:ro
       - shared:/shared

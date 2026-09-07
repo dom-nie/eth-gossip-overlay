@@ -13,11 +13,13 @@
 # needs a testnet and minutes of checkpoint sync, so that variant runs nightly.
 #
 # IMAGE            the tag to build and check, fleet-overlay:demo by default
+# TOOLBOX          the Dockerfile's toolbox stage, which the compose demo's setup step needs
 # MAX_IMAGE_BYTES  the size budget, 80 MB by default
 # MESH_TIMEOUT     seconds the mesh has to form, 120 by default and 900 with beacon nodes
 set -euo pipefail
 
 IMAGE=${IMAGE:-fleet-overlay:demo}
+TOOLBOX=${TOOLBOX:-fleet-overlay:toolbox}
 MAX_IMAGE_BYTES=${MAX_IMAGE_BYTES:-80000000}
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -43,18 +45,26 @@ volume() {
   echo "fleet-overlay-check-$1-$$"
 }
 
+compose() {
+  FLEET_OVERLAY_IMAGE=$IMAGE FLEET_OVERLAY_TOOLBOX_IMAGE=$TOOLBOX \
+    docker compose -f "$demo/docker-compose.yml" "$@"
+}
+
 cleanup() {
   docker volume ls -q --filter "name=fleet-overlay-check-.*-$$" | xargs -r docker volume rm -f > /dev/null 2>&1 || true
-  FLEET_OVERLAY_IMAGE=$IMAGE docker compose -f "$demo/docker-compose.yml" down -v --remove-orphans > /dev/null 2>&1 || true
+  compose down -v --remove-orphans > /dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 docker image inspect "$IMAGE" > /dev/null 2>&1 || docker build -t "$IMAGE" "$root"
+docker image inspect "$TOOLBOX" > /dev/null 2>&1 || docker build --target toolbox -t "$TOOLBOX" "$root"
 
 # 1. The example files an operator copies to a host, read by the binary in the image. gen-seed
-# writes the one file the examples do not ship, which is also how an operator makes it.
+# writes the one file the examples do not ship, which is also how an operator makes it. The
+# volume is made from the image's state directory, so it arrives owned by the user the image
+# runs as; the second run mounts the same volume where the example config expects the seed.
 etc=$(volume etc)
-docker run --rm -v "$etc:/etc/fleet-overlay" "$IMAGE" gen-seed --out /etc/fleet-overlay/seed > /dev/null
+docker run --rm -v "$etc:/var/lib/fleet-overlay" "$IMAGE" gen-seed --out /var/lib/fleet-overlay/seed > /dev/null
 if docker run --rm \
   -e FLEET_OVERLAY_HOSTNAME=bn-ams1-07 \
   -v "$etc:/etc/fleet-overlay" \
@@ -66,9 +76,15 @@ else
   fail "image_runs_check_config_against_example_files_and_exits_0"
 fi
 
-# 2. Nothing in the sidecar needs root, and an image that runs as root invites a deployment
-# that keeps it.
-uid=$(docker run --rm --entrypoint id "$IMAGE" -u)
+# 2. Nothing in the sidecar needs root, and an image that runs as root invites a deployment that
+# keeps it. There is no `id` in the image to ask, so the answer comes from the one file the
+# binary writes: the process created node.key, so the file's owner is the process's uid.
+nonroot=$(volume nonroot)
+docker run --rm \
+  -v "$nonroot:/var/lib/fleet-overlay" \
+  -v "$root/deploy/examples/config.yaml:/etc/fleet-overlay/config.yaml:ro" \
+  "$IMAGE" peer-id > /dev/null
+uid=$(docker run --rm -v "$nonroot:/state" --entrypoint stat "$TOOLBOX" -c %u /state/node.key)
 if [ "$uid" != "0" ]; then
   pass "image_runs_as_non_root (uid $uid)"
 else
@@ -106,8 +122,7 @@ fi
 
 # 5. Every sidecar sees the other two. With beacon nodes, each one also has to be trusted by
 # the beacon node beside it.
-compose() { FLEET_OVERLAY_IMAGE=$IMAGE docker compose -f "$demo/docker-compose.yml" "$@"; }
-
+#
 # The value of a metric summed over its label sets, or nothing at all when the endpoint is not
 # answering yet.
 metric() {

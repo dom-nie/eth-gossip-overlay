@@ -1,0 +1,7 @@
+# The build context is the workspace, minus what a build never reads. .git stays: build.rs reads
+# the commit out of it for --version and for SOURCE_DATE_EPOCH.
+/target
+/mutants.out*
+/tickets
+/Architecture.md
+.DS_Store

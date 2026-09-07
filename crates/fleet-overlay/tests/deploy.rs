@@ -20,6 +20,7 @@ const CONFIG: &str = "deploy/examples/config.yaml";
 const COMPOSE_ROSTER: &str = "examples/compose/roster.yaml";
 const COMPOSE_CONFIG: &str = "examples/compose/config.yaml";
 const COMPOSE: &str = "examples/compose/docker-compose.yml";
+const DOCKERFILE: &str = "Dockerfile";
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -361,4 +362,19 @@ fn compose_roster_and_config_load_with_real_parsers() {
             host.hostname
         );
     }
+}
+
+/// The version label is what a registry and an operator read off a pulled image, so it has to
+/// be the version the workspace builds rather than whatever it was when the file was written.
+#[test]
+fn dockerfile_labels_the_version_the_workspace_builds() {
+    let expected = format!(
+        r#"org.opencontainers.image.version="{}""#,
+        env!("CARGO_PKG_VERSION")
+    );
+
+    assert!(
+        read(DOCKERFILE).contains(&expected),
+        "{DOCKERFILE} does not carry {expected}"
+    );
 }
