@@ -19,6 +19,9 @@ const ALERTS_DIR: &str = "deploy/prometheus";
 const ALERTS_FILE: &str = "alerts.yml";
 const DASHBOARD: &str = "deploy/grafana/fleet-overlay.json";
 const COMPOSE: &str = "examples/compose/docker-compose.yml";
+const ROLLOUT: &str = "docs/rollout.md";
+const TROUBLESHOOTING: &str = "docs/troubleshooting.md";
+const EVENTS: &str = "docs/events.md";
 
 /// The image `promtool` comes out of where the host has no local one. Pinned to a tag rather
 /// than a digest on purpose: the check is "does a current Prometheus accept these rules".
@@ -420,5 +423,152 @@ fn the_compose_demo_mounts_the_shipped_dashboard_and_alert_rules() {
         "../../deploy/prometheus/alerts.yml:/etc/prometheus/rules/fleet-overlay.yml:ro",
     ] {
         assert!(compose.contains(mount), "{COMPOSE} does not mount {mount}");
+    }
+}
+
+/// The bodies of a Markdown file's ```language blocks, in order.
+fn fenced_blocks(text: &str, language: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut current: Option<Vec<&str>> = None;
+
+    for line in text.lines() {
+        match (&mut current, line.trim_end()) {
+            (Some(lines), "```") => {
+                blocks.push(lines.join("\n"));
+                current = None;
+            }
+            (Some(lines), line) => lines.push(line),
+            (None, fence) if fence == format!("```{language}") => current = Some(Vec::new()),
+            (None, _) => {}
+        }
+    }
+    blocks
+}
+
+/// Every LogQL query the project ships: the dashboard's optional panels, and the code blocks in
+/// the rollout guide and in T-044's event reference.
+fn logql_queries() -> Vec<String> {
+    let mut queries: Vec<String> = dashboard_queries()
+        .into_iter()
+        .filter(|(kind, _)| kind == "loki")
+        .map(|(_, expr)| expr)
+        .collect();
+    for doc in [ROLLOUT, EVENTS] {
+        queries.extend(fenced_blocks(&read(doc), "logql"));
+    }
+    queries
+}
+
+/// A directory inside the workspace for the rule files promtool is handed, since the container
+/// form of it bind-mounts whatever directory it is given and a temporary one may not be shared
+/// with the runtime.
+fn scratch() -> PathBuf {
+    let dir = workspace_root().join("target/t052");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Check 4. The queries an operator copies out of the rollout guide, wrapped one per recording
+/// rule so `promtool` parses them the way Prometheus would. Skipped where promtool cannot be
+/// reached, like check 1.
+#[test]
+fn rollout_doc_queries_are_syntactically_valid_promql() {
+    let queries = fenced_blocks(&read(ROLLOUT), "promql");
+    assert!(!queries.is_empty(), "{ROLLOUT} has no promql block");
+
+    let mut rules = String::from("groups:\n  - name: rollout-doc\n    rules:\n");
+    for (index, query) in queries.iter().enumerate() {
+        let indented = query
+            .lines()
+            .map(|line| format!("          {line}"))
+            .collect::<Vec<String>>()
+            .join("\n");
+        rules.push_str(&format!(
+            "      - record: doc:query{index}\n        expr: |\n{indented}\n"
+        ));
+    }
+
+    let dir = scratch();
+    let file = "rollout-doc-queries.yml";
+    std::fs::write(dir.join(file), &rules).unwrap();
+
+    let Some(output) = check_rules(&dir, file) else {
+        return;
+    };
+    assert_promtool_accepted(&output);
+}
+
+/// The same contract as checks 2 and 3, over the guide: a query in the documentation that names
+/// a series the binary does not export sends an operator looking for a fault that is really a
+/// typo in the doc.
+#[test]
+fn rollout_doc_queries_name_only_metrics_the_binary_exports() {
+    let exported = exported_metrics();
+
+    for query in fenced_blocks(&read(ROLLOUT), "promql") {
+        let unknown: Vec<String> = metric_names(&query)
+            .into_iter()
+            .filter(|name| !exported.contains(name))
+            .collect();
+
+        assert!(
+            unknown.is_empty(),
+            "{ROLLOUT} names series the binary does not export: {unknown:?} in {query:?}"
+        );
+    }
+}
+
+/// Check 5. D32: there is one log stream with an `event` field, not a stream per event, so
+/// every LogQL query selects the field rather than a file or a pipe.
+#[test]
+fn every_loki_query_selects_on_the_event_field() {
+    let queries = logql_queries();
+    assert!(queries.len() >= 3, "only {} LogQL queries", queries.len());
+
+    for query in &queries {
+        assert!(query.contains("| json"), "no `| json` in {query:?}");
+        assert!(query.contains("event=\""), "no event filter in {query:?}");
+        for stream in ["stdout", "stderr"] {
+            assert!(!query.contains(stream), "{stream} named in {query:?}");
+        }
+    }
+}
+
+/// The heading an anchor points at, GitHub's way: lowercased, punctuation dropped, spaces
+/// turned into dashes.
+fn anchor(heading: &str) -> String {
+    heading
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-')
+        .map(|c| if c == ' ' { '-' } else { c })
+        .collect()
+}
+
+/// An alert whose runbook link goes nowhere is an alert that fires at three in the morning and
+/// says nothing useful. Every one of them has a section of its own in the troubleshooting guide.
+#[test]
+fn every_runbook_annotation_names_a_heading_in_the_troubleshooting_doc() {
+    let headings: BTreeSet<String> = read(TROUBLESHOOTING)
+        .lines()
+        .filter_map(|line| line.strip_prefix("## "))
+        .map(anchor)
+        .collect();
+    assert!(!headings.is_empty(), "{TROUBLESHOOTING} has no sections");
+
+    for rule in alert_rules() {
+        let (path, section) = rule
+            .annotations
+            .runbook
+            .split_once('#')
+            .unwrap_or_else(|| panic!("{}: runbook has no anchor", rule.alert));
+
+        assert_eq!(path, TROUBLESHOOTING, "{}", rule.alert);
+        assert!(
+            headings.contains(section),
+            "{}: no `## ` heading in {TROUBLESHOOTING} anchors to {section}",
+            rule.alert
+        );
     }
 }
