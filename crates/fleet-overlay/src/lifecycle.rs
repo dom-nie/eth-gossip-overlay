@@ -200,7 +200,15 @@ pub fn exit_on_panic() {
         if std::env::var_os("RUST_BACKTRACE").is_some() {
             default(info);
         } else {
-            eprintln!("fleet-overlay: {info}");
+            // Not `{info}`: its own rendering puts the payload on a second line, and a fatal
+            // path here is one line an operator reads out of the journal.
+            let at = info
+                .location()
+                .map_or_else(String::new, |at| format!(" at {at}"));
+            eprintln!(
+                "fleet-overlay: panicked{at}: {}",
+                info.payload_as_str().unwrap_or("no message")
+            );
         }
         std::process::exit(EXIT_PANIC);
     }));
