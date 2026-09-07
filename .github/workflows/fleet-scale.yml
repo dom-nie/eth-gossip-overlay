@@ -1,0 +1,33 @@
+name: Fleet at scale
+
+# T-051's fleet harness with thirty hosts per scenario instead of three to six. Every scenario
+# starts a whole sidecar and a fake beacon node per host, so this is minutes rather than the
+# half minute the pull-request run takes, and it runs nightly instead.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fleet:
+    name: N=30
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustup show active-toolchain
+
+      - uses: Swatinem/rust-cache@v2
+
+      # One scenario at a time: thirty sidecars and thirty fake beacon nodes is enough for one
+      # runner to hold, and eleven of those at once is not.
+      - name: Scenarios at thirty hosts
+        run: cargo test -p fleet-overlay --test fleet_v1 -- --test-threads=1
+        env:
+          FLEET_NODES: 30

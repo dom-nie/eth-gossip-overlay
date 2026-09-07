@@ -9,7 +9,7 @@ use fleet_overlay::metrics::{
     PEER_QUEUE_DROPS_TOTAL, PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF, SOURCE_OVERLAY,
     UNIT_BYTES,
 };
-use harness::{Fleet, Scrape, WAIT, topic};
+use harness::{Fleet, SETTLE, Scrape, WAIT, topic};
 use overlay_transport::sender::{DropReason, LARGE_LANE_BYTES};
 
 mod harness;
@@ -316,7 +316,9 @@ async fn slow_peer_at_1_mbps_keeps_sender_memory_under_bound_and_others_unaffect
     /// More than the hundred concurrent unidirectional streams a peer will accept, because a
     /// node that stops reading holds every stream it was sent open and the sender blocks on the
     /// next one. That is where the queue behind it starts to fill.
-    const MESSAGES: usize = 140;
+    const MESSAGES: u64 = 140;
+    /// Enough messages before the throttle to say what delivery costs without one.
+    const BASELINE: u64 = 10;
     const PAYLOAD_BYTES: usize = 64 * 1024;
 
     let block = topic("beacon_block");
@@ -328,17 +330,20 @@ async fn slow_peer_at_1_mbps_keeps_sender_memory_under_bound_and_others_unaffect
     let slow = fleet.node(3).hostname().0.clone();
     fleet.throttle_node(3, Some(ONE_MBPS));
 
-    let blocks: Vec<Vec<u8>> = (0..MESSAGES)
-        .map(|index| incompressible(index as u64, PAYLOAD_BYTES))
+    let blocks: Vec<Vec<u8>> = (BASELINE..BASELINE + MESSAGES)
+        .map(|index| incompressible(index, PAYLOAD_BYTES))
         .collect();
-    let started = Instant::now();
+    let mut unthrottled = Vec::new();
+    for index in 0..BASELINE {
+        unthrottled.push(
+            deliver_to_fast_nodes(&fleet, &block, &incompressible(index, PAYLOAD_BYTES)).await,
+        );
+    }
+
+    fleet.throttle_node(3, Some(ONE_MBPS));
+    let mut paced = Vec::new();
     for payload in &blocks {
-        fleet.node(0).bn().publish(&block, payload).await;
-        fleet
-            .wait_for("both fast nodes to import the block", WAIT, |fleet| {
-                (1..3).all(|node| fleet.node(node).bn().count(&block, payload) == 1)
-            })
-            .await;
+        paced.push(deliver_to_fast_nodes(&fleet, &block, payload).await);
         let queued = fleet.node(0).metrics().await.sum(
             PEER_QUEUE_DEPTH,
             &[
@@ -352,11 +357,10 @@ async fn slow_peer_at_1_mbps_keeps_sender_memory_under_bound_and_others_unaffect
             "{queued} bytes queued for the slow peer, bound is {LARGE_LANE_BYTES}"
         );
     }
-    let unthrottled = started.elapsed();
-    let throttled = Duration::from_secs_f64((MESSAGES * PAYLOAD_BYTES) as f64 / ONE_MBPS as f64);
+    let (before, after) = (median(&mut unthrottled), median(&mut paced));
     assert!(
-        unthrottled < throttled / 4,
-        "{unthrottled:?} to reach the fast nodes; the slow peer's own rate needs {throttled:?}"
+        after <= before * 4 + SETTLE,
+        "a message took {after:?} to reach the fast nodes, {before:?} before the throttle"
     );
 
     fleet
@@ -376,9 +380,28 @@ async fn slow_peer_at_1_mbps_keeps_sender_memory_under_bound_and_others_unaffect
     let arrived = blocks
         .iter()
         .filter(|payload| fleet.node(3).bn().count(&block, payload) == 1)
-        .count();
+        .count() as u64;
     assert!(arrived < MESSAGES, "the slow peer kept up with {arrived}");
     fleet.throttle_node(3, None);
+}
+
+/// Publishes one block at node 0 and answers with how long it took to reach the two nodes
+/// nothing has throttled.
+async fn deliver_to_fast_nodes(fleet: &Fleet, topic: &str, payload: &[u8]) -> Duration {
+    let sent = Instant::now();
+    fleet.node(0).bn().publish(topic, payload).await;
+    fleet
+        .wait_for("both fast nodes to import the block", WAIT, |fleet| {
+            (1..3).all(|node| fleet.node(node).bn().count(topic, payload) == 1)
+        })
+        .await;
+    sent.elapsed()
+}
+
+/// The middle of `times`, which says what a message costs without one slow round deciding it.
+fn median(times: &mut [Duration]) -> Duration {
+    times.sort_unstable();
+    times[times.len() / 2]
 }
 
 /// A payload snappy cannot shrink, so what a beacon node puts on the wire is the size asked for.
@@ -427,7 +450,7 @@ async fn seed_rotation_with_host_by_host_sidecar_restarts_keeps_the_full_mesh_an
     let before = via_previous_seed(&fleet.metrics().await);
 
     fleet.rotate_seed([0x22; 32]).await;
-    for index in 0..3 {
+    for index in 0..fleet.hosts() {
         fleet.restart_node(index).await;
         fleet.wait_full_mesh(WAIT).await;
     }

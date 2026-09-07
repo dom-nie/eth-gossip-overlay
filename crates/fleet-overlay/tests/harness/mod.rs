@@ -122,6 +122,11 @@ static LOG: LazyLock<Arc<LogHandle>> = LazyLock::new(|| {
     }))
 });
 
+/// The nightly variant: `FLEET_NODES=30` grows every region until the fleet has at least that
+/// many hosts, so the scenarios run at a scale that catches what three or five cannot, without a
+/// pull request paying for it every time.
+const HOSTS_ENV: &str = "FLEET_NODES";
+
 /// A `/eth2/<digest>/<name>/ssz_snappy` topic string, which is the only shape the mirror parses.
 pub fn topic(name: &str) -> String {
     format!("/eth2/{FORK_DIGEST}/{name}/ssz_snappy")
@@ -171,7 +176,8 @@ impl Builder {
         write_secret(&dir.path().join("seed"), &SEED);
 
         let mut nodes = Vec::new();
-        for (region, hosts) in &self.regions {
+        let regions = scaled(self.regions);
+        for (region, hosts) in &regions {
             for _ in 0..*hosts {
                 let index = nodes.len();
                 nodes.push(Node::create(dir.path(), &prefix, index, region).await);
@@ -194,6 +200,27 @@ impl Builder {
         }
         fleet
     }
+}
+
+/// The layout a fleet really starts with: what the scenario asked for, grown region by region
+/// until it holds [`HOSTS_ENV`] hosts. An unset or unreadable variable leaves it alone.
+fn scaled(mut regions: Vec<(String, usize)>) -> Vec<(String, usize)> {
+    let Ok(target) = std::env::var(HOSTS_ENV)
+        .unwrap_or_default()
+        .parse::<usize>()
+    else {
+        return regions;
+    };
+    let mut hosts: usize = regions.iter().map(|(_, hosts)| hosts).sum();
+    let count = regions.len();
+    for round in 0.. {
+        if hosts >= target || count == 0 {
+            return regions;
+        }
+        regions[round % count].1 += 1;
+        hosts += 1;
+    }
+    regions
 }
 
 /// Distinguishes one fleet's hostnames from another's: the read-pacing hook and the captured
@@ -224,6 +251,11 @@ impl Fleet {
     /// Every node, in the order the region layout named them.
     pub fn nodes(&self) -> &[Node] {
         &self.nodes
+    }
+
+    /// How many hosts the fleet has, which the nightly variant grows (see [`HOSTS_ENV`]).
+    pub fn hosts(&self) -> usize {
+        self.nodes.len()
     }
 
     /// One node.
@@ -290,10 +322,10 @@ impl Fleet {
     /// it works with the kill switch off as well.
     pub async fn wait_full_mesh(&mut self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
-        let probe = topic(&format!(
-            "beacon_attestation_{}",
-            FIRST_PROBE_SUBNET - self.probes
-        ));
+        let subnet = FIRST_PROBE_SUBNET
+            .checked_sub(self.probes)
+            .expect("a fleet needs one attestation subnet per probe round");
+        let probe = topic(&format!("beacon_attestation_{subnet}"));
         self.probes += 1;
         for node in &self.nodes {
             node.subscribe(&probe).await;
@@ -454,11 +486,21 @@ impl Fleet {
 
     /// Stops one node's sidecar and waits until it has let go of its ports, which is what lets
     /// the replacement bind them again.
+    ///
+    /// The wait is not belt and braces. `App::run` gives its tasks §11's two seconds and then
+    /// returns whether or not they are finished, so on a fleet with a few dozen peers the
+    /// endpoint can outlive the join; in the binary the process exit takes care of the rest,
+    /// and here the next node has to bind the same port.
     pub async fn stop_node(&mut self, index: usize) {
         if let Some(running) = self.nodes[index].app.take() {
             running.stop.send_replace(true);
             let _ = running.task.await;
         }
+        let (overlay, metrics) = (self.nodes[index].overlay, self.nodes[index].metrics);
+        self.wait_for("the stopped node to let go of its ports", WAIT, |_| {
+            UdpSocket::bind(overlay).is_ok() && TcpListener::bind(metrics).is_ok()
+        })
+        .await;
     }
 
     /// Runs the seed rotation of DX-N2 up to the restarts, so that every host accepts keys from
