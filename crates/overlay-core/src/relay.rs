@@ -66,4 +66,18 @@ mod tests {
             vec![host("bn-us-03"), host("bn-us-04"), host("bn-us-05")]
         );
     }
+
+    /// The window is a ring, so an origin that lands near the end of the pool still gets `n`
+    /// relays instead of however many hosts are left. Nothing about the pool's order says where
+    /// it begins, and cutting the window short would leave the hosts at the top of the region
+    /// carrying less than the ones below them.
+    #[test]
+    fn select_wraps_around_the_end_of_the_pool() {
+        let relays = select(&host("bn-eu-01"), &pool(4), 3);
+
+        assert_eq!(
+            relays,
+            vec![host("bn-us-03"), host("bn-us-04"), host("bn-us-01")]
+        );
+    }
 }
