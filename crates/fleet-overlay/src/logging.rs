@@ -157,9 +157,9 @@ pub(crate) fn directive(level: LogLevel) -> &'static str {
 #[cfg(test)]
 pub(crate) mod testing {
     use std::io::{self, Write};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, LazyLock, Mutex};
 
-    use overlay_core::config::Log;
+    use overlay_core::config::{Log, LogFormat, LogLevel};
     use serde_json::{Map, Value};
     use tracing::Dispatch;
     use tracing_subscriber::fmt::MakeWriter;
@@ -202,14 +202,42 @@ pub(crate) mod testing {
         }
     }
 
+    /// One subscriber for the whole test binary, kept alive under every thread-scoped one.
+    ///
+    /// `tracing` settles a call site's interest the first time the call site is reached, by
+    /// asking the dispatchers alive at that moment, and a call site reached with none alive
+    /// settles on "never" for the rest of the process: a [`with_default`] test that reaches it
+    /// afterwards reads an empty sink. A subscriber that never goes away and takes an interest
+    /// in every level holds that answer at "sometimes", so each event asks the dispatcher in
+    /// force instead. It also keeps the global maximum level at `trace`, which a scoped
+    /// subscriber alone lowers for every thread at once. Its own lines go nowhere: what a test
+    /// reads back is the rendering of the configuration it asked for, not this one.
+    ///
+    /// [`with_default`]: tracing::dispatcher::with_default
+    static PROCESS_WIDE: LazyLock<()> = LazyLock::new(|| {
+        let cfg = Log {
+            level: LogLevel::Trace,
+            format: LogFormat::Text,
+        };
+        let discard: fn() -> io::Sink = io::sink;
+        let (dispatch, _handle) = build(&cfg, discard, false, None, None);
+        // Another global subscriber in this binary would be a bug, but every test that reads a
+        // sink would fail on its own assertion, so there is nothing to add by panicking here.
+        let _ = tracing::dispatcher::set_global_default(dispatch);
+    });
+
     /// A subscriber built exactly as [`init`](super::init) builds the real one, writing to
     /// memory and taking the terminal and `RUST_LOG` answers as arguments rather than reading
     /// the process.
+    ///
+    /// Installs [`PROCESS_WIDE`] first, which is why it is every test's way in: a fixture built
+    /// here is built before the code under it reaches its first call site.
     pub(crate) fn subscriber(
         cfg: &Log,
         is_tty: bool,
         rust_log: Option<&str>,
     ) -> (Sink, Dispatch, LogHandle) {
+        LazyLock::force(&PROCESS_WIDE);
         let sink = Sink::default();
         let (dispatch, handle) =
             build(cfg, sink.clone(), is_tty, rust_log.map(str::to_owned), None);
