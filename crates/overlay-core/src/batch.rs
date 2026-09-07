@@ -211,7 +211,9 @@ mod tests {
     use crate::roster::Hostname;
     use crate::time::{Clock, FakeClock};
     use crate::topic::table::TopicId;
-    use crate::wire::{BATCH_ENTRY_OVERHEAD_BYTES, BATCH_HEADER_BYTES};
+    use crate::wire::{
+        BATCH_ENTRY_OVERHEAD_BYTES, BATCH_HEADER_BYTES, BatchFlags, Frame, encode_datagram,
+    };
 
     const WINDOW: Duration = Duration::from_millis(10);
     const STALE_AFTER: Duration = Duration::from_millis(1000);
@@ -611,5 +613,50 @@ mod tests {
             prop_assert_eq!(once.len(), flushed.len());
             prop_assert!(once.iter().all(|nonce| *nonce < pushes));
         }
+    }
+
+    /// The flags on a frame [`Flush::into_frame`] made, which is a `BATCH` or a bug.
+    fn batch_flags(frame: &Frame) -> BatchFlags {
+        match frame {
+            Frame::Batch { flags, .. } => *flags,
+            other => panic!("into_frame made {other:?}"),
+        }
+    }
+
+    #[test]
+    fn encoded_batch_never_exceeds_max_bytes() {
+        let clock = FakeClock::new();
+        let mut batcher = batcher();
+        let mut flushes = Vec::new();
+        for n in 0..200u32 {
+            let len = 4 + (n as usize * 37) % 1400;
+            flushes.extend(batcher.push(
+                &dest("host-a"),
+                TopicId::new(11),
+                tagged(n, len),
+                MAX_BYTES,
+                clock.now(),
+            ));
+            clock.advance(Duration::from_millis(1));
+            flushes.extend(batcher.tick(clock.now()));
+        }
+        clock.advance(WINDOW);
+        flushes.extend(batcher.tick(clock.now()));
+
+        let mut datagrams = 0;
+        for flush in flushes {
+            let carrier = flush.carrier;
+            let frame = flush.into_frame();
+            assert_eq!(batch_flags(&frame), BatchFlags::NONE);
+            let encoded = encode_datagram(&frame).len();
+            match carrier {
+                Carrier::Datagram => {
+                    datagrams += 1;
+                    assert!(encoded <= MAX_BYTES, "{encoded} bytes in one datagram");
+                }
+                Carrier::Stream => assert!(encoded > MAX_BYTES),
+            }
+        }
+        assert!(datagrams > 10, "only {datagrams} batches were built");
     }
 }
