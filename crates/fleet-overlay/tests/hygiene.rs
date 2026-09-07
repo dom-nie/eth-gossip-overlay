@@ -129,6 +129,48 @@ fn every_mutants_skip_carries_a_reason() {
     }
 }
 
+/// A Lighthouse identity is always a secp256k1 key, so a sidecar whose libp2p was built without
+/// the feature cannot decode the beacon node's public key and every dial ends in `Invalid public
+/// key`. The graph asked here is the normal one, which is the only place the answer is honest:
+/// `overlay-bn` takes `lighthouse_network` as a dev-dependency, and that turns the feature on for
+/// every test build in the workspace, this one included. So no test can answer the question by
+/// compiling against libp2p; it has to ask what the binary is built from.
+#[test]
+fn the_shipped_binary_is_built_to_decode_a_lighthouse_key() {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let out = std::process::Command::new(cargo)
+        .args([
+            "tree",
+            "-p",
+            "fleet-overlay",
+            "-e",
+            "normal",
+            "-f",
+            "{p} {f}",
+        ])
+        .current_dir(workspace_root())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "cargo tree failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tree = String::from_utf8(out.stdout).unwrap();
+
+    let libp2p = tree
+        .lines()
+        .find(|line| line.contains("libp2p v"))
+        .expect("no libp2p in fleet-overlay's normal dependency graph");
+    assert!(
+        libp2p.contains("secp256k1"),
+        "the shipped binary's libp2p has no `secp256k1` feature, so it cannot pair with a real \
+         beacon node. A test build hides this, because overlay-bn's dev-dependency on \
+         lighthouse_network turns the feature on. Add it to the libp2p features in the workspace \
+         Cargo.toml.\n{libp2p}"
+    );
+}
+
 /// The `## [...]` sections of a changelog, as heading and body. The heading keeps its brackets,
 /// which is what tells a version section from any other second-level heading the file grows.
 fn changelog_sections(text: &str) -> Vec<(&str, &str)> {
