@@ -1,6 +1,7 @@
-//! The deployment examples under `deploy/`. They are text files an operator copies into their
-//! own configuration management, so the tests are lint-style checks that read them from the
-//! repository and hold them to what the sidecar and the two systemd units actually need.
+//! The deployment examples under `deploy/` and the compose demo under `examples/compose/`. They
+//! are text files an operator copies into their own configuration management or starts as they
+//! are, so the tests are lint-style checks that read them from the repository and hold them to
+//! what the sidecar, the two systemd units and the demo stack actually need.
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -16,6 +17,9 @@ const NFT_TEMPLATE: &str = "deploy/nftables/fleet-overlay.nft.j2";
 const NFT_EXAMPLE: &str = "deploy/nftables/fleet-overlay.nft.example";
 const ROSTER: &str = "deploy/examples/roster.yaml";
 const CONFIG: &str = "deploy/examples/config.yaml";
+const COMPOSE_ROSTER: &str = "examples/compose/roster.yaml";
+const COMPOSE_CONFIG: &str = "examples/compose/config.yaml";
+const COMPOSE: &str = "examples/compose/docker-compose.yml";
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -309,4 +313,52 @@ fn systemd_analyze_verify_passes() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The demo's own config and roster, through the parsers the sidecar starts with, plus the two
+/// things the demo needs that a bare-metal host does not: metrics reachable from another
+/// container, and a node key on a volume that outlives the container (D01, D30).
+///
+/// The roster addresses are the static addresses the compose network hands out, so a change to
+/// one that misses the other would leave three sidecars dialling nothing. Holding the file to
+/// the compose file is what keeps the two together.
+#[test]
+fn compose_roster_and_config_load_with_real_parsers() {
+    let config = Config::from_yaml(&read(COMPOSE_CONFIG))
+        .unwrap_or_else(|err| panic!("{COMPOSE_CONFIG}: {err}"));
+    let roster = Roster::from_yaml(&read(COMPOSE_ROSTER))
+        .unwrap_or_else(|err| panic!("{COMPOSE_ROSTER}: {err}"));
+    let compose = read(COMPOSE);
+
+    assert_eq!(config.metrics_listen.to_string(), "0.0.0.0:7789");
+    assert!(
+        config
+            .bn
+            .node_key_file
+            .starts_with("/var/lib/fleet-overlay"),
+        "{COMPOSE_CONFIG}: the node key is not on the volume: {}",
+        config.bn.node_key_file.display()
+    );
+    assert_eq!(roster.hosts.len(), 3, "{COMPOSE_ROSTER}");
+
+    let regions: std::collections::BTreeSet<&str> = roster
+        .hosts
+        .iter()
+        .map(|host| host.region.0.as_str())
+        .collect();
+    assert_eq!(regions.len(), 2, "{COMPOSE_ROSTER}: {regions:?}");
+
+    for host in &roster.hosts {
+        assert!(
+            compose.contains(&format!("{}:", host.hostname)),
+            "{COMPOSE}: no service named {}",
+            host.hostname
+        );
+        assert!(
+            compose.contains(&host.addr.ip().to_string()),
+            "{COMPOSE}: {} is not the address the network hands {}",
+            host.addr.ip(),
+            host.hostname
+        );
+    }
 }
