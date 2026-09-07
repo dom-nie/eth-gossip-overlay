@@ -439,6 +439,37 @@ mod tests {
         assert_eq!(cluster.datagrams_received(1, &cluster.hostname(0)), 0);
     }
 
+    /// Small class is not the same as small. `Class::of` puts an `AttesterSlashing` in it on
+    /// kind alone, and a post-Electra one carries every attesting index of a slot twice, well
+    /// past the `u16` length a `BATCH` entry has for it. Such a payload never reaches the
+    /// batcher: it goes as a whole message, the way v1 sent everything, because `wire`'s
+    /// narrowing would stop a debug build and a release build would write a frame that decodes
+    /// as something else (D21).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn small_class_payload_no_batch_entry_can_hold_goes_as_a_whole_message() {
+        let slashing = topic("attester_slashing");
+        let payload = incompressible(MAX_BATCH_ENTRY_BYTES + 4096);
+        assert!(payload.len() > MAX_BATCH_ENTRY_BYTES, "{}", payload.len());
+        let mut cluster = TestCluster::start(2).await;
+        for node in 0..2 {
+            cluster.start_sidecar(node, subscriptions(&[&slashing], &[]));
+        }
+        eventually("the sibling to say it wants slashings", || {
+            cluster.live(0).subscribers(&slashing).len() == 1
+        })
+        .await;
+
+        assert!(cluster.from_bn(0, &slashing, &payload));
+
+        eventually("the sibling to queue it", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert_eq!(cluster.published(1)[0].class, Class::Small);
+        assert_eq!(cluster.published(1)[0].payload, payload);
+        assert_eq!(cluster.datagrams_received(1, &cluster.hostname(0)), 0);
+    }
+
     /// The invariant the module is shaped around (§5.7): a message that goes to a hundred peers
     /// with one of them stalled is done for the other ninety-nine at once. The loop hands each
     /// peer's queue a frame and waits for none of them.
