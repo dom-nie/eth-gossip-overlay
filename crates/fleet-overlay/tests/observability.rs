@@ -17,6 +17,7 @@ use serde::Deserialize;
 
 const ALERTS_DIR: &str = "deploy/prometheus";
 const ALERTS_FILE: &str = "alerts.yml";
+const DASHBOARD: &str = "deploy/grafana/fleet-overlay.json";
 
 /// The image `promtool` comes out of where the host has no local one. Pinned to a tag rather
 /// than a digest on purpose: the check is "does a current Prometheus accept these rules".
@@ -338,4 +339,84 @@ fn process_names_are_the_ones_the_collector_exports() {
         .collect();
 
     assert!(missing.is_empty(), "not on the scrape: {missing:?}");
+}
+
+/// Every query in the dashboard, as (datasource type, expression). Each target carries its own
+/// datasource, which is how the Prometheus panels are told from the optional Loki ones.
+fn dashboard_queries() -> Vec<(String, String)> {
+    let dashboard: serde_json::Value =
+        serde_json::from_str(&read(DASHBOARD)).unwrap_or_else(|err| panic!("{DASHBOARD}: {err}"));
+    let mut queries = Vec::new();
+    collect_queries(&dashboard, &mut queries);
+    queries
+}
+
+fn collect_queries(value: &serde_json::Value, into: &mut Vec<(String, String)>) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                collect_queries(item, into);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            let expr = fields.get("expr").and_then(serde_json::Value::as_str);
+            let kind = fields
+                .get("datasource")
+                .and_then(|source| source.get("type"))
+                .and_then(serde_json::Value::as_str);
+            if let (Some(expr), Some(kind)) = (expr, kind) {
+                into.push((kind.to_owned(), expr.to_owned()));
+            }
+            for field in fields.values() {
+                collect_queries(field, into);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Check 3. The same contract as the alert rules, over the panels: a dashboard that names a
+/// series the binary does not export is a panel that stays empty and says nothing about why.
+#[test]
+fn dashboard_json_is_valid_and_references_only_known_metrics() {
+    let exported = exported_metrics();
+    let queries = dashboard_queries();
+
+    let prometheus: Vec<&(String, String)> = queries
+        .iter()
+        .filter(|(kind, _)| kind == "prometheus")
+        .collect();
+    assert!(
+        !prometheus.is_empty(),
+        "{DASHBOARD} has no Prometheus panel"
+    );
+
+    for (_, expr) in prometheus {
+        let named = metric_names(expr);
+        assert!(!named.is_empty(), "no series read out of {expr:?}");
+
+        let unknown: Vec<&String> = named
+            .iter()
+            .filter(|name| !exported.contains(*name))
+            .collect();
+        assert!(
+            unknown.is_empty(),
+            "{expr:?} names series the binary does not export: {unknown:?}"
+        );
+    }
+}
+
+/// The demo's Grafana provisions every dashboard under `examples/compose/dashboards`, and the
+/// dashboard lives in `deploy/` where an operator finds it. A second copy in the demo would rot
+/// the first time either changed, so the compose file mounts the real file into that directory.
+#[test]
+fn the_compose_demo_mounts_the_shipped_dashboard() {
+    let compose = read("examples/compose/docker-compose.yml");
+    let mount =
+        "../../deploy/grafana/fleet-overlay.json:/var/lib/grafana/dashboards/fleet-overlay.json:ro";
+
+    assert!(
+        compose.contains(mount),
+        "examples/compose/docker-compose.yml does not mount {DASHBOARD}"
+    );
 }
