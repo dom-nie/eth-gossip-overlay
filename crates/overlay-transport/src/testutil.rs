@@ -1392,3 +1392,84 @@ pub fn view(connection: &quinn::Connection, peers: Vec<(Hostname, PeerState)>) -
             .collect(),
     )
 }
+
+/// A byte rate one host reads its peers' data streams at, for T-051's scenario 14.
+///
+/// The overlay has no bandwidth knob and netem is not available inside a test binary, so a slow
+/// host is made by pausing its own reads. [`crate::receive`] waits here before each frame and
+/// charges what it delivered, and because the pacer is shared by every stream task of a host,
+/// paying for one message keeps the next stream unread. Data then piles up behind the
+/// connection's flow-control window until the senders' large lanes overflow, which is the
+/// behaviour D17's bounds exist for.
+///
+/// ```ignore
+/// throttle::set(&cluster.hostname(2), Some(125_000)); // 1 Mbps
+/// // ... publish, then:
+/// throttle::set(&cluster.hostname(2), None);
+/// ```
+pub mod throttle {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
+    use std::time::{Duration, Instant};
+
+    use overlay_core::roster::Hostname;
+
+    /// The longest single pause. A paced reader comes back often enough that dropping its
+    /// receiver still ends the task promptly, and no wait in the fleet harness is longer than
+    /// this.
+    const SLICE: Duration = Duration::from_millis(50);
+
+    /// One host's rate and the moment it has paid off what it has read.
+    struct Pacer {
+        bytes_per_s: u64,
+        ready_at: Instant,
+    }
+
+    static PACED: LazyLock<Mutex<HashMap<Hostname, Pacer>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    fn paced() -> MutexGuard<'static, HashMap<Hostname, Pacer>> {
+        PACED.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Paces `host`'s reads at `bytes_per_s`, or lets them run at full speed again with `None`.
+    pub fn set(host: &Hostname, bytes_per_s: Option<u64>) {
+        match bytes_per_s {
+            Some(bytes_per_s) if bytes_per_s > 0 => {
+                paced().insert(
+                    host.clone(),
+                    Pacer {
+                        bytes_per_s,
+                        ready_at: Instant::now(),
+                    },
+                );
+            }
+            _ => {
+                paced().remove(host);
+            }
+        }
+    }
+
+    /// Charges `bytes` against `host`'s rate, which is what the next [`wait`] pays for.
+    pub(crate) fn charge(host: &Hostname, bytes: usize) {
+        let mut paced = paced();
+        if let Some(pacer) = paced.get_mut(host) {
+            let owed = Duration::from_secs_f64(bytes as f64 / pacer.bytes_per_s as f64);
+            pacer.ready_at = pacer.ready_at.max(Instant::now()) + owed;
+        }
+    }
+
+    /// Returns once `host` has paid for everything it has read. Immediately for a host nothing
+    /// has throttled, which is every host outside scenario 14.
+    pub(crate) async fn wait(host: &Hostname) {
+        loop {
+            let Some(ready_at) = paced().get(host).map(|pacer| pacer.ready_at) else {
+                return;
+            };
+            let Some(left) = ready_at.checked_duration_since(Instant::now()) else {
+                return;
+            };
+            tokio::time::sleep(left.min(SLICE)).await;
+        }
+    }
+}

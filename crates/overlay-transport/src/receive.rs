@@ -293,6 +293,11 @@ async fn read_stream(mut stream: quinn::RecvStream, ctx: Arc<Ctx>) {
 /// of (D10).
 async fn read_frames<R: AsyncRead + Unpin>(stream: &mut R, ctx: &Ctx) -> StreamEnd {
     loop {
+        // A host the fleet harness has throttled reads no further until it has paid for what it
+        // already delivered (T-051 scenario 14). Nothing throttles a host outside that test, and
+        // the hook is compiled out of every build that does not carry the test surface.
+        #[cfg(any(test, feature = "test-util"))]
+        crate::testutil::throttle::wait(&ctx.deps.node.hostname).await;
         let read = tokio::time::timeout(
             STREAM_READ_TIMEOUT,
             wire::read_frame(stream, MAX_FRAME_BYTES),
@@ -358,6 +363,8 @@ impl Ctx {
         self.deps
             .stats
             .message(Direction::In, class, self.labels(), payload.len());
+        #[cfg(any(test, feature = "test-util"))]
+        crate::testutil::throttle::charge(&self.deps.node.hostname, payload.len());
         if !self.deps.sets.borrow().advertised.contains(&topic) {
             self.deps.stats.unwanted_topic(&self.peer);
             return;

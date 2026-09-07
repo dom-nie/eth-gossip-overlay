@@ -446,6 +446,13 @@ impl Fleet {
         }
     }
 
+    /// Paces one node's reads at `bytes_per_s`, or lets them run at full speed again with
+    /// `None`. The overlay has no bandwidth knob and a test binary has no netem, so a slow host
+    /// is one that stops reading until it has paid for what it read (T-033, D17).
+    pub fn throttle_node(&self, index: usize, bytes_per_s: Option<u64>) {
+        overlay_transport::testutil::throttle::set(&self.nodes[index].hostname, bytes_per_s);
+    }
+
     /// Cuts every pair between the two sets by taking each side out of the other's roster and
     /// reloading, which closes the connection that pair holds and keeps it from being redialled.
     /// Nothing else changes: both halves keep their beacon nodes and their other peers.

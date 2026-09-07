@@ -312,8 +312,11 @@ async fn publish_and_wait(fleet: &Fleet, topic: &str, text: &str) {
 async fn slow_peer_at_1_mbps_keeps_sender_memory_under_bound_and_others_unaffected() {
     /// 1 Mbps in bytes per second.
     const ONE_MBPS: u64 = 125_000;
-    const MESSAGES: usize = 16;
-    const PAYLOAD_BYTES: usize = 256 * 1024;
+    /// More than the hundred concurrent unidirectional streams a peer will accept, because a
+    /// node that stops reading holds every stream it was sent open and the sender blocks on the
+    /// next one. That is where the queue behind it starts to fill.
+    const MESSAGES: usize = 140;
+    const PAYLOAD_BYTES: usize = 64 * 1024;
 
     let block = topic("beacon_block");
     let mut fleet = Fleet::builder().regions(&[("eu", 4)]).start().await;
@@ -330,6 +333,11 @@ async fn slow_peer_at_1_mbps_keeps_sender_memory_under_bound_and_others_unaffect
     let started = Instant::now();
     for payload in &blocks {
         fleet.node(0).bn().publish(&block, payload).await;
+        fleet
+            .wait_for("both fast nodes to import the block", WAIT, |fleet| {
+                (1..3).all(|node| fleet.node(node).bn().count(&block, payload) == 1)
+            })
+            .await;
         let queued = fleet.node(0).metrics().await.sum(
             PEER_QUEUE_DEPTH,
             &[
@@ -343,21 +351,11 @@ async fn slow_peer_at_1_mbps_keeps_sender_memory_under_bound_and_others_unaffect
             "{queued} bytes queued for the slow peer, bound is {LARGE_LANE_BYTES}"
         );
     }
-
-    fleet
-        .wait_for("both fast nodes to import every block", WAIT, |fleet| {
-            (1..3).all(|node| {
-                blocks
-                    .iter()
-                    .all(|p| fleet.node(node).bn().count(&block, p) == 1)
-            })
-        })
-        .await;
     let unthrottled = started.elapsed();
     let throttled = Duration::from_secs_f64((MESSAGES * PAYLOAD_BYTES) as f64 / ONE_MBPS as f64);
     assert!(
         unthrottled < throttled / 4,
-        "{unthrottled:?} to reach the fast nodes; the slow peer's rate alone is {throttled:?}"
+        "{unthrottled:?} to reach the fast nodes; the slow peer's own rate needs {throttled:?}"
     );
 
     fleet
@@ -374,6 +372,11 @@ async fn slow_peer_at_1_mbps_keeps_sender_memory_under_bound_and_others_unaffect
             })
         })
         .await;
+    let arrived = blocks
+        .iter()
+        .filter(|payload| fleet.node(3).bn().count(&block, payload) == 1)
+        .count();
+    assert!(arrived < MESSAGES, "the slow peer kept up with {arrived}");
     fleet.throttle_node(3, None);
 }
 
