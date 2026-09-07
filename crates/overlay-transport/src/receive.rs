@@ -1320,6 +1320,48 @@ mod tests {
         assert_eq!(cluster.stats(1).relayed_batches(), 0);
     }
 
+    /// Any number of regions, each decided on its own (§5.4): the fleet is three, three and one
+    /// host, and the origin relays into the region at the threshold while the single-host one is
+    /// sent to directly. Every beacon node in the fleet is offered the attestation once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn three_region_fleet_relays_into_regions_at_the_threshold_and_goes_direct_below_it() {
+        let subnet = topic("beacon_attestation_7");
+        let payload = payload(b"one attestation for three regions");
+        let mut cluster = Builder::new(&[NodeKind::Manager; 7])
+            .regions(&["eu", "eu", "eu", "us", "us", "us", "ap"])
+            .fanout(relaying(3, 1))
+            .start()
+            .await;
+        for node in 0..7 {
+            cluster.start_sidecar(node, subscriptions(&[&subnet], &[]));
+        }
+        eventually("every host to say it wants the subnet", || {
+            (0..7).all(|node| cluster.live(node).subscribers(&subnet).len() == 6)
+        })
+        .await;
+
+        assert!(cluster.from_bn(0, &subnet, &payload));
+
+        for node in 1..7 {
+            eventually("every other host to queue it", || {
+                cluster.published(node).len() == 1
+            })
+            .await;
+        }
+        tokio::time::sleep(SETTLE).await;
+        let origin = cluster.hostname(0);
+        let over_the_wan = |nodes: std::ops::Range<usize>| {
+            nodes
+                .filter(|node| cluster.stats(*node).messages(Direction::In, &origin) > 0)
+                .count()
+        };
+        assert_eq!(over_the_wan(3..6), 1, "the region at the threshold relays");
+        assert_eq!(over_the_wan(6..7), 1, "the single-host region is direct");
+        for node in 0..7 {
+            assert_eq!(cluster.published(node).len(), usize::from(node != 0));
+        }
+    }
+
     /// An entry id the peer never announced costs that entry and nothing else (D21): the rest of
     /// the batch is delivered and the connection carries on, because the sender is one release
     /// ahead or its `TOPIC_ADD` has not arrived yet, neither of which is a protocol error.
