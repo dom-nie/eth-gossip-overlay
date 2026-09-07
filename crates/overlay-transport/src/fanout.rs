@@ -5,7 +5,7 @@
 //!
 //! | Message | Carrier |
 //! |---|---|
-//! | small class, toward a peer that advertised `DATAGRAM_BATCHES` and takes datagrams | the batcher (T-061), then one `BATCH` datagram per window ([`crate::batching`]) |
+//! | small class, toward a peer that advertised `DATAGRAM_BATCHES` and takes datagrams | the batcher (T-061), then one `BATCH` datagram per window ([`crate::batching`]), carrying `RELAY` when the peer is a relay for it |
 //! | everything else | a `CHUNK` with `k = 1, m = 0` on a unidirectional stream of its own |
 //!
 //! The whole-message form is what every release can read, so it is both v1's only path and what
@@ -14,10 +14,15 @@
 //! small-class payloads no `BATCH` can: an entry's length is a `u16` and small class is decided
 //! by kind, so an `AttesterSlashing` runs past what a batch entry holds (D21).
 //!
-//! Only what the beacon node sent comes through here. A message that arrived from the overlay is
-//! published locally and never sent on (§3 principle 1), which is what bounds duplicates to the
-//! number of beacon nodes that got it from public gossip (§5.5). [`crate::receive`] holds no
-//! handle to this task and has nothing to hand one.
+//! A small-class batch crossing to a region large enough to be worth the hop goes to a few of
+//! that region's hosts with `RELAY` set, and each of them delivers it inside its own region
+//! (D11, D20). The router decides which hosts and this loop marks the batches for them; the
+//! second hop itself is [`crate::receive`]'s.
+//!
+//! Only what the beacon node sent comes through here. [`crate::receive`] holds no handle to this
+//! task and has nothing to hand one, so what a host takes off the overlay is published locally
+//! and goes no further except as that one relay hop (§3 principle 1), which is what bounds
+//! duplicates to the number of beacon nodes that got a message from public gossip (§5.5).
 //!
 //! # Per-peer senders
 //!
