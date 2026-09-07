@@ -85,6 +85,10 @@ async fn attestation_on_subnet_reaches_only_subscribed_bns() {
 
 /// §5.5: two beacon nodes validating the same message from public gossip is the normal case,
 /// and the seen cache is what turns the two copies into one publish at every other host.
+///
+/// The two origins are cut from each other so that both really publish. Sharing a connection
+/// would let whichever went first reach the other's beacon node before it had, and the copy the
+/// scenario is about would never be sent.
 #[tokio::test(flavor = "multi_thread")]
 async fn same_message_from_two_origins_is_published_once_everywhere() {
     let block = topic("beacon_block");
@@ -93,10 +97,13 @@ async fn same_message_from_two_origins_is_published_once_everywhere() {
         node.subscribe(&block).await;
     }
     fleet.wait_full_mesh(WAIT).await;
+    fleet.partition(&[0], &[1]).await;
 
     let payload = b"one block, two origins".to_vec();
-    fleet.node(0).bn().publish(&block, &payload).await;
-    fleet.node(1).bn().publish(&block, &payload).await;
+    tokio::join!(
+        fleet.node(0).bn().publish(&block, &payload),
+        fleet.node(1).bn().publish(&block, &payload),
+    );
 
     fleet
         .wait_for("both other beacon nodes to import it", WAIT, |fleet| {

@@ -344,7 +344,11 @@ impl FakeBn {
         let peer_id = *swarm.local_peer_id();
         let (commands, command_rx) = mpsc::channel(64);
         let (received_tx, received) = mpsc::channel(8192);
-        let (events_tx, events) = mpsc::channel(64);
+        // A sidecar announces its whole subscription set in one go, which on a mainnet spec is
+        // the mirror's own topics plus a column topic per index, so one connect alone is well
+        // over a hundred events. The sink is `try_send`, so a channel sized for a handful loses
+        // whichever of them arrives while a test is not reading.
+        let (events_tx, events) = mpsc::channel(8192);
         let (answers_tx, answers) = mpsc::channel(64);
         let (inbound_tx, inbound) = mpsc::channel(64);
         let task = tokio::spawn(drive(
