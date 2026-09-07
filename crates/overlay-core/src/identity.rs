@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 use crate::roster::Hostname;
 
 /// The HKDF salt. Versioned so a later derivation scheme can never collide with this one.
-const HKDF_SALT: &[u8] = b"fleet-overlay/v1";
+const HKDF_SALT: &[u8] = b"eth-gossip-overlay/v1";
 /// The HKDF info prefix for the overlay TLS key; the hostname follows it. The purpose label
 /// keeps a second derivation from the same seed apart from this one.
 const TLS_INFO_PREFIX: &[u8] = b"overlay-tls:";
@@ -436,10 +436,10 @@ mod tests {
         assert_eq!(*loaded, [0x22; 32]);
     }
 
-    /// Freezes the derivation. The value is from the first green run of the tests above and
-    /// was recomputed independently before merge; any other HKDF-SHA256 and Ed25519
-    /// implementation must reproduce it. If this test ever fails, every sibling's pin table
-    /// would reject this host.
+    /// Freezes the derivation. The value was derived twice at MD-03, in two implementations
+    /// unrelated to this one and to each other, and the same method reproduced the vector this
+    /// one replaced under the old salt; any other HKDF-SHA256 and Ed25519 implementation must
+    /// reproduce it. If this test ever fails, every sibling's pin table would reject this host.
     #[test]
     fn golden_vector_seed_all_zero_host_bn_test_01() {
         let key = expected_tls_public_key(&FleetSeed::from([0u8; 32]), &host("bn-test-01"));
@@ -447,7 +447,7 @@ mod tests {
         let hex: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
         assert_eq!(
             hex,
-            "ed0588b1ad3f567cd8049b42ddb34fc435e71298c9571ad9a5e86957e2682645"
+            "039b144efbad9965270448bf38a2aa3fd820305d14737929eac77d0ec7b97fa1"
         );
     }
 }

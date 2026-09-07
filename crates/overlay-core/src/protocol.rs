@@ -19,7 +19,7 @@ pub const PROTOCOL_MAJOR: u8 = 1;
 /// The ALPN both ends offer, as the bytes rustls wants. The only place the major reaches the
 /// wire, so there is one string to keep right.
 pub fn protocol_alpn() -> Vec<u8> {
-    format!("fleet-overlay/{PROTOCOL_MAJOR}").into_bytes()
+    format!("eth-gossip-overlay/{PROTOCOL_MAJOR}").into_bytes()
 }
 
 /// The protocol minor. It changes when a release adds something a peer can use without being told
@@ -70,7 +70,7 @@ mod tests {
     #[test]
     fn alpn_is_the_protocol_name_and_the_major() {
         assert_eq!(PROTOCOL_MAJOR, 1);
-        assert_eq!(protocol_alpn(), b"fleet-overlay/1");
+        assert_eq!(protocol_alpn(), b"eth-gossip-overlay/1");
     }
 
     /// The numbers a peer reads out of HELLO and holds this host to, so they are pinned as

@@ -82,7 +82,7 @@ const SPKI_ED25519_PREFIX: [u8; 12] = [
 /// The name the dialler puts in SNI and the acceptor never reads. TLS insists on a name;
 /// the overlay's identities are keys, so one constant stands in for all of them and roster
 /// hostnames never have to fit a name type (D14, D27).
-pub const PLACEHOLDER_NAME: &str = "fleet-overlay";
+pub const PLACEHOLDER_NAME: &str = "eth-gossip-overlay";
 
 /// Why the overlay's TLS configuration could not be built. All of it means the crypto provider
 /// is not the one this module installs, so none of it happens under `ring`.
@@ -873,7 +873,7 @@ mod tests {
         peer: &str,
     ) -> quinn::ClientConfig {
         dialler_with(pins, own, peer, |tls| {
-            tls.alpn_protocols = vec![b"fleet-overlay/2".to_vec()];
+            tls.alpn_protocols = vec![b"eth-gossip-overlay/2".to_vec()];
         })
     }
 
