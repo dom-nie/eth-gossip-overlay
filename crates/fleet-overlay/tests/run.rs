@@ -139,6 +139,24 @@ fn task_panic_terminates_the_process_non_zero() {
     assert!(stderr.contains("--test-panic-after-ms"), "{stderr:?}");
 }
 
+/// The other half of the same rule: an operator who exported `RUST_BACKTRACE` asked for the
+/// backtrace, so the hook stands aside and lets the default one print it.
+#[test]
+fn a_panic_prints_a_backtrace_when_the_operator_asked_for_one() {
+    let fixture = Fixture::new();
+
+    let mut sidecar = fixture.run_with(|command| {
+        command
+            .args(["--test-panic-after-ms", "100"])
+            .env("RUST_BACKTRACE", "1");
+    });
+    assert!(!sidecar.wait().success());
+
+    let stderr = sidecar.stderr();
+    assert!(stderr.lines().count() > 1, "{stderr:?}");
+    assert!(stderr.contains("--test-panic-after-ms"), "{stderr:?}");
+}
+
 /// OPS-N5: `READY=1` promises that `fleet-overlayctl` works, so the admin socket has to answer
 /// by the time it is sent. `STOPPING=1` is the first thing a shutdown does, so systemd stops
 /// counting the process as running before it has finished going.

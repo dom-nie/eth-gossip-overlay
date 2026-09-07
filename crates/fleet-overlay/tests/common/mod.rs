@@ -69,6 +69,7 @@ impl Fixture {
         command
             .env("FLEET_OVERLAY_HOSTNAME", HOSTNAME)
             .env_remove("RUST_LOG")
+            .env_remove("RUST_BACKTRACE")
             .env_remove("NOTIFY_SOCKET")
             .env_remove("WATCHDOG_USEC")
             .env_remove("CREDENTIALS_DIRECTORY")
