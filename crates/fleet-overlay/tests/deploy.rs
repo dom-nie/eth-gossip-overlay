@@ -78,3 +78,23 @@ fn unit_has_no_cpuquota_and_has_memorymax_512m() {
     );
     assert!(!sets(&text, "CPUQuota"), "{UNIT} sets a CPU quota");
 }
+
+/// The sandbox and the two directories systemd hands over: `/run/fleet-overlay` for the admin
+/// socket and the `lighthouse.env` the drop-in reads, `/var/lib/fleet-overlay` for the node key
+/// the beacon node's trust is pinned to.
+#[test]
+fn unit_has_protectsystem_strict_privatetmp_runtimedirectory_and_statedirectory() {
+    let text = read(UNIT);
+
+    for directive in [
+        "ProtectSystem=strict",
+        "PrivateTmp=yes",
+        "RuntimeDirectory=fleet-overlay",
+        "StateDirectory=fleet-overlay",
+    ] {
+        assert!(
+            has_directive(&text, directive),
+            "{UNIT} is missing {directive}"
+        );
+    }
+}
