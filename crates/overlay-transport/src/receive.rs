@@ -27,11 +27,12 @@
 //!
 //! # Nothing here waits for the beacon node
 //!
-//! The only awaits are accepting a stream, reading a frame and reading a datagram. Publishing is a push into T-017's
-//! bounded queue and returns whether or not anything is draining it (DX-N4), so a wedged beacon
-//! node costs queue drops and never a stalled stream. Every read is bounded twice: by
-//! [`MAX_FRAME_BYTES`] before a body is allocated, and by [`STREAM_READ_TIMEOUT`], after which
-//! the stream is closed and the rest of the connection carries on.
+//! The only awaits are accepting a stream, reading a frame and reading a datagram. Publishing
+//! is a push into T-017's bounded queue and returns whether or not anything is draining it
+//! (DX-N4), so a wedged beacon node costs queue drops and never a stalled stream. Every read is
+//! bounded twice: by [`MAX_FRAME_BYTES`] before a body is allocated, and by
+//! [`STREAM_READ_TIMEOUT`], after which the stream is closed and the rest of the connection
+//! carries on.
 //!
 //! # One hop
 //!
