@@ -95,8 +95,15 @@ impl FanoutBudget {
         let chunk_bytes = chunk_bytes.max(1) as u64;
         let share = (4 * LARGE_BYTES_PER_SLOT_ESTIMATE / roster_size.max(1)) as u64;
         let capacity = share.div_ceil(chunk_bytes) * chunk_bytes;
+        Self::new(capacity / slot_secs.max(1), capacity, now)
+    }
+
+    /// A budget of `capacity` bytes refilling at `per_second`, for a caller that has the two
+    /// numbers already. [`default_for`](Self::default_for) is what the sidecar wires; a test
+    /// reaches the bound with a bucket it can empty in one batch instead of a slot's traffic.
+    pub fn new(per_second: u64, capacity: u64, now: Instant) -> Self {
         Self {
-            bucket: TokenBucket::new(capacity / slot_secs.max(1), capacity, now),
+            bucket: TokenBucket::new(per_second, capacity, now),
             violation_since: None,
         }
     }

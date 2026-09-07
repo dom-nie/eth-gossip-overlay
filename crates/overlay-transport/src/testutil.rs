@@ -456,6 +456,7 @@ pub struct Builder {
     small: config::SmallClass,
     fanout: config::Fanout,
     regions: Vec<Region>,
+    budget: Option<FanoutBudget>,
     advertised: BTreeMap<usize, u64>,
 }
 
@@ -476,6 +477,7 @@ impl Builder {
             small: config::SmallClass::default(),
             fanout: config::Fanout::default(),
             regions: vec![Region(REGION.to_owned()); kinds.len()],
+            budget: None,
             advertised: BTreeMap::new(),
         }
     }
@@ -495,6 +497,13 @@ impl Builder {
     /// on (T-043).
     pub fn fanout(mut self, fanout: config::Fanout) -> Self {
         self.fanout = fanout;
+        self
+    }
+
+    /// What each of a sidecar's peers may make it fan out (DX-N3). The fleet's own share of a
+    /// slot otherwise, which no test can spend in one batch.
+    pub fn budget(mut self, budget: FanoutBudget) -> Self {
+        self.budget = Some(budget);
         self
     }
 
@@ -647,6 +656,7 @@ impl Builder {
             admission: Box::new(admission),
             small: watch::channel(self.small).0,
             fanout: watch::channel(self.fanout).0,
+            budget: self.budget,
         };
         let initial = self
             .roster
@@ -770,6 +780,8 @@ pub struct TestCluster<A: Admission = HelloAdmission> {
     /// What every sidecar's router routes under, on the same kind of channel and for the same
     /// reason (D36's threshold reloads).
     fanout: watch::Sender<config::Fanout>,
+    /// The fan-out budget a test decided, or the fleet's own share of a slot.
+    budget: Option<FanoutBudget>,
 }
 
 /// How a cluster builds a node's admission, which it does again whenever a node restarts.
@@ -1095,12 +1107,14 @@ impl<A: Admission> TestCluster<A> {
             clock: Arc::new(SystemClock),
             // The slot length comes from the beacon node's spec snapshot in production
             // (CL-N3); a cluster has no beacon node, so it runs at mainnet's.
-            budget: FanoutBudget::default_for(
-                self.hosts.len(),
-                config::LargeClass::default().chunk_bytes,
-                12,
-                Instant::now(),
-            ),
+            budget: self.budget.clone().unwrap_or_else(|| {
+                FanoutBudget::default_for(
+                    self.hosts.len(),
+                    config::LargeClass::default().chunk_bytes,
+                    12,
+                    Instant::now(),
+                )
+            }),
             relaying: Relaying {
                 live: live.clone(),
                 topics: node.topics.clone(),
