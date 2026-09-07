@@ -193,4 +193,31 @@ mod tests {
         assert_eq!(payloads(&flushes[0]), vec![payload(1)]);
         assert!(batcher.tick(clock.now()).is_empty());
     }
+
+    #[test]
+    fn payloads_for_same_dest_share_one_batch_whatever_their_topic() {
+        let clock = FakeClock::new();
+        let mut batcher = batcher();
+        for (topic, byte) in [(11, 1), (22, 2)] {
+            batcher.push(
+                &dest("host-a"),
+                TopicId::new(topic),
+                payload(byte),
+                MAX_BYTES,
+                clock.now(),
+            );
+        }
+
+        clock.advance(WINDOW);
+        let flushes = batcher.tick(clock.now());
+
+        assert_eq!(flushes.len(), 1);
+        let topics: Vec<TopicId> = flushes[0]
+            .entries
+            .iter()
+            .map(|entry| entry.topic_id)
+            .collect();
+        assert_eq!(topics, vec![TopicId::new(11), TopicId::new(22)]);
+        assert_eq!(payloads(&flushes[0]), vec![payload(1), payload(2)]);
+    }
 }
