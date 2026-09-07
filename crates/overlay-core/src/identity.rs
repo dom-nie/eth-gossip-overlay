@@ -18,7 +18,16 @@ use zeroize::Zeroizing;
 
 use crate::roster::Hostname;
 
-/// The HKDF salt. Versioned so a later derivation scheme can never collide with this one.
+/// The HKDF salt: a fixed domain separator, and it has to be fixed. Every host derives every
+/// other host's expected key from the roster alone to build its pin table, so a random or
+/// per-host salt would leave nobody able to check anybody. RFC 5869's advice that a salt should
+/// be random addresses low-entropy input keying material; the fleet seed is 32 bytes from the
+/// operating system's generator, so extraction is sound without it and the salt's job here is
+/// separation, not entropy.
+///
+/// A second key derived from the same seed takes a new [`TLS_INFO_PREFIX`]-style purpose label,
+/// never a bump of this string. The `/v1` marks the derivation scheme, and changing it changes
+/// every host's key at once, which is a fleet-wide outage rather than the addition of a purpose.
 const HKDF_SALT: &[u8] = b"eth-gossip-overlay/v1";
 /// The HKDF info prefix for the overlay TLS key; the hostname follows it. The purpose label
 /// keeps a second derivation from the same seed apart from this one.
