@@ -78,6 +78,28 @@ jobs:
             echo "nft is not installed on this runner, skipping the ruleset check"
           fi
 
+  observability:
+    name: alert rules, dashboard and rollout guide
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      # promtool comes out of the Prometheus image, so there is nothing to install and the
+      # version is whatever a current Prometheus ships. The Rust checks below find it the same
+      # way, and skip where a host has neither it nor a docker daemon.
+      - name: promtool on the alert rules
+        run: |
+          docker run --rm -v "$PWD:/w" -w /w --entrypoint promtool \
+            prom/prometheus:latest check rules deploy/prometheus/alerts.yml
+
+      - name: Checks 1 to 5
+        run: cargo test -p fleet-overlay --test observability
+
   container:
     name: container image and demo
     runs-on: ubuntu-latest
