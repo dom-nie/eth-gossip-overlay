@@ -1,4 +1,42 @@
 //! Which hosts in a remote region carry a small-class batch for the rest of it (§5.4, D20).
+//!
+//! Sending every batch to every subscribed host in the other region costs the WAN a copy per
+//! host; sending it to a few of them and letting each fan it out inside its own region costs a
+//! copy per relay and one metro hop. Which few is arithmetic over hostnames, so every origin
+//! works it out from its own live view with nothing to ask and nothing to agree on (§3).
+//!
+//! Spreading is by a hash of the origin's own hostname, so two origins pick different windows of
+//! the same region and the load lands on all of it rather than on whichever hosts answer
+//! fastest. Round-trip time is not an input: the whole region is one metro hop wide (§5.4), and
+//! picking by RTT would make every origin choose the same handful of hosts.
+
+use crate::roster::Hostname;
+
+/// FNV-1a's 64-bit offset basis. The hash is here to spread origins over a pool of a few dozen
+/// hosts, which any well-mixed hash does; FNV-1a is the one D20 named, so both ends of a fleet
+/// upgrade compute the same window from the same live view.
+const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// FNV-1a's 64-bit prime.
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// The `relays_per_remote_region` hosts of `pool_sorted` that carry a batch from `origin`: the
+/// window of `n` hosts starting where the origin's hash lands.
+///
+/// `pool_sorted` is every live host in the remote region that has sent a `SUBS`, in hostname
+/// order, and it is the caller's to build: this takes hostnames and no connections, so the
+/// arithmetic is a function a test can ask a question of.
+pub fn select(origin: &Hostname, pool_sorted: &[Hostname], n: usize) -> Vec<Hostname> {
+    let start = (fnv1a64(origin.0.as_bytes()) % pool_sorted.len() as u64) as usize;
+    pool_sorted[start..start + n].to_vec()
+}
+
+/// The FNV-1a hash of `bytes`, 64 bits.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -11,7 +49,9 @@ mod tests {
 
     /// A remote region's live subscribed hosts, in the hostname order the pool is built in.
     fn pool(hosts: usize) -> Vec<Hostname> {
-        (1..=hosts).map(|n| host(&format!("bn-us-{n:02}"))).collect()
+        (1..=hosts)
+            .map(|n| host(&format!("bn-us-{n:02}")))
+            .collect()
     }
 
     /// The window is `n` hosts long and it starts where the origin's hash lands, so two origins
