@@ -1,5 +1,5 @@
 [Unit]
-Description=Fleet gossip overlay sidecar
+Description=Eth gossip overlay sidecar
 Documentation=https://github.com/dom-nie/eth-gossip-overlay
 After=network-online.target
 Wants=network-online.target

@@ -1,4 +1,4 @@
-# Fleet Gossip Overlay
+# Eth Gossip Overlay
 
 [![CI](https://github.com/dom-nie/eth-gossip-overlay/actions/workflows/ci.yml/badge.svg)](https://github.com/dom-nie/eth-gossip-overlay/actions/workflows/ci.yml)
 

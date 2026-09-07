@@ -98,7 +98,7 @@ sudo systemctl restart <LIGHTHOUSE_UNIT>
 
 ```console
 $ sudo systemctl status eth-gossip-overlay
-● eth-gossip-overlay.service - Fleet gossip overlay sidecar
+● eth-gossip-overlay.service - Eth gossip overlay sidecar
      Loaded: loaded (/etc/systemd/system/eth-gossip-overlay.service; enabled; preset: enabled)
      Active: active (running) since Mon 2026-09-07 09:12:41 UTC; 3min 22s ago
    Main PID: 1841 (eth-gossip-overlay)

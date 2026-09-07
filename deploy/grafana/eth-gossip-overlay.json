@@ -1,6 +1,6 @@
 {
   "uid": "eth-gossip-overlay",
-  "title": "Fleet gossip overlay",
+  "title": "Eth gossip overlay",
   "description": "The sidecar's own view: the overlay mesh, what crosses it, whether it wins and what the guardrails are doing. The last row needs a Loki datasource and the rest do not.",
   "tags": [
     "eth-gossip-overlay"
