@@ -4,12 +4,16 @@
 
 use std::path::{Path, PathBuf};
 
+use overlay_core::config::Config;
+use overlay_core::roster::Roster;
+
 const UNIT: &str = "deploy/systemd/fleet-overlay.service";
 const DROP_IN: &str = "deploy/systemd/lighthouse-bn.service.d/10-fleet-overlay-trusted-peer.conf";
 const SYSCTL: &str = "deploy/sysctl/90-fleet-overlay.conf";
 const NFT_TEMPLATE: &str = "deploy/nftables/fleet-overlay.nft.j2";
 const NFT_EXAMPLE: &str = "deploy/nftables/fleet-overlay.nft.example";
 const ROSTER: &str = "deploy/examples/roster.yaml";
+const CONFIG: &str = "deploy/examples/config.yaml";
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -206,4 +210,17 @@ fn rendered_nft_from_example_roster_contains_all_three_addresses_and_only_udp_77
             "{rule:?} is not a UDP 7788 rule"
         );
     }
+}
+
+/// The shipped examples are what an operator copies to a host, so they have to be files the
+/// sidecar accepts. Both parsers reject an unknown key, so a key the code renames fails here
+/// rather than on the operator's first start.
+#[test]
+fn example_config_and_roster_load_with_the_real_parsers() {
+    let config = Config::from_yaml(&read(CONFIG));
+    let roster = Roster::from_yaml(&read(ROSTER));
+
+    config.unwrap_or_else(|err| panic!("{CONFIG}: {err}"));
+    let roster = roster.unwrap_or_else(|err| panic!("{ROSTER}: {err}"));
+    assert_eq!(roster.hosts.len(), 3, "{ROSTER}");
 }
