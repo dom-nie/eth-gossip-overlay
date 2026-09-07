@@ -8,6 +8,8 @@ use assert_cmd::cargo::cargo_bin;
 use overlay_bn::node_key::PeerId;
 use overlay_core::identity::FleetSeed;
 
+mod common;
+
 /// A config whose node key lives in `dir`; every other key keeps its default. No seed, no
 /// roster.
 fn config_in(dir: &Path) -> io::Result<PathBuf> {
@@ -126,4 +128,75 @@ fn gen_seed_output_loads_as_a_valid_fleet_seed() {
         .success();
 
     FleetSeed::load_from(None, &seed).unwrap();
+}
+
+#[test]
+fn check_config_with_valid_files_exits_0_and_prints_hostname_region_and_peer_id() {
+    let fixture = common::Fixture::new();
+
+    let output = fixture
+        .command()
+        .args(["check-config", "--config"])
+        .arg(&fixture.config)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let printed = String::from_utf8(output.stdout).unwrap();
+    let peer_id = std::fs::read_to_string(&fixture.node_key)
+        .map(|_| peer_id_of(&fixture))
+        .unwrap();
+    for expected in [common::HOSTNAME, common::REGION, common::SITE, &peer_id] {
+        assert!(printed.contains(expected), "{expected} missing from {printed}");
+    }
+}
+
+#[test]
+fn check_config_with_missing_roster_exits_1_and_names_the_path() {
+    let fixture = common::Fixture::new();
+    std::fs::remove_file(&fixture.roster).unwrap();
+
+    let output = fixture
+        .command()
+        .args(["check-config", "--config"])
+        .arg(&fixture.config)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains(&fixture.roster.display().to_string()),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn check_config_with_hostname_not_in_roster_exits_1() {
+    let fixture = common::Fixture::new();
+
+    let output = fixture
+        .command()
+        .env("FLEET_OVERLAY_HOSTNAME", "bn-nobody-99")
+        .args(["check-config", "--config"])
+        .arg(&fixture.config)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("bn-nobody-99"), "{stderr}");
+}
+
+/// The peer id `peer-id` prints for this fixture's node key, which is what `check-config` has to
+/// agree with.
+fn peer_id_of(fixture: &common::Fixture) -> String {
+    let output = fixture
+        .command()
+        .args(["peer-id", "--config"])
+        .arg(&fixture.config)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
