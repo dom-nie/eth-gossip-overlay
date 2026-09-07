@@ -291,8 +291,8 @@ mod tests {
     use crate::manager::LiveSource;
     use crate::sender::{LARGE_QUEUED_BYTES_MAX, LargeLedger, PeerSender};
     use crate::testutil::{
-        Builder, NodeKind, REGION, SendSpy, WAIT, eventually, peer_state, subscriptions, topic,
-        view, within,
+        Builder, NodeKind, REGION, SendSpy, TestCluster, WAIT, eventually, peer_state,
+        subscriptions, topic, view, within,
     };
 
     /// The gossipsub wire form of an attestation nothing else in a test will produce, so ten of
@@ -301,6 +301,21 @@ mod tests {
         snap::raw::Encoder::new()
             .compress_vec(format!("attestation {n}").as_bytes())
             .unwrap()
+    }
+
+    /// A gossipsub wire form of about `bytes`, from a pattern snappy cannot shrink, so a test
+    /// that is about a size bound is asserting on the size it asked for.
+    fn incompressible(bytes: usize) -> Vec<u8> {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let raw: Vec<u8> = (0..bytes)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        snap::raw::Encoder::new().compress_vec(&raw).unwrap()
     }
 
     /// The label an alert and a dashboard are keyed on (§12), so the strings are pinned rather
@@ -370,6 +385,32 @@ mod tests {
         })
         .await;
         assert_eq!(cluster.datagrams_received(1, &cluster.hostname(0)), 1);
+    }
+
+    /// A payload no datagram on this path holds still travels alone, on a stream, rather than
+    /// being split: only the large class is chunked (D21). It arrives as the batch it is, of one
+    /// entry.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn payload_above_max_datagram_size_arrives_via_stream() {
+        let subnet = topic("beacon_attestation_7");
+        let big = incompressible(4096);
+        let mut cluster = TestCluster::start(2).await;
+        for node in 0..2 {
+            cluster.start_sidecar(node, subscriptions(&[&subnet], &[]));
+        }
+        eventually("the sibling to say it wants the subnet", || {
+            cluster.live(0).subscribers(&subnet).len() == 1
+        })
+        .await;
+
+        assert!(cluster.from_bn(0, &subnet, &big));
+
+        eventually("the sibling to queue it", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert_eq!(cluster.published(1)[0].payload, big);
+        assert_eq!(cluster.datagrams_received(1, &cluster.hostname(0)), 0);
     }
 
     /// The invariant the module is shaped around (§5.7): a message that goes to a hundred peers
