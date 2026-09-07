@@ -101,8 +101,8 @@ in its own row, since the table is generated from the same doc comments the code
 | `bn.publish_rate_limit.large_per_s` | `300` | reload | large-class messages per second. |
 | `bn.publish_rate_limit.bytes_per_s` | `33554432` | reload | payload bytes per second across both classes. |
 | `bn.idontwant_on_publish` | `true` | restart | tell the beacon node IDONTWANT for a message as it is published. |
-| `classes.small.batch_window_ms` | `10` | restart | how long a batch collects entries before it is flushed. |
-| `classes.small.stale_after_ms` | `1000` | restart | a batch older than this is dropped rather than delivered late. |
+| `classes.small.batch_window_ms` | `10` | reload | how long a batch collects entries before it is flushed. |
+| `classes.small.stale_after_ms` | `1000` | reload | a batch older than this is dropped rather than delivered late. |
 | `classes.large.chunk_bytes` | `2048` | restart | the fixed chunk size. A multiple of 64, which the Reed-Solomon shards require. |
 | `classes.large.parity_ratio` | `0.1` | restart | parity chunks as a fraction of data chunks. |
 | `classes.large.repair_deadline_ms` | `250` | reload | how long after the first chunk a receiver waits before asking peers for the missing ones. |
