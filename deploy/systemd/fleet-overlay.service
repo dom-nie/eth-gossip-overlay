@@ -24,6 +24,17 @@ RestartMaxDelaySec=60
 
 ExecStart=/usr/local/bin/fleet-overlay run
 
+# The seed is read from $CREDENTIALS_DIRECTORY/seed, so no service user owns it and none has to
+# exist. For the encrypted variant run
+#   systemd-creds encrypt --name=seed seed /etc/fleet-overlay/seed.cred
+# on the host and replace the line below with
+#   LoadCredentialEncrypted=seed:/etc/fleet-overlay/seed.cred
+LoadCredential=seed:/etc/fleet-overlay/seed
+DynamicUser=yes
+# FLEET_OVERLAY_HOSTNAME, so the roster key comes from your inventory and cannot drift from
+# whatever gethostname() happens to say. Optional: without it the sidecar asks the kernel.
+EnvironmentFile=-/etc/fleet-overlay/fleet-overlay.env
+
 # /var/lib/fleet-overlay holds the node key, /run/fleet-overlay the admin socket and the
 # lighthouse.env the beacon node's drop-in reads. Both are systemd's to create and clean up.
 StateDirectory=fleet-overlay
