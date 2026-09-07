@@ -115,3 +115,28 @@ fn unit_loads_the_seed_as_a_credential_and_uses_dynamicuser() {
         );
     }
 }
+
+/// OPS-N1: the drop-in is two directives and nothing else. The dash on `EnvironmentFile=` is
+/// what makes the file optional, and without it a beacon node whose sidecar has never started
+/// would fail its own start on a missing file.
+#[test]
+fn drop_in_contains_only_after_and_optional_environmentfile() {
+    let text = read(DROP_IN);
+
+    let directives: Vec<&str> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('['))
+        .collect();
+
+    assert_eq!(
+        directives,
+        [
+            "After=fleet-overlay.service",
+            "EnvironmentFile=-/run/fleet-overlay/lighthouse.env",
+        ]
+    );
+    for forbidden in ["ExecStartPre", "Wants", "Requires"] {
+        assert!(!text.contains(forbidden), "{DROP_IN} has {forbidden}=");
+    }
+}
