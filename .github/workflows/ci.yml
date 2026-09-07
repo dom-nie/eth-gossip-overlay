@@ -49,6 +49,35 @@ jobs:
             exit 1
           fi
 
+  deploy-examples:
+    name: deployment examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain pinned in rust-toolchain.toml
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      # systemd-analyze verify treats a missing ExecStart= command as an error, so the path the
+      # unit starts has to exist. Nothing runs it, so a stand-in is enough.
+      - name: Put a stand-in where the unit's ExecStart= points
+        run: |
+          printf '#!/bin/sh\nexit 1\n' | sudo tee /usr/local/bin/fleet-overlay > /dev/null
+          sudo chmod 755 /usr/local/bin/fleet-overlay
+
+      - name: Units, sysctl, nftables template and examples
+        run: cargo test -p fleet-overlay --test deploy
+
+      - name: Check the rendered allowlist with nft
+        run: |
+          if command -v nft > /dev/null; then
+            sudo nft -c -f deploy/nftables/fleet-overlay.nft.example
+          else
+            echo "nft is not installed on this runner, skipping the ruleset check"
+          fi
+
   deny:
     name: cargo deny
     runs-on: ubuntu-latest
