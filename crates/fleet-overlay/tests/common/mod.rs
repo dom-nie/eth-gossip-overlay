@@ -273,3 +273,76 @@ pub fn scrape(addr: SocketAddr) -> String {
     stream.read_to_string(&mut answer).unwrap();
     answer
 }
+
+/// A stand-in for systemd's notification socket: a Unix datagram socket in a temp directory
+/// that remembers every message the sidecar sends it.
+pub struct NotifySocket {
+    _dir: tempfile::TempDir,
+    path: PathBuf,
+    received: Output,
+}
+
+impl NotifySocket {
+    /// Binds the socket and starts reading it. The reading thread ends with the test binary,
+    /// which has nothing else to wait for.
+    pub fn start() -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("notify.sock");
+        let socket = std::os::unix::net::UnixDatagram::bind(&path).unwrap();
+        let received = Output::default();
+        let sink = received.clone();
+        std::thread::spawn(move || {
+            let mut buffer = [0u8; 4096];
+            while let Ok(read) = socket.recv(&mut buffer) {
+                let mut held = sink.0.lock().unwrap();
+                held.push_str(&String::from_utf8_lossy(&buffer[..read]));
+                held.push('\n');
+            }
+        });
+        Self {
+            _dir: dir,
+            path,
+            received,
+        }
+    }
+
+    /// What to put in `NOTIFY_SOCKET`.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Every message so far, newline separated.
+    pub fn received(&self) -> String {
+        self.received.text()
+    }
+
+    /// How many messages holding `needle` have arrived.
+    pub fn count(&self, needle: &str) -> usize {
+        self.received()
+            .lines()
+            .filter(|line| line.contains(needle))
+            .count()
+    }
+
+    /// Waits for a message holding `needle`, or panics with everything received.
+    pub fn wait_for(&self, needle: &str) {
+        let deadline = Instant::now() + WAIT;
+        while Instant::now() < deadline {
+            if self.count(needle) > 0 {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        panic!("no {needle:?} in:\n{}", self.received());
+    }
+}
+
+/// One request on the admin socket, as `fleet-overlayctl` sends it.
+pub fn ask_admin(socket: &Path, request: &str) -> String {
+    let mut stream = std::os::unix::net::UnixStream::connect(socket).unwrap();
+    stream.set_read_timeout(Some(WAIT)).unwrap();
+    writeln!(stream, "{request}").unwrap();
+    let mut answer = String::new();
+    BufReader::new(stream).read_line(&mut answer).unwrap();
+    answer
+}
