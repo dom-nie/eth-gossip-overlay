@@ -41,6 +41,7 @@ use overlay_core::roster::{Hostname, Region, SelfIdentity};
 use overlay_core::topic::table::TopicId;
 use overlay_core::topic::{Class, Topic};
 use overlay_core::wire::{Frame, MAX_BATCH_ENTRY_BYTES, encode_stream};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::batching::{BatchHandle, Small};
@@ -104,7 +105,9 @@ pub struct Fanout {
     lanes: ClassLanes<Outbound>,
     live: LiveSource,
     self_id: SelfIdentity,
-    cfg: config::Fanout,
+    /// What the router routes under, re-read per message so a reload of the relay threshold or
+    /// the relay count takes hold on the next one (T-043, D36).
+    cfg: watch::Receiver<config::Fanout>,
     topics: Arc<Mutex<OwnTopics>>,
     batches: BatchHandle,
     stats: Arc<dyn TrafficStats>,
@@ -130,7 +133,7 @@ impl Fanout {
         lanes: ClassLanes<Outbound>,
         live: LiveSource,
         self_id: SelfIdentity,
-        cfg: config::Fanout,
+        cfg: watch::Receiver<config::Fanout>,
         topics: Arc<Mutex<OwnTopics>>,
         batches: BatchHandle,
         stats: Arc<dyn TrafficStats>,
@@ -168,7 +171,7 @@ impl Fanout {
             outbound.class,
             &view,
             &self.self_id,
-            &self.cfg,
+            &self.cfg.borrow(),
         ) else {
             return;
         };
@@ -590,7 +593,7 @@ mod tests {
                 region: Region(REGION.to_owned()),
                 site: None,
             },
-            config::Fanout::default(),
+            tokio::sync::watch::channel(config::Fanout::default()).1,
             topics,
             crate::batching::Batching::spawn(
                 tokio::sync::watch::channel(config::SmallClass::default()).1,

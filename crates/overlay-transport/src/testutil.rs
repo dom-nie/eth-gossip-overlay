@@ -434,6 +434,8 @@ pub struct Builder {
     cfg: Overlay,
     roster: Option<Vec<usize>>,
     small: config::SmallClass,
+    fanout: config::Fanout,
+    regions: Vec<Region>,
     advertised: BTreeMap<usize, u64>,
 }
 
@@ -452,8 +454,28 @@ impl Builder {
             },
             roster: None,
             small: config::SmallClass::default(),
+            fanout: config::Fanout::default(),
+            regions: vec![Region(REGION.to_owned()); kinds.len()],
             advertised: BTreeMap::new(),
         }
+    }
+
+    /// The region each node declares and is listed under in the roster, one entry per node. A
+    /// cluster is one region unless a test says otherwise, which is what a relay plan needs
+    /// (D15, D20).
+    pub fn regions(mut self, regions: &[&str]) -> Self {
+        self.regions = regions
+            .iter()
+            .map(|region| Region((*region).to_owned()))
+            .collect();
+        self
+    }
+
+    /// The fanout every sidecar in the cluster routes under, on the channel a reload publishes
+    /// on (T-043).
+    pub fn fanout(mut self, fanout: config::Fanout) -> Self {
+        self.fanout = fanout;
+        self
     }
 
     /// The transport settings every node runs under. Only `listen` is overridden, per node, with
@@ -524,10 +546,11 @@ impl Builder {
         let mut nodes = Vec::new();
         for (index, kind) in self.kinds.iter().copied().enumerate() {
             let hostname = Hostname(format!("{prefix}-bn-{index:02}"));
+            let region = self.regions[index].clone();
             features::mask(&hostname, self.advertised.get(&index).copied());
             let self_hello = SelfHello {
                 hostname: hostname.clone(),
-                region: Region(REGION.to_owned()),
+                region: region.clone(),
                 site: None,
                 // Not the process id: every node in a cluster runs in this one process, and a
                 // test about a restart needs them told apart the way two processes would be.
@@ -571,7 +594,7 @@ impl Builder {
 
             hosts.push(HostEntry {
                 hostname: hostname.clone(),
-                region: Region(REGION.to_owned()),
+                region,
                 site: None,
                 addr,
             });
@@ -603,6 +626,7 @@ impl Builder {
             nodes,
             admission: Box::new(admission),
             small: watch::channel(self.small).0,
+            fanout: watch::channel(self.fanout).0,
         };
         let initial = self
             .roster
@@ -723,6 +747,9 @@ pub struct TestCluster<A: Admission = HelloAdmission> {
     /// (T-043). Every node in a cluster shares it, the way every host in a fleet runs one
     /// `config.yaml`.
     small: watch::Sender<config::SmallClass>,
+    /// What every sidecar's router routes under, on the same kind of channel and for the same
+    /// reason (D36's threshold reloads).
+    fanout: watch::Sender<config::Fanout>,
 }
 
 /// How a cluster builds a node's admission, which it does again whenever a node restarts.
@@ -1034,7 +1061,7 @@ impl<A: Admission> TestCluster<A> {
         let (subscriptions, watching) = watch::channel(sets);
         let identity = SelfIdentity {
             hostname: node.hostname.clone(),
-            region: Region(REGION.to_owned()),
+            region: node.self_hello.region.clone(),
             site: None,
         };
         let deps = Deps {
@@ -1066,7 +1093,7 @@ impl<A: Admission> TestCluster<A> {
                 lanes,
                 live,
                 identity,
-                config::Fanout::default(),
+                self.fanout.subscribe(),
                 node.topics.clone(),
                 small,
                 stats,

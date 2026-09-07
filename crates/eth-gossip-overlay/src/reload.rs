@@ -35,9 +35,12 @@
 //! - `classes.small.batch_window_ms` and `classes.small.stale_after_ms`: one applier for the
 //!   section, sending both bounds to T-062's batcher task, which closes what it is holding under
 //!   the old ones and collects under the new.
-//! - `overlay.fanout.small.relay_min_remote_hosts` (D36) and `classes.large.repair_deadline_ms`
-//!   (D24) have no applier: their consumers arrive with T-063 and T-082, which register one
-//!   each. Until then a change is still applied, in that [`Reloader::config`] answers with it.
+//! - `overlay.fanout.small.*`: one applier for the three relay keys, sending the fanout T-063's
+//!   router reads on to the fanout task. The `large` section keeps the values the process
+//!   started with, because its keys need a restart and this must not smuggle them in.
+//! - `classes.large.repair_deadline_ms` (D24) has no applier: its consumer arrives with T-082,
+//!   which registers one. Until then a change is still applied, in that [`Reloader::config`]
+//!   answers with it.
 //!
 //! The roster is not a config key and has no applier. It goes on its own watch channel, which
 //! T-023's connection manager and [`spawn_pin_table`] follow, and is the one entry in
@@ -53,7 +56,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwap;
-use overlay_core::config::{Config, PublishRateLimit, SmallClass};
+use overlay_core::config::{Config, Fanout, PublishRateLimit, SmallClass};
 use overlay_core::identity::{FleetSeed, Seeds, read_secret_file};
 use overlay_core::roster::Roster;
 use overlay_transport::tls::PinTable;
@@ -81,7 +84,9 @@ pub const RELOADABLE: &[&str] = &[
     "inject",
     "log.format",
     "log.level",
+    "overlay.fanout.small.cross_region",
     "overlay.fanout.small.relay_min_remote_hosts",
+    "overlay.fanout.small.relays_per_remote_region",
     "overlay.fleet_seed_previous_file",
 ];
 
@@ -167,6 +172,8 @@ pub struct Deps {
     pub limits: watch::Sender<PublishRateLimit>,
     /// The window and stale bound the batcher collects under (D21).
     pub small: watch::Sender<SmallClass>,
+    /// Where the fanout task reads the plan it routes under (T-063).
+    pub fanout: watch::Sender<Fanout>,
     /// The running subscriber, whose level and format are reloadable (D32).
     pub log: Arc<LogHandle>,
     /// Where the two reload counters live.
@@ -317,6 +324,24 @@ impl Reloader {
                     let small = deps.small;
                     Box::new(move |cfg: &Config| {
                         small.send_replace(cfg.classes.small.clone());
+                        Ok(())
+                    })
+                },
+            ),
+            (
+                // One applier for the three relay keys, which the router weighs together. It
+                // sends the small section beside the `large` the process started with: those
+                // keys need a restart, and a reload that carried them would apply what it had
+                // just reported as restart-required.
+                "overlay.fanout.small",
+                {
+                    let fanout = deps.fanout;
+                    let large = config.overlay.fanout.large.clone();
+                    Box::new(move |cfg: &Config| {
+                        fanout.send_replace(Fanout {
+                            large: large.clone(),
+                            small: cfg.overlay.fanout.small.clone(),
+                        });
                         Ok(())
                     })
                 },
@@ -583,7 +608,9 @@ mod tests {
     use std::time::Duration;
 
     use arc_swap::ArcSwap;
-    use overlay_core::config::{Log, LogFormat, LogLevel, PublishRateLimit};
+    use overlay_core::config::{
+        CrossRegion, LargeFanout, Log, LogFormat, LogLevel, PublishRateLimit,
+    };
     use overlay_core::identity::{FleetSeed, Seeds, expected_tls_public_key, write_secret_file};
     use overlay_core::roster::{Hostname, Roster};
     use overlay_transport::tls::PinTable;
@@ -673,6 +700,7 @@ mod tests {
         previous_seed: watch::Receiver<Option<FleetSeed>>,
         limits: watch::Receiver<PublishRateLimit>,
         small: watch::Receiver<SmallClass>,
+        fanout: watch::Receiver<Fanout>,
         stats: Arc<Recorded>,
         reloader: Reloader,
     }
@@ -704,6 +732,7 @@ mod tests {
             let (seed_tx, previous_seed) = watch::channel(None);
             let (limits_tx, limits) = watch::channel(PublishRateLimit::default());
             let (small_tx, small) = watch::channel(SmallClass::default());
+            let (fanout_tx, fanout) = watch::channel(Fanout::default());
             let (sink, dispatch, log) = testing::subscriber(log_cfg, false, rust_log);
             let stats = Arc::new(Recorded::default());
             let reloader = Reloader::new(
@@ -714,6 +743,7 @@ mod tests {
                     previous_seed: seed_tx,
                     limits: limits_tx,
                     small: small_tx,
+                    fanout: fanout_tx,
                     log: Arc::new(log),
                     stats: stats.clone(),
                 },
@@ -728,6 +758,7 @@ mod tests {
                 previous_seed,
                 limits,
                 small,
+                fanout,
                 stats,
                 reloader,
             };
@@ -878,28 +909,20 @@ mod tests {
     #[test]
     fn changed_reloadable_key_without_an_applier_is_reported_applied_and_visible_in_config() {
         let mut h = Fixture::new(
-            "overlay:\n  roster_file: ROSTER\n  fanout:\n    small:\n      relay_min_remote_hosts: 12\ninject: true\n",
+            "overlay:\n  roster_file: ROSTER\nclasses:\n  large:\n    repair_deadline_ms: 250\ninject: true\n",
             &roster_yaml(3),
         );
         h.write_config(
-            "overlay:\n  roster_file: ROSTER\n  fanout:\n    small:\n      relay_min_remote_hosts: 6\ninject: true\n",
+            "overlay:\n  roster_file: ROSTER\nclasses:\n  large:\n    repair_deadline_ms: 400\ninject: true\n",
         );
 
         let report = h.reloader.reload(Trigger::Manual);
 
-        assert_eq!(
-            report.applied,
-            ["overlay.fanout.small.relay_min_remote_hosts"]
-        );
+        assert_eq!(report.applied, ["classes.large.repair_deadline_ms"]);
         assert!(report.restart_required.is_empty(), "{report:?}");
         assert_eq!(
-            h.reloader
-                .config()
-                .overlay
-                .fanout
-                .small
-                .relay_min_remote_hosts,
-            6
+            h.reloader.config().classes.large.repair_deadline,
+            Duration::from_millis(400)
         );
     }
 
