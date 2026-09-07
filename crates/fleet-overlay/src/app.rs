@@ -177,13 +177,18 @@ pub fn check_config(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     tls::identity(&derive_tls_keypair(&me.seeds.current, &me.self_id.hostname))?;
     let budget = MemoryBudget::compute(me.roster.hosts.len(), SEND_LANES);
     Ok(format!(
-        "hostname: {}\nregion: {}\nsite: {}\npeer id: {}\nroster: {} hosts\nmemory budget: {} \
+        "hostname: {}\nregion: {}\nsite: {}\npeer id: {}\nroster: {} {}\nmemory budget: {} \
          ({} in bounded structures plus {}% headroom)\n",
         me.self_id.hostname,
         me.self_id.region,
         me.self_id.site.as_deref().unwrap_or("none"),
         me.node_key.peer_id(),
         me.roster.hosts.len(),
+        if me.roster.hosts.len() == 1 {
+            "host"
+        } else {
+            "hosts"
+        },
         mib(budget.total_bytes),
         mib(budget.bounded_bytes),
         budget::HEADROOM_PERCENT,
@@ -467,9 +472,9 @@ impl App {
     /// Readiness is sent here rather than in [`build`](Self::build) because the admin socket is
     /// bound by the time build returns, which is exactly what `READY=1` promises (OPS-N5).
     pub async fn run(self, shutdown: impl Future<Output = ()>) {
-        let watchdog = self.spawn_watchdog();
         self.notify.ready();
         tracing::info!("ready");
+        let watchdog = self.spawn_watchdog();
 
         shutdown.await;
         tracing::info!("shutting down");

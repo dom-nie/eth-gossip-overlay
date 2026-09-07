@@ -24,7 +24,44 @@ cargo build --release          # binaries in target/release/{fleet-overlay,fleet
 
 `fleet-overlay gen-seed [--out PATH]` writes a new fleet seed: 32 bytes from the OS random number generator as 64 hex characters, mode 0600, default `/etc/fleet-overlay/seed`. It refuses to overwrite an existing file. Run it once per fleet and copy the file to every host over a secure channel; every host's overlay TLS key derives from it and its hostname.
 
-`fleet-overlay peer-id [--config PATH]` prints the libp2p peer id of this host's node key (`bn.node_key_file`, created on first use). That is the id the sidecar hands Lighthouse through `/run/fleet-overlay/lighthouse.env` once T-045 lands, so it is how an operator reads the value ahead of time. It needs neither the seed nor the roster. The node key is per host and unrelated to the seed, so rotating the seed never changes the peer id.
+`fleet-overlay peer-id [--config PATH]` prints the libp2p peer id of this host's node key (`bn.node_key_file`, created on first use). That is the id the sidecar hands Lighthouse through `/run/fleet-overlay/lighthouse.env`, so it is how an operator reads the value ahead of the first start. It needs neither the seed nor the roster. The node key is per host and unrelated to the seed, so rotating the seed never changes the peer id.
+
+`fleet-overlay run [--config PATH]`, which is also what happens with no subcommand, is the sidecar itself. It reads the config, roster and seed, writes `lighthouse.env` before it binds anything, and then serves the overlay until `SIGTERM`. `SIGHUP` re-reads both files. Under systemd it is a `Type=notify` unit: readiness is sent once the admin socket answers, and the watchdog is fed only while all four core loops are going round. Without `NOTIFY_SOCKET` all of that is skipped, so the same binary runs under `docker run`.
+
+`fleet-overlay check-config [--config PATH]` rehearses a start without starting one. It reads the same files in the same order, derives the same keys, and prints who this host is and what the sidecar's bounded structures would hold. Exit 1 with one line on stderr if anything a start needs is missing or wrong, which makes it the check to run from configuration management after pushing a roster.
+
+```console
+$ fleet-overlay --help
+Sidecar binary for a private gossip overlay between Lighthouse beacon nodes.
+
+Usage: fleet-overlay [OPTIONS] [COMMAND]
+
+Commands:
+  run           Run the sidecar, which is what happens with no subcommand at all
+  peer-id       Print this host's libp2p peer id, creating the node key on first use
+  check-config  Check that the sidecar would start with these files, without starting it
+  gen-seed      Create a new fleet seed from the OS random number generator
+  help          Print this message or the help of the given subcommand(s)
+
+Options:
+      --config <CONFIG>  The sidecar's config.yaml [default: /etc/fleet-overlay/config.yaml]
+  -h, --help             Print help
+  -V, --version          Print version
+
+$ fleet-overlay --version
+fleet-overlay 0.1.0 9e5e500d46d6 2026-09-07
+protocol 1.0 features=0x0
+
+$ fleet-overlay check-config
+hostname: bn-ams1-07
+region: eu
+site: ams1
+peer id: 12D3KooWJ6JBbaSGzLK7jZj7qtey7W9wc36Wq8qhkid7Rgpy854b
+roster: 3 hosts
+memory budget: 61 MiB (49 MiB in bounded structures plus 25% headroom)
+```
+
+The second `--version` line is the compatibility one: the major travels in the overlay's ALPN and the minor and feature bits in `HELLO`, so a pair runs at the lower minor and the intersection of the bits. Two sidecars on the same major always pair.
 
 `fleet-overlayctl` talks to a running sidecar over the admin socket in `admin_socket` (`/run/fleet-overlay/admin.sock` by default), which is mode 0660 and local only. `status` is the first thing to look at during a rolling upgrade: it prints the kill switch, the beacon node's version and whether it trusts the sidecar, and one row per live peer with its software version and the feature bits the pair negotiated. `roster reload` re-reads `config.yaml` and `roster.yaml` exactly as SIGHUP does, and applies whatever the files say. Exit codes are meant for configuration management: 0 the command took effect, 1 the sidecar refused it or the reload reported an error, 2 there was no socket to talk to.
 
