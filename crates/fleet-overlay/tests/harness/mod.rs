@@ -104,6 +104,11 @@ static NEXT_PORT: LazyLock<AtomicU32> = LazyLock::new(|| {
     AtomicU32::new((spread % PORT_RANGE.len() as u64) as u32)
 });
 
+/// Held across every node's [`App::build`]. The two values below are read from the process
+/// environment, which one process cannot give two nodes at once, so only one node in the whole
+/// binary may be inside `build` at a time.
+static STARTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// One subscriber for the whole binary. `logging::init` keeps the first one installed, so every
 /// node's [`App`] shares this handle rather than fighting over the global dispatcher.
 static LOG: LazyLock<Arc<LogHandle>> = LazyLock::new(|| {
@@ -401,11 +406,12 @@ impl Fleet {
 
     /// Builds one node's sidecar and leaves it running.
     async fn start_node(&mut self, index: usize) {
+        let _starting = STARTING.lock().await;
         let node = &self.nodes[index];
         // `App` reads this host's name and its runtime directory from the process environment,
-        // which N sidecars in one process cannot each have. Both are read before `build`
-        // reaches its first await, and nodes are started one at a time, so the value in force
-        // is always this node's.
+        // which N sidecars in one process cannot each have. Both are read before `build` reaches
+        // its first await, and [`STARTING`] keeps every other node in the binary out until this
+        // one is built, so the values in force are always this node's.
         unsafe {
             std::env::set_var("FLEET_OVERLAY_HOSTNAME", &node.hostname.0);
             std::env::set_var("RUNTIME_DIRECTORY", &node.dir);
