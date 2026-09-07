@@ -232,19 +232,12 @@ fn strip_stale(entries: &mut Vec<Entry>, stale_after: Duration, now: Instant) ->
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::time::Duration;
 
-    use bytes::Bytes;
     use proptest::prelude::*;
 
     use super::*;
-    use crate::protocol::MAX_BATCH_ENTRIES;
-    use crate::roster::Hostname;
     use crate::time::{Clock, FakeClock};
-    use crate::topic::table::TopicId;
-    use crate::wire::{
-        BATCH_ENTRY_OVERHEAD_BYTES, BATCH_HEADER_BYTES, BatchFlags, Frame, encode_datagram,
-    };
+    use crate::wire::encode_datagram;
 
     const WINDOW: Duration = Duration::from_millis(10);
     const STALE_AFTER: Duration = Duration::from_millis(1000);
