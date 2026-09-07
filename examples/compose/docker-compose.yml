@@ -45,7 +45,6 @@ x-beacon-node: &beacon-node
         --datadir /data \
         --checkpoint-sync-url "$$CHECKPOINT_SYNC_URL" \
         --http --http-address 0.0.0.0 \
-        --disable-deposit-contract-sync \
         --subscribe-all-subnets \
         --target-peers 30 \
         "$$@" \
@@ -55,10 +54,13 @@ x-beacon-node: &beacon-node
 x-beacon-node-env: &beacon-node-env
   NETWORK: ${NETWORK:-hoodi}
   CHECKPOINT_SYNC_URL: ${CHECKPOINT_SYNC_URL:-https://checkpoint-sync.hoodi.ethpandaops.io}
-  # Empty by default, which starts a beacon node with no execution client: it checkpoint syncs
-  # and gossips, and every block it sees stays optimistic. Put --execution-endpoint and
-  # --execution-jwt here to give it one.
-  LIGHTHOUSE_EXTRA_ARGS: ${LIGHTHOUSE_EXTRA_ARGS-}
+  # The execution layer flags. v8.2.2 requires --execution-endpoint, so a beacon node with no
+  # execution client is one pointed at a port nothing answers on: it checkpoint syncs and
+  # gossips, and every block it sees stays optimistic, which is all the demo needs. The endpoint
+  # needs a JWT secret beside it either way, and --execution-jwt-secret-key is the form that
+  # takes one inline, so the demo carries no file for a secret nothing ever reads. Replace the
+  # whole value to hand the nodes a real client.
+  LIGHTHOUSE_EXTRA_ARGS: ${LIGHTHOUSE_EXTRA_ARGS---execution-endpoint http://127.0.0.1:1 --execution-jwt-secret-key 0000000000000000000000000000000000000000000000000000000000000000}
   TRUST_SIDECAR: ${TRUST_SIDECAR:-1}
 
 services:

@@ -15,12 +15,14 @@ expensive half: budget a core or two and a few gigabytes of memory for each beac
 disk for three datadirs. On a smaller machine, [start the overlay on its own](#the-overlay-on-its-own)
 instead, which needs neither a testnet nor an execution client.
 
-The beacon nodes start without an execution client, so they checkpoint sync and gossip but
-leave every block optimistic. That is enough to watch messages cross the overlay. To give them
-a real one, put its flags in `LIGHTHOUSE_EXTRA_ARGS`:
+The beacon nodes run without an execution client, so they checkpoint sync and gossip but leave
+every block optimistic. That is enough to watch messages cross the overlay. Lighthouse still
+requires `--execution-endpoint`, so `LIGHTHOUSE_EXTRA_ARGS` defaults to one on a port nothing
+answers on, with a throwaway JWT secret beside it. Setting the variable replaces both flags,
+which is how the nodes get a real client:
 
 ```sh
-export LIGHTHOUSE_EXTRA_ARGS="--execution-endpoint http://host.docker.internal:8551 --execution-jwt /data/jwt.hex"
+export LIGHTHOUSE_EXTRA_ARGS="--execution-endpoint http://host.docker.internal:8551 --execution-jwt-secret-key $(cat jwt.hex)"
 ```
 
 ## Start
