@@ -2,7 +2,9 @@
 //! own configuration management, so the tests are lint-style checks that read them from the
 //! repository and hold them to what the sidecar and the two systemd units actually need.
 
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use overlay_core::config::{Config, LogFormat, LogLevel, Steering};
 use overlay_core::roster::Roster;
@@ -246,4 +248,66 @@ fn example_config_has_the_shipped_defaults() {
     for removed in ["auth:", "relay_selection"] {
         assert!(!text.contains(removed), "{CONFIG} still has {removed}");
     }
+}
+
+/// The command the unit starts, which is also the one thing `systemd-analyze verify` needs on
+/// disk before it will check anything else.
+fn exec_start(unit: &str) -> &str {
+    unit.lines()
+        .find_map(|line| line.trim().strip_prefix("ExecStart="))
+        .and_then(|command| command.split_whitespace().next())
+        .expect("the unit has an ExecStart=")
+}
+
+/// The two units as systemd itself reads them, which is the only check here that catches a
+/// misspelled directive or a section that does not exist. The drop-in is verified through a
+/// stand-in beacon node unit, because a drop-in alone has nothing to attach to.
+///
+/// Skipped where `systemd-analyze` is not installed, and where the sidecar is not installed at
+/// the path the unit starts, since verify counts a missing command as an error of its own. The
+/// CI job puts both in place; a laptop skips.
+#[test]
+fn systemd_analyze_verify_passes() {
+    let unit = read(UNIT);
+    let command = exec_start(&unit);
+    if !Path::new(command).exists() {
+        eprintln!("skipped: {command} is not installed on this host");
+        return;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let drop_ins = dir.path().join("lighthouse-bn.service.d");
+    std::fs::create_dir(&drop_ins).unwrap();
+    std::fs::write(dir.path().join("fleet-overlay.service"), &unit).unwrap();
+    std::fs::write(
+        dir.path().join("lighthouse-bn.service"),
+        "[Unit]\nDescription=Stand-in for the beacon node\n\n[Service]\nExecStart=/bin/true\n",
+    )
+    .unwrap();
+    std::fs::write(
+        drop_ins.join("10-fleet-overlay-trusted-peer.conf"),
+        read(DROP_IN),
+    )
+    .unwrap();
+
+    let verified = Command::new("systemd-analyze")
+        .arg("verify")
+        .arg(dir.path().join("fleet-overlay.service"))
+        .arg(dir.path().join("lighthouse-bn.service"))
+        .output();
+    let output = match verified {
+        Ok(output) => output,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            eprintln!("skipped: systemd-analyze is not installed on this host");
+            return;
+        }
+        Err(err) => panic!("systemd-analyze: {err}"),
+    };
+
+    assert!(
+        output.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
