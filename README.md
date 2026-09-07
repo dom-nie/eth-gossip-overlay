@@ -8,7 +8,7 @@ It is for operators who run several Lighthouse beacon nodes they control, whethe
 
 The overlay is an accelerator, never a dependency. Every beacon node keeps its own public peers, the sidecar holds no validator keys and creates no messages, and the receiving node validates everything that arrives through it as it would any other gossip. When the overlay is down, or a sidecar dies, the node carries on as if it had never had one; nothing gets worse.
 
-The quickstart in docs/quickstart.md arrives with the operator documentation.
+[docs/rollout.md](docs/rollout.md) is how to put it on a fleet: a canary against a matched control group, the three numbers that say whether it is winning, and how to back out. The alert rules and the Grafana dashboard it refers to are in [`deploy/`](deploy/), and [docs/troubleshooting.md](docs/troubleshooting.md) is the runbook every alert links to. The quickstart in docs/quickstart.md arrives with the operator documentation.
 
 ## Build
 
