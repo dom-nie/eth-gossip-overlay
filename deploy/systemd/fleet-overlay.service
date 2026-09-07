@@ -24,5 +24,12 @@ RestartMaxDelaySec=60
 
 ExecStart=/usr/local/bin/fleet-overlay run
 
+CPUWeight=200
+# No CPUQuota=: CFS throttling would stall a fanout in the middle of a block.
+MemoryMax=512M
+# Cores reserved for the sidecar on hosts that have them, excluded from the beacon node's own
+# AllowedCPUs=. Host-specific, so it is off here.
+#AllowedCPUs=<CPU_LIST>
+
 [Install]
 WantedBy=multi-user.target
