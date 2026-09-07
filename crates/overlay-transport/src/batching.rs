@@ -20,7 +20,8 @@
 //! being looked up here, because the fanout already had the live view in its hand when it routed
 //! it. The limit moves with path MTU discovery, so it is read per payload and not per peer
 //! (T-061), and the queue is remembered per destination so a batch closed by the timer, long
-//! after the payload that opened it, still has somewhere to go.
+//! after the payload that opened it, still has somewhere to go. A destination is forgotten again
+//! when its queue refuses a batch, which is what a peer that has left the live set does.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
