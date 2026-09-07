@@ -470,6 +470,44 @@ mod tests {
         assert_eq!(cluster.datagrams_received(1, &cluster.hostname(0)), 0);
     }
 
+    /// The fallback D29 exists for, which is what lets a fleet be upgraded host by host: toward
+    /// a peer that never advertised `DATAGRAM_BATCHES`, the small class goes as whole messages
+    /// on streams the way v1 sent it, and it arrives.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peer_without_datagram_batches_feature_still_receives_whole_messages_on_streams() {
+        let subnet = topic("beacon_attestation_7");
+        let payload = attestation(0);
+        let mut cluster = Builder::new(&[NodeKind::Manager; 2])
+            .advertising(1, 0)
+            .start()
+            .await;
+        for node in 0..2 {
+            cluster.start_sidecar(node, subscriptions(&[&subnet], &[]));
+        }
+        eventually("the older sibling to say it wants the subnet", || {
+            cluster.live(0).subscribers(&subnet).len() == 1
+        })
+        .await;
+        assert_eq!(
+            cluster
+                .live(0)
+                .get(&cluster.hostname(1))
+                .unwrap()
+                .negotiated
+                .features,
+            0
+        );
+
+        assert!(cluster.from_bn(0, &subnet, &payload));
+
+        eventually("the older sibling to queue it", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert_eq!(cluster.published(1)[0].payload, payload);
+        assert_eq!(cluster.datagrams_received(1, &cluster.hostname(0)), 0);
+    }
+
     /// The invariant the module is shaped around (§5.7): a message that goes to a hundred peers
     /// with one of them stalled is done for the other ninety-nine at once. The loop hands each
     /// peer's queue a frame and waits for none of them.

@@ -434,6 +434,7 @@ pub struct Builder {
     cfg: Overlay,
     roster: Option<Vec<usize>>,
     small: config::SmallClass,
+    advertised: BTreeMap<usize, u64>,
 }
 
 impl Builder {
@@ -451,6 +452,7 @@ impl Builder {
             },
             roster: None,
             small: config::SmallClass::default(),
+            advertised: BTreeMap::new(),
         }
     }
 
@@ -465,6 +467,14 @@ impl Builder {
     /// smaller set is how a test reloads one in later.
     pub fn roster(mut self, hosts: &[usize]) -> Self {
         self.roster = Some(hosts.to_vec());
+        self
+    }
+
+    /// What node `index` advertises in its HELLO, for a cluster standing in for a fleet whose
+    /// hosts are not all on one release. Applied before the node has a manager, so its first
+    /// HELLO carries it.
+    pub fn advertising(mut self, index: usize, features: u64) -> Self {
+        self.advertised.insert(index, features);
         self
     }
 
@@ -514,6 +524,7 @@ impl Builder {
         let mut nodes = Vec::new();
         for (index, kind) in self.kinds.iter().copied().enumerate() {
             let hostname = Hostname(format!("{prefix}-bn-{index:02}"));
+            features::mask(&hostname, self.advertised.get(&index).copied());
             let self_hello = SelfHello {
                 hostname: hostname.clone(),
                 region: Region(REGION.to_owned()),
@@ -1453,6 +1464,52 @@ pub fn view(connection: &quinn::Connection, peers: Vec<(Hostname, PeerState)>) -
             })
             .collect(),
     )
+}
+
+/// The feature bits one host advertises in its HELLO, for the fallback D29 exists for.
+///
+/// Every node in a test binary runs one build, so the intersection two of them negotiate is
+/// always the whole set and no fallback can ever run. Masking what one host advertises is what
+/// the other side of a fleet halfway through an upgrade looks like (T-062, T-051 scenario 18).
+/// It takes effect on the next HELLO that host sends, so a running node is restarted to change
+/// it, the way a real one would be.
+///
+/// ```ignore
+/// features::mask(fleet.node(2).hostname(), Some(0));
+/// fleet.restart_node(2).await;
+/// ```
+pub mod features {
+    use std::collections::HashMap;
+    use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
+
+    use overlay_core::protocol::SUPPORTED_FEATURES;
+    use overlay_core::roster::Hostname;
+
+    static MASKED: LazyLock<Mutex<HashMap<Hostname, u64>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    fn masked() -> MutexGuard<'static, HashMap<Hostname, u64>> {
+        MASKED.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Makes `host` advertise `features` instead of what its build supports, or what its build
+    /// supports again with `None`.
+    pub fn mask(host: &Hostname, features: Option<u64>) {
+        match features {
+            Some(features) => {
+                masked().insert(host.clone(), features);
+            }
+            None => {
+                masked().remove(host);
+            }
+        }
+    }
+
+    /// What `host` puts in its HELLO: what it was masked to, or this build's own set, which is
+    /// every host outside a test about the fallback.
+    pub(crate) fn advertised(host: &Hostname) -> u64 {
+        masked().get(host).copied().unwrap_or(SUPPORTED_FEATURES)
+    }
 }
 
 /// The datagram limit one host's batcher fills a batch to, for T-062's fallback test.
