@@ -6,8 +6,22 @@ Wants=network-online.target
 # A pull-in and nothing stronger, so neither unit's restart touches the other. Rename this if
 # your Lighthouse unit is called something else.
 Wants=lighthouse-bn.service
+# A crash loop backs off to a minute and is never stopped for good; an overlay that keeps
+# trying is worth more than one systemd gave up on overnight.
+StartLimitIntervalSec=0
 
 [Service]
+Type=notify
+NotifyAccess=main
+# Fed only while the connection manager, the BN link, the fanout and the publisher are all
+# going round, so a wedged sidecar is restarted rather than left half alive.
+WatchdogSec=30
+Restart=always
+RestartSec=2
+# RestartSteps= and RestartMaxDelaySec= need systemd 254 or newer.
+RestartSteps=6
+RestartMaxDelaySec=60
+
 ExecStart=/usr/local/bin/fleet-overlay run
 
 [Install]
