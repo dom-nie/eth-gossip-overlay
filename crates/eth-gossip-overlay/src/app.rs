@@ -48,7 +48,7 @@ use overlay_transport::endpoint;
 use overlay_transport::fanout::Fanout;
 use overlay_transport::hello::{HelloAdmission, OwnTopics, SelfHello};
 use overlay_transport::manager::{ConnectionManager, Handle, Local, PeerEvent};
-use overlay_transport::receive::{Deps as ReceiveDeps, NoStripes, PeerReceiver};
+use overlay_transport::receive::{Deps as ReceiveDeps, NoStripes, PeerReceiver, Relaying};
 use overlay_transport::sender::{
     self, LARGE_LANE_BYTES, LARGE_QUEUED_BYTES_MAX, LargeLedger, SMALL_LANE_FRAMES,
 };
@@ -356,6 +356,9 @@ impl App {
             "connection manager started"
         );
 
+        let (small_tx, small_rx) = watch::channel(cfg.classes.small.clone());
+        let (fanout_tx, fanout_rx) = watch::channel(cfg.overlay.fanout.clone());
+        let (batches, batching) = Batching::spawn(small_rx, metrics.clone());
         let (to_exchange, exchanged) = mpsc::channel(PEER_EVENT_QUEUE);
         let receivers = tokio::spawn(receive_peers(
             peer_events_rx,
@@ -374,12 +377,16 @@ impl App {
                     spec_rx.borrow().seconds_per_slot,
                     Instant::now(),
                 ),
+                // The second hop a relay makes, handed over rather than reached for: one hop is
+                // structural everywhere else on this path (D20, T-063).
+                relaying: Relaying {
+                    live: manager.live_source(),
+                    topics: topics.clone(),
+                    batches: batches.clone(),
+                },
             },
         ));
         let exchange = subs::spawn(exchanged, sets_rx.clone(), topics.clone(), metrics.clone());
-        let (small_tx, small_rx) = watch::channel(cfg.classes.small.clone());
-        let (fanout_tx, fanout_rx) = watch::channel(cfg.overlay.fanout.clone());
-        let (batches, batching) = Batching::spawn(small_rx, metrics.clone());
         let fanout = Fanout::spawn(
             fanout_lanes,
             manager.live_source(),

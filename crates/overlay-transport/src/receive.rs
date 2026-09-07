@@ -34,13 +34,18 @@
 //! [`STREAM_READ_TIMEOUT`], after which the stream is closed and the rest of the connection
 //! carries on.
 //!
-//! # One hop
+//! # One hop, and the one thing that gets a second
 //!
-//! Nothing here can send. A message from the overlay is published locally and goes no further
-//! (§3 principle 1); only what the beacon node hands this host enters the overlay, through
-//! [`crate::fanout`], which this module holds nothing of. That is what keeps duplicates bounded
-//! by the number of beacon nodes that received a message from public gossip (§5.5). Relays
-//! (T-063) and cut-through forwarding (T-073) add their second hop behind their own flags.
+//! A message from the overlay is published locally and goes no further (§3 principle 1): only
+//! what the beacon node hands this host enters the overlay, through [`crate::fanout`], which
+//! this module holds nothing of. That is what keeps duplicates bounded by the number of beacon
+//! nodes that received a message from public gossip (§5.5).
+//!
+//! The exception is a `BATCH` carrying `RELAY` from a peer in another region, which asks this
+//! host to fan it out inside its own (D11, D20). That second hop is [`Relaying`], handed to the
+//! receiver rather than reached for, and it is metered: the bytes are charged to the peer's
+//! fan-out budget, and a peer that asks for more of it than its share closes (DX-N3). T-073's
+//! cut-through forwarding gets the same treatment behind its own flag.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -58,14 +63,16 @@ use overlay_core::subs::PeerState;
 use overlay_core::time::Clock;
 use overlay_core::topic::table::TopicId;
 use overlay_core::topic::{Class, SubscriptionSets, Topic};
-use overlay_core::wire::{self, Chunk, ChunkFlags, Frame, Read};
+use overlay_core::wire::{self, BatchEntry, BatchFlags, Chunk, ChunkFlags, Frame, Read};
 use quinn::VarInt;
 use tokio::io::AsyncRead;
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 
+use crate::batching::{BatchHandle, Small};
 use crate::fanout::{Direction, PeerLabels, TrafficStats};
-use crate::manager::{CloseCode, ManagerStats, PeerInfo};
+use crate::hello::OwnTopics;
+use crate::manager::{CloseCode, LiveSource, ManagerStats, PeerInfo};
 use crate::subs;
 
 /// How long one frame may take to arrive once its stream has started (DX-N3). A peer that opens
@@ -105,6 +112,15 @@ pub trait ReceiveStats: ManagerStats + TrafficStats {
     /// budget covers, so it was delivered locally and fanned out nowhere (DX-N3). §12 alerts on
     /// any non-zero value.
     fn fanout_suppressed(&self, peer: &Hostname, kind: FanoutKind);
+
+    /// `relayed_batches_total`: one `RELAY` batch fanned out inside this host's region. A batch
+    /// holding nothing this host had not already seen re-fans nothing and is not counted (D20).
+    fn relayed_batch(&self);
+
+    /// `relay_same_region_total{peer}`: a peer in this host's own region asked for a re-fan.
+    /// No sender does that, so it is the peer breaking the protocol; the entries are delivered
+    /// locally and forwarded nowhere (D20).
+    fn relay_same_region(&self, peer: &Hostname);
 }
 
 impl ReceiveStats for () {
@@ -114,6 +130,18 @@ impl ReceiveStats for () {
     fn first_seen(&self, _: Class) {}
     fn duplicate(&self, _: Class) {}
     fn fanout_suppressed(&self, _: &Hostname, _: FanoutKind) {}
+    fn relayed_batch(&self) {}
+    fn relay_same_region(&self, _: &Hostname) {}
+}
+
+/// What a payload's arrival owes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Delivery {
+    /// This host's own: published if its beacon node wants the topic, dropped if not (DX-N1).
+    Local,
+    /// The same, and what was new to the seen cache is owed to this host's region as well,
+    /// because a `RELAY` batch carried it (D20).
+    Relayed,
 }
 
 /// What to do with a chunk that is a piece of a message rather than a whole one. T-074 puts the
@@ -162,15 +190,30 @@ pub struct Deps {
     /// The budget each peer gets a copy of. A bucket that starts full is what a peer that
     /// connects an hour later would have anyway, since a refill saturates at the capacity.
     pub budget: FanoutBudget,
+    /// What a `RELAY` batch is fanned out with.
+    pub relaying: Relaying,
+}
+
+/// The second hop, as the receive path is handed it: what a relay needs to fan a `RELAY` batch
+/// out inside its own region and nothing more (D20). Nothing else here can send, which is what
+/// makes one hop structural for everything but this.
+#[derive(Clone)]
+pub struct Relaying {
+    /// The live set, read once per batch for the in-region subscribers of each entry's topic.
+    pub live: LiveSource,
+    /// This host's own topic ids, which a re-fanned entry travels under: an entry is named by
+    /// whoever sends it, and the relay is the sender of the second hop (D13).
+    pub topics: Arc<Mutex<OwnTopics>>,
+    /// The batcher the entries are re-coalesced through, so each in-region subscriber gets one
+    /// batch holding only what it asked for (D21).
+    pub batches: BatchHandle,
 }
 
 /// One peer's receiver. Dropping it stops the task: everything it holds belongs to a connection,
 /// and a connection that is gone has nothing left to read.
 pub struct PeerReceiver {
-    peer: Hostname,
+    ctx: Arc<Ctx>,
     connection: quinn::Connection,
-    budget: Mutex<FanoutBudget>,
-    stats: Arc<dyn ReceiveStats>,
     task: JoinHandle<()>,
 }
 
@@ -178,55 +221,45 @@ impl PeerReceiver {
     /// Starts reading `peer`'s streams. One of these per live peer, started from
     /// [`PeerEvent::Up`](crate::manager::PeerEvent::Up) and dropped on its `Down`.
     pub fn spawn(peer: &PeerInfo, deps: Deps) -> Self {
-        let connection = peer.connection.clone();
-        let budget = Mutex::new(deps.budget.clone());
-        let stats = deps.stats.clone();
         let ctx = Arc::new(Ctx {
             peer: peer.hostname.clone(),
             region: peer.region.clone(),
             site: peer.site.clone(),
             state: peer.state.clone(),
+            budget: Mutex::new(deps.budget.clone()),
             deps,
             warned_invalid: AtomicBool::new(false),
         });
         Self {
-            peer: peer.hostname.clone(),
-            connection: connection.clone(),
-            budget,
-            stats,
-            task: tokio::spawn(read_peer(connection, ctx)),
+            task: tokio::spawn(read_peer(peer.connection.clone(), ctx.clone())),
+            connection: peer.connection.clone(),
+            ctx,
         }
     }
 
     /// Charges this peer's fan-out budget for `bytes` of second-hop work, counting a refusal
-    /// and closing the connection when the peer has been over budget for too long (DX-N3).
-    /// Nothing in v1 calls it, because nothing in v1 fans out what it receives; T-063 charges
-    /// `kind = Relay` and T-073 `kind = Chunk`.
+    /// and closing the connection when the peer has been over budget for too long (DX-N3). The
+    /// datagram loop charges `kind = Relay` for every `RELAY` batch; T-073 charges `Chunk`.
     pub fn charge(&self, kind: FanoutKind, bytes: usize, now: Instant) -> Charge {
-        let charge = self.budget(kind, bytes, now);
-        if charge != Charge::Allowed {
-            self.stats.fanout_suppressed(&self.peer, kind);
-        }
+        let charge = self.ctx.charge(kind, bytes, now);
         if charge == Charge::CloseRateExceeded {
-            tracing::warn!(
-                peer = %self.peer,
-                kind = kind.as_str(),
-                "closing a peer that has been over its fan-out budget for too long"
-            );
-            CloseCode::RateExceeded.close(&self.connection);
+            close_rate_exceeded(&self.ctx.peer, kind, &self.connection);
         }
         charge
     }
+}
 
-    /// The budget, recovering the guard from a poisoned lock: nothing between the lock and its
-    /// release can panic, so the bucket is whole, and refusing to charge afterwards would let a
-    /// peer past the one bound that stops it.
-    fn budget(&self, kind: FanoutKind, bytes: usize, now: Instant) -> Charge {
-        self.budget
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .charge(kind, bytes, now)
-    }
+/// Ends a connection whose peer has been over its fan-out budget for longer than
+/// [`SUSTAINED_VIOLATION`](overlay_core::budget::SUSTAINED_VIOLATION). The peer comes back
+/// through the ordinary reconnect backoff, which is what makes this a pause and not a
+/// punishment (DX-N3).
+fn close_rate_exceeded(peer: &Hostname, kind: FanoutKind, connection: &quinn::Connection) {
+    tracing::warn!(
+        %peer,
+        kind = kind.as_str(),
+        "closing a peer that has been over its fan-out budget for too long"
+    );
+    CloseCode::RateExceeded.close(connection);
 }
 
 impl Drop for PeerReceiver {
@@ -247,6 +280,8 @@ struct Ctx {
     site: Option<String>,
     /// The peer's own topic ids, kept up to date by the control stream reader (T-027).
     state: Arc<Mutex<PeerState>>,
+    /// What this peer may make this host fan out (DX-N3), one bucket per connection.
+    budget: Mutex<FanoutBudget>,
     deps: Deps,
     /// Whether this connection has already had its line about a payload that did not check out.
     /// A peer sending a stream of them costs one line, and a reconnect gets a fresh one.
@@ -275,7 +310,12 @@ async fn read_peer(connection: quinn::Connection, ctx: Arc<Ctx>) {
 async fn datagrams(connection: quinn::Connection, ctx: Arc<Ctx>) {
     loop {
         match connection.read_datagram().await {
-            Ok(datagram) => ctx.datagram(datagram),
+            Ok(datagram) => {
+                if ctx.datagram(datagram) == After::Close {
+                    close_rate_exceeded(&ctx.peer, FanoutKind::Relay, &connection);
+                    return;
+                }
+            }
             Err(error) => {
                 tracing::debug!(peer = %ctx.peer, %error, "peer sends no more datagrams");
                 return;
@@ -292,7 +332,7 @@ async fn accept(connection: quinn::Connection, ctx: Arc<Ctx>) {
     loop {
         match connection.accept_uni().await {
             Ok(stream) => {
-                streams.spawn(read_stream(stream, ctx.clone()));
+                streams.spawn(read_stream(stream, ctx.clone(), connection.clone()));
             }
             Err(error) => {
                 tracing::debug!(peer = %ctx.peer, %error, "peer opens no more streams");
@@ -310,16 +350,30 @@ enum StreamEnd {
     Ended,
     /// A frame did not arrive within [`STREAM_READ_TIMEOUT`].
     Timeout,
+    /// The peer has been asking for more second-hop work than its budget covers for longer than
+    /// the connection is given (DX-N3).
+    RateExceeded,
+}
+
+/// Whether the connection a frame arrived on carries on. A `RELAY` batch from a peer that has
+/// been over its fan-out budget for too long is the one thing on this path that ends it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum After {
+    /// Keep reading.
+    Carry,
+    /// Close with [`CloseCode::RateExceeded`].
+    Close,
 }
 
 /// One stream from the peer's first byte to whatever ends it, and the one place a stalled
 /// stream is given up on.
-async fn read_stream(mut stream: quinn::RecvStream, ctx: Arc<Ctx>) {
+async fn read_stream(mut stream: quinn::RecvStream, ctx: Arc<Ctx>, connection: quinn::Connection) {
     match read_frames(&mut stream, &ctx).await {
         StreamEnd::Timeout => {
             tracing::debug!(peer = %ctx.peer, "closing a stream that stalled mid-frame");
             let _ = stream.stop(VarInt::from_u32(STALLED_STREAM_CODE));
         }
+        StreamEnd::RateExceeded => close_rate_exceeded(&ctx.peer, FanoutKind::Relay, &connection),
         // A stream that ended has nothing left to stop, and the peer that finished it knows.
         StreamEnd::Ended => {}
     }
@@ -342,7 +396,11 @@ async fn read_frames<R: AsyncRead + Unpin>(stream: &mut R, ctx: &Ctx) -> StreamE
         .await;
         match read {
             Err(_) => return StreamEnd::Timeout,
-            Ok(Ok(Read::Frame(frame))) => ctx.frame(frame),
+            Ok(Ok(Read::Frame(frame))) => {
+                if ctx.frame(frame) == After::Close {
+                    return StreamEnd::RateExceeded;
+                }
+            }
             Ok(Ok(Read::Unknown(frame_type))) => {
                 tracing::debug!(peer = %ctx.peer, frame_type, "frame type from a newer peer");
                 ctx.deps.stats.unknown_frame_type(&ctx.peer);
@@ -356,29 +414,37 @@ async fn read_frames<R: AsyncRead + Unpin>(stream: &mut R, ctx: &Ctx) -> StreamE
 }
 
 impl Ctx {
-    /// Sends one frame down the path its carrier and shape call for.
-    fn frame(&self, frame: Frame) {
+    /// Sends one frame down the path its carrier and shape call for, and answers whether the
+    /// connection carries on.
+    fn frame(&self, frame: Frame) -> After {
         // Off the socket and decoded, which is the earliest the arrival time can be read here;
         // everything below it, the id above all, costs time this host should not be charged
         // with in the fleet-spread query.
         let arrived = self.deps.clock.wall();
         match frame {
             Frame::Chunk { chunk, .. } if chunk.is_whole() => {
-                self.deliver(chunk.topic_id, chunk.data, Some(chunk.msg_id), arrived);
+                let _ = self.deliver(
+                    chunk.topic_id,
+                    chunk.data,
+                    Some(chunk.msg_id),
+                    arrived,
+                    Delivery::Local,
+                );
+                After::Carry
             }
-            Frame::Chunk { flags, chunk } => self.deps.stripes.chunk(&self.peer, flags, chunk),
-            // `RELAY` asks the receiver to re-fan the batch inside its own region, which is
-            // T-063's to act on. v1 delivers the entries locally and lets the flag be (D20).
-            Frame::Batch { entries, .. } => {
-                for entry in entries {
-                    self.deliver(entry.topic_id, entry.payload, None, arrived);
-                }
+            Frame::Chunk { flags, chunk } => {
+                self.deps.stripes.chunk(&self.peer, flags, chunk);
+                After::Carry
             }
-            other => tracing::debug!(
-                peer = %self.peer,
-                frame = ?other.frame_type(),
-                "frame that does not belong on a data stream"
-            ),
+            Frame::Batch { flags, entries } => self.batch(flags, entries, arrived),
+            other => {
+                tracing::debug!(
+                    peer = %self.peer,
+                    frame = ?other.frame_type(),
+                    "frame that does not belong on a data stream"
+                );
+                After::Carry
+            }
         }
     }
 
@@ -386,17 +452,10 @@ impl Ctx {
     /// else is dropped whole and counted `unknown_frame_type_total{peer}`: a type from a newer
     /// release, and a type that belongs on a stream, are the same thing here, since a datagram
     /// has no length prefix to skip a frame by (D10).
-    fn datagram(&self, datagram: Bytes) {
+    fn datagram(&self, datagram: Bytes) -> After {
         let arrived = self.deps.clock.wall();
         match wire::decode_datagram(datagram) {
-            // `RELAY` asks the receiver to re-fan the batch inside its own region, which is
-            // T-063's to act on. This release delivers the entries locally and lets the flag be
-            // (D11, D20).
-            Ok(Frame::Batch { entries, .. }) => {
-                for entry in entries {
-                    self.deliver(entry.topic_id, entry.payload, None, arrived);
-                }
-            }
+            Ok(Frame::Batch { flags, entries }) => return self.batch(flags, entries, arrived),
             Ok(other) => {
                 tracing::debug!(
                     peer = %self.peer,
@@ -413,21 +472,148 @@ impl Ctx {
                 tracing::debug!(peer = %self.peer, %error, "datagram that does not decode");
             }
         }
+        After::Carry
+    }
+
+    /// One `BATCH`, from either carrier. Without `RELAY` the entries are this host's alone.
+    ///
+    /// With it, the sender is asking this host to fan the batch out inside its own region, and
+    /// three things decide whether it does. The sender has to be in another region: a
+    /// same-region `RELAY` is a peer breaking the protocol, and honouring it would be the
+    /// hundredfold re-forwarding the bit exists to prevent (D20). The bytes have to fit the
+    /// peer's fan-out budget, or the batch is delivered here and fanned out nowhere (DX-N3).
+    /// And an entry is only re-fanned if it was new to this host's seen cache: one it already
+    /// held reached its region from another relay or from the origin, and has been fanned
+    /// already.
+    fn batch(&self, flags: BatchFlags, entries: Vec<BatchEntry>, arrived: SystemTime) -> After {
+        if !flags.contains(BatchFlags::RELAY) {
+            self.deliver_all(entries, arrived);
+            return After::Carry;
+        }
+        if self.region == self.deps.node.region {
+            self.deps.stats.relay_same_region(&self.peer);
+            tracing::debug!(peer = %self.peer, "a peer in this region asked for a re-fan");
+            self.deliver_all(entries, arrived);
+            return After::Carry;
+        }
+        let bytes = entries.iter().map(|entry| entry.payload.len()).sum();
+        let charge = self.charge(FanoutKind::Relay, bytes, Instant::now());
+        if charge != Charge::Allowed {
+            self.deliver_all(entries, arrived);
+            return match charge {
+                Charge::CloseRateExceeded => After::Close,
+                _ => After::Carry,
+            };
+        }
+        let new: Vec<(Topic, Bytes)> = entries
+            .into_iter()
+            .filter_map(|entry| {
+                self.deliver(
+                    entry.topic_id,
+                    entry.payload,
+                    None,
+                    arrived,
+                    Delivery::Relayed,
+                )
+            })
+            .collect();
+        self.refan(new);
+        After::Carry
+    }
+
+    /// Every entry of a batch this host keeps to itself.
+    fn deliver_all(&self, entries: Vec<BatchEntry>, arrived: SystemTime) {
+        for entry in entries {
+            let _ = self.deliver(
+                entry.topic_id,
+                entry.payload,
+                None,
+                arrived,
+                Delivery::Local,
+            );
+        }
+    }
+
+    /// Hands what was new to this host's own batcher, once per in-region subscriber of each
+    /// entry's topic, so every one of them gets a single batch of what it asked for and nothing
+    /// else (D21). The batches go out with `RELAY` clear: this is the second hop and there is
+    /// no third.
+    ///
+    /// Every payload here came out of a `BATCH` entry, so it already fits the `u16` length one
+    /// carries and [`Batcher::push`](overlay_core::batch::Batcher::push)'s precondition holds
+    /// without a second check. A topic this host has no id of its own for is not re-fanned: an
+    /// id its peers have never been told is unreadable on a frame, and minting one mid-flight is
+    /// what D12 rules out.
+    fn refan(&self, new: Vec<(Topic, Bytes)>) {
+        if new.is_empty() {
+            return;
+        }
+        let relaying = &self.deps.relaying;
+        let view = relaying.live.live();
+        let mut refanned = false;
+        for (topic, payload) in new {
+            let Some(topic_id) = crate::hello::lock(&relaying.topics).table.get(&topic) else {
+                tracing::debug!(%topic, "no id of this host's own to re-fan an entry under");
+                continue;
+            };
+            for (hostname, peer) in view.in_region(&self.deps.node.region) {
+                let wanted = *hostname != self.deps.node.hostname
+                    && subs::state(&peer.state).subscribed(&topic);
+                let Some(max_bytes) = wanted
+                    .then(|| crate::fanout::datagram_limit(&self.deps.node.hostname, peer))
+                    .flatten()
+                else {
+                    continue;
+                };
+                let queued = relaying.batches.push(Small {
+                    dest: hostname.clone(),
+                    topic_id,
+                    payload: payload.clone(),
+                    max_bytes,
+                    relay: false,
+                    sender: peer.sender.clone(),
+                });
+                refanned |= queued.is_ok();
+            }
+        }
+        if refanned {
+            self.deps.stats.relayed_batch();
+        }
+    }
+
+    /// Charges this peer's fan-out budget for `bytes` of second-hop work and counts a refusal
+    /// (DX-N3). Closing is the caller's: whoever is reading the connection is who has it.
+    ///
+    /// The lock guard is recovered from a poisoned lock: nothing between the lock and its
+    /// release can panic, so the bucket is whole, and refusing to charge afterwards would let a
+    /// peer past the one bound that stops it.
+    fn charge(&self, kind: FanoutKind, bytes: usize, now: Instant) -> Charge {
+        let charge = self
+            .budget
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .charge(kind, bytes, now);
+        if charge != Charge::Allowed {
+            self.deps.stats.fanout_suppressed(&self.peer, kind);
+        }
+        charge
     }
 
     /// One payload, from a whole message or from a batch entry. `header_id` is the id the frame
     /// claimed for it, which only a chunk header carries, and `arrived` is when the frame that
-    /// carried it came off the socket.
+    /// carried it came off the socket. The answer is the entry a relay owes its own region,
+    /// which is only ever `Some` for [`Delivery::Relayed`].
     fn deliver(
         &self,
         topic_id: u16,
         payload: Bytes,
         header_id: Option<MessageId>,
         arrived: SystemTime,
-    ) {
+        delivery: Delivery,
+    ) -> Option<(Topic, Bytes)> {
         let Some(topic) = self.topic(topic_id) else {
             self.deps.stats.unknown_topic_id(&self.peer);
-            return;
+            return None;
         };
         let class = Class::of(topic.kind(), payload.len());
         self.deps
@@ -435,9 +621,14 @@ impl Ctx {
             .message(Direction::In, class, self.labels(), payload.len());
         #[cfg(any(test, feature = "test-util"))]
         crate::testutil::throttle::charge(&self.deps.node.hostname, payload.len());
-        if !self.deps.sets.borrow().advertised.contains(&topic) {
+        // A relay carries on past the gate: what it publishes is its own beacon node's business
+        // (DX-N1), what it re-fans is its region's, and it need not want a thing in the batch.
+        let wanted = self.deps.sets.borrow().advertised.contains(&topic);
+        if !wanted {
             self.deps.stats.unwanted_topic(&self.peer);
-            return;
+            if delivery == Delivery::Local {
+                return None;
+            }
         }
         let computed = msgid::compute(&topic.to_string(), &payload, wire::MAX_PAYLOAD_BYTES);
         let refused = match (computed.branch, header_id) {
@@ -451,30 +642,37 @@ impl Ctx {
         if let Some(refused) = refused {
             self.deps.stats.invalid_payload(&self.peer);
             self.warn_invalid(&topic, refused);
-            return;
+            return None;
         }
         // Insert site 2 of 3 (D08), immediately before the enqueue. There is no second insert
         // anywhere in this file, and a message dropped below is one this host is already
         // holding for the seen cache's TTL.
         if !self.deps.seen.insert(computed.id) {
             self.deps.stats.duplicate(class);
-            return;
+            return None;
         }
-        self.deps.stats.first_seen(class);
-        events::emit_first_arrival(&FirstArrival {
-            id: computed.id,
-            class,
-            topic: &topic,
-            node: &self.deps.node,
-            at: arrived,
-            source: events::Source::Overlay { origin: &self.peer },
-        });
-        self.deps.publish.enqueue(PublishItem {
-            topic,
-            id: computed.id,
-            payload,
-            class,
-        });
+        let owed = match delivery {
+            Delivery::Relayed => Some((topic.clone(), payload.clone())),
+            Delivery::Local => None,
+        };
+        if wanted {
+            self.deps.stats.first_seen(class);
+            events::emit_first_arrival(&FirstArrival {
+                id: computed.id,
+                class,
+                topic: &topic,
+                node: &self.deps.node,
+                at: arrived,
+                source: events::Source::Overlay { origin: &self.peer },
+            });
+            self.deps.publish.enqueue(PublishItem {
+                topic,
+                id: computed.id,
+                payload,
+                class,
+            });
+        }
+        owed
     }
 
     /// One line per connection about payloads the beacon node would refuse. A peer sending a
@@ -1288,6 +1486,7 @@ mod tests {
             region: Region("eu".to_owned()),
             site: None,
             state: Arc::new(Mutex::new(PeerState::default())),
+            budget: Mutex::new(FanoutBudget::default_for(2, 2048, 12, Instant::now())),
             deps: Deps {
                 seen: SharedSeenCache::new(SeenCache::new(
                     Duration::from_secs(60),
@@ -1305,6 +1504,15 @@ mod tests {
                 }),
                 clock: Arc::new(SystemClock),
                 budget: FanoutBudget::default_for(2, 2048, 12, Instant::now()),
+                relaying: Relaying {
+                    live: LiveSource::fixed(crate::manager::LiveView::default()),
+                    topics: Arc::new(Mutex::new(OwnTopics::default())),
+                    batches: crate::batching::Batching::spawn(
+                        watch::channel(overlay_core::config::SmallClass::default()).1,
+                        Arc::new(()),
+                    )
+                    .0,
+                },
             },
             warned_invalid: AtomicBool::new(false),
         });

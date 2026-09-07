@@ -166,14 +166,16 @@ impl Fanout {
     /// takes a lock and returns.
     fn send(&mut self, outbound: Outbound) {
         let view = self.live.live();
-        let RoutePlan::Direct(targets) = route(
+        let (targets, relays) = match route(
             &outbound.topic,
             outbound.class,
             &view,
             &self.self_id,
             &self.cfg.borrow(),
-        ) else {
-            return;
+        ) {
+            RoutePlan::Direct(targets) => (targets, Vec::new()),
+            RoutePlan::SmallRelayed { direct, relays } => (direct, relays),
+            RoutePlan::Nothing => return,
         };
         let Some(topic_id) = self.own_id(&outbound.topic) else {
             tracing::debug!(
@@ -188,7 +190,13 @@ impl Fanout {
         // collected for.
         let mut whole: Option<Bytes> = None;
         let now = Instant::now();
-        for target in targets {
+        // A relay is a target like any other; what it gets is the `RELAY` bit, which asks it to
+        // fan the batch out inside its own region (D11).
+        let targets = targets
+            .into_iter()
+            .map(|target| (target, false))
+            .chain(relays.into_iter().map(|target| (target, true)));
+        for (target, relay) in targets {
             // A peer can leave the live set between the plan and the send, and the send is what
             // finds out (§5.3).
             let Some(live) = view.get(&target) else {
@@ -214,7 +222,7 @@ impl Fanout {
                     topic_id,
                     payload: outbound.payload.clone(),
                     max_bytes,
-                    relay: false,
+                    relay,
                     sender: live.sender.clone(),
                 }),
                 None => {
@@ -241,31 +249,15 @@ impl Fanout {
     /// one.
     ///
     /// Three things have to hold. The class has to be the small one, since only it is batched
-    /// (§5.4). The peer has to have advertised `DATAGRAM_BATCHES`, or it is running a release
-    /// that reads nothing but whole messages (D29). And the payload has to fit the `u16` length a
-    /// `BATCH` entry carries, which a small-class `AttesterSlashing` need not: small class is by
-    /// kind, and `wire`'s narrowing would stop a debug build and write a frame that decodes as
-    /// something else in a release one (D21).
+    /// (§5.4). The payload has to fit the `u16` length a `BATCH` entry carries, which a
+    /// small-class `AttesterSlashing` need not: small class is by kind, and `wire`'s narrowing
+    /// would stop a debug build and write a frame that decodes as something else in a release
+    /// one (D21). And the peer has to take a batch datagram at all, which is
+    /// [`datagram_limit`]'s question.
     fn batch_bytes(&self, class: Class, bytes: usize, live: &LivePeer) -> Option<usize> {
-        (class == Class::Small
-            && live.negotiated.allows(features::DATAGRAM_BATCHES)
-            && bytes <= MAX_BATCH_ENTRY_BYTES)
-            .then(|| self.datagram_limit(live))
+        (class == Class::Small && bytes <= MAX_BATCH_ENTRY_BYTES)
+            .then(|| datagram_limit(&self.self_id.hostname, live))
             .flatten()
-    }
-
-    /// What a datagram to `live` currently holds, which moves with path MTU discovery, or
-    /// nothing when the peer's transport takes no datagram at all and the whole-message path is
-    /// the only one it has.
-    fn datagram_limit(&self, live: &LivePeer) -> Option<usize> {
-        // The one seam a test has into this number. `send_datagram` refuses a batch built
-        // against a limit the path does not hold, and nothing a test can do to a loopback
-        // connection makes quinn's own answer disagree with it (T-062 test 7).
-        #[cfg(any(test, feature = "test-util"))]
-        if let Some(forced) = crate::testutil::datagram_limit::forced(&self.self_id.hostname) {
-            return Some(forced);
-        }
-        live.connection.max_datagram_size()
     }
 
     /// The id this host's peers know `topic` by. Never interns: an id nobody has been told about
@@ -274,6 +266,32 @@ impl Fanout {
     fn own_id(&self, topic: &Topic) -> Option<TopicId> {
         lock(&self.topics).table.get(topic)
     }
+}
+
+/// What a batch datagram to `live` may fill, which moves with path MTU discovery, or nothing
+/// when the peer takes no such batch: it advertised no `DATAGRAM_BATCHES`, so it runs a release
+/// that reads whole messages only (D29), or its transport carries no datagram at all. A relay's
+/// re-fan asks the same question of its own region (T-063), so `self_host` is the sending host
+/// rather than a field of one caller.
+#[cfg_attr(
+    not(any(test, feature = "test-util")),
+    allow(
+        unused_variables,
+        reason = "self_host is read only by the limit a test forces"
+    )
+)]
+pub(crate) fn datagram_limit(self_host: &Hostname, live: &LivePeer) -> Option<usize> {
+    if !live.negotiated.allows(features::DATAGRAM_BATCHES) {
+        return None;
+    }
+    // The one seam a test has into this number. `send_datagram` refuses a batch built against a
+    // limit the path does not hold, and nothing a test can do to a loopback connection makes
+    // quinn's own answer disagree with it (T-062 test 7).
+    #[cfg(any(test, feature = "test-util"))]
+    if let Some(forced) = crate::testutil::datagram_limit::forced(self_host) {
+        return Some(forced);
+    }
+    live.connection.max_datagram_size()
 }
 
 /// Whether a whole message of `payload_bytes` is within the frame limit the peer advertised in

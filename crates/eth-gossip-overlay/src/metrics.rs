@@ -124,6 +124,8 @@ pub const PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL: &str = "overlay_peer_auth_via_previ
 pub const FANOUT_SUPPRESSED_TOTAL: &str = "overlay_fanout_suppressed_total";
 /// Batches this host re-fanned as a relay.
 pub const RELAYED_BATCHES_TOTAL: &str = "overlay_relayed_batches_total";
+/// Relay batches from a peer in this host's own region, which no sender should send.
+pub const RELAY_SAME_REGION_TOTAL: &str = "overlay_relay_same_region_total";
 /// Messages from the beacon node dropped because the fanout lane was full.
 pub const FANOUT_LANE_DROPPED_TOTAL: &str = "overlay_fanout_lane_dropped_total";
 /// Chunks written to peers.
@@ -260,6 +262,8 @@ pub struct Metrics {
     roster_region_mismatch: IntCounterVec,
     peer_auth_via_previous_seed: IntCounterVec,
     fanout_suppressed: IntCounterVec,
+    relayed_batches: IntCounter,
+    relay_same_region: IntCounterVec,
     fanout_lane_dropped: IntCounterVec,
     peer_queue_depth: IntGaugeVec,
     peer_queue_drops: IntCounterVec,
@@ -403,6 +407,12 @@ impl Metrics {
             "Second-hop work refused by the fan-out budget.",
             &[LABEL_PEER, LABEL_KIND],
         )?;
+        let relayed_batches = b.counter(RELAYED_BATCHES_TOTAL, "Batches re-fanned as a relay.")?;
+        let relay_same_region = b.counter_vec(
+            RELAY_SAME_REGION_TOTAL,
+            "Relay batches from a peer in this host's own region.",
+            &[LABEL_PEER],
+        )?;
         let fanout_lane_dropped = b.counter_vec(
             FANOUT_LANE_DROPPED_TOTAL,
             "Messages dropped because the fanout lane was full.",
@@ -435,10 +445,9 @@ impl Metrics {
             class_reason,
         )?;
 
-        // Registered and then let go of: their producers land in v2, v3 and T-043, and each of
-        // those tickets adds the handle it needs. The registry keeps the collector alive, so
-        // the name is on the scrape from this release on.
-        b.counter(RELAYED_BATCHES_TOTAL, "Batches re-fanned as a relay.")?;
+        // Registered and then let go of: their producers land in v3 and T-073, and each of those
+        // tickets adds the handle it needs. The registry keeps the collector alive, so the name
+        // is on the scrape from this release on.
         b.counter(CHUNKS_SENT_TOTAL, "Chunks written to peers.")?;
         b.counter(CHUNKS_RECEIVED_TOTAL, "Chunks read from peers.")?;
         b.counter(
@@ -501,6 +510,8 @@ impl Metrics {
             roster_region_mismatch,
             peer_auth_via_previous_seed,
             fanout_suppressed,
+            relayed_batches,
+            relay_same_region,
             fanout_lane_dropped,
             peer_queue_depth,
             peer_queue_drops,
@@ -738,6 +749,14 @@ impl ReceiveStats for Metrics {
         self.fanout_suppressed
             .with_label_values(&[&peer.0, kind.as_str()])
             .inc();
+    }
+
+    fn relayed_batch(&self) {
+        self.relayed_batches.inc();
+    }
+
+    fn relay_same_region(&self, peer: &Hostname) {
+        self.relay_same_region.with_label_values(&[&peer.0]).inc();
     }
 }
 

@@ -72,7 +72,7 @@ use crate::manager::{
     Admission, CloseCode, ConnectionManager, Handle, LivePeer, LiveSource, LiveView, Local,
     ManagerStats, PeerCounts, PeerEvent, PeerInfo,
 };
-use crate::receive::{Deps, NoStripes, PeerReceiver, ReceiveStats};
+use crate::receive::{Deps, NoStripes, PeerReceiver, ReceiveStats, Relaying};
 use crate::sender::{
     self, DropReason, LARGE_QUEUED_BYTES_MAX, LargeLedger, SenderHandle, SenderStats, StaleReason,
     Transport,
@@ -404,6 +404,14 @@ impl ReceiveStats for CountingStats {
 
     fn fanout_suppressed(&self, peer: &Hostname, kind: FanoutKind) {
         add(&self.fanout_suppressed, (peer.clone(), kind));
+    }
+
+    fn relayed_batch(&self) {
+        self.relayed_batches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn relay_same_region(&self, peer: &Hostname) {
+        add(&self.relay_same_region, peer.clone());
     }
 }
 
@@ -1076,6 +1084,7 @@ impl<A: Admission> TestCluster<A> {
             region: node.self_hello.region.clone(),
             site: None,
         };
+        let (small, batching) = Batching::spawn(self.small.subscribe(), stats.clone());
         let deps = Deps {
             seen: seen.clone(),
             publish: published.clone(),
@@ -1092,12 +1101,16 @@ impl<A: Admission> TestCluster<A> {
                 12,
                 Instant::now(),
             ),
+            relaying: Relaying {
+                live: live.clone(),
+                topics: node.topics.clone(),
+                batches: small.clone(),
+            },
         };
         let receivers: Receivers = Arc::new(Mutex::new(BTreeMap::new()));
         let (to_exchange, exchanged) = mpsc::channel(64);
         let lanes = ClassLanes::new(Arc::new(()));
         let to_fanout = lanes.pusher();
-        let (small, batching) = Batching::spawn(self.small.subscribe(), stats.clone());
         let tasks = vec![
             crate::subs::spawn(exchanged, watching, node.topics.clone(), stats.clone()),
             tokio::spawn(receive_peers(events, to_exchange, deps, receivers.clone())),
