@@ -21,7 +21,6 @@
 
 use std::collections::BTreeMap;
 use std::future::Future;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -216,9 +215,6 @@ pub struct App {
     commands: mpsc::Sender<BnCommand>,
     /// True once a shutdown has begun, which is what the watchdog task waits on.
     stop: watch::Sender<bool>,
-    /// Where the scrape endpoint actually bound, which is not `metrics_listen` when that asked
-    /// for port 0.
-    metrics_addr: SocketAddr,
     _log: Arc<LogHandle>,
 }
 
@@ -253,14 +249,14 @@ impl App {
         let registry = prometheus::Registry::new();
         let metrics = Arc::new(Metrics::new(&registry)?);
         let gossipsub = Arc::new(Mutex::new(prometheus_client::registry::Registry::default()));
-        let (metrics_addr, metrics_task) =
+        let (metrics_bound, metrics_task) =
             metrics::serve(cfg.metrics_listen, registry, gossipsub.clone())
                 .await
                 .map_err(|source| StartupError::Bind {
                     what: format!("metrics_listen {}", cfg.metrics_listen),
                     source,
                 })?;
-        tracing::info!(addr = %metrics_addr, "metrics endpoint bound");
+        tracing::info!(addr = %metrics_bound, "metrics endpoint bound");
 
         let clock = Arc::new(SystemClock);
         let seen = SharedSeenCache::new(
@@ -457,14 +453,8 @@ impl App {
             ],
             commands,
             stop: watch::channel(false).0,
-            metrics_addr,
             _log: log,
         })
-    }
-
-    /// Where the scrape endpoint bound, for a caller that asked for port 0.
-    pub fn metrics_addr(&self) -> SocketAddr {
-        self.metrics_addr
     }
 
     /// Reports readiness, then runs until `shutdown` resolves and stops everything.

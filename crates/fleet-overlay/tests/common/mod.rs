@@ -28,7 +28,6 @@ pub struct Fixture {
     pub dir: tempfile::TempDir,
     pub config: PathBuf,
     pub roster: PathBuf,
-    pub seed: PathBuf,
     pub node_key: PathBuf,
     /// The overlay port the config asks for, which a test can take first.
     pub overlay: SocketAddr,
@@ -38,46 +37,30 @@ impl Fixture {
     /// A fixture whose roster holds this host alone, on ports nothing else in the test binary
     /// is using.
     pub fn new() -> Self {
-        Self::with_hosts(&[(HOSTNAME, REGION, SITE)])
-    }
-
-    /// The same with a roster of `hosts`, each `(hostname, region, site)`.
-    pub fn with_hosts(hosts: &[(&str, &str, &str)]) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = |name: &str| dir.path().join(name);
-        let (config, roster, seed, node_key) = (
-            path("config.yaml"),
-            path("roster.yaml"),
-            path("seed"),
-            path("node.key"),
-        );
+        let (config, roster, node_key) =
+            (path("config.yaml"), path("roster.yaml"), path("node.key"));
 
         let overlay = free_port();
-        let mut entries = String::from("hosts:\n");
-        for (index, (hostname, region, site)) in hosts.iter().enumerate() {
-            let addr = if index == 0 { overlay } else { free_port() };
-            entries.push_str(&format!(
-                "  - hostname: {hostname}\n    region: {region}\n    site: {site}\n    addr: \"{addr}\"\n"
-            ));
-        }
-        std::fs::write(&roster, entries).unwrap();
-        std::fs::write(&seed, format!("{}\n", "ab".repeat(32))).unwrap();
+        std::fs::write(
+            &roster,
+            format!(
+                "hosts:\n  - hostname: {HOSTNAME}\n    region: {REGION}\n    site: {SITE}\n    \
+                 addr: \"{overlay}\"\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(path("seed"), format!("{}\n", "ab".repeat(32))).unwrap();
         std::fs::write(&config, config_yaml(dir.path(), overlay)).unwrap();
 
         Self {
             dir,
             config,
             roster,
-            seed,
             node_key,
             overlay,
         }
-    }
-
-    /// Rewrites `config.yaml` with `edit` applied to the text this fixture wrote.
-    pub fn edit_config(&self, edit: impl Fn(&str) -> String) {
-        let text = std::fs::read_to_string(&self.config).unwrap();
-        std::fs::write(&self.config, edit(&text)).unwrap();
     }
 
     /// The sidecar under test, not yet started.
@@ -174,11 +157,6 @@ impl Sidecar {
             stdout,
             stderr,
         }
-    }
-
-    /// The child's process id, for the signal a test sends it.
-    pub fn id(&self) -> u32 {
-        self.child.id()
     }
 
     pub fn stdout(&self) -> String {
