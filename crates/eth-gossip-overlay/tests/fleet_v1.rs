@@ -491,3 +491,64 @@ async fn seed_rotation_with_host_by_host_sidecar_restarts_keeps_the_full_mesh_an
         assert_eq!(fleet.node(index).bn().disconnects(), 1, "node {index}");
     }
 }
+
+/// §10 and §5.4: a slot's worth of attestations from one beacon node reaches every other beacon
+/// node in the fleet, batched into datagrams rather than a stream per attestation. A thousand is
+/// more than a fleet this size sees in a slot, and it runs on loopback, so what the bound covers
+/// is the sidecar's own path: the batch window, the send queues and the publish queue.
+///
+/// The bound is measured from the last publish rather than the first, because the burst arrives
+/// through the beacon node's own gossipsub link one message at a time and how long a loaded
+/// machine takes to hand over a thousand of them is not what this scenario is about. Both
+/// numbers are printed.
+#[tokio::test(flavor = "multi_thread")]
+async fn attestation_burst_of_1000_arrives_within_100_ms_on_loopback() {
+    let subnet = topic("beacon_attestation_11");
+    let burst: Vec<Vec<u8>> = (0..1000)
+        .map(|n| format!("attestation {n} of the burst").into_bytes())
+        .collect();
+    let mut fleet = Fleet::builder().regions(&[("eu", 3)]).start().await;
+    for node in fleet.nodes() {
+        node.subscribe(&subnet).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    fleet.settle().await;
+    let arrived = |fleet: &Fleet, index: usize| {
+        fleet
+            .node(index)
+            .bn()
+            .received()
+            .iter()
+            .filter(|(seen, _)| *seen == subnet)
+            .count()
+    };
+    let hosts = fleet.hosts();
+
+    let started = Instant::now();
+    for payload in &burst {
+        fleet.node(0).bn().publish(&subnet, payload).await;
+    }
+    let published = Instant::now();
+
+    fleet
+        .wait_for(
+            "every other beacon node to import the burst",
+            WAIT,
+            |fleet| (1..hosts).all(|index| arrived(fleet, index) >= burst.len()),
+        )
+        .await;
+    let delivery = published.elapsed();
+    println!(
+        "burst of {} published in {:?}, delivered {:?} later",
+        burst.len(),
+        published - started,
+        delivery
+    );
+    assert!(
+        delivery < Duration::from_millis(100),
+        "the burst took {delivery:?} to arrive after the last publish"
+    );
+    for index in 1..hosts {
+        assert_eq!(arrived(&fleet, index), burst.len(), "node {index}");
+    }
+}
