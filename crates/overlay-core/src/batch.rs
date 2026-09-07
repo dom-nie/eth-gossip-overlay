@@ -449,4 +449,32 @@ mod tests {
         assert!(flushes[0].entries.is_empty());
         assert_eq!(flushes[0].stale_dropped, 1);
     }
+
+    #[test]
+    fn mixed_fresh_and_stale_payloads_flush_only_the_fresh_ones() {
+        let clock = FakeClock::new();
+        let mut batcher = batcher();
+        batcher.push(
+            &dest("host-a"),
+            TopicId::new(11),
+            payload(1),
+            MAX_BYTES,
+            clock.now(),
+        );
+        clock.advance(WINDOW - Duration::from_millis(1));
+        batcher.push(
+            &dest("host-a"),
+            TopicId::new(11),
+            payload(2),
+            MAX_BYTES,
+            clock.now(),
+        );
+
+        clock.advance(STALE_AFTER - (WINDOW - Duration::from_millis(1)));
+        let flushes = batcher.tick(clock.now());
+
+        assert_eq!(flushes.len(), 1);
+        assert_eq!(payloads(&flushes[0]), vec![payload(2)]);
+        assert_eq!(flushes[0].stale_dropped, 1);
+    }
 }
