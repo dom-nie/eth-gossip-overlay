@@ -107,4 +107,12 @@ mod tests {
 
         assert_eq!(relays, vec![host("bn-us-01"), host("bn-us-02")]);
     }
+
+    /// A region with nobody live in it has no relays, which is what a region behind a broken
+    /// WAN link looks like from here (§9). The caller sends the batch nowhere rather than
+    /// dividing by a pool of nothing.
+    #[test]
+    fn select_with_no_remote_hosts_returns_empty() {
+        assert!(select(&host("bn-eu-01"), &[], 3).is_empty());
+    }
 }
