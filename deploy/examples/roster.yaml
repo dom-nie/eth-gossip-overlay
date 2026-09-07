@@ -1,0 +1,13 @@
+hosts:
+  - hostname: bn-ams1-07
+    region: eu
+    site: ams1
+    addr: "203.0.113.37:7788"
+  - hostname: bn-fra1-02
+    region: eu
+    site: fra1
+    addr: "198.51.100.12:7788"
+  - hostname: bn-nyc1-01
+    region: us
+    site: nyc1
+    addr: "[2001:db8:1::120]:7788"
