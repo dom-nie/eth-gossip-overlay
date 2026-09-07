@@ -149,6 +149,7 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
+    use crate::protocol::MAX_BATCH_ENTRIES;
     use crate::roster::Hostname;
     use crate::time::{Clock, FakeClock};
     use crate::topic::table::TopicId;
@@ -307,5 +308,36 @@ mod tests {
         let rest = batcher.tick(clock.now());
         assert_eq!(rest.len(), 1);
         assert_eq!(payloads(&rest[0]), vec![payload(3)]);
+    }
+
+    /// Not in the ticket's plan: `MAX_BATCH_ENTRIES` is the count a peer advertises in HELLO and
+    /// refuses past, and a datagram limit high enough to reach it is a limit no test would
+    /// otherwise use.
+    #[test]
+    fn batch_never_holds_more_than_max_batch_entries() {
+        const ROOMY: usize = 1 << 20;
+        let clock = FakeClock::new();
+        let mut batcher = batcher();
+        for _ in 0..MAX_BATCH_ENTRIES {
+            let pushed = batcher.push(
+                &dest("host-a"),
+                TopicId::new(11),
+                payload(1),
+                ROOMY,
+                clock.now(),
+            );
+            assert!(pushed.is_empty());
+        }
+
+        let flushes = batcher.push(
+            &dest("host-a"),
+            TopicId::new(11),
+            payload(2),
+            ROOMY,
+            clock.now(),
+        );
+
+        assert_eq!(flushes.len(), 1);
+        assert_eq!(flushes[0].entries.len(), usize::from(MAX_BATCH_ENTRIES));
     }
 }
