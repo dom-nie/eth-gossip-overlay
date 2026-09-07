@@ -4,13 +4,15 @@
 use std::time::{Duration, Instant};
 
 use eth_gossip_overlay::metrics::{
-    FIRST_SEEN_TOTAL, LABEL_CLASS, LABEL_DIRECTION, LABEL_PEER, LABEL_REASON, LABEL_SOURCE,
-    LABEL_UNIT, MESSAGES_TOTAL, PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL, PEER_QUEUE_DEPTH,
-    PEER_QUEUE_DROPS_TOTAL, PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF, SOURCE_OVERLAY,
-    UNIT_BYTES,
+    BN_SUBSCRIPTIONS, FIRST_SEEN_TOTAL, LABEL_CLASS, LABEL_DIRECTION, LABEL_PEER, LABEL_REASON,
+    LABEL_SOURCE, LABEL_UNIT, MESSAGES_TOTAL, PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL, PEER_QUEUE_DEPTH,
+    PEER_QUEUE_DROPS_TOTAL, PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF, RELAYED_BATCHES_TOTAL,
+    SOURCE_OVERLAY, UNIT_BYTES, UNWANTED_TOPIC_TOTAL,
 };
 use harness::{Fleet, SETTLE, Scrape, WAIT, topic};
 use overlay_core::protocol::features;
+use overlay_core::relay;
+use overlay_core::roster::Hostname;
 use overlay_transport::sender::{DropReason, LARGE_LANE_BYTES};
 use overlay_transport::testutil::features::mask;
 
@@ -665,4 +667,59 @@ async fn cross_region_small_batches_cost_one_wan_copy_per_relay() {
     fleet.settle().await;
     let after = sent(&fleet.node(0).metrics().await);
     assert_eq!(after - before, relays as f64, "WAN copies per batch");
+}
+
+/// DX-N5 scenario 13, and DX-N1: a relay fans a batch out for its region whether or not it
+/// wants anything in it. The host the origin relays through has unsubscribed from the subnet,
+/// so it counts the entry as unwanted and offers its own beacon node nothing, and the two hosts
+/// beside it are given the attestation all the same (D20).
+#[tokio::test(flavor = "multi_thread")]
+async fn unsubscribed_relay_refans_but_does_not_publish() {
+    let subnet = topic("beacon_attestation_11");
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", 1), ("us", 3)])
+        .start()
+        .await;
+    for node in fleet.nodes() {
+        node.subscribe(&subnet).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    fleet.set_relays(1, 1).await;
+    // Which host the origin relays through is a hash of its own name over the region's hosts in
+    // hostname order (D20), which is what the fleet's own numbering gives.
+    let pool: Vec<Hostname> = (1..4)
+        .map(|node| fleet.node(node).hostname().clone())
+        .collect();
+    let chosen = relay::select(fleet.node(0).hostname(), &pool, 1);
+    let relay = 1 + pool.iter().position(|host| *host == chosen[0]).unwrap();
+    let before = fleet.node(relay).metrics().await.sum(BN_SUBSCRIPTIONS, &[]);
+
+    fleet.node(relay).unsubscribe(&subnet).await;
+    fleet
+        .wait_for_metrics(
+            "the relay to stop advertising the subnet",
+            WAIT,
+            |scrapes| scrapes[relay].sum(BN_SUBSCRIPTIONS, &[]) < before,
+        )
+        .await;
+    let payload = b"an attestation the relay does not want".to_vec();
+    fleet.node(0).bn().publish(&subnet, &payload).await;
+
+    for node in (1..4).filter(|node| *node != relay) {
+        fleet
+            .wait_for("the hosts beside the relay to import it", WAIT, |fleet| {
+                fleet.node(node).bn().count(&subnet, &payload) == 1
+            })
+            .await;
+    }
+    fleet.settle().await;
+    assert_eq!(fleet.node(relay).bn().count(&subnet, &payload), 0);
+    let scrape = fleet.node(relay).metrics().await;
+    assert!(
+        scrape.sum(
+            UNWANTED_TOPIC_TOTAL,
+            &[(LABEL_PEER, &fleet.node(0).hostname().0)]
+        ) > 0.0
+    );
+    assert!(scrape.sum(RELAYED_BATCHES_TOTAL, &[]) > 0.0);
 }

@@ -243,6 +243,7 @@ pub enum RpcAnswer {
 
 enum Cmd {
     Subscribe(String),
+    Unsubscribe(String),
     Publish {
         topic: String,
         data: Vec<u8>,
@@ -427,6 +428,15 @@ impl FakeBn {
     pub async fn subscribe(&self, topic: &str) {
         self.commands
             .send(Cmd::Subscribe(topic.to_owned()))
+            .await
+            .unwrap();
+    }
+
+    /// Unsubscribes the fake from `topic`; the link sees `BnEvent::Unsubscribed` once it has.
+    /// A beacon node does this whenever its validators' subnet duties move on.
+    pub async fn unsubscribe(&self, topic: &str) {
+        self.commands
+            .send(Cmd::Unsubscribe(topic.to_owned()))
             .await
             .unwrap();
     }
@@ -745,6 +755,10 @@ async fn drive(mut swarm: Swarm<FakeBnBehaviour>, mut commands: mpsc::Receiver<C
                 Some(Cmd::Subscribe(topic)) => {
                     let gossip = &mut swarm.behaviour_mut().gossip;
                     gossip.subscribe(&IdentTopic::new(topic)).unwrap();
+                }
+                Some(Cmd::Unsubscribe(topic)) => {
+                    let gossip = &mut swarm.behaviour_mut().gossip;
+                    gossip.unsubscribe(&IdentTopic::new(topic));
                 }
                 Some(Cmd::Publish { topic, data, reply }) => {
                     let gossip = &mut swarm.behaviour_mut().gossip;
