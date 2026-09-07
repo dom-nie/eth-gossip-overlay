@@ -14,6 +14,7 @@ pub mod progress;
 pub mod protocol;
 pub mod pubqueue;
 pub mod ratelimit;
+pub mod relay;
 pub mod roster;
 pub mod seen;
 pub mod subs;
