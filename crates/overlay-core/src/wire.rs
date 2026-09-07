@@ -67,6 +67,14 @@ pub const MAX_MISSING_INDICES: usize = 4096;
 /// across a fork transition; this leaves room for several forks at once.
 pub const MAX_TOPIC_SNAPSHOT_ENTRIES: usize = 4096;
 
+/// What a `BATCH` costs before its first entry: the type and flags bytes and the entry count.
+/// The batcher (T-061) fills a batch to the datagram limit without encoding it to find out how
+/// big it has become, so it budgets with this rather than a number of its own.
+pub const BATCH_HEADER_BYTES: usize = 4;
+
+/// What one entry adds to a `BATCH` beyond its payload: the topic id and the payload length.
+pub const BATCH_ENTRY_OVERHEAD_BYTES: usize = 4;
+
 /// The flag bits a `CHUNK` defines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ChunkFlags(u8);
