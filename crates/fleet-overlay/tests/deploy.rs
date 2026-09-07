@@ -175,11 +175,12 @@ fn sysctl_file_has_the_four_keys_and_not_busy_poll() {
 /// Renders the nftables template over a context that is the roster document itself, which is
 /// what an operator's own configuration management hands it.
 fn render_nft(roster_yaml: &str) -> String {
-    let roster: serde_yaml_bw::Value = serde_yaml_bw::from_str(roster_yaml).unwrap();
-    let template = read(NFT_TEMPLATE);
-    let mut env = minijinja::Environment::new();
-    env.add_template("nft", &template).unwrap();
-    env.get_template("nft").unwrap().render(roster).unwrap()
+    let roster: serde_yaml_bw::Value =
+        serde_yaml_bw::from_str(roster_yaml).unwrap_or_else(|err| panic!("{ROSTER}: {err}"));
+
+    minijinja::Environment::new()
+        .render_str(&read(NFT_TEMPLATE), roster)
+        .unwrap_or_else(|err| panic!("{NFT_TEMPLATE}: {err}"))
 }
 
 /// The allowlist regenerated whenever the roster changes. Key pinning is the fence that
@@ -256,7 +257,7 @@ fn exec_start(unit: &str) -> &str {
     unit.lines()
         .find_map(|line| line.trim().strip_prefix("ExecStart="))
         .and_then(|command| command.split_whitespace().next())
-        .expect("the unit has an ExecStart=")
+        .unwrap_or_else(|| panic!("{UNIT} has no ExecStart="))
 }
 
 /// The two units as systemd itself reads them, which is the only check here that catches a
