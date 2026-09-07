@@ -220,4 +220,28 @@ mod tests {
         assert_eq!(topics, vec![TopicId::new(11), TopicId::new(22)]);
         assert_eq!(payloads(&flushes[0]), vec![payload(1), payload(2)]);
     }
+
+    #[test]
+    fn payloads_for_different_dests_are_separate_batches() {
+        let clock = FakeClock::new();
+        let mut batcher = batcher();
+        for (host, byte) in [("host-a", 1), ("host-b", 2)] {
+            batcher.push(
+                &dest(host),
+                TopicId::new(11),
+                payload(byte),
+                MAX_BYTES,
+                clock.now(),
+            );
+        }
+
+        clock.advance(WINDOW);
+        let flushes = batcher.tick(clock.now());
+
+        assert_eq!(flushes.len(), 2);
+        let a = flushes.iter().find(|f| f.dest == dest("host-a")).unwrap();
+        let b = flushes.iter().find(|f| f.dest == dest("host-b")).unwrap();
+        assert_eq!(payloads(a), vec![payload(1)]);
+        assert_eq!(payloads(b), vec![payload(2)]);
+    }
 }
