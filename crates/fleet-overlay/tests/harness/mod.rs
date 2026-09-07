@@ -422,6 +422,14 @@ impl Fleet {
         std::fs::write(node.dir.join("config.yaml"), yaml).unwrap();
     }
 
+    /// Ends one node's beacon node, the way a beacon node that is down or restarting looks to
+    /// its sidecar (§9). The sidecar stays up.
+    pub async fn stop_bn(&mut self, index: usize) {
+        if let Some(bn) = self.nodes[index].bn.take() {
+            bn.stop().await;
+        }
+    }
+
     /// Stops one node's sidecar and starts it again on the same files, so it keeps its node key,
     /// its peer id, its `lighthouse.env` and its overlay port (§9, D01).
     pub async fn restart_node(&mut self, index: usize) {
@@ -651,6 +659,14 @@ impl Bn {
             .iter()
             .filter(|(seen, bytes)| seen == topic && bytes == payload)
             .count()
+    }
+
+    /// Drops the swarm and the mock server, so the sidecar's link goes down and stays down.
+    async fn stop(self) {
+        for drain in &self.drains {
+            drain.abort();
+        }
+        self.fake.shutdown().await;
     }
 
     /// Whether the sidecar has subscribed to `topic` on this beacon node, which is what the
