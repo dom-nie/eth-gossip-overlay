@@ -24,11 +24,9 @@ struct Cli {
     #[arg(long, global = true, default_value = "/etc/fleet-overlay/config.yaml")]
     config: PathBuf,
 
-    /// Panic in a spawned task this many milliseconds after startup.
-    ///
-    /// Hidden because it exists for one test: that a panicking task takes the whole process
-    /// down. A flag rather than a `cfg(test)` hook, so that test drives the shipped binary
-    /// instead of a build that differs from it.
+    /// Panic in a spawned task this many milliseconds after startup. Hidden because it exists
+    /// for one test: that a panicking task takes the whole process down. A flag rather than a
+    /// `cfg(test)` hook, so that test drives the shipped binary and not a build that differs.
     #[arg(long, global = true, hide = true)]
     test_panic_after_ms: Option<u64>,
 }
@@ -88,8 +86,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 ))?;
         }
         Command::PeerId => {
-            let cfg = Config::load(&cli.config)?;
-            let key = NodeKey::load_or_create(&cfg.bn.node_key_file)?;
+            let key = NodeKey::load_or_create(&Config::load(&cli.config)?.bn.node_key_file)?;
             println!("{}", key.peer_id());
         }
         Command::CheckConfig => print!("{}", app::check_config(&cli.config)?),
