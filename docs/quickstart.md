@@ -74,8 +74,12 @@ Rehearse the start first. `check-config` reads the same files in the same order 
 prints who this host turned out to be:
 
 ```sh
-sudo -E fleet-overlay check-config
+sudo fleet-overlay check-config
 ```
+
+If your roster names this host something other than `hostname` reports, put
+`FLEET_OVERLAY_HOSTNAME=` in front of that command with the value the unit's environment file
+carries; `check-config` reads the environment the same way a start does.
 
 Then install the unit from [`deploy/systemd/`](../deploy/README.md) and start it:
 

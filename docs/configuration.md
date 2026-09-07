@@ -67,7 +67,8 @@ the events as well. [events.md](events.md) has the fields, the queries, and why
 ## Every key
 
 `On change` is `reload` for a key a running sidecar picks up and `restart` for one it reads only
-at startup.
+at startup. Every key below has been here since 0.1.0, the first release; one added later says so
+in its own row, since the table is generated from the same doc comments the code carries.
 
 <!-- generated from crates/overlay-core/src/config.rs, do not edit by hand -->
 
