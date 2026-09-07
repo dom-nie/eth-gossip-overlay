@@ -88,9 +88,12 @@ const POLL: Duration = Duration::from_millis(10);
 /// eight hex characters will do as long as every node uses the same.
 const FORK_DIGEST: &str = "6a95a1a9";
 
-/// The topic every beacon node is subscribed to, on which [`Fleet::wait_full_mesh`] proves that
-/// a message really crosses each pair. Small class, and no scenario asserts on it.
-const PROBE_TOPIC: &str = "beacon_attestation_63";
+/// The attestation subnet the first probe round runs on. Each round takes the next one down, so
+/// a probe topic is always the newest entry in every beacon node's subscription set, including a
+/// beacon node whose sidecar has just restarted and re-read the whole set at once. A peer that
+/// routes the probe has therefore seen a bitmap holding every other topic as well, which is what
+/// makes the round a proof for the topics a scenario really uses. No scenario asserts on these.
+const FIRST_PROBE_SUBNET: usize = 63;
 
 /// The QUIC and metrics ports the harness hands out, below every platform's ephemeral range
 /// rather than from `:0`: a restarted node has to bind the port it had, and `:0` lets the
@@ -178,6 +181,7 @@ impl Builder {
             nodes,
             settings: self.settings,
             cut: Vec::new(),
+            probes: 0,
         };
         for index in 0..fleet.nodes.len() {
             fleet.write_files(index);
@@ -200,6 +204,8 @@ pub struct Fleet {
     settings: Settings,
     /// Pairs whose rosters no longer name each other, from [`Fleet::partition`].
     cut: Vec<(usize, usize)>,
+    /// How many probe rounds [`Fleet::wait_full_mesh`] has run.
+    probes: usize,
 }
 
 impl Fleet {
@@ -277,7 +283,11 @@ impl Fleet {
     /// it works with the kill switch off as well.
     pub async fn wait_full_mesh(&mut self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
-        let probe = topic(PROBE_TOPIC);
+        let probe = topic(&format!(
+            "beacon_attestation_{}",
+            FIRST_PROBE_SUBNET - self.probes
+        ));
+        self.probes += 1;
         for node in &self.nodes {
             node.subscribe(&probe).await;
         }
@@ -410,6 +420,22 @@ impl Fleet {
             node.metrics,
         );
         std::fs::write(node.dir.join("config.yaml"), yaml).unwrap();
+    }
+
+    /// Stops one node's sidecar and starts it again on the same files, so it keeps its node key,
+    /// its peer id, its `lighthouse.env` and its overlay port (§9, D01).
+    pub async fn restart_node(&mut self, index: usize) {
+        self.stop_node(index).await;
+        self.start_node(index).await;
+    }
+
+    /// Stops one node's sidecar and waits until it has let go of its ports, which is what lets
+    /// the replacement bind them again.
+    pub async fn stop_node(&mut self, index: usize) {
+        if let Some(running) = self.nodes[index].app.take() {
+            running.stop.send_replace(true);
+            let _ = running.task.await;
+        }
     }
 
     /// Cuts every pair between the two sets by taking each side out of the other's roster and
