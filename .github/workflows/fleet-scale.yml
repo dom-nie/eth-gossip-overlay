@@ -1,8 +1,9 @@
 name: Fleet at scale
 
-# T-051's fleet harness with thirty hosts per scenario instead of three to six. Every scenario
-# starts a whole sidecar and a fake beacon node per host, so this is minutes rather than the
-# half minute the pull-request run takes, and it runs nightly instead.
+# The nightly runs: too slow, or too dependent on a public network, for a pull request.
+#
+# T-051's fleet harness with thirty hosts per scenario instead of three to six, and the compose
+# demo with the three real beacon nodes a newcomer starts.
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -31,3 +32,16 @@ jobs:
         run: cargo test -p fleet-overlay --test fleet_v1 -- --test-threads=1
         env:
           FLEET_NODES: 30
+
+  compose:
+    name: compose demo with beacon nodes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The pull-request job starts the sidecars alone, which proves the mesh. This one starts
+      # the demo a newcomer starts: three Lighthouse nodes checkpoint syncing a testnet, and
+      # overlay_bn_trusted at 1 on every sidecar. Three beacon nodes at once is more than a
+      # runner comfortably holds, so a failure here is worth reading before it is believed.
+      - name: The demo with real beacon nodes
+        run: scripts/container-checks.sh --with-beacon-nodes

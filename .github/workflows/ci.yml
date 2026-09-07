@@ -78,6 +78,20 @@ jobs:
             echo "nft is not installed on this runner, skipping the ruleset check"
           fi
 
+  container:
+    name: container image and demo
+    runs-on: ubuntu-latest
+    steps:
+      # Not shallow: build.rs reads the commit date out of .git for SOURCE_DATE_EPOCH, which is
+      # what makes two builds of one commit produce one binary.
+      - uses: actions/checkout@v4
+
+      # Builds the image and runs T-047's checks against it: check-config on the shipped
+      # examples, a non-root user, the size budget, a node key that survives its container, and
+      # the compose demo reaching a full mesh. Nothing is pushed; T-048 owns that.
+      - name: Image and compose checks
+        run: scripts/container-checks.sh
+
   deny:
     name: cargo deny
     runs-on: ubuntu-latest
