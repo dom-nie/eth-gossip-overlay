@@ -58,8 +58,9 @@ pub fn route(
 
 #[cfg(test)]
 mod tests {
-    use overlay_core::config::Fanout;
+    use overlay_core::config::{Fanout, SmallFanout};
     use overlay_core::roster::{Hostname, Region, SelfIdentity};
+    use overlay_core::subs::PeerState;
     use overlay_core::topic::{Class, Topic};
 
     use super::{RoutePlan, route};
@@ -72,6 +73,42 @@ mod tests {
 
     fn topic(name: &str) -> Topic {
         Topic::parse(&format!("/eth2/6a95a1a9/{name}/ssz_snappy")).unwrap()
+    }
+
+    /// A fanout that relays the small class into a remote region of `min_remote_hosts` or more,
+    /// through `per_region` of its hosts.
+    fn relaying(min_remote_hosts: usize, per_region: usize) -> Fanout {
+        Fanout {
+            small: SmallFanout {
+                relay_min_remote_hosts: min_remote_hosts,
+                relays_per_remote_region: per_region,
+                ..SmallFanout::default()
+            },
+            ..Fanout::default()
+        }
+    }
+
+    /// A live view with each peer in the region named beside it, which is the region it declared
+    /// in its HELLO and the one its second hop would fan out in (D15).
+    fn view_in(connection: &quinn::Connection, peers: Vec<(&str, &str, PeerState)>) -> LiveView {
+        let regions: Vec<(Hostname, Region)> = peers
+            .iter()
+            .map(|(name, region, _)| (host(name), Region((*region).to_owned())))
+            .collect();
+        let mut live = view(
+            connection,
+            peers
+                .into_iter()
+                .map(|(name, _, state)| (host(name), state))
+                .collect(),
+        );
+        for (hostname, region) in regions {
+            live.0
+                .get_mut(&hostname)
+                .expect("the peer this view was built from")
+                .region = region;
+        }
+        live
     }
 
     /// The host doing the routing, which is in no view unless a test puts it there.
@@ -234,6 +271,36 @@ mod tests {
         let plan = route(&block, Class::Large, &live, &me(), &Fanout::default());
 
         assert_eq!(plan, RoutePlan::Direct(vec![subscriber]));
+    }
+
+    /// §5.4: a small-class batch crosses the WAN to a few hosts of the remote region, which fan
+    /// it out inside it, while the origin's own region is reached directly as ever. The three
+    /// hosts of `us` are exactly `relay_min_remote_hosts`, so the region is big enough for the
+    /// relay hop to be worth its copies (D36), and the two that carry it are the window
+    /// `fnv1a64("bn-me") % 3` opens at (D20).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_small_class_yields_in_region_direct_and_remote_relays() {
+        let connection = connection().await;
+        let subnet = topic("beacon_attestation_7");
+        let live = view_in(
+            &connection,
+            vec![
+                ("bn-eu-a", "eu", peer_state(&[(1, &subnet)], &[1])),
+                ("bn-us-01", "us", peer_state(&[(1, &subnet)], &[1])),
+                ("bn-us-02", "us", peer_state(&[(1, &subnet)], &[1])),
+                ("bn-us-03", "us", peer_state(&[(1, &subnet)], &[1])),
+            ],
+        );
+
+        let plan = route(&subnet, Class::Small, &live, &me(), &relaying(3, 2));
+
+        assert_eq!(
+            plan,
+            RoutePlan::SmallRelayed {
+                direct: vec![host("bn-eu-a")],
+                relays: vec![host("bn-us-02"), host("bn-us-03")],
+            }
+        );
     }
 
     /// v1 sends both classes the same way, so the class changes nothing about the plan. T-072
