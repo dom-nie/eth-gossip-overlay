@@ -200,9 +200,11 @@ fn strip_stale(entries: &mut Vec<Entry>, stale_after: Duration, now: Instant) ->
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::time::Duration;
 
     use bytes::Bytes;
+    use proptest::prelude::*;
 
     use super::*;
     use crate::protocol::MAX_BATCH_ENTRIES;
@@ -530,5 +532,84 @@ mod tests {
             payloads(&flushes[0]),
             (1..=4).map(payload).collect::<Vec<Bytes>>()
         );
+    }
+
+    /// One step of the property test: a payload for one of three destinations, or time passing.
+    #[derive(Clone, Debug)]
+    enum Op {
+        Push(u8, usize),
+        Advance(u64),
+    }
+
+    fn ops() -> impl Strategy<Value = Vec<Op>> {
+        prop::collection::vec(
+            prop_oneof![
+                (0u8..3, 4usize..1400).prop_map(|(host, len)| Op::Push(host, len)),
+                (0u64..1500).prop_map(Op::Advance),
+            ],
+            0..200,
+        )
+    }
+
+    /// A payload of `len` bytes that says which push it came from.
+    fn tagged(nonce: u32, len: usize) -> Bytes {
+        let mut payload = vec![0u8; len];
+        payload[..4].copy_from_slice(&nonce.to_le_bytes());
+        Bytes::from(payload)
+    }
+
+    fn nonce(payload: &Bytes) -> u32 {
+        u32::from_le_bytes(payload[..4].try_into().unwrap())
+    }
+
+    fn record(flushes: Vec<Flush>, flushed: &mut Vec<u32>, stale: &mut usize) {
+        for flush in flushes {
+            *stale += flush.stale_dropped;
+            flushed.extend(flush.entries.iter().map(|entry| nonce(&entry.payload)));
+        }
+    }
+
+    proptest! {
+        /// Nothing is lost and nothing is delivered twice: every payload pushed either comes
+        /// back in exactly one flush or is counted stale, whatever order the pushes and the
+        /// ticks arrive in. That is the whole contract T-062 relies on when it counts what it
+        /// sent against what the beacon node handed over.
+        #[test]
+        fn property_every_pushed_payload_is_flushed_or_counted_stale_exactly_once(
+            ops in ops(),
+        ) {
+            let clock = FakeClock::new();
+            let mut batcher = batcher();
+            let mut pushes = 0u32;
+            let mut flushed = Vec::new();
+            let mut stale = 0;
+
+            for op in ops {
+                match op {
+                    Op::Push(host, len) => {
+                        let flushes = batcher.push(
+                            &dest(&format!("host-{host}")),
+                            TopicId::new(u16::from(host)),
+                            tagged(pushes, len),
+                            MAX_BYTES,
+                            clock.now(),
+                        );
+                        pushes += 1;
+                        record(flushes, &mut flushed, &mut stale);
+                    }
+                    Op::Advance(millis) => {
+                        clock.advance(Duration::from_millis(millis));
+                        record(batcher.tick(clock.now()), &mut flushed, &mut stale);
+                    }
+                }
+            }
+            clock.advance(WINDOW);
+            record(batcher.tick(clock.now()), &mut flushed, &mut stale);
+
+            prop_assert_eq!(flushed.len() + stale, pushes as usize);
+            let once: BTreeSet<u32> = flushed.iter().copied().collect();
+            prop_assert_eq!(once.len(), flushed.len());
+            prop_assert!(once.iter().all(|nonce| *nonce < pushes));
+        }
     }
 }
