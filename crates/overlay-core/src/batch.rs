@@ -25,7 +25,7 @@ use bytes::Bytes;
 use crate::protocol::MAX_BATCH_ENTRIES;
 use crate::roster::Hostname;
 use crate::topic::table::TopicId;
-use crate::wire::{BATCH_ENTRY_OVERHEAD_BYTES, BATCH_HEADER_BYTES};
+use crate::wire::{BATCH_ENTRY_OVERHEAD_BYTES, BATCH_HEADER_BYTES, BatchEntry, BatchFlags, Frame};
 
 /// One payload waiting for the batch it travels in.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,6 +63,25 @@ pub struct Flush {
     /// `stale_dropped_total`. A batch whose entries all aged out is flushed with none of them
     /// and this above zero, so the count reaches the caller either way.
     pub stale_dropped: usize,
+}
+
+impl Flush {
+    /// The frame the entries travel as. `RELAY` is clear: this batch is going to the host it
+    /// was collected for, and only a relay re-fanning one in its own region sets the bit
+    /// (D11, T-063).
+    pub fn into_frame(self) -> Frame {
+        Frame::Batch {
+            flags: BatchFlags::NONE,
+            entries: self
+                .entries
+                .into_iter()
+                .map(|entry| BatchEntry {
+                    topic_id: entry.topic_id.get(),
+                    payload: entry.payload,
+                })
+                .collect(),
+        }
+    }
 }
 
 /// The open batches, one per destination.
