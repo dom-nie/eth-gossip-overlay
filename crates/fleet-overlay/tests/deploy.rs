@@ -28,3 +28,33 @@ fn unit_files_have_no_binding_directives() {
         }
     }
 }
+
+/// Whether the file sets exactly this directive on a line of its own, so a mention in a comment
+/// never stands in for the real thing.
+fn has_directive(text: &str, directive: &str) -> bool {
+    text.lines().any(|line| line.trim() == directive)
+}
+
+/// OPS-N5: the sidecar reports ready once its admin socket answers and feeds the watchdog only
+/// while all four core loops go round, so systemd restarts a wedged process. The backoff then
+/// stretches a crash loop out to a minute, and no start limit ever stops the unit for good.
+#[test]
+fn unit_has_notify_watchdog_and_restart_backoff_directives() {
+    let text = read(UNIT);
+
+    for directive in [
+        "Type=notify",
+        "NotifyAccess=main",
+        "WatchdogSec=30",
+        "Restart=always",
+        "RestartSec=2",
+        "RestartSteps=6",
+        "RestartMaxDelaySec=60",
+        "StartLimitIntervalSec=0",
+    ] {
+        assert!(
+            has_directive(&text, directive),
+            "{UNIT} is missing {directive}"
+        );
+    }
+}
