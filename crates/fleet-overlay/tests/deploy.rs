@@ -58,3 +58,23 @@ fn unit_has_notify_watchdog_and_restart_backoff_directives() {
         );
     }
 }
+
+/// Whether the file sets `key` at all, on a line of its own. A commented-out line sets nothing,
+/// which is how the unit can explain in place why a directive is missing.
+fn sets(text: &str, key: &str) -> bool {
+    text.lines()
+        .any(|line| line.trim_start().starts_with(&format!("{key}=")))
+}
+
+/// §5.7: the sidecar gets a memory ceiling it was sized for and never a CPU quota, because CFS
+/// throttling would stall a fanout in the middle of a block.
+#[test]
+fn unit_has_no_cpuquota_and_has_memorymax_512m() {
+    let text = read(UNIT);
+
+    assert!(
+        has_directive(&text, "MemoryMax=512M"),
+        "{UNIT} is missing MemoryMax=512M"
+    );
+    assert!(!sets(&text, "CPUQuota"), "{UNIT} sets a CPU quota");
+}
