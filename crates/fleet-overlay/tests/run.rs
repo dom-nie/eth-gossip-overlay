@@ -122,6 +122,23 @@ fn sigterm_shuts_down_within_2_seconds_with_exit_0() {
     );
 }
 
+/// §9: a wedged sidecar is worse than a dead one, because the beacon node keeps a peer that
+/// does nothing. A panicking task ends the process so systemd's `Restart=always` takes over.
+#[test]
+fn task_panic_terminates_the_process_non_zero() {
+    let fixture = Fixture::new();
+
+    let mut sidecar = fixture.run_with(|command| {
+        command.args(["--test-panic-after-ms", "100"]);
+    });
+    let status = sidecar.wait();
+
+    assert!(!status.success(), "{status:?}");
+    let stderr = sidecar.stderr();
+    assert_eq!(stderr.lines().count(), 1, "{stderr:?}");
+    assert!(stderr.contains("--test-panic-after-ms"), "{stderr:?}");
+}
+
 /// OPS-N5: `READY=1` promises that `fleet-overlayctl` works, so the admin socket has to answer
 /// by the time it is sent. `STOPPING=1` is the first thing a shutdown does, so systemd stops
 /// counting the process as running before it has finished going.
