@@ -17,7 +17,13 @@ overlay-bn = { path = "crates/overlay-bn" }
 # patch table at the bottom, and rerunning T-018's compatibility matrix.
 lighthouse_network = { git = "https://github.com/sigp/lighthouse.git", tag = "v8.2.2" }
 types = { git = "https://github.com/sigp/lighthouse.git", tag = "v8.2.2", features = ["saturating-arith"] }
-libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", default-features = false, features = ["tcp", "noise", "yamux", "identify", "gossipsub", "gossipsub-partial-messages", "request-response", "metrics", "tokio", "macros"] }
+# secp256k1 is what lets the sidecar verify the beacon node's key: a Lighthouse identity is
+# always secp256k1, so without the feature the noise handshake cannot decode it and every dial
+# ends in `Invalid public key: Key decoding error: cargo feature secp256k1 is not enabled`. The
+# sidecar still signs with ed25519 (D01). Leaving it out is invisible to the matrix, because
+# overlay-bn's dev-dependency on lighthouse_network turns the feature on for every test build;
+# only the shipped binary, which has no lighthouse_network, can tell the difference.
+libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", default-features = false, features = ["tcp", "noise", "yamux", "identify", "gossipsub", "gossipsub-partial-messages", "request-response", "metrics", "tokio", "macros", "secp256k1"] }
 # The version Lighthouse's discv5 already resolves to, so the sidecar signs the records the
 # beacon node parses. The sidecar only signs with ed25519, but `CombinedKey` and the
 # `ed25519_dalek` re-export that names the dalek version the crate signs with are both behind
