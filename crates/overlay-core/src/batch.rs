@@ -125,6 +125,7 @@ mod tests {
     use crate::roster::Hostname;
     use crate::time::{Clock, FakeClock};
     use crate::topic::table::TopicId;
+    use crate::wire::{BATCH_ENTRY_OVERHEAD_BYTES, BATCH_HEADER_BYTES};
 
     const WINDOW: Duration = Duration::from_millis(10);
     const STALE_AFTER: Duration = Duration::from_millis(1000);
@@ -140,9 +141,12 @@ mod tests {
         Hostname(name.to_owned())
     }
 
-    /// An attestation-sized payload, filled with `byte` so a test can tell entries apart.
+    /// An attestation, near enough: §10 puts them at about 240 bytes.
+    const PAYLOAD_BYTES: usize = 240;
+
+    /// One payload, filled with `byte` so a test can tell entries apart.
     fn payload(byte: u8) -> Bytes {
-        Bytes::from(vec![byte; 240])
+        Bytes::from(vec![byte; PAYLOAD_BYTES])
     }
 
     /// What a flush carries, in the order it carries it.
@@ -243,5 +247,38 @@ mod tests {
         let b = flushes.iter().find(|f| f.dest == dest("host-b")).unwrap();
         assert_eq!(payloads(a), vec![payload(1)]);
         assert_eq!(payloads(b), vec![payload(2)]);
+    }
+
+    #[test]
+    fn push_that_would_exceed_max_bytes_flushes_the_previous_batch_and_starts_a_new_one() {
+        const ROOM_FOR_TWO: usize =
+            BATCH_HEADER_BYTES + 2 * (BATCH_ENTRY_OVERHEAD_BYTES + PAYLOAD_BYTES);
+        let clock = FakeClock::new();
+        let mut batcher = batcher();
+        for byte in [1, 2] {
+            let pushed = batcher.push(
+                &dest("host-a"),
+                TopicId::new(11),
+                payload(byte),
+                ROOM_FOR_TWO,
+                clock.now(),
+            );
+            assert!(pushed.is_empty());
+        }
+
+        let flushes = batcher.push(
+            &dest("host-a"),
+            TopicId::new(11),
+            payload(3),
+            ROOM_FOR_TWO,
+            clock.now(),
+        );
+
+        assert_eq!(flushes.len(), 1);
+        assert_eq!(payloads(&flushes[0]), vec![payload(1), payload(2)]);
+        clock.advance(WINDOW);
+        let rest = batcher.tick(clock.now());
+        assert_eq!(rest.len(), 1);
+        assert_eq!(payloads(&rest[0]), vec![payload(3)]);
     }
 }
