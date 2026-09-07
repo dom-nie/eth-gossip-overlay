@@ -54,10 +54,15 @@ pub enum Carrier {
 pub struct Flush {
     /// The host every entry in it is for.
     pub dest: Hostname,
-    /// The entries, in the order they were pushed.
+    /// The entries, in the order they were pushed, and none of them stale at the moment of the
+    /// flush.
     pub entries: Vec<Entry>,
     /// What carries them.
     pub carrier: Carrier,
+    /// Entries the flush left behind for having aged out, which the caller counts as
+    /// `stale_dropped_total`. A batch whose entries all aged out is flushed with none of them
+    /// and this above zero, so the count reaches the caller either way.
+    pub stale_dropped: usize,
 }
 
 /// The open batches, one per destination.
@@ -66,6 +71,7 @@ pub struct Flush {
 /// the window by hand and the sidecar stamps it from the injected clock.
 pub struct Batcher {
     window: Duration,
+    stale_after: Duration,
     open: BTreeMap<Hostname, Open>,
 }
 
@@ -91,23 +97,37 @@ impl Open {
         self.bytes + cost <= max_bytes && self.entries.len() < usize::from(MAX_BATCH_ENTRIES)
     }
 
-    fn take(&mut self, dest: &Hostname) -> Flush {
+    fn take(&mut self, dest: &Hostname, stale_after: Duration, now: Instant) -> Flush {
+        let mut entries = std::mem::take(&mut self.entries);
+        let stale_dropped = strip_stale(&mut entries, stale_after, now);
         Flush {
             dest: dest.clone(),
-            entries: std::mem::take(&mut self.entries),
+            entries,
             carrier: Carrier::Datagram,
+            stale_dropped,
         }
     }
 }
 
 impl Batcher {
-    /// A batcher that holds a destination's payloads for `window` before flushing them.
-    /// `stale_after` is what the stale drop reads.
-    pub fn new(window: Duration, _stale_after: Duration) -> Self {
+    /// A batcher that holds a destination's payloads for `window` before flushing them and
+    /// delivers nothing that has waited longer than `stale_after`.
+    pub fn new(window: Duration, stale_after: Duration) -> Self {
         Self {
             window,
+            stale_after,
             open: BTreeMap::new(),
         }
+    }
+
+    /// Removes the entries that have aged out of `entries` and answers how many went, for the
+    /// caller to count as `stale_dropped_total`.
+    ///
+    /// A flush runs this on its way out, and T-062's sender runs it again when it dequeues one,
+    /// because a flush can wait in a per-peer send lane long enough to age out on the way
+    /// (D21).
+    pub fn drop_stale(&self, entries: &mut Vec<Entry>, now: Instant) -> usize {
+        strip_stale(entries, self.stale_after, now)
     }
 
     /// Adds `payload` to the batch for `dest`, and returns the batches this push completed:
@@ -140,13 +160,14 @@ impl Batcher {
                 dest: dest.clone(),
                 entries: vec![entry],
                 carrier: Carrier::Stream,
+                stale_dropped: 0,
             });
             return flushes;
         }
 
         let mut open = self.open.remove(dest).unwrap_or_else(|| Open::new(now));
         if !open.fits(cost, max_bytes) {
-            flushes.push(open.take(dest));
+            flushes.push(open.take(dest, self.stale_after, now));
             open = Open::new(now);
         }
         open.bytes += cost;
@@ -158,17 +179,23 @@ impl Batcher {
     /// The batches whose window has run out at `now`. Called from a timer a few times per
     /// window, so a destination that has gone quiet still gets what it was owed.
     pub fn tick(&mut self, now: Instant) -> Vec<Flush> {
-        let window = self.window;
+        let (window, stale_after) = (self.window, self.stale_after);
         let mut flushes = Vec::new();
         self.open.retain(|dest, open| {
             if open.opened_at + window > now {
                 return true;
             }
-            flushes.push(open.take(dest));
+            flushes.push(open.take(dest, stale_after, now));
             false
         });
         flushes
     }
+}
+
+fn strip_stale(entries: &mut Vec<Entry>, stale_after: Duration, now: Instant) -> usize {
+    let before = entries.len();
+    entries.retain(|entry| entry.pushed_at + stale_after > now);
+    before - entries.len()
 }
 
 #[cfg(test)]
