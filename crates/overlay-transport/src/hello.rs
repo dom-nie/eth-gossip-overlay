@@ -82,13 +82,23 @@ impl SelfHello {
         }
     }
 
+    /// What this host advertises, which is what its build supports. The one seam a test has
+    /// into it: every node in a test binary runs one build, so the intersection two of them
+    /// negotiate is always the whole set and D29's fallback could never run.
+    fn advertised(&self) -> u64 {
+        #[cfg(any(test, feature = "test-util"))]
+        return crate::testutil::features::advertised(&self.hostname);
+        #[cfg(not(any(test, feature = "test-util")))]
+        SUPPORTED_FEATURES
+    }
+
     /// The frame, with `topics` as the sender's whole table. An absent site travels as the empty
     /// string, because the layout has no way to say "no site" and a label nobody set reads the
     /// same either way.
     fn frame(&self, topics: Vec<(TopicId, String)>) -> Frame {
         Frame::Hello(Hello {
             minor: PROTOCOL_MINOR,
-            features: SUPPORTED_FEATURES,
+            features: self.advertised(),
             max_frame_bytes: MAX_FRAME_BYTES,
             max_batch_entries: MAX_BATCH_ENTRIES,
             instance_id: self.instance_id,
