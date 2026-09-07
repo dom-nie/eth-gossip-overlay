@@ -1,10 +1,15 @@
 //! What a peer sends this host, on its way into the beacon node.
 //!
-//! One task per live peer accepts unidirectional streams and reads the frames off each. A whole
-//! message is a `CHUNK` with `k = 1, m = 0`; any other chunk is a stripe, which v1 does not know
-//! how to put together and hands to [`Stripes`] (T-074). A `BATCH` on a stream feeds each entry
-//! through the same path, because an entry names its own topic and an id this host cannot
-//! resolve costs that entry alone (D21).
+//! One task per live peer reads both carriers. It accepts unidirectional streams and reads the
+//! frames off each, and it reads the peer's datagrams, which is where the small class arrives
+//! (§5.3). A whole message is a `CHUNK` with `k = 1, m = 0`; any other chunk is a stripe, which
+//! this release does not know how to put together and hands to [`Stripes`] (T-074). A `BATCH`
+//! feeds each entry through the same path on either carrier, because an entry names its own
+//! topic and an id this host cannot resolve costs that entry alone (D21).
+//!
+//! The two carriers differ in what a frame this release cannot read costs. A stream has a `u32`
+//! length prefix, so an unknown frame type is stepped over and reading goes on; a datagram is
+//! one frame and nothing else, so an unknown type there drops the datagram (D10).
 //!
 //! # The order every payload is checked in
 //!
@@ -22,7 +27,7 @@
 //!
 //! # Nothing here waits for the beacon node
 //!
-//! The only awaits are accepting a stream and reading a frame. Publishing is a push into T-017's
+//! The only awaits are accepting a stream, reading a frame and reading a datagram. Publishing is a push into T-017's
 //! bounded queue and returns whether or not anything is draining it (DX-N4), so a wedged beacon
 //! node costs queue drops and never a stalled stream. Every read is bounded twice: by
 //! [`MAX_FRAME_BYTES`] before a body is allocated, and by [`STREAM_READ_TIMEOUT`], after which
