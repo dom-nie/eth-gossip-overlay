@@ -1362,6 +1362,59 @@ mod tests {
         }
     }
 
+    /// Nothing tracks who the relays are: the selection is re-derived from the live set on every
+    /// message, so a relay that dies is out of the pool and the next batch goes to whoever the
+    /// hash lands on now (D20, §9). The region keeps getting its attestations throughout.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_going_down_is_replaced_in_the_next_selection() {
+        let subnet = topic("beacon_attestation_7");
+        let (first, second) = (payload(b"before the relay went"), payload(b"after it went"));
+        let mut cluster = Builder::new(&[NodeKind::Manager; 5])
+            .regions(&["eu", "us", "us", "us", "us"])
+            .fanout(relaying(3, 1))
+            .start()
+            .await;
+        for node in 0..5 {
+            cluster.start_sidecar(node, subscriptions(&[&subnet], &[]));
+        }
+        eventually("every host to say it wants the subnet", || {
+            (0..5).all(|node| cluster.live(node).subscribers(&subnet).len() == 4)
+        })
+        .await;
+        assert!(cluster.from_bn(0, &subnet, &first));
+        for node in 1..5 {
+            eventually("the region to be given the first attestation", || {
+                cluster.published(node).len() == 1
+            })
+            .await;
+        }
+        let origin = cluster.hostname(0);
+        let relay = (1..5)
+            .find(|node| cluster.stats(*node).messages(Direction::In, &origin) > 0)
+            .expect("one host of the region carried the batch");
+
+        cluster.set_roster_for(0, &(0..5).filter(|node| *node != relay).collect::<Vec<_>>());
+        eventually("the origin to lose the relay", || {
+            cluster.live(0).get(&cluster.hostname(relay)).is_none()
+        })
+        .await;
+        assert!(cluster.from_bn(0, &subnet, &second));
+
+        for node in 1..5 {
+            eventually("the region to be given the second attestation", || {
+                cluster.published(node).len() == 2
+            })
+            .await;
+        }
+        let carried = (1..5)
+            .filter(|node| cluster.stats(*node).messages(Direction::In, &origin) > 0)
+            .collect::<Vec<_>>();
+        assert!(
+            carried.len() == 2 && carried.contains(&relay),
+            "the second batch went to a host that was not the first relay: {carried:?}"
+        );
+    }
+
     /// An entry id the peer never announced costs that entry and nothing else (D21): the rest of
     /// the batch is delivered and the connection carries on, because the sender is one release
     /// ahead or its `TOPIC_ADD` has not arrived yet, neither of which is a protocol error.
