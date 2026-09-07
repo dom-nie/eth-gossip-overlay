@@ -62,6 +62,10 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 rand = "0.10"
 
+# Renders the nftables template in T-046's deployment tests, the way an operator's own
+# configuration management renders it. fleet-overlay's dev-dependencies alone.
+minijinja = "2"
+
 proptest = "1"
 # `gethostname` for the sidecar's own identity (T-003 keeps it out of overlay-core), and raising
 # a real SIGHUP at a test process, which is the only way to prove the signal loop is wired to

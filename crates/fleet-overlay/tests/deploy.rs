@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 const UNIT: &str = "deploy/systemd/fleet-overlay.service";
 const DROP_IN: &str = "deploy/systemd/lighthouse-bn.service.d/10-fleet-overlay-trusted-peer.conf";
 const SYSCTL: &str = "deploy/sysctl/90-fleet-overlay.conf";
+const NFT_TEMPLATE: &str = "deploy/nftables/fleet-overlay.nft.j2";
+const NFT_EXAMPLE: &str = "deploy/nftables/fleet-overlay.nft.example";
+const ROSTER: &str = "deploy/examples/roster.yaml";
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -161,4 +164,46 @@ fn sysctl_file_has_the_four_keys_and_not_busy_poll() {
         );
     }
     assert!(!text.contains("busy_poll"), "{SYSCTL} sets busy_poll");
+}
+
+/// Renders the nftables template over a context that is the roster document itself, which is
+/// what an operator's own configuration management hands it.
+fn render_nft(roster_yaml: &str) -> String {
+    let roster: serde_yaml_bw::Value = serde_yaml_bw::from_str(roster_yaml).unwrap();
+    let template = read(NFT_TEMPLATE);
+    let mut env = minijinja::Environment::new();
+    env.add_template("nft", &template).unwrap();
+    env.get_template("nft").unwrap().render(roster).unwrap()
+}
+
+/// The allowlist regenerated whenever the roster changes. Key pinning is the fence that
+/// matters, so this one only has to keep every address in the roster reachable on UDP 7788 and
+/// nothing else open. The shipped rendering has to be what the template makes of the shipped
+/// roster, or the two rot apart the first time either changes.
+#[test]
+fn rendered_nft_from_example_roster_contains_all_three_addresses_and_only_udp_7788() {
+    let rendered = render_nft(&read(ROSTER));
+
+    assert_eq!(
+        rendered,
+        read(NFT_EXAMPLE),
+        "{NFT_EXAMPLE} is not what {NFT_TEMPLATE} renders from {ROSTER}"
+    );
+    for address in ["203.0.113.37", "198.51.100.12", "2001:db8:1::120"] {
+        assert!(rendered.contains(address), "{address} is not in the set");
+    }
+    assert!(!rendered.contains('['), "an address kept its brackets");
+
+    let rules: Vec<&str> = rendered
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("dport"))
+        .collect();
+    assert!(!rules.is_empty(), "the ruleset matches no port at all");
+    for rule in rules {
+        assert!(
+            rule.starts_with("udp dport 7788 "),
+            "{rule:?} is not a UDP 7788 rule"
+        );
+    }
 }

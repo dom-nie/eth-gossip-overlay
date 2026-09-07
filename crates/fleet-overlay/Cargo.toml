@@ -31,6 +31,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 [dev-dependencies]
 assert_cmd.workspace = true
 bytes.workspace = true
+minijinja.workspace = true
 overlay-transport = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
