@@ -395,6 +395,37 @@ mod tests {
         );
     }
 
+    /// `small.cross_region: direct` is the switch that turns relaying off for an operator whose
+    /// WAN egress turns out not to matter (§5.4). Every subscriber gets its own copy however
+    /// large its region is.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_in_direct_mode_yields_all_remote_subscribers() {
+        let connection = connection().await;
+        let subnet = topic("beacon_attestation_7");
+        let live = view_in(
+            &connection,
+            vec![
+                ("bn-us-01", "us", peer_state(&[(1, &subnet)], &[1])),
+                ("bn-us-02", "us", peer_state(&[(1, &subnet)], &[1])),
+                ("bn-us-03", "us", peer_state(&[(1, &subnet)], &[1])),
+            ],
+        );
+        let direct = Fanout {
+            small: SmallFanout {
+                cross_region: CrossRegion::Direct,
+                ..relaying(3, 2).small
+            },
+            ..Fanout::default()
+        };
+
+        let plan = route(&subnet, Class::Small, &live, &me(), &direct);
+
+        assert_eq!(
+            plan,
+            RoutePlan::Direct(vec![host("bn-us-01"), host("bn-us-02"), host("bn-us-03")])
+        );
+    }
+
     /// v1 sends both classes the same way, so the class changes nothing about the plan. T-072
     /// rewrites this test: a large message becomes a stripe over the same peers, and the two
     /// answers stop matching.
