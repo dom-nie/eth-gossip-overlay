@@ -24,6 +24,7 @@ use bytes::Bytes;
 
 use crate::roster::Hostname;
 use crate::topic::table::TopicId;
+use crate::wire::{BATCH_ENTRY_OVERHEAD_BYTES, BATCH_HEADER_BYTES};
 
 /// One payload waiting for the batch it travels in.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -54,10 +55,33 @@ pub struct Batcher {
     open: BTreeMap<Hostname, Open>,
 }
 
-/// What one destination has collected so far.
+/// What one destination has collected so far, and what it would encode to.
 struct Open {
     opened_at: Instant,
+    bytes: usize,
     entries: Vec<Entry>,
+}
+
+impl Open {
+    fn new(now: Instant) -> Self {
+        Self {
+            opened_at: now,
+            bytes: BATCH_HEADER_BYTES,
+            entries: Vec::new(),
+        }
+    }
+
+    /// Whether one more entry of `cost` bytes still fits a datagram of `max_bytes`.
+    fn fits(&self, cost: usize, max_bytes: usize) -> bool {
+        self.bytes + cost <= max_bytes
+    }
+
+    fn take(&mut self, dest: &Hostname) -> Flush {
+        Flush {
+            dest: dest.clone(),
+            entries: std::mem::take(&mut self.entries),
+        }
+    }
 }
 
 impl Batcher {
@@ -71,28 +95,34 @@ impl Batcher {
     }
 
     /// Adds `payload` to the batch for `dest`, and returns the batches this push completed:
-    /// any whose window ran out while nothing was being pushed to them.
+    /// the one for `dest` when the payload no longer fits `max_bytes`, and any whose window ran
+    /// out while nothing was being pushed to them.
+    ///
+    /// `max_bytes` is the destination's current datagram limit, which moves with path MTU
+    /// discovery and so arrives with every push rather than at construction.
     pub fn push(
         &mut self,
         dest: &Hostname,
         topic_id: TopicId,
         payload: Bytes,
-        _max_bytes: usize,
+        max_bytes: usize,
         now: Instant,
     ) -> Vec<Flush> {
-        let flushes = self.tick(now);
-        self.open
-            .entry(dest.clone())
-            .or_insert_with(|| Open {
-                opened_at: now,
-                entries: Vec::new(),
-            })
-            .entries
-            .push(Entry {
-                topic_id,
-                payload,
-                pushed_at: now,
-            });
+        let mut flushes = self.tick(now);
+        let cost = BATCH_ENTRY_OVERHEAD_BYTES + payload.len();
+
+        let mut open = self.open.remove(dest).unwrap_or_else(|| Open::new(now));
+        if !open.fits(cost, max_bytes) {
+            flushes.push(open.take(dest));
+            open = Open::new(now);
+        }
+        open.bytes += cost;
+        open.entries.push(Entry {
+            topic_id,
+            payload,
+            pushed_at: now,
+        });
+        self.open.insert(dest.clone(), open);
         flushes
     }
 
@@ -105,10 +135,7 @@ impl Batcher {
             if open.opened_at + window > now {
                 return true;
             }
-            flushes.push(Flush {
-                dest: dest.clone(),
-                entries: std::mem::take(&mut open.entries),
-            });
+            flushes.push(open.take(dest));
             false
         });
         flushes
