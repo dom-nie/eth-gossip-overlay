@@ -68,7 +68,8 @@ pub struct Flush {
 impl Flush {
     /// The frame the entries travel as. `RELAY` is clear: this batch is going to the host it
     /// was collected for, and only a relay re-fanning one in its own region sets the bit
-    /// (D11, T-063).
+    /// (D11, T-063). Every payload here fits the `u16` length an entry carries, which is
+    /// [`Batcher::push`]'s precondition and not something this can check.
     pub fn into_frame(self) -> Frame {
         Frame::Batch {
             flags: BatchFlags::NONE,
@@ -158,6 +159,15 @@ impl Batcher {
     /// would not fit a datagram of its own is flushed on the spot with [`Carrier::Stream`],
     /// which leaves the open batch collecting: the two carriers keep no order between them
     /// anyway.
+    ///
+    /// A payload past what a `BATCH` entry's `u16` length carries is not the batcher's to send.
+    /// Encoding is infallible and the caller owns the limits, so `wire`'s length narrowing stops
+    /// a debug build and a release build would write a frame that decodes as something else.
+    /// Small class is not the same as small: `AttesterSlashing` classifies by kind alone, and a
+    /// post-Electra one carries every attesting index of a slot twice, well past 64 KiB
+    /// compressed. T-062 sends a payload that large as a whole message on the `CHUNK` path
+    /// ([`crate::wire::Frame::whole_message`]), which is what v1's fanout already does for
+    /// everything. The batcher cannot build one itself: it never sees a message id.
     pub fn push(
         &mut self,
         dest: &Hostname,
