@@ -639,6 +639,33 @@ mod tests {
         assert_eq!(cluster.stats(1).unknown_topic_ids(&cluster.hostname(0)), 2);
     }
 
+    /// A sidecar publishes only what its own beacon node asked for, whatever a sibling sends it
+    /// (DX-N1). The entry is counted as traffic that crossed the connection and then dropped, so
+    /// both ends agree on what was sent and only one of them publishes it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn entry_for_a_topic_outside_the_advertised_set_is_counted_and_not_enqueued() {
+        let wanted = topic("beacon_attestation_7");
+        let column = topic("data_column_sidecar_37");
+        let unwanted = payload(b"a column this beacon node does not custody");
+        let (cluster, peer) = peer_of(
+            subscriptions(&[&wanted], &[&column]),
+            &[(3, &wanted), (4, &column)],
+        )
+        .await;
+
+        datagram(&peer, batch(vec![entry(4, &unwanted)]));
+
+        let sender = cluster.hostname(0);
+        eventually("the entry to be refused", || {
+            cluster.stats(1).unwanted_topics(&sender) == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert!(cluster.published(1).is_empty());
+        assert!(cluster.seen(1).is_empty());
+        assert_eq!(cluster.stats(1).messages(Direction::In, &sender), 1);
+    }
+
     /// An entry id the peer never announced costs that entry and nothing else (D21): the rest of
     /// the batch is delivered and the connection carries on, because the sender is one release
     /// ahead or its `TOPIC_ADD` has not arrived yet, neither of which is a protocol error.
