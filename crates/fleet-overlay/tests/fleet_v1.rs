@@ -1,7 +1,10 @@
 //! The system-level properties of a running fleet (T-051). Every test here drives whole
 //! sidecars: the wiring `fleet-overlay run` builds, with only the beacon node replaced.
 
-use fleet_overlay::metrics::{LABEL_DIRECTION, LABEL_PEER, MESSAGES_TOTAL};
+use fleet_overlay::metrics::{
+    FIRST_SEEN_TOTAL, LABEL_CLASS, LABEL_DIRECTION, LABEL_PEER, LABEL_REASON, LABEL_SOURCE,
+    MESSAGES_TOTAL, PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF, SOURCE_OVERLAY,
+};
 use harness::{Fleet, Scrape, WAIT, topic};
 
 mod harness;
@@ -151,4 +154,41 @@ async fn three_region_fleet_works() {
             |fleet| (1..6).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
         )
         .await;
+}
+
+/// §5.7's kill switch: a sidecar with `inject: false` is a sidecar an operator has told to stop
+/// changing anything. It stays on the overlay, keeps counting what it wins and hands its beacon
+/// node nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn inject_off_node_receives_and_counts_but_publishes_nothing() {
+    let block = topic("beacon_block");
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", 3)])
+        .config(|settings| settings.inject = false)
+        .start()
+        .await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+
+    let payload = b"a block nobody may inject".to_vec();
+    fleet.node(0).bn().publish(&block, &payload).await;
+
+    fleet
+        .wait_for_metrics("node 1 to count what it may not publish", WAIT, |scrapes| {
+            let won = scrapes[1].sum(
+                FIRST_SEEN_TOTAL,
+                &[(LABEL_CLASS, "large"), (LABEL_SOURCE, SOURCE_OVERLAY)],
+            );
+            let held = scrapes[1].sum(
+                PUBLISH_SUPPRESSED_TOTAL,
+                &[(LABEL_CLASS, "large"), (LABEL_REASON, REASON_INJECT_OFF)],
+            );
+            won > 0.0 && held > 0.0
+        })
+        .await;
+    fleet.settle().await;
+    assert_eq!(fleet.node(1).bn().count(&block, &payload), 0, "injected");
+    assert_eq!(fleet.node(2).bn().count(&block, &payload), 0, "injected");
 }
