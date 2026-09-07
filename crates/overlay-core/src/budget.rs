@@ -231,6 +231,102 @@ pub fn check(budget: &MemoryBudget, limit: Option<u64>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testlog::LOG;
+
+    /// A fleet the size of the motivating deployment, at T-033's lane bounds.
+    fn budget() -> MemoryBudget {
+        MemoryBudget::compute(
+            200,
+            SendLaneBounds {
+                small_frames: 600,
+                large_bytes: 1024 * 1024,
+                large_bytes_max: 64 * 1024 * 1024,
+            },
+        )
+    }
+
+    /// OPS-N4: the line goes out either way, because an operator sizing `MemoryMax` needs the
+    /// number whether or not it currently fits. The warning is what an alert is written against,
+    /// so it has to be absent when the budget does fit and absent again when there is no ceiling
+    /// to compare it with, which is every host without cgroup v2 and every cgroup set to `max`.
+    #[test]
+    fn memory_budget_warns_only_when_above_cgroup_max() {
+        let budget = budget();
+        let over = budget.total_bytes - 1;
+        let under = budget.total_bytes;
+
+        let mark = LOG.len();
+        check(&budget, Some(over));
+        let above = LOG.since(mark);
+        assert!(above.contains("memory budget"), "{above}");
+        assert!(above.contains(&budget.total_bytes.to_string()), "{above}");
+        assert!(above.contains(&over.to_string()), "{above}");
+        assert!(above.contains("WARN"), "{above}");
+
+        let mark = LOG.len();
+        check(&budget, Some(under));
+        let fits = LOG.since(mark);
+        assert!(fits.contains(&budget.total_bytes.to_string()), "{fits}");
+        assert!(!fits.contains("WARN"), "{fits}");
+
+        let mark = LOG.len();
+        check(&budget, None);
+        let unlimited = LOG.since(mark);
+        assert!(unlimited.contains("none"), "{unlimited}");
+        assert!(!unlimited.contains("WARN"), "{unlimited}");
+    }
+
+    /// The `None` cases, which is what a host without cgroup v2 and a cgroup with no ceiling
+    /// both look like. Every developer machine that is not Linux is the first of them.
+    #[test]
+    fn memory_max_is_none_without_a_file_and_without_a_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let unlimited = dir.path().join("memory.max");
+        std::fs::write(&unlimited, "max\n").unwrap();
+        let numeric = dir.path().join("limited");
+        std::fs::write(&numeric, "536870912\n").unwrap();
+
+        assert_eq!(read_memory_max(&dir.path().join("absent")), None);
+        assert_eq!(read_memory_max(&unlimited), None);
+        assert_eq!(read_memory_max(&numeric), Some(536_870_912));
+    }
+
+    /// The rows are what T-076's table grows from, so the sum has to be the rows and the total
+    /// has to be the sum plus exactly the headroom OPS-N4 asks for.
+    #[test]
+    fn memory_budget_totals_the_rows_and_adds_the_headroom() {
+        let budget = budget();
+
+        assert_eq!(budget.rows.len(), 3);
+        assert_eq!(
+            budget.bounded_bytes,
+            budget.rows.iter().map(|(_, bytes)| bytes).sum::<u64>()
+        );
+        assert_eq!(
+            budget.total_bytes,
+            budget.bounded_bytes * (100 + HEADROOM_PERCENT) / 100
+        );
+    }
+
+    /// The per-peer lanes are the only row a roster changes, and the process-wide cap is what
+    /// keeps a large fleet from multiplying its way past the budget (DX-N4).
+    #[test]
+    fn peer_send_lanes_grow_with_the_roster_up_to_the_process_cap() {
+        let lanes = SendLaneBounds {
+            small_frames: 600,
+            large_bytes: 1024 * 1024,
+            large_bytes_max: 8 * 1024 * 1024,
+        };
+        let row = |roster: usize| MemoryBudget::compute(roster, lanes).rows[2].1;
+
+        assert_eq!(row(1), 0, "a fleet of one has no peers to queue for");
+        assert!(row(5) > row(2));
+        assert_eq!(
+            row(200) - row(100),
+            100 * 600 * SMALL_MESSAGE_BYTES,
+            "past the cap only the small lanes still grow"
+        );
+    }
 
     /// The label an alert is keyed on (§12), so the strings are pinned rather than derived.
     #[test]
