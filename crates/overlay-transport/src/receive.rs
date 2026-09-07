@@ -1004,6 +1004,74 @@ mod tests {
         }
     }
 
+    /// A relay in `eu` with one in-region subscriber beside it, and a peer of the test's own in
+    /// `us` to send `RELAY` batches from. Node 1 is the relay, node 2 the host it fans out to,
+    /// and the returned peer is node 0, the lowest hostname and so the one that dials.
+    async fn relay_of(subnet: &Topic) -> (TestCluster, PeerInfo) {
+        let mut cluster = Builder::new(&[NodeKind::Bare, NodeKind::Manager, NodeKind::Manager])
+            .regions(&["us", "eu", "eu"])
+            .start()
+            .await;
+        for node in [1, 2] {
+            cluster.start_sidecar(node, subscriptions(&[subnet], &[]));
+        }
+        eventually("the two siblings to pair and subscribe", || {
+            cluster.live(1).subscribers(subnet).len() == 1
+        })
+        .await;
+        let peer = cluster
+            .dial_announcing(
+                0,
+                1,
+                &cluster.self_hello(0),
+                vec![(TopicId::new(3), subnet.to_string())],
+            )
+            .await;
+        (cluster, peer)
+    }
+
+    /// A batch asking its destination to fan it out inside its own region (D11).
+    fn relay_batch(entries: Vec<BatchEntry>) -> Bytes {
+        encode_datagram(&Frame::Batch {
+            flags: BatchFlags::RELAY,
+            entries,
+        })
+    }
+
+    /// The id a payload on `topic` hashes to, which is what the seen cache holds.
+    fn id_of(topic: &Topic, payload: &[u8]) -> MessageId {
+        msgid::compute(&topic.to_string(), payload, wire::MAX_PAYLOAD_BYTES).id
+    }
+
+    /// D20: a relay re-fans only what was new to its own seen cache. An entry it already held
+    /// reached its region from another relay or from the origin and has been spread once
+    /// already, and spreading it again would cost the region a copy per relay.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_refans_only_entries_new_to_its_seen_cache() {
+        let subnet = topic("beacon_attestation_7");
+        let held = payload(b"an attestation the relay is already holding");
+        let fresh = payload(b"an attestation the relay has not seen");
+        let (cluster, peer) = relay_of(&subnet).await;
+        assert!(cluster.seen(1).insert(id_of(&subnet, &held)));
+
+        datagram(&peer, relay_batch(vec![entry(3, &held), entry(3, &fresh)]));
+
+        eventually("the in-region subscriber to be given the new entry", || {
+            cluster.published(2).len() == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(cluster.published(2)[0].payload, fresh);
+        assert_eq!(cluster.published(2).len(), 1);
+        assert_eq!(cluster.stats(1).relayed_batches(), 1);
+
+        datagram(&peer, relay_batch(vec![entry(3, &held)]));
+
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(cluster.published(2).len(), 1, "nothing new was re-fanned");
+        assert_eq!(cluster.stats(1).relayed_batches(), 1);
+    }
+
     /// §5.4 end to end over two regions: an attestation reaches every subscriber in the remote
     /// one, and the WAN carried one copy per relay rather than one per host. The relay's own
     /// batch goes out with `RELAY` clear, so the hosts it fans to spread nothing further and
