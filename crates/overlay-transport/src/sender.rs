@@ -32,7 +32,7 @@ use overlay_core::batch::{self, Carrier, Flush};
 use overlay_core::roster::Hostname;
 use overlay_core::topic::Class;
 use overlay_core::wire::{
-    BATCH_ENTRY_OVERHEAD_BYTES, BATCH_HEADER_BYTES, encode_datagram, encode_stream,
+    BATCH_ENTRY_OVERHEAD_BYTES, BATCH_HEADER_BYTES, BatchFlags, encode_datagram, encode_stream,
 };
 use quinn::SendDatagramError;
 use tokio::sync::Notify;
@@ -172,8 +172,12 @@ struct Queued {
 enum Waiting {
     /// The bytes a stream carries, length prefix included.
     Frame(Bytes),
-    /// A flushed batch and the age bound it was collected under.
-    Batch { flush: Flush, stale_after: Duration },
+    /// A flushed batch, the flags it goes out under and the age bound it was collected under.
+    Batch {
+        flush: Flush,
+        flags: BatchFlags,
+        stale_after: Duration,
+    },
 }
 
 impl Waiting {
@@ -479,8 +483,9 @@ impl SenderHandle {
     }
 
     /// Queues one flushed batch on the small lane, to go as a datagram when the task reaches it
-    /// (§5.3). `stale_after` is the bound its entries were collected under, which the task
-    /// checks them against again before it sends (D21).
+    /// (§5.3). `flags` is what the batch goes out under, `RELAY` on one the destination is to
+    /// fan out for its own region (D11); `stale_after` is the bound its entries were collected
+    /// under, which the task checks them against again before it sends (D21).
     ///
     /// Not encoded here, unlike [`push`](Self::push): a batch goes to the one destination it was
     /// collected for, so there is nothing to share the bytes with, and the second stale check
@@ -488,10 +493,19 @@ impl SenderHandle {
     pub fn push_batch(
         &self,
         flush: Flush,
+        flags: BatchFlags,
         stale_after: Duration,
         now: Instant,
     ) -> Result<(), Dropped> {
-        self.queue(Class::Small, Waiting::Batch { flush, stale_after }, now)
+        self.queue(
+            Class::Small,
+            Waiting::Batch {
+                flush,
+                flags,
+                stale_after,
+            },
+            now,
+        )
     }
 
     fn queue(&self, class: Class, waiting: Waiting, now: Instant) -> Result<(), Dropped> {
@@ -579,9 +593,11 @@ async fn drain<T: Transport>(queues: Arc<Queues>, transport: T) {
         };
         let written = match queued.waiting {
             Waiting::Frame(frame) => transport.send(frame).await,
-            Waiting::Batch { flush, stale_after } => {
-                send_batch(&transport, &queues, flush, stale_after, now).await
-            }
+            Waiting::Batch {
+                flush,
+                flags,
+                stale_after,
+            } => send_batch(&transport, &queues, flush, flags, stale_after, now).await,
         };
         if let Err(error) = written {
             tracing::debug!(peer = %queues.peer, %error, "connection carries no more frames");
@@ -603,6 +619,7 @@ async fn send_batch<T: Transport>(
     transport: &T,
     queues: &Queues,
     mut flush: Flush,
+    flags: BatchFlags,
     stale_after: Duration,
     now: Instant,
 ) -> std::io::Result<()> {
@@ -614,7 +631,7 @@ async fn send_batch<T: Transport>(
         return Ok(());
     }
     let carrier = flush.carrier;
-    let frame = flush.into_frame();
+    let frame = flush.into_frame(flags);
     if carrier == Carrier::Stream {
         return transport.send(encode_stream(&frame)).await;
     }
@@ -915,7 +932,7 @@ mod tests {
         // behind it, which is the case the second check exists for.
         sender.push(Class::Large, frame(0), start).unwrap();
         sender
-            .push_batch(flush_of(start), stale_after, start)
+            .push_batch(flush_of(start), BatchFlags::NONE, stale_after, start)
             .unwrap();
         tokio::time::advance(stale_after + Duration::from_millis(1)).await;
         link.release();

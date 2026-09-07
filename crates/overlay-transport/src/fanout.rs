@@ -211,6 +211,7 @@ impl Fanout {
                     topic_id,
                     payload: outbound.payload.clone(),
                     max_bytes,
+                    relay: false,
                     sender: live.sender.clone(),
                 }),
                 None => {

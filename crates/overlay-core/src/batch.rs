@@ -66,13 +66,13 @@ pub struct Flush {
 }
 
 impl Flush {
-    /// The frame the entries travel as. `RELAY` is clear: this batch is going to the host it
-    /// was collected for, and only a relay re-fanning one in its own region sets the bit
-    /// (D11, T-063). Every payload here fits the `u16` length an entry carries, which is
+    /// The frame the entries travel as. `flags` is the sender's: `RELAY` on a batch for a host
+    /// that is to fan it out inside its own region, clear on one going to the host it is for
+    /// (D11, D20). Every payload here fits the `u16` length an entry carries, which is
     /// [`Batcher::push`]'s precondition and not something this can check.
-    pub fn into_frame(self) -> Frame {
+    pub fn into_frame(self, flags: BatchFlags) -> Frame {
         Frame::Batch {
-            flags: BatchFlags::NONE,
+            flags,
             entries: self
                 .entries
                 .into_iter()
@@ -672,7 +672,7 @@ mod tests {
         let mut datagrams = 0;
         for flush in flushes {
             let carrier = flush.carrier;
-            let frame = flush.into_frame();
+            let frame = flush.into_frame(BatchFlags::NONE);
             assert_eq!(batch_flags(&frame), BatchFlags::NONE);
             let encoded = encode_datagram(&frame).len();
             match carrier {

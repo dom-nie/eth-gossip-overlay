@@ -14,6 +14,14 @@
 //! `try_send`: a payload that will not fit is counted under the peer it was for and dropped,
 //! which is what its lane would do a moment later anyway.
 //!
+//! # Two batchers, not one
+//!
+//! A batch to a relay carries `RELAY` and one to the host it is for does not (D11), and the same
+//! host can be both at once: it is a relay for a topic most of its region wants and an ordinary
+//! subscriber for one only a handful of them do (D36). The flag therefore belongs to the batch
+//! and not to the destination, and the two batchers are how a destination keeps one open batch
+//! of each kind.
+//!
 //! # What arrives with each payload
 //!
 //! The destination's datagram limit and its send queue both come with the payload rather than
@@ -33,6 +41,7 @@ use overlay_core::config;
 use overlay_core::roster::Hostname;
 use overlay_core::topic::Class;
 use overlay_core::topic::table::TopicId;
+use overlay_core::wire::BatchFlags;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -65,6 +74,9 @@ pub struct Small {
     /// What a datagram to this destination currently holds, read off the connection when the
     /// message was routed.
     pub max_bytes: usize,
+    /// Whether the destination is a relay for this payload, which is what puts `RELAY` on the
+    /// batch it ends up in (D11).
+    pub relay: bool,
     /// The destination's send queue, so a batch closed later still has one.
     pub sender: SenderHandle,
 }
@@ -122,7 +134,7 @@ async fn run(
     stats: Arc<dyn SenderStats>,
 ) {
     let mut cfg = small.borrow_and_update().clone();
-    let mut batcher = Batcher::new(cfg.batch_window, cfg.stale_after);
+    let mut batchers = Batchers::new(&cfg);
     let mut senders: BTreeMap<Hostname, SenderHandle> = BTreeMap::new();
     let mut arrived = Vec::with_capacity(DRAIN_MAX);
     let mut tick = tokio::time::interval(BATCH_TICK);
@@ -138,26 +150,79 @@ async fn run(
         let now = Instant::now();
         let mut flushes = Vec::new();
         if small.has_changed().unwrap_or(false) {
-            // Past every open batch's window, so the batcher hands back everything it holds
-            // before the bounds it was holding it under go.
-            flushes.extend(batcher.tick(now + cfg.batch_window));
+            // Past every open batch's window, so the batchers hand back everything they hold
+            // before the bounds they were holding it under go.
+            flushes.extend(batchers.tick(now + cfg.batch_window));
             cfg = small.borrow_and_update().clone();
-            batcher = Batcher::new(cfg.batch_window, cfg.stale_after);
+            batchers = Batchers::new(&cfg);
         }
         for item in arrived.drain(..) {
-            flushes.extend(batcher.push(
-                &item.dest,
-                item.topic_id,
-                item.payload,
-                item.max_bytes,
-                now,
-            ));
+            let flags = flags_of(item.relay);
+            flushes.extend(
+                batchers
+                    .of(item.relay)
+                    .push(&item.dest, item.topic_id, item.payload, item.max_bytes, now)
+                    .into_iter()
+                    .map(|flush| (flush, flags)),
+            );
             senders.insert(item.dest, item.sender);
         }
-        flushes.extend(batcher.tick(now));
-        for flush in flushes {
-            send(&mut senders, stats.as_ref(), flush, cfg.stale_after, now);
+        flushes.extend(batchers.tick(now));
+        for (flush, flags) in flushes {
+            send(
+                &mut senders,
+                stats.as_ref(),
+                flush,
+                flags,
+                cfg.stale_after,
+                now,
+            );
         }
+    }
+}
+
+/// One batcher per flag set a batch can go out under, so a destination that is a relay for one
+/// topic and an ordinary subscriber for another keeps the two apart.
+struct Batchers {
+    direct: Batcher,
+    relayed: Batcher,
+}
+
+impl Batchers {
+    fn new(cfg: &config::SmallClass) -> Self {
+        Self {
+            direct: Batcher::new(cfg.batch_window, cfg.stale_after),
+            relayed: Batcher::new(cfg.batch_window, cfg.stale_after),
+        }
+    }
+
+    fn of(&mut self, relay: bool) -> &mut Batcher {
+        match relay {
+            true => &mut self.relayed,
+            false => &mut self.direct,
+        }
+    }
+
+    /// The batches of both whose window has run out at `now`, each with the flags it goes out
+    /// under.
+    fn tick(&mut self, now: Instant) -> Vec<(Flush, BatchFlags)> {
+        [(&mut self.direct, false), (&mut self.relayed, true)]
+            .into_iter()
+            .flat_map(|(batcher, relay)| {
+                batcher
+                    .tick(now)
+                    .into_iter()
+                    .map(move |flush| (flush, flags_of(relay)))
+            })
+            .collect()
+    }
+}
+
+/// What a batch for a relay and one for its own destination carry (D11).
+fn flags_of(relay: bool) -> BatchFlags {
+    match relay {
+        true => BatchFlags::RELAY,
+        false => BatchFlags::NONE,
     }
 }
 
@@ -167,6 +232,7 @@ fn send(
     senders: &mut BTreeMap<Hostname, SenderHandle>,
     stats: &dyn SenderStats,
     flush: Flush,
+    flags: BatchFlags,
     stale_after: Duration,
     now: Instant,
 ) {
@@ -183,7 +249,7 @@ fn send(
         return;
     };
     let dest = flush.dest.clone();
-    if sender.push_batch(flush, stale_after, now).is_err() {
+    if sender.push_batch(flush, flags, stale_after, now).is_err() {
         tracing::debug!(peer = %dest, "peer has no sender to queue the batch on");
         senders.remove(&dest);
     }
