@@ -1,11 +1,15 @@
 //! The system-level properties of a running fleet (T-051). Every test here drives whole
 //! sidecars: the wiring `fleet-overlay run` builds, with only the beacon node replaced.
 
+use std::time::{Duration, Instant};
+
 use fleet_overlay::metrics::{
     FIRST_SEEN_TOTAL, LABEL_CLASS, LABEL_DIRECTION, LABEL_PEER, LABEL_REASON, LABEL_SOURCE,
-    MESSAGES_TOTAL, PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF, SOURCE_OVERLAY,
+    LABEL_UNIT, MESSAGES_TOTAL, PEER_QUEUE_DEPTH, PEER_QUEUE_DROPS_TOTAL, PUBLISH_SUPPRESSED_TOTAL,
+    REASON_INJECT_OFF, SOURCE_OVERLAY, UNIT_BYTES,
 };
 use harness::{Fleet, Scrape, WAIT, topic};
+use overlay_transport::sender::{DropReason, LARGE_LANE_BYTES};
 
 mod harness;
 
@@ -298,4 +302,90 @@ async fn publish_and_wait(fleet: &Fleet, topic: &str, text: &str) {
         })
         .await;
     fleet.settle().await;
+}
+
+/// D17: a peer that cannot keep up costs its senders a bounded amount of memory and nothing
+/// else. One node reads at 1 Mbps while large messages are published at full rate; the sender's
+/// queue for it stays inside `LARGE_LANE_BYTES`, what does not fit is counted as dropped, and
+/// the nodes that are not throttled receive everything at the speed they always did.
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_peer_at_1_mbps_keeps_sender_memory_under_bound_and_others_unaffected() {
+    /// 1 Mbps in bytes per second.
+    const ONE_MBPS: u64 = 125_000;
+    const MESSAGES: usize = 16;
+    const PAYLOAD_BYTES: usize = 256 * 1024;
+
+    let block = topic("beacon_block");
+    let mut fleet = Fleet::builder().regions(&[("eu", 4)]).start().await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    let slow = fleet.node(3).hostname().0.clone();
+    fleet.throttle_node(3, Some(ONE_MBPS));
+
+    let blocks: Vec<Vec<u8>> = (0..MESSAGES)
+        .map(|index| incompressible(index as u64, PAYLOAD_BYTES))
+        .collect();
+    let started = Instant::now();
+    for payload in &blocks {
+        fleet.node(0).bn().publish(&block, payload).await;
+        let queued = fleet.node(0).metrics().await.sum(
+            PEER_QUEUE_DEPTH,
+            &[
+                (LABEL_PEER, &slow),
+                (LABEL_CLASS, "large"),
+                (LABEL_UNIT, UNIT_BYTES),
+            ],
+        );
+        assert!(
+            queued <= LARGE_LANE_BYTES as f64,
+            "{queued} bytes queued for the slow peer, bound is {LARGE_LANE_BYTES}"
+        );
+    }
+
+    fleet
+        .wait_for("both fast nodes to import every block", WAIT, |fleet| {
+            (1..3).all(|node| {
+                blocks
+                    .iter()
+                    .all(|p| fleet.node(node).bn().count(&block, p) == 1)
+            })
+        })
+        .await;
+    let unthrottled = started.elapsed();
+    let throttled = Duration::from_secs_f64((MESSAGES * PAYLOAD_BYTES) as f64 / ONE_MBPS as f64);
+    assert!(
+        unthrottled < throttled / 4,
+        "{unthrottled:?} to reach the fast nodes; the slow peer's rate alone is {throttled:?}"
+    );
+
+    fleet
+        .wait_for_metrics("the sender to count the frames it threw away", WAIT, |s| {
+            [DropReason::Full, DropReason::Stale].iter().any(|reason| {
+                s[0].sum(
+                    PEER_QUEUE_DROPS_TOTAL,
+                    &[
+                        (LABEL_PEER, &slow),
+                        (LABEL_CLASS, "large"),
+                        (LABEL_REASON, reason.as_str()),
+                    ],
+                ) > 0.0
+            })
+        })
+        .await;
+    fleet.throttle_node(3, None);
+}
+
+/// A payload snappy cannot shrink, so what a beacon node puts on the wire is the size asked for.
+fn incompressible(seed: u64, bytes: usize) -> Vec<u8> {
+    let mut state = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+    (0..bytes)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u8
+        })
+        .collect()
 }
