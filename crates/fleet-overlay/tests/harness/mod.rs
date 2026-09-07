@@ -177,6 +177,7 @@ impl Builder {
             dir,
             nodes,
             settings: self.settings,
+            cut: Vec::new(),
         };
         for index in 0..fleet.nodes.len() {
             fleet.write_files(index);
@@ -197,6 +198,8 @@ pub struct Fleet {
     dir: tempfile::TempDir,
     nodes: Vec<Node>,
     settings: Settings,
+    /// Pairs whose rosters no longer name each other, from [`Fleet::partition`].
+    cut: Vec<(usize, usize)>,
 }
 
 impl Fleet {
@@ -334,11 +337,15 @@ impl Fleet {
         })
     }
 
-    /// The peers node `index` should hold: every other node its roster names.
+    /// The peers node `index` should hold: every other node its roster still names.
     fn expected_peers(&self, index: usize) -> Vec<usize> {
         (0..self.nodes.len())
-            .filter(|&other| other != index)
+            .filter(|&other| other != index && !self.is_cut(index, other))
             .collect()
+    }
+
+    fn is_cut(&self, a: usize, b: usize) -> bool {
+        self.cut.contains(&(a, b)) || self.cut.contains(&(b, a))
     }
 
     /// Polls the admin sockets until every running node reports the peers its roster names.
@@ -373,6 +380,7 @@ impl Fleet {
     fn write_files(&self, index: usize) {
         let node = &self.nodes[index];
         let hosts: String = (0..self.nodes.len())
+            .filter(|&other| other == index || !self.is_cut(index, other))
             .map(|other| {
                 let peer = &self.nodes[other];
                 format!(
@@ -402,6 +410,34 @@ impl Fleet {
             node.metrics,
         );
         std::fs::write(node.dir.join("config.yaml"), yaml).unwrap();
+    }
+
+    /// Cuts every pair between the two sets by taking each side out of the other's roster and
+    /// reloading, which closes the connection that pair holds and keeps it from being redialled.
+    /// Nothing else changes: both halves keep their beacon nodes and their other peers.
+    pub async fn partition(&mut self, a: &[usize], b: &[usize]) {
+        for &left in a {
+            for &right in b {
+                self.cut.push((left, right));
+            }
+        }
+        for index in 0..self.nodes.len() {
+            self.write_files(index);
+        }
+        self.reload_all().await;
+        self.wait_for_peers("the cut connections to close", WAIT)
+            .await;
+    }
+
+    /// `fleet-overlayctl reload` on every running node, the way `systemctl reload` reaches a
+    /// whole fleet.
+    async fn reload_all(&self) {
+        for node in &self.nodes {
+            if node.app.is_some() {
+                let answer = node.ctl(r#"{"cmd":"reload"}"#).await;
+                assert!(answer.contains(r#""ok":true"#), "reload: {answer}");
+            }
+        }
     }
 
     /// Builds one node's sidecar and leaves it running.
