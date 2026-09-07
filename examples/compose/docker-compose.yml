@@ -33,6 +33,13 @@ x-beacon-node: &beacon-node
   command:
     - |
       peer_id=$$(cat /shared/$$SIDECAR.peerid)
+      # The two flags OPS-N1's drop-in puts on a real beacon node's ExecStart=. TRUST_SIDECAR=0
+      # leaves them off, which is the mistake OverlayNotTrustedByBn exists to catch and what
+      # scripts/alert-checks.sh makes on purpose.
+      if [ "$${TRUST_SIDECAR:-1}" = 1 ]; then
+        set -- --trusted-peers "$$peer_id" \
+          --libp2p-addresses "/ip4/127.0.0.1/tcp/7787/p2p/$$peer_id"
+      fi
       exec lighthouse beacon_node \
         --network "$$NETWORK" \
         --datadir /data \
@@ -41,8 +48,7 @@ x-beacon-node: &beacon-node
         --disable-deposit-contract-sync \
         --subscribe-all-subnets \
         --target-peers 30 \
-        --trusted-peers "$$peer_id" \
-        --libp2p-addresses "/ip4/127.0.0.1/tcp/7787/p2p/$$peer_id" \
+        "$$@" \
         $$LIGHTHOUSE_EXTRA_ARGS
   restart: unless-stopped
 
@@ -53,6 +59,7 @@ x-beacon-node-env: &beacon-node-env
   # and gossips, and every block it sees stays optimistic. Put --execution-endpoint and
   # --execution-jwt here to give it one.
   LIGHTHOUSE_EXTRA_ARGS: ${LIGHTHOUSE_EXTRA_ARGS-}
+  TRUST_SIDECAR: ${TRUST_SIDECAR:-1}
 
 services:
   # The fleet seed once, and each sidecar's peer id before any beacon node needs it. This is the
@@ -186,10 +193,12 @@ services:
       GF_AUTH_DISABLE_LOGIN_FORM: "true"
     volumes:
       - ./grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./dashboards:/var/lib/grafana/dashboards:ro
-      # The shipped dashboard, mounted rather than copied here: a second copy would be wrong
-      # the first time either changed, and a symlink would point outside the mount above.
-      - ../../deploy/grafana/fleet-overlay.json:/var/lib/grafana/dashboards/fleet-overlay.json:ro
+      # The provisioned directory is /var/lib/grafana/dashboards and these are two directories
+      # inside it, side by side rather than nested: the shipped dashboard is mounted from
+      # deploy/ rather than copied here, because a copy would be wrong the first time either
+      # changed and a symlink would point outside whatever directory is mounted.
+      - ../../deploy/grafana:/var/lib/grafana/dashboards/shipped:ro
+      - ./dashboards:/var/lib/grafana/dashboards/local:ro
     networks: [demo]
     ports:
       - "127.0.0.1:3000:3000"

@@ -419,7 +419,7 @@ fn the_compose_demo_mounts_the_shipped_dashboard_and_alert_rules() {
     let compose = read(COMPOSE);
 
     for mount in [
-        "../../deploy/grafana/fleet-overlay.json:/var/lib/grafana/dashboards/fleet-overlay.json:ro",
+        "../../deploy/grafana:/var/lib/grafana/dashboards/shipped:ro",
         "../../deploy/prometheus/alerts.yml:/etc/prometheus/rules/fleet-overlay.yml:ro",
     ] {
         assert!(compose.contains(mount), "{COMPOSE} does not mount {mount}");

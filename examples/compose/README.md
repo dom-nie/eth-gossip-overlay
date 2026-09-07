@@ -45,11 +45,10 @@ volume so the beacon nodes have their `--trusted-peers` value before they start.
 sidecar warns at startup that the endpoint is not on loopback, and that warning is correct: on
 a real host it stays on `127.0.0.1` and only the local scraper reaches it.
 
-Grafana loads every dashboard JSON under `dashboards/`, and the compose file mounts
-`deploy/grafana/fleet-overlay.json` into it, so the dashboard an operator installs is the one
-the demo shows. Drop your own JSON in `dashboards/` and it is loaded too. Prometheus loads
-`deploy/prometheus/alerts.yml` the same way; the rules are at
-<http://127.0.0.1:9090/alerts>.
+Grafana loads `deploy/grafana/fleet-overlay.json`, mounted from the repository rather than
+copied here, so the dashboard an operator installs is the one the demo shows. Drop your own JSON
+into `dashboards/` and it is loaded beside it. Prometheus loads `deploy/prometheus/alerts.yml`
+the same way, and their state is at <http://127.0.0.1:9090/alerts>.
 
 ## What to look at
 

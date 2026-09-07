@@ -1,5 +1,7 @@
-# Every dashboard JSON in examples/compose/dashboards is loaded at startup. The directory is
-# empty until T-052's dashboard lands in it.
+# Every dashboard JSON under /var/lib/grafana/dashboards is loaded at startup, subdirectories
+# included. docker-compose.yml mounts two of them there: `shipped` is deploy/grafana, which is
+# where the project's own dashboard lives, and `local` is examples/compose/dashboards, which is
+# yours to drop files into.
 apiVersion: 1
 
 providers:
