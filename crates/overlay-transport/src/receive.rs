@@ -666,6 +666,32 @@ mod tests {
         assert_eq!(cluster.stats(1).messages(Direction::In, &sender), 1);
     }
 
+    /// A datagram has no length prefix, so there is no way to step over a frame this release
+    /// cannot read: the whole datagram goes, whatever is behind the type byte (D10). The
+    /// connection carries on, and the next datagram is delivered as if the first had not been
+    /// there.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn datagram_with_unknown_frame_type_is_dropped_whole_and_counted() {
+        let subnet = topic("beacon_attestation_7");
+        let wanted = payload(b"the datagram after the one from the future");
+        let (cluster, peer) = peer_of(subscriptions(&[&subnet], &[]), &[(3, &subnet)]).await;
+        let readable = payload(b"the entry hidden behind the unknown type");
+        let mut from_the_future = BytesMut::from(&[200u8, 0][..]);
+        from_the_future.extend_from_slice(&batch(vec![entry(3, &readable)]));
+
+        datagram(&peer, from_the_future.freeze());
+        datagram(&peer, batch(vec![entry(3, &wanted)]));
+
+        eventually("the datagram after it to be queued", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(cluster.published(1).len(), 1);
+        assert_eq!(cluster.published(1)[0].payload, wanted);
+        assert_eq!(cluster.stats(1).unknown_frame_types(&cluster.hostname(0)), 1);
+    }
+
     /// An entry id the peer never announced costs that entry and nothing else (D21): the rest of
     /// the batch is delivered and the connection carries on, because the sender is one release
     /// ahead or its `TOPIC_ADD` has not arrived yet, neither of which is a protocol error.
