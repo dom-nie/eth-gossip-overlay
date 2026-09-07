@@ -192,3 +192,28 @@ async fn inject_off_node_receives_and_counts_but_publishes_nothing() {
     assert_eq!(fleet.node(1).bn().count(&block, &payload), 0, "injected");
     assert_eq!(fleet.node(2).bn().count(&block, &payload), 0, "injected");
 }
+
+/// §3 principle 1 and the structure that enforces it: the receive path holds nothing that can
+/// send, so what reaches a host from the overlay is published locally and goes no further. With
+/// A cut from C, a block published at A is at B and nowhere else.
+#[tokio::test(flavor = "multi_thread")]
+async fn message_takes_one_overlay_hop_only() {
+    let block = topic("beacon_block");
+    let mut fleet = Fleet::builder().regions(&[("eu", 3)]).start().await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    fleet.partition(&[0], &[2]).await;
+
+    let payload = b"a block that must not be relayed".to_vec();
+    fleet.node(0).bn().publish(&block, &payload).await;
+
+    fleet
+        .wait_for("node 1 to import the block", WAIT, |fleet| {
+            fleet.node(1).bn().count(&block, &payload) == 1
+        })
+        .await;
+    fleet.settle().await;
+    assert_eq!(fleet.node(2).bn().count(&block, &payload), 0, "second hop");
+}
