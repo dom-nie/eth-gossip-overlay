@@ -113,7 +113,7 @@ $ sudo journalctl -u fleet-overlay -o cat | jq .
 {
   "timestamp": "2026-09-07T09:12:41.489217Z",
   "level": "INFO",
-  "target": "fleet_overlay::app",
+  "target": "eth_gossip_overlay::app",
   "message": "admin socket bound",
   "path": "/run/fleet-overlay/admin.sock"
 }

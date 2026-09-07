@@ -1,9 +1,9 @@
 {
-  "uid": "fleet-overlay",
+  "uid": "eth-gossip-overlay",
   "title": "Fleet gossip overlay",
   "description": "The sidecar's own view: the overlay mesh, what crosses it, whether it wins and what the guardrails are doing. The last row needs a Loki datasource and the rest do not.",
   "tags": [
-    "fleet-overlay"
+    "eth-gossip-overlay"
   ],
   "editable": true,
   "schemaVersion": 39,
@@ -856,7 +856,7 @@
             "type": "prometheus",
             "uid": "${prom}"
           },
-          "expr": "process_resident_memory_bytes{job=\"fleet-overlay\",instance=~\"$instance\"}",
+          "expr": "process_resident_memory_bytes{job=\"eth-gossip-overlay\",instance=~\"$instance\"}",
           "refId": "A",
           "legendFormat": "{{instance}}"
         }
@@ -927,7 +927,7 @@
             "type": "prometheus",
             "uid": "${prom}"
           },
-          "expr": "rate(process_cpu_seconds_total{job=\"fleet-overlay\",instance=~\"$instance\"}[5m])",
+          "expr": "rate(process_cpu_seconds_total{job=\"eth-gossip-overlay\",instance=~\"$instance\"}[5m])",
           "refId": "A",
           "legendFormat": "{{instance}}"
         }
@@ -976,7 +976,7 @@
             "type": "prometheus",
             "uid": "${prom}"
           },
-          "expr": "process_open_fds{job=\"fleet-overlay\",instance=~\"$instance\"}",
+          "expr": "process_open_fds{job=\"eth-gossip-overlay\",instance=~\"$instance\"}",
           "refId": "A",
           "legendFormat": "{{instance}}"
         }
@@ -1037,7 +1037,7 @@
                 "type": "loki",
                 "uid": "${loki}"
               },
-              "expr": "avg((\n  max by (msg_id) (max_over_time({unit=\"fleet-overlay.service\"} | json | event=\"first_arrival\" | topic=~\".*beacon_block.*\" | unwrap first_arrival_ns [5m]))\n  -\n  min by (msg_id) (min_over_time({unit=\"fleet-overlay.service\"} | json | event=\"first_arrival\" | topic=~\".*beacon_block.*\" | unwrap first_arrival_ns [5m]))\n) / 1e6)",
+              "expr": "avg((\n  max by (msg_id) (max_over_time({unit=\"eth-gossip-overlay.service\"} | json | event=\"first_arrival\" | topic=~\".*beacon_block.*\" | unwrap first_arrival_ns [5m]))\n  -\n  min by (msg_id) (min_over_time({unit=\"eth-gossip-overlay.service\"} | json | event=\"first_arrival\" | topic=~\".*beacon_block.*\" | unwrap first_arrival_ns [5m]))\n) / 1e6)",
               "refId": "A",
               "legendFormat": "mean"
             },
@@ -1046,7 +1046,7 @@
                 "type": "loki",
                 "uid": "${loki}"
               },
-              "expr": "max((\n  max by (msg_id) (max_over_time({unit=\"fleet-overlay.service\"} | json | event=\"first_arrival\" | topic=~\".*beacon_block.*\" | unwrap first_arrival_ns [5m]))\n  -\n  min by (msg_id) (min_over_time({unit=\"fleet-overlay.service\"} | json | event=\"first_arrival\" | topic=~\".*beacon_block.*\" | unwrap first_arrival_ns [5m]))\n) / 1e6)",
+              "expr": "max((\n  max by (msg_id) (max_over_time({unit=\"eth-gossip-overlay.service\"} | json | event=\"first_arrival\" | topic=~\".*beacon_block.*\" | unwrap first_arrival_ns [5m]))\n  -\n  min by (msg_id) (min_over_time({unit=\"eth-gossip-overlay.service\"} | json | event=\"first_arrival\" | topic=~\".*beacon_block.*\" | unwrap first_arrival_ns [5m]))\n) / 1e6)",
               "refId": "B",
               "legendFormat": "worst host pair"
             }
@@ -1097,7 +1097,7 @@
                 "type": "loki",
                 "uid": "${loki}"
               },
-              "expr": "sum(count_over_time({unit=\"fleet-overlay.service\"} | json | event=\"import\" [5m]))",
+              "expr": "sum(count_over_time({unit=\"eth-gossip-overlay.service\"} | json | event=\"import\" [5m]))",
               "refId": "A",
               "legendFormat": "import events"
             }

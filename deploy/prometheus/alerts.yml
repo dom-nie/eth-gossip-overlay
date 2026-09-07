@@ -106,7 +106,7 @@ groups:
       # the literal here and it is the value deploy/systemd/fleet-overlay.service sets. Raise or
       # lower MemoryMax and this number has to move with it (docs/rollout.md says so too).
       - alert: OverlayMemoryHigh
-        expr: process_resident_memory_bytes{job="fleet-overlay"} / (512 * 1024 * 1024) > 0.8
+        expr: process_resident_memory_bytes{job="eth-gossip-overlay"} / (512 * 1024 * 1024) > 0.8
         for: 10m
         labels:
           severity: warning
@@ -118,7 +118,7 @@ groups:
       # sidecar that keeps dying stays invisible in `systemctl status` unless something counts
       # the starts. Two in an hour is a bad afternoon; three is a loop.
       - alert: OverlaySidecarRestarting
-        expr: changes(process_start_time_seconds{job="fleet-overlay"}[1h]) > 2
+        expr: changes(process_start_time_seconds{job="eth-gossip-overlay"}[1h]) > 2
         for: 5m
         labels:
           severity: warning

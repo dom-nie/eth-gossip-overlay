@@ -20,7 +20,7 @@ examples:
 
 Two things about the rules. `OverlayMemoryHigh` and `OverlaySidecarRestarting` read `process_*`
 series, which every target with a process collector exports, so they select on
-`job="fleet-overlay"`; if your scrape job has another name, change theirs. And `OverlayMemoryHigh`
+`job="eth-gossip-overlay"`; if your scrape job has another name, change theirs. And `OverlayMemoryHigh`
 carries `512M` as a literal, because Prometheus cannot see the unit's `MemoryMax`. If you change
 `MemoryMax` in `deploy/systemd/fleet-overlay.service`, change the rule and the dashboard's
 threshold lines to match, or the alert goes off at the wrong number in whichever direction you
@@ -30,7 +30,7 @@ The dashboard's last row queries Loki and the rest does not, so it is useful wit
 alone. To fill in that row, point a Loki datasource at wherever you ship the sidecar's journal.
 [events.md](events.md) is the schema.
 
-![The dashboard, loaded in the compose demo's Grafana](fleet-overlay-dashboard.png)
+![The dashboard, loaded in the compose demo's Grafana](eth-gossip-overlay-dashboard.png)
 
 That is `examples/compose` running its three sidecars on their own, which is what the demo starts
 on a machine with no room for a testnet. The overview row is live; everything fed by beacon node
@@ -127,11 +127,11 @@ has the schema and the field meanings.
 ```logql
 (
   max by (msg_id) (
-    max_over_time({unit="fleet-overlay.service"} | json | event="first_arrival" | topic=~".*beacon_block.*" | unwrap first_arrival_ns [5m])
+    max_over_time({unit="eth-gossip-overlay.service"} | json | event="first_arrival" | topic=~".*beacon_block.*" | unwrap first_arrival_ns [5m])
   )
   -
   min by (msg_id) (
-    min_over_time({unit="fleet-overlay.service"} | json | event="first_arrival" | topic=~".*beacon_block.*" | unwrap first_arrival_ns [5m])
+    min_over_time({unit="eth-gossip-overlay.service"} | json | event="first_arrival" | topic=~".*beacon_block.*" | unwrap first_arrival_ns [5m])
   )
 ) / 1e6
 ```
@@ -168,9 +168,9 @@ The `large` class is blocks, blobs and data columns together. For blocks alone, 
 from the event log, which is where the topic is:
 
 ```logql
-sum(count_over_time({unit="fleet-overlay.service"} | json | event="first_arrival" | topic=~".*beacon_block.*" | source="overlay" [5m]))
+sum(count_over_time({unit="eth-gossip-overlay.service"} | json | event="first_arrival" | topic=~".*beacon_block.*" | source="overlay" [5m]))
 /
-sum(count_over_time({unit="fleet-overlay.service"} | json | event="first_arrival" | topic=~".*beacon_block.*" [5m]))
+sum(count_over_time({unit="eth-gossip-overlay.service"} | json | event="first_arrival" | topic=~".*beacon_block.*" [5m]))
 ```
 
 Both are on the dashboard. `OverlayWinRateFalling` alerts on the first one dropping under 0.5 for
@@ -190,7 +190,7 @@ avg(rate(process_cpu_seconds_total{job="lighthouse",canary="true"}[1h]))
 The sidecar's own cost is on the dashboard's process row and is the smaller half of the question:
 
 ```promql
-rate(process_cpu_seconds_total{job="fleet-overlay"}[5m])
+rate(process_cpu_seconds_total{job="eth-gossip-overlay"}[5m])
 ```
 
 ## What this buys you on chain

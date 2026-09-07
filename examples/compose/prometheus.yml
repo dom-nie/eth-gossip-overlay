@@ -11,6 +11,6 @@ rule_files:
   - /etc/prometheus/rules/fleet-overlay.yml
 
 scrape_configs:
-  - job_name: fleet-overlay
+  - job_name: eth-gossip-overlay
     static_configs:
       - targets: ["sc-1:7789", "sc-2:7789", "sc-3:7789"]

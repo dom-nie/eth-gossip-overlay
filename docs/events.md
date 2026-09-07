@@ -24,7 +24,7 @@ a person running the binary by hand reads text. `RUST_LOG` overrides the level a
 way to filter per target; while it is set, a reloaded `log.level` is ignored and the sidecar
 logs that it was. Both keys reload on SIGHUP.
 
-Queries below assume JSON. They select the unit's stream first; `{unit="fleet-overlay.service"}`
+Queries below assume JSON. They select the unit's stream first; `{unit="eth-gossip-overlay.service"}`
 is what journald's Loki shipper labels it, and any selector that reaches the sidecar's lines
 works the same.
 
@@ -70,11 +70,11 @@ The p50 and p99 of this over a canary window are the first success criterion.
 ```logql
 (
   max by (msg_id) (
-    max_over_time({unit="fleet-overlay.service"} | json | event="first_arrival" | topic=~".*beacon_block.*" | unwrap first_arrival_ns [5m])
+    max_over_time({unit="eth-gossip-overlay.service"} | json | event="first_arrival" | topic=~".*beacon_block.*" | unwrap first_arrival_ns [5m])
   )
   -
   min by (msg_id) (
-    min_over_time({unit="fleet-overlay.service"} | json | event="first_arrival" | topic=~".*beacon_block.*" | unwrap first_arrival_ns [5m])
+    min_over_time({unit="eth-gossip-overlay.service"} | json | event="first_arrival" | topic=~".*beacon_block.*" | unwrap first_arrival_ns [5m])
   )
 ) / 1e6
 ```
@@ -85,9 +85,9 @@ The share of blocks that reached a host over the overlay before its own beacon n
 Above 50% is the second success criterion.
 
 ```logql
-sum(count_over_time({unit="fleet-overlay.service"} | json | event="first_arrival" | topic=~".*beacon_block.*" | source="overlay" [5m]))
+sum(count_over_time({unit="eth-gossip-overlay.service"} | json | event="first_arrival" | topic=~".*beacon_block.*" | source="overlay" [5m]))
 /
-sum(count_over_time({unit="fleet-overlay.service"} | json | event="first_arrival" | topic=~".*beacon_block.*" [5m]))
+sum(count_over_time({unit="eth-gossip-overlay.service"} | json | event="first_arrival" | topic=~".*beacon_block.*" [5m]))
 ```
 
 Drop the `topic` filter in either query for every large message rather than blocks alone.
