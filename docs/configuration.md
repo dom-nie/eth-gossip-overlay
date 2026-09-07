@@ -1,0 +1,114 @@
+# Configuration
+
+One `config.yaml`, the same on every host, at `/etc/fleet-overlay/config.yaml` unless `--config`
+says otherwise. Every key has a default, so a file naming only what you change is valid, and
+[`deploy/examples/config.yaml`](../deploy/examples/config.yaml) is that file with every default
+written out. A key the sidecar does not know, or a misspelled one, stops the start rather than
+being ignored: run `fleet-overlay check-config` after pushing a file and configuration management
+finds out before systemd does.
+
+## Reload or restart
+
+`systemctl reload fleet-overlay`, `SIGHUP` and `fleet-overlayctl roster reload` all re-read
+`config.yaml` and `roster.yaml` without dropping a connection. The reload report says what took
+effect and what did not:
+
+```console
+$ sudo fleet-overlayctl roster reload
+applied: inject, roster
+restart required: overlay.listen
+```
+
+The table below says which side each key is on. A key marked `restart` is read once at startup:
+changing it in the file and reloading changes nothing until the sidecar restarts, and the report
+names it so the change is not silently lost. A reload applies a key only when its value changed
+in the document, so rewriting the file behind a path a key already names does nothing on its own.
+
+## Who this host is
+
+The hostname is the identity everywhere: the roster key, the input to the overlay TLS key, the
+connection tie-break. It is `gethostname()` unless `FLEET_OVERLAY_HOSTNAME` says otherwise, and
+configuration management should always set it from the inventory name so the two cannot drift.
+`FLEET_OVERLAY_REGION` and `FLEET_OVERLAY_SITE` override the roster's answer for this host.
+
+`roster.yaml` is the fleet, one entry per host, and is not part of `config.yaml`:
+
+```yaml
+hosts:
+  - hostname: bn-ams1-07
+    region: eu
+    site: ams1                  # optional, a label for metrics and nothing else
+    addr: "203.0.113.37:7788"   # where this host's overlay is dialled
+```
+
+Every host carries the same roster, and `region` is what the fan-out treats as a failure and
+latency domain. Have your discovery tool write `roster.yaml`; the sidecar notices a changed file
+within 10 seconds and reloads it. Such an automatic reload is refused if it would drop more than
+half of the hosts the sidecar currently has, on the grounds that a truncated file is more likely
+than half a fleet leaving at once. `fleet-overlayctl roster reload` applies the file anyway,
+which is how a genuine shrink is done.
+
+## The seed, the node key and the logs
+
+`overlay.fleet_seed_file` names the fleet seed, but `$CREDENTIALS_DIRECTORY/seed` wins whenever
+systemd sets it, which is what the shipped unit's `LoadCredential=` does. Set
+`overlay.fleet_seed_previous_file` only while a seed rotation is running;
+[security.md](security.md) is the procedure.
+
+`bn.node_key_file` holds this host's libp2p identity, created on first start with mode 0600. It
+is the peer id the beacon node trusts, and it is not derived from the seed. Deleting it gives the
+sidecar a new identity on the next start, so `lighthouse.env` changes and the beacon node has to
+be restarted to read it; keep the file, and on a container keep the volume under it.
+
+The `log` section sets the level and the format of the sidecar's one output stream, which carries
+the events as well. [events.md](events.md) has the fields, the queries, and why
+`tracing-journald` is an option rather than the default.
+
+## Every key
+
+`On change` is `reload` for a key a running sidecar picks up and `restart` for one it reads only
+at startup.
+
+<!-- generated from crates/overlay-core/src/config.rs, do not edit by hand -->
+
+| Key | Default | On change | What it is |
+|---|---|---|---|
+| `overlay.listen` | `[::]:7788` | restart | the address the QUIC endpoint binds. `[::]` listens dual-stack. |
+| `overlay.roster_file` | `/etc/fleet-overlay/roster.yaml` | restart | the fleet roster, re-read on SIGHUP and whenever the file changes. |
+| `overlay.fleet_seed_file` | `/etc/fleet-overlay/seed` | restart | the shared secret every overlay TLS key derives from. |
+| `overlay.fleet_seed_previous_file` | unset | reload | the outgoing seed while a rotation is in progress, so peers still on it keep pairing. Absent or `null` otherwise. |
+| `overlay.keepalive_ms` | `1000` | restart | the QUIC keepalive interval. Shorter than `idle_timeout_ms`, or every quiet connection would drop. |
+| `overlay.idle_timeout_ms` | `5000` | restart | how long a silent connection lives before QUIC closes it. |
+| `overlay.initial_window_bytes` | `4000000` | restart | the initial congestion window. A connection that carries one block every 12 s never leaves slow start with the RFC default. |
+| `overlay.fanout.large.in_region` | `stripe` | restart | how a large message reaches the origin's own region. One of `stripe`, `direct`. |
+| `overlay.fanout.large.cross_region` | `stripe` | restart | how it reaches each other region. One of `stripe`, `direct`, `relays`. |
+| `overlay.fanout.large.stripe_min_recipients` | `16` | restart | with fewer subscribed recipients than this the message goes out whole; a stripe over a handful of hosts saves nothing. |
+| `overlay.fanout.small.in_region` | `direct` | restart | how a batch reaches the origin's own region. One of `stripe`, `direct`. |
+| `overlay.fanout.small.cross_region` | `relays` | restart | how it reaches each other region. One of `stripe`, `direct`, `relays`. |
+| `overlay.fanout.small.relays_per_remote_region` | `3` | restart | how many hosts in a remote region receive a batch and re-fan it locally. |
+| `overlay.fanout.small.relay_min_remote_hosts` | `12` | reload | a remote region with fewer live subscribed hosts than this is sent to directly; relaying would not save enough WAN traffic to pay for the extra hop. |
+| `overlay.io_thread.pin_cpu` | `none` | restart | a reserved core to pin the overlay I/O thread to. `null` leaves it unpinned. |
+| `overlay.io_thread.prefer_busy_poll` | `false` | restart | spin on the socket instead of waiting for interrupts. |
+| `overlay.io_thread.busy_poll_usecs` | `100` | restart | how long each busy-poll spin lasts. |
+| `overlay.io_thread.steering` | `off` | restart | how the overlay's packets are steered to the pinned core's NIC queue. One of `auto`, `ntuple`, `rfs`, `off`. |
+| `bn.identity_url` | `http://127.0.0.1:5052/eth/v1/node/identity` | restart | the beacon API endpoint that reports the node's peer id. |
+| `bn.events_url` | `http://127.0.0.1:5052/eth/v1/events?topics=block` | restart | the beacon API event stream. |
+| `bn.libp2p_addr` | `/ip4/127.0.0.1/tcp/9000` | restart | the multiaddr the sidecar dials to join the beacon node's gossipsub. |
+| `bn.node_key_file` | `/var/lib/fleet-overlay/node.key` | restart | the sidecar's own libp2p identity, per host, created on first start. |
+| `bn.listen_addr` | `/ip4/127.0.0.1/tcp/7787` | restart | where the sidecar listens for the beacon node's own dial. Lighthouse caps inbound connections before it knows who is connecting, so a sidecar that only dialled would wait for peer churn on a busy node (MD-01). Restart-required: the beacon node is given this address in its command line. |
+| `bn.publish_rate_limit.small_per_s` | `8000` | reload | small-class messages per second. |
+| `bn.publish_rate_limit.large_per_s` | `300` | reload | large-class messages per second. |
+| `bn.publish_rate_limit.bytes_per_s` | `33554432` | reload | payload bytes per second across both classes. |
+| `bn.idontwant_on_publish` | `true` | restart | tell the beacon node IDONTWANT for a message as it is published. |
+| `classes.small.batch_window_ms` | `10` | restart | how long a batch collects entries before it is flushed. |
+| `classes.small.stale_after_ms` | `1000` | restart | a batch older than this is dropped rather than delivered late. |
+| `classes.large.chunk_bytes` | `2048` | restart | the fixed chunk size. A multiple of 64, which the Reed-Solomon shards require. |
+| `classes.large.parity_ratio` | `0.1` | restart | parity chunks as a fraction of data chunks. |
+| `classes.large.repair_deadline_ms` | `250` | reload | how long after the first chunk a receiver waits before asking peers for the missing ones. |
+| `inject` | `true` | reload | whether the sidecar publishes what it receives into the beacon node. `false` is the kill switch: the sidecar keeps observing and reporting but changes nothing. |
+| `admin_socket` | `/run/fleet-overlay/admin.sock` | restart | the Unix socket `fleet-overlayctl` connects to. |
+| `metrics_listen` | `127.0.0.1:7789` | restart | where the Prometheus scrape endpoint binds. |
+| `log.level` | `info` | reload | the least severe level that is emitted. `RUST_LOG` overrides it. One of `trace`, `debug`, `info`, `warn`, `error`. |
+| `log.format` | `auto` | reload | how the log stream is rendered. One of `auto`, `json`, `text`. |
+
+<!-- end generated -->

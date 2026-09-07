@@ -4,9 +4,9 @@ One section per alert in [`deploy/prometheus/alerts.yml`](../deploy/prometheus/a
 the alert is telling you, and the first thing to look at. Each rule's `runbook` annotation points
 at the section below it, so the link in the notification lands on the right paragraph.
 
-This file starts as the alert runbook and grows into the general operator guide: T-053 adds the
-symptoms that no alert covers, the diagnostic commands in one place, and the answers to the
-questions a first install raises.
+[symptoms.md](symptoms.md) is the other half of the runbook: the things worth looking into that
+no rule fires on, because the healthy value is a judgement call or because they only ever happen
+on a first install.
 
 Three commands answer most of these. `fleet-overlayctl status` says what the sidecar thinks is
 true, `curl -s 127.0.0.1:7789/metrics` says what it is reporting, and
@@ -33,11 +33,12 @@ this node while it lasts, and nothing this node validates leaves over the overla
 running on public gossip alone. Its validators are not at risk, but it is getting none of the
 overlay's benefit.
 
-Check the beacon node is up and its libp2p port is where `bn.listen_addr` says. The sidecar dials
+Check the beacon node is up and its libp2p port is where `bn.libp2p_addr` says. The sidecar dials
 it and reconnects on its own, so a beacon node that was restarted comes back without help. If the
 beacon node is up and the link still will not form, read the sidecar's log: the dial error names
 the cause, and the common one is a beacon node listening somewhere other than the configured
-address.
+address. A beacon node whose datadir was rebuilt has a new libp2p key and takes one backoff cycle
+longer, which [symptoms.md](symptoms.md#the-beacon-node-came-back-with-a-new-identity) explains.
 
 ## OverlayNotTrustedByBn
 

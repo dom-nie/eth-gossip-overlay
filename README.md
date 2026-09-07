@@ -8,7 +8,24 @@ It is for operators who run several Lighthouse beacon nodes they control, whethe
 
 The overlay is an accelerator, never a dependency. Every beacon node keeps its own public peers, the sidecar holds no validator keys and creates no messages, and the receiving node validates everything that arrives through it as it would any other gossip. When the overlay is down, or a sidecar dies, the node carries on as if it had never had one; nothing gets worse.
 
-[docs/rollout.md](docs/rollout.md) is how to put it on a fleet: a canary against a matched control group, the three numbers that say whether it is winning, and how to back out. The alert rules and the Grafana dashboard it refers to are in [`deploy/`](deploy/), and [docs/troubleshooting.md](docs/troubleshooting.md) is the runbook every alert links to. The quickstart in docs/quickstart.md arrives with the operator documentation.
+Start at [docs/quickstart.md](docs/quickstart.md): two hosts, from a downloaded binary to a block that arrived over the overlay instead of the public network.
+
+## Documentation
+
+| | |
+|---|---|
+| [docs/quickstart.md](docs/quickstart.md) | two hosts, install to first arrival |
+| [docs/lighthouse.md](docs/lighthouse.md) | the beacon node's side: the drop-in, the two flags, `--target-peers` |
+| [docs/configuration.md](docs/configuration.md) | every key, its default, and whether it reloads |
+| [docs/security.md](docs/security.md) | the threat model, the three fences, holding and rotating the seed |
+| [docs/troubleshooting.md](docs/troubleshooting.md) | one section per alert, which is where every alert links |
+| [docs/symptoms.md](docs/symptoms.md) | what to look into when no alert fired |
+| [docs/rollout.md](docs/rollout.md) | a canary against a matched control group, and how to back out |
+| [docs/upgrading.md](docs/upgrading.md) | what a release's `Protocol:` line means for a fleet part way through |
+| [docs/events.md](docs/events.md) | the `first_arrival` event, its fields, and the queries over it |
+| [docs/faq.md](docs/faq.md) | why a sidecar, why not RLNC, what it buys, what happens if it dies |
+
+The alert rules and the Grafana dashboard the runbook refers to are in [`deploy/`](deploy/).
 
 ## Build
 

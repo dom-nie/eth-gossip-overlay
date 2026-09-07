@@ -195,34 +195,8 @@ rate(process_cpu_seconds_total{job="fleet-overlay"}[5m])
 
 ## What this buys you on chain
 
-Architecture.md §2 is the reasoning. This is the part of it an operator can measure, and the order
-is how quickly each one answers.
-
-**Wrong-head votes on other proposers' late blocks.** Timely head is 14 of the 64 attestation
-reward weight and is lost whenever a block is not imported by four seconds. Blocks that reach any
-fleet host in time now reach all of them in time, so head vote correctness is where the effect
-shows up first. Read it from your validator monitor or from the attestation records on chain,
-canary against control, over a day or two.
-
-**Missed attestations from local peering trouble.** A host that loses its public peers still
-receives blocks over the overlay, so a peering problem stops costing attestations. This shows up
-as the disappearance of a failure mode rather than as a number going up, which means you need the
-before: how many attestation misses in the last months traced back to peering.
-
-**Own proposals under timing games.** A proposal now enters the public network from every host in
-the fleet at once rather than from one node's mesh peers. What you can measure is the attestation
-share your own blocks receive against the delay you published them at, block by block, and from
-that the orphan curve. It needs weeks, because it is counted per proposal, and it is the input to
-choosing a publish delay rather than a number that improves on its own.
-
-**Sync committee participation.** Late-head misses get the same arrival improvement as
-attestations and are paid in full rather than at 14 of 64. Expect little at period boundaries: a
-fleet already running `--subscribe-all-subnets` is a large share of every sync subnet's
-subscribers, so its messages already reach its own aggregators quickly.
-
-**Not covered.** Import time after arrival is dominated by the execution layer's `newPayload` and
-by column verification, and the overlay does not change it. It is measured, not improved: every
-100 ms of import cancels 100 ms of the arrival gain on a late block.
+The four things to measure, and how long each one takes to answer, are in
+[faq.md](faq.md#what-does-the-overlay-actually-buy-me).
 
 ## Rolling back
 

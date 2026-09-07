@@ -27,7 +27,8 @@ const DROP_IN: &str = "deploy/systemd/lighthouse-bn.service.d/10-fleet-overlay-t
 /// The markers around the generated part of the reference, the same shape the ticket backlog's
 /// own generator uses, so the preamble a person writes and the table a program writes live in
 /// one document.
-const BEGIN: &str = "<!-- generated from crates/overlay-core/src/config.rs, do not edit by hand -->";
+const BEGIN: &str =
+    "<!-- generated from crates/overlay-core/src/config.rs, do not edit by hand -->";
 const END: &str = "<!-- end generated -->";
 
 /// A document longer than this is one an operator stops reading. The count is the words outside
@@ -44,6 +45,7 @@ fn read(relative: &str) -> String {
 }
 
 /// Every `docs/*.md`, sorted, as repository-relative paths.
+#[allow(clippy::unwrap_used)]
 fn operator_documents() -> Vec<String> {
     let dir = workspace_root().join("docs");
     let mut found: Vec<String> = std::fs::read_dir(&dir)
@@ -94,6 +96,8 @@ struct Item {
     fields: Vec<Field>,
     /// The serialized names of an enum's variants, empty for a struct.
     values: Vec<String>,
+    /// Whether `#[serde(rename_all = "lowercase")]` spells those variants.
+    lowercase: bool,
 }
 
 struct Field {
@@ -143,11 +147,20 @@ fn config_model() -> BTreeMap<String, Item> {
         }
 
         let doc = docs.join(" ").trim().to_owned();
-        if let Some(name) = line.strip_prefix("pub struct ").and_then(|r| r.split(' ').next()) {
-            open = Some((name.to_owned(), Item::default(), false));
-        } else if let Some(name) = line.strip_prefix("pub enum ").and_then(|r| r.split(' ').next())
+        if let Some(name) = line
+            .strip_prefix("pub struct ")
+            .and_then(|r| r.split(' ').next())
         {
-            open = Some((name.to_owned(), Item::default(), true));
+            open = Some((name.to_owned(), Item::default(), false));
+        } else if let Some(name) = line
+            .strip_prefix("pub enum ")
+            .and_then(|r| r.split(' ').next())
+        {
+            let item = Item {
+                lowercase,
+                ..Item::default()
+            };
+            open = Some((name.to_owned(), item, true));
         } else if line == "}" {
             if let Some((name, item, _)) = open.take() {
                 items.insert(name, item);
@@ -155,13 +168,15 @@ fn config_model() -> BTreeMap<String, Item> {
         } else if let Some((_, item, is_enum)) = open.as_mut() {
             if *is_enum {
                 if let Some(variant) = trimmed.strip_suffix(',').filter(|v| !v.contains(' ')) {
-                    let value = match lowercase {
+                    let value = match item.lowercase {
                         true => variant.to_lowercase(),
                         false => variant.to_owned(),
                     };
                     item.values.push(value);
                 }
-            } else if let Some(field) = trimmed.strip_prefix("pub ").and_then(|f| f.strip_suffix(','))
+            } else if let Some(field) = trimmed
+                .strip_prefix("pub ")
+                .and_then(|f| f.strip_suffix(','))
                 && let Some((name, ty)) = field.split_once(": ")
             {
                 item.fields.push(Field {
@@ -173,9 +188,7 @@ fn config_model() -> BTreeMap<String, Item> {
         }
         docs.clear();
         rename = None;
-        if line.starts_with("pub struct ") || line.starts_with("pub enum ") {
-            lowercase = false;
-        }
+        lowercase = false;
     }
     items
 }
@@ -282,7 +295,10 @@ fn reference_table() -> String {
             let values: Vec<String> = row.values.iter().map(|v| format!("`{v}`")).collect();
             doc = format!("{doc} One of {}.", values.join(", "));
         }
-        table.push_str(&format!("| `{}` | {default} | {reload} | {doc} |\n", row.path));
+        table.push_str(&format!(
+            "| `{}` | {default} | {reload} | {doc} |\n",
+            row.path
+        ));
     }
     table
 }

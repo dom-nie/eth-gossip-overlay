@@ -41,7 +41,8 @@ jobs:
 
       # The pull-request job starts the sidecars alone, which proves the mesh. This one starts
       # the demo a newcomer starts: three Lighthouse nodes checkpoint syncing a testnet, and
-      # overlay_bn_trusted at 1 on every sidecar. Three beacon nodes at once is more than a
+      # overlay_bn_trusted at 1 on every sidecar. It then runs T-053 check 3, the quickstart's
+      # own verification commands against that demo. Three beacon nodes at once is more than a
       # runner comfortably holds, so a failure here is worth reading before it is believed.
       - name: The demo with real beacon nodes
         run: scripts/container-checks.sh --with-beacon-nodes
