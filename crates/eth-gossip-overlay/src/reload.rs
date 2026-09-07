@@ -32,11 +32,12 @@
 //!   the outgoing seed for as long as the file is configured (DX-N2).
 //! - `log.level` and `log.format`: T-044's [`LogHandle`], which leaves the level alone while
 //!   `RUST_LOG` is set and says so (D32).
-//! - `overlay.fanout.small.relay_min_remote_hosts` (D36), `classes.large.repair_deadline_ms`
-//!   (D24) and the two `classes.small` keys the batcher reads, `batch_window_ms` and
-//!   `stale_after_ms` (T-061), have no applier: their consumers arrive with T-063, T-082 and
-//!   T-062, which register one each. Until then a change is still applied, in that
-//!   [`Reloader::config`] answers with it.
+//! - `classes.small.batch_window_ms` and `classes.small.stale_after_ms`: one applier for the
+//!   section, sending both bounds to T-062's batcher task, which closes what it is holding under
+//!   the old ones and collects under the new.
+//! - `overlay.fanout.small.relay_min_remote_hosts` (D36) and `classes.large.repair_deadline_ms`
+//!   (D24) have no applier: their consumers arrive with T-063 and T-082, which register one
+//!   each. Until then a change is still applied, in that [`Reloader::config`] answers with it.
 //!
 //! The roster is not a config key and has no applier. It goes on its own watch channel, which
 //! T-023's connection manager and [`spawn_pin_table`] follow, and is the one entry in
@@ -52,7 +53,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwap;
-use overlay_core::config::{Config, PublishRateLimit};
+use overlay_core::config::{Config, PublishRateLimit, SmallClass};
 use overlay_core::identity::{FleetSeed, Seeds, read_secret_file};
 use overlay_core::roster::Roster;
 use overlay_transport::tls::PinTable;
@@ -164,6 +165,8 @@ pub struct Deps {
     pub previous_seed: watch::Sender<Option<FleetSeed>>,
     /// The ceilings the publisher rebuilds its token buckets from (DX-N3).
     pub limits: watch::Sender<PublishRateLimit>,
+    /// The window and stale bound the batcher collects under (D21).
+    pub small: watch::Sender<SmallClass>,
     /// The running subscriber, whose level and format are reloadable (D32).
     pub log: Arc<LogHandle>,
     /// Where the two reload counters live.
@@ -302,6 +305,18 @@ impl Reloader {
                     let limits = deps.limits;
                     Box::new(move |cfg: &Config| {
                         limits.send_replace(cfg.bn.publish_rate_limit.clone());
+                        Ok(())
+                    })
+                },
+            ),
+            (
+                // One applier for the section, as above: the batcher takes the window and the
+                // stale bound together.
+                "classes.small",
+                {
+                    let small = deps.small;
+                    Box::new(move |cfg: &Config| {
+                        small.send_replace(cfg.classes.small.clone());
                         Ok(())
                     })
                 },
@@ -657,6 +672,7 @@ mod tests {
         roster: watch::Receiver<Roster>,
         previous_seed: watch::Receiver<Option<FleetSeed>>,
         limits: watch::Receiver<PublishRateLimit>,
+        small: watch::Receiver<SmallClass>,
         stats: Arc<Recorded>,
         reloader: Reloader,
     }
@@ -687,6 +703,7 @@ mod tests {
             let (roster_tx, roster_rx) = watch::channel(Roster::from_yaml(roster).unwrap());
             let (seed_tx, previous_seed) = watch::channel(None);
             let (limits_tx, limits) = watch::channel(PublishRateLimit::default());
+            let (small_tx, small) = watch::channel(SmallClass::default());
             let (sink, dispatch, log) = testing::subscriber(log_cfg, false, rust_log);
             let stats = Arc::new(Recorded::default());
             let reloader = Reloader::new(
@@ -696,6 +713,7 @@ mod tests {
                     roster: roster_tx,
                     previous_seed: seed_tx,
                     limits: limits_tx,
+                    small: small_tx,
                     log: Arc::new(log),
                     stats: stats.clone(),
                 },
@@ -709,6 +727,7 @@ mod tests {
                 roster: roster_rx,
                 previous_seed,
                 limits,
+                small,
                 stats,
                 reloader,
             };

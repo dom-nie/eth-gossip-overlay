@@ -501,6 +501,7 @@ mod tests {
                 watch::channel(Roster::from_yaml(&roster_yaml(3)).unwrap());
             let (seed_tx, _seed_rx) = watch::channel::<Option<FleetSeed>>(None);
             let (limits_tx, _limits_rx) = watch::channel(Default::default());
+            let (small_tx, _small_rx) = watch::channel(Default::default());
             let (_sink, _dispatch, log) = testing::subscriber(&Log::default(), false, None);
             let reloader = Reloader::new(
                 config_path.clone(),
@@ -509,6 +510,7 @@ mod tests {
                     roster: roster_tx,
                     previous_seed: seed_tx,
                     limits: limits_tx,
+                    small: small_tx,
                     log: Arc::new(log),
                     stats: Arc::new(()),
                 },

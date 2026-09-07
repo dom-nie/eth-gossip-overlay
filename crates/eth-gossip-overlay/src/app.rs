@@ -377,8 +377,8 @@ impl App {
             },
         ));
         let exchange = subs::spawn(exchanged, sets_rx.clone(), topics.clone(), metrics.clone());
-        let (batches, batching) =
-            Batching::spawn(watch::channel(cfg.classes.small.clone()).1, metrics.clone());
+        let (small_tx, small_rx) = watch::channel(cfg.classes.small.clone());
+        let (batches, batching) = Batching::spawn(small_rx, metrics.clone());
         let fanout = Fanout::spawn(
             fanout_lanes,
             manager.live_source(),
@@ -406,6 +406,7 @@ impl App {
                 roster: roster_tx,
                 previous_seed: previous_seed_tx,
                 limits: limits_tx,
+                small: small_tx,
                 log: log.clone(),
                 stats: metrics.clone(),
             },
