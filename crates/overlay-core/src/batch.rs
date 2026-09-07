@@ -477,4 +477,35 @@ mod tests {
         assert_eq!(payloads(&flushes[0]), vec![payload(2)]);
         assert_eq!(flushes[0].stale_dropped, 1);
     }
+
+    #[test]
+    fn drop_stale_on_a_flushed_batch_removes_only_entries_that_aged_out_since() {
+        let clock = FakeClock::new();
+        let mut batcher = batcher();
+        batcher.push(
+            &dest("host-a"),
+            TopicId::new(11),
+            payload(1),
+            MAX_BYTES,
+            clock.now(),
+        );
+        clock.advance(WINDOW - Duration::from_millis(1));
+        batcher.push(
+            &dest("host-a"),
+            TopicId::new(11),
+            payload(2),
+            MAX_BYTES,
+            clock.now(),
+        );
+        clock.advance(Duration::from_millis(1));
+        let mut flushes = batcher.tick(clock.now());
+        assert_eq!(flushes[0].entries.len(), 2);
+        assert_eq!(flushes[0].stale_dropped, 0);
+
+        clock.advance(STALE_AFTER - WINDOW);
+        let dropped = batcher.drop_stale(&mut flushes[0].entries, clock.now());
+
+        assert_eq!(dropped, 1);
+        assert_eq!(payloads(&flushes[0]), vec![payload(2)]);
+    }
 }
