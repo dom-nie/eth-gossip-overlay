@@ -205,3 +205,37 @@ fn peer_id_of(fixture: &common::Fixture) -> String {
     assert!(output.status.success(), "{output:?}");
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
+
+/// D01: the node key is the sidecar's whole libp2p identity, so `peer-id` runs on a host that
+/// has neither a seed nor a roster yet. Which is what an operator does first, to put the id in
+/// the beacon node's configuration before the sidecar has ever started.
+#[test]
+fn peer_id_needs_only_the_node_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config_in(dir.path()).unwrap();
+    let node_key = dir.path().join("node.key");
+
+    let first = fleet_overlay()
+        .args(["peer-id", "--config"])
+        .arg(&config)
+        .output()
+        .unwrap();
+
+    assert!(first.status.success(), "{first:?}");
+    assert!(node_key.is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&node_key).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "{mode:04o}");
+    }
+
+    let second = fleet_overlay()
+        .args(["peer-id", "--config"])
+        .arg(&config)
+        .output()
+        .unwrap();
+
+    assert!(second.status.success(), "{second:?}");
+    assert_eq!(second.stdout, first.stdout);
+}
