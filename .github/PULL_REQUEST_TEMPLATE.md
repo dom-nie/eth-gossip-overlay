@@ -11,6 +11,6 @@ Ticket: T-NNN, or none
 - [ ] New config keys are parsed in `overlay-core`'s `Config`, defaulted, validated, and documented in `docs/configuration.md` once the operator documentation exists
 - [ ] New metrics are added to the metrics constants module and to the design document's metrics table
 - [ ] Linux-only code is behind `cfg(target_os = "linux")` and the workspace still builds on macOS
-- [ ] The `Unreleased` section of `CHANGELOG.md` is updated once the changelog exists
+- [ ] The `Unreleased` section of `CHANGELOG.md` says what this change gives an operator, or the pull request carries the `skip-changelog` label
 - [ ] Reviewed by someone who did not write it; the reviewer ticks this list
 - [ ] For a change that implements a backlog ticket, the ticket's status is updated and the master file regenerated

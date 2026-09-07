@@ -49,6 +49,32 @@ Run `cargo fmt --all` before committing. Clippy runs with `-D warnings`, and thr
 
 The subject is a lowercase imperative summary under 72 characters. Changes from the backlog carry the ticket id as a prefix (`T-007: expire seen cache entries after ttl`); other changes name what they do. The body, when there is one, says what changed and why in plain language.
 
+## Changelog
+
+Every change to a crate's `src/` adds a line to the `Unreleased` section of `CHANGELOG.md`, and CI fails a pull request that does not. Write it for the operator who will read the release notes rather than for the reviewer who has the diff: what they get, or what changes under them, in a sentence. A change with nothing an operator would read, a test or a refactor or a comment, carries the `skip-changelog` label instead. `scripts/changelog.sh check origin/main HEAD` runs the same check before you push.
+
+Every section, `Unreleased` included, carries one `Protocol:` line saying what the release means for a fleet halfway through an upgrade. It is machine-read, so it has one spelling:
+
+```
+Protocol: major unchanged (1); features added: none
+Protocol: major unchanged (1); features added: STRIPING (bit 1)
+Protocol: major 1 → 2; features added: none
+```
+
+The major is `PROTOCOL_MAJOR`, which changes only when a release stops being able to pair with the one before it. A feature name is one of `overlay_core::protocol::features::NAMES` upper-cased, with the bit it occupies; a name or a bit that belongs to no feature fails the suite, and a release whose image does not advertise a bit the notes claim fails the release workflow. `major unchanged` means every pair keeps working and the hosts can be upgraded in any order; `major 1 → 2` means the fleet is two overlays until the last host is done. [docs/upgrading.md](docs/upgrading.md) is the operator's side of the same two cases.
+
+## Releases
+
+```sh
+scripts/release.sh 0.2.0 --dry-run    # what it would change, changing nothing
+scripts/release.sh 0.2.0              # bump, move the section, commit, tag
+git push origin main v0.2.0           # the tag is what builds the release
+```
+
+`release.sh` refuses a version that is already tagged, a working tree that is not clean, and an `Unreleased` section whose `Protocol:` line is missing or claims a major the build does not speak. It bumps the workspace version and the image label, moves `Unreleased` under the new version with today's date, leaves an empty `Unreleased` behind, commits and tags. Nothing is pushed for you.
+
+Pushing the tag runs `.github/workflows/release.yml`: both Linux targets on a Debian oldstable builder, a tarball per target with the two binaries, the licence and `deploy/`, `SHA256SUMS`, a provenance attestation, the container image on `ghcr.io` and a GitHub release whose notes are the changelog section. Running that workflow by hand instead is a dry run: it builds and checksums, and publishes nothing.
+
 ## Developer Certificate of Origin
 
 Contributors certify the [Developer Certificate of Origin 1.1](https://developercertificate.org/) by adding `Signed-off-by: Name <email>` to each commit, which `git commit -s` does for you. There is no CLA. The sign-off is what a pull request needs, and it is the only trailer this project uses: no `Co-Authored-By`, no tool attribution.
@@ -74,6 +100,6 @@ The pull request template carries this list verbatim and a test keeps the two co
 - [ ] New config keys are parsed in `overlay-core`'s `Config`, defaulted, validated, and documented in `docs/configuration.md` once the operator documentation exists
 - [ ] New metrics are added to the metrics constants module and to the design document's metrics table
 - [ ] Linux-only code is behind `cfg(target_os = "linux")` and the workspace still builds on macOS
-- [ ] The `Unreleased` section of `CHANGELOG.md` is updated once the changelog exists
+- [ ] The `Unreleased` section of `CHANGELOG.md` says what this change gives an operator, or the pull request carries the `skip-changelog` label
 - [ ] Reviewed by someone who did not write it; the reviewer ticks this list
 - [ ] For a change that implements a backlog ticket, the ticket's status is updated and the master file regenerated
