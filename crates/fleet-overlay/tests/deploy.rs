@@ -220,11 +220,9 @@ fn rendered_nft_from_example_roster_contains_all_three_addresses_and_only_udp_77
 /// rather than on the operator's first start.
 #[test]
 fn example_config_and_roster_load_with_the_real_parsers() {
-    let config = Config::from_yaml(&read(CONFIG));
-    let roster = Roster::from_yaml(&read(ROSTER));
+    Config::from_yaml(&read(CONFIG)).unwrap_or_else(|err| panic!("{CONFIG}: {err}"));
+    let roster = Roster::from_yaml(&read(ROSTER)).unwrap_or_else(|err| panic!("{ROSTER}: {err}"));
 
-    config.unwrap_or_else(|err| panic!("{CONFIG}: {err}"));
-    let roster = roster.unwrap_or_else(|err| panic!("{ROSTER}: {err}"));
     assert_eq!(roster.hosts.len(), 3, "{ROSTER}");
 }
 
