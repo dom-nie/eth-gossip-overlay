@@ -10,7 +10,9 @@ use eth_gossip_overlay::metrics::{
     UNIT_BYTES,
 };
 use harness::{Fleet, SETTLE, Scrape, WAIT, topic};
+use overlay_core::protocol::features;
 use overlay_transport::sender::{DropReason, LARGE_LANE_BYTES};
+use overlay_transport::testutil::features::mask;
 
 mod harness;
 
@@ -551,4 +553,66 @@ async fn attestation_burst_of_1000_arrives_within_100_ms_on_loopback() {
     for index in 1..hosts {
         assert_eq!(arrived(&fleet, index), burst.len(), "node {index}");
     }
+}
+
+/// Scenario 18 (D29): this release is the first to advertise a feature bit, and a fleet is
+/// upgraded host by host, so for as long as the rollout takes some pairs have the bit and some
+/// do not. Both keep working: the pair still forms, the older host is served by the whole
+/// message path it can read, and what it publishes still reaches the upgraded ones.
+///
+/// The host that has not been upgraded is one whose HELLO advertises nothing, which is exactly
+/// what a release before this one puts in it. A feature set is read once per HELLO, so changing
+/// it is a restart, the way upgrading a host is.
+#[tokio::test(flavor = "multi_thread")]
+async fn rolling_upgrade_adding_a_feature_bit_keeps_pairing_and_serves_older_peers_by_fallback() {
+    let subnet = topic("beacon_attestation_9");
+    let mut fleet = Fleet::builder().regions(&[("eu", 3)]).start().await;
+    for node in fleet.nodes() {
+        node.subscribe(&subnet).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    let (upgraded, older) = (
+        fleet.node(1).hostname().clone(),
+        fleet.node(2).hostname().clone(),
+    );
+
+    mask(&older, Some(0));
+    fleet.restart_node(2).await;
+    fleet.wait_full_mesh(WAIT).await;
+
+    assert_eq!(
+        fleet.node(0).negotiated_features(&upgraded).await,
+        features::DATAGRAM_BATCHES,
+        "two hosts on this release should have negotiated the bit"
+    );
+    assert_eq!(
+        fleet.node(0).negotiated_features(&older).await,
+        0,
+        "a host that advertised nothing should have negotiated nothing"
+    );
+
+    let out = b"an attestation for a fleet halfway through the upgrade".to_vec();
+    fleet.node(0).bn().publish(&subnet, &out).await;
+    fleet
+        .wait_for("both other beacon nodes to import it", WAIT, |fleet| {
+            (1..3).all(|index| fleet.node(index).bn().count(&subnet, &out) == 1)
+        })
+        .await;
+
+    let back = b"an attestation from the host that has not upgraded".to_vec();
+    fleet.node(2).bn().publish(&subnet, &back).await;
+    fleet
+        .wait_for("the upgraded hosts to import what it sent", WAIT, |fleet| {
+            (0..2).all(|index| fleet.node(index).bn().count(&subnet, &back) == 1)
+        })
+        .await;
+
+    mask(&older, None);
+    fleet.restart_node(2).await;
+    fleet.wait_full_mesh(WAIT).await;
+    assert_eq!(
+        fleet.node(0).negotiated_features(&older).await,
+        features::DATAGRAM_BATCHES,
+        "the upgraded host should have negotiated the bit"
+    );
 }

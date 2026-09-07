@@ -40,9 +40,9 @@
 //!
 //! # Scenarios
 //!
-//! The nine v1 scenarios and DX-N5's review scenarios live in `tests/fleet_v1.rs`. The seven
-//! that need a feature this release does not ship are written by the ticket that ships it, in
-//! this harness, with the hooks only they need:
+//! The nine v1 scenarios and DX-N5's review scenarios live in `tests/fleet_v1.rs`. The six that
+//! need a feature no release has shipped yet are written by the ticket that ships it, in this
+//! harness, with the hooks only they need:
 //!
 //! | # | Scenario | Written by |
 //! |---|---|---|
@@ -52,7 +52,6 @@
 //! | 13 | an unsubscribed relay re-fans but does not publish | T-063 |
 //! | 15 | a wedged beacon node on one host does not delay the second hop to its region | T-063, T-073 |
 //! | 16 | one third of a region lost mid-slot completes via parity or repair before the deadline | T-074, T-082 |
-//! | 18 | a rolling upgrade adding a feature bit keeps pairing and serves older peers by fallback | T-062 |
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
@@ -711,6 +710,22 @@ impl Node {
     }
 
     /// How many live peers the admin socket reports, or none when the sidecar is stopped.
+    /// What this node's pair with `peer` negotiated, as `eth-gossip-overlayctl status` reports
+    /// it: the bits both ends advertised, which is what says whether a pair is running the
+    /// fallback or the feature (D29).
+    pub async fn negotiated_features(&self, peer: &Hostname) -> u64 {
+        let answer = self.ctl(r#"{"cmd":"status"}"#).await;
+        let status: serde_json::Value = serde_json::from_str(&answer).unwrap();
+        status["status"]["peers"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no peers in {answer}"))
+            .iter()
+            .find(|live| live["hostname"] == peer.0.as_str())
+            .unwrap_or_else(|| panic!("{peer} is not live: {answer}"))["features"]
+            .as_u64()
+            .unwrap()
+    }
+
     pub async fn live_peers(&self) -> usize {
         if self.app.is_none() {
             return 0;
