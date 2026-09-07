@@ -726,6 +726,15 @@ impl<A: Admission> TestCluster<A> {
             .unwrap_or_default()
     }
 
+    /// The `DATAGRAM` frames node `index` has read from `peer`, counted by quinn on the
+    /// connection itself. Datagrams that arrived rather than batches that were built, which is
+    /// what a test about the small class's carrier is asking.
+    pub fn datagrams_received(&self, index: usize, peer: &Hostname) -> u64 {
+        self.live(index)
+            .get(peer)
+            .map_or(0, |live| live.connection.stats().frame_rx.datagram)
+    }
+
     /// What node `index` puts in its own HELLO.
     pub fn self_hello(&self, index: usize) -> SelfHello {
         self.nodes[index].self_hello.clone()

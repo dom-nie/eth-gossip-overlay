@@ -227,8 +227,17 @@ mod tests {
     use crate::manager::LiveSource;
     use crate::sender::{LARGE_QUEUED_BYTES_MAX, LargeLedger, PeerSender};
     use crate::testutil::{
-        Builder, NodeKind, REGION, SendSpy, WAIT, peer_state, topic, view, within,
+        Builder, NodeKind, REGION, SendSpy, TestCluster, WAIT, eventually, peer_state,
+        subscriptions, topic, view, within,
     };
+
+    /// The gossipsub wire form of an attestation nothing else in a test will produce, so ten of
+    /// them are ten payloads to the seen cache rather than one repeated ten times.
+    fn attestation(n: usize) -> Vec<u8> {
+        snap::raw::Encoder::new()
+            .compress_vec(format!("attestation {n}").as_bytes())
+            .unwrap()
+    }
 
     /// The label an alert and a dashboard are keyed on (§12), so the strings are pinned rather
     /// than derived.
@@ -259,6 +268,34 @@ mod tests {
             limit as usize - WHOLE_MESSAGE_HEADER_BYTES + 1,
             limit
         ));
+    }
+
+    /// §5.4: ten attestations for one destination inside one window leave as one datagram, and
+    /// the destination publishes ten payloads. That is the whole point of batching, and the two
+    /// halves of it are what an operator sees on either end: one frame on the wire, ten
+    /// messages in the counters.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ten_attestations_pushed_within_the_window_arrive_as_one_datagram_and_ten_publishes() {
+        let subnet = topic("beacon_attestation_7");
+        let mut cluster = TestCluster::start(2).await;
+        for node in 0..2 {
+            cluster.start_sidecar(node, subscriptions(&[&subnet], &[]));
+        }
+        eventually("the sibling to say it wants the subnet", || {
+            cluster.live(0).subscribers(&subnet).len() == 1
+        })
+        .await;
+
+        for n in 0..10 {
+            let payload = attestation(n);
+            assert!(cluster.from_bn(0, &subnet, &payload));
+        }
+
+        eventually("all ten to be queued at the sibling", || {
+            cluster.published(1).len() == 10
+        })
+        .await;
+        assert_eq!(cluster.datagrams_received(1, &cluster.hostname(0)), 1);
     }
 
     /// The invariant the module is shaped around (§5.7): a message that goes to a hundred peers
