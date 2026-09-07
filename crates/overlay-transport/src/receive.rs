@@ -513,6 +513,7 @@ mod tests {
     };
     use bytes::BytesMut;
     use overlay_core::budget::SUSTAINED_VIOLATION;
+    use overlay_core::config;
     use overlay_core::seen::SeenCache;
     use overlay_core::time::SystemClock;
     use overlay_core::topic::UNKNOWN_LARGE_THRESHOLD_BYTES;
@@ -790,6 +791,69 @@ mod tests {
                 == Some(after.clone().into())
         })
         .await;
+    }
+
+    /// A fanout that relays into a remote region of `min_remote_hosts` or more, through
+    /// `per_region` of its hosts.
+    fn relaying(min_remote_hosts: usize, per_region: usize) -> config::Fanout {
+        config::Fanout {
+            small: config::SmallFanout {
+                relay_min_remote_hosts: min_remote_hosts,
+                relays_per_remote_region: per_region,
+                ..config::SmallFanout::default()
+            },
+            ..config::Fanout::default()
+        }
+    }
+
+    /// §5.4 end to end over two regions: an attestation reaches every subscriber in the remote
+    /// one, and the WAN carried one copy per relay rather than one per host. The relay's own
+    /// batch goes out with `RELAY` clear, so the hosts it fans to spread nothing further and
+    /// each of them is offered the attestation once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_forwards_a_relay_batch_in_region_once_with_relay_clear() {
+        let subnet = topic("beacon_attestation_7");
+        let payload = payload(b"one attestation for two regions");
+        let mut cluster = Builder::new(&[NodeKind::Manager; 6])
+            .regions(&["eu", "eu", "eu", "us", "us", "us"])
+            .fanout(relaying(3, 1))
+            .start()
+            .await;
+        for node in 0..6 {
+            cluster.start_sidecar(node, subscriptions(&[&subnet], &[]));
+        }
+        eventually("every host to say it wants the subnet", || {
+            (0..6).all(|node| cluster.live(node).subscribers(&subnet).len() == 5)
+        })
+        .await;
+
+        assert!(cluster.from_bn(0, &subnet, &payload));
+
+        for node in 1..6 {
+            eventually("every other host to queue it", || {
+                cluster.published(node).len() == 1
+            })
+            .await;
+        }
+        tokio::time::sleep(SETTLE).await;
+        let origin = cluster.hostname(0);
+        let over_the_wan = (3..6)
+            .filter(|node| cluster.stats(*node).messages(Direction::In, &origin) > 0)
+            .count();
+        assert_eq!(over_the_wan, 1, "one WAN copy per relay, not one per host");
+        for node in 0..6 {
+            assert_eq!(cluster.published(node).len(), usize::from(node != 0));
+            assert_eq!(cluster.stats(node).duplicates(Class::Small), 0);
+            for peer in 0..6 {
+                assert_eq!(
+                    cluster
+                        .stats(node)
+                        .relay_same_region(&cluster.hostname(peer)),
+                    0,
+                    "a batch was re-fanned with RELAY still set"
+                );
+            }
+        }
     }
 
     /// One hop is structural, not a rule this file follows (§3 principle 1): a receiver holds

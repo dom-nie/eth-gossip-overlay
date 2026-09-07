@@ -166,6 +166,8 @@ pub struct CountingStats {
     first_seen: Mutex<HashMap<Class, u64>>,
     duplicates: Mutex<HashMap<Class, u64>>,
     fanout_suppressed: Mutex<BTreeMap<(Hostname, FanoutKind), u64>>,
+    relayed_batches: AtomicU64,
+    relay_same_region: Mutex<BTreeMap<Hostname, u64>>,
     queue_depths: Mutex<HashMap<(Hostname, Class), (usize, usize)>>,
     queue_drops: Mutex<HashMap<(Hostname, Class, DropReason), u64>>,
     stale_dropped: Mutex<HashMap<StaleReason, u64>>,
@@ -271,6 +273,16 @@ impl CountingStats {
     /// `fanout_suppressed_total{peer, kind}`.
     pub fn fanout_suppressed(&self, peer: &Hostname, kind: FanoutKind) -> u64 {
         count(&self.fanout_suppressed, &(peer.clone(), kind))
+    }
+
+    /// `relayed_batches_total`.
+    pub fn relayed_batches(&self) -> u64 {
+        self.relayed_batches.load(Ordering::Relaxed)
+    }
+
+    /// `relay_same_region_total{peer}`.
+    pub fn relay_same_region(&self, peer: &Hostname) -> u64 {
+        count(&self.relay_same_region, peer)
     }
 
     /// `peer_queue_depth{peer, class}` in frames and bytes, as it was last set.
