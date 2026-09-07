@@ -9,8 +9,9 @@
 #
 # The mesh check starts the three sidecars alone. A sidecar builds its overlay whether or not
 # its beacon node is up, so the check needs no testnet and runs on every pull request.
-# --with-beacon-nodes starts the whole demo instead and also asserts overlay_bn_trusted, which
-# needs a testnet and minutes of checkpoint sync, so that variant runs nightly.
+# --with-beacon-nodes starts the whole demo instead and also asserts overlay_bn_trusted, and
+# then runs T-053 check 3: the quickstart's own verification commands against the demo. Both
+# need a testnet and minutes of checkpoint sync, so that variant runs nightly.
 #
 # IMAGE            the tag to build and check, fleet-overlay:demo by default
 # TOOLBOX          the Dockerfile's toolbox stage, which the compose demo's setup step needs
@@ -165,6 +166,39 @@ if [ "$formed" = 1 ]; then
   pass "$check (${elapsed}s)"
 else
   fail "$check (gave up after ${elapsed}s)"
+fi
+
+# 6. T-053 check 3. The quickstart's "Check it worked" section, run as written. Its `sh` blocks
+# are the commands an operator types; `console` blocks show output and are not run. The demo is
+# the quickstart already performed, so what is left to check is the last section: the commands
+# have to name the right paths, flags and metrics, and each has to exit 0.
+#
+# A demo host is a container, so `sudo`, `journalctl` and the two binaries are functions that
+# reach into it. Everything else, curl and jq and grep included, runs as the document says.
+quickstart_commands() {
+  awk '
+    /^## / { under = ($0 == "## Check it worked") }
+    under && /^```sh$/ { inside = 1; next }
+    inside && /^```$/ { inside = 0; next }
+    inside { print }
+  ' "$root/docs/quickstart.md"
+}
+
+if [ "$with_beacon_nodes" = 1 ] && [ "$formed" = 1 ]; then
+  commands=$(quickstart_commands)
+  if [ -z "$commands" ]; then
+    fail "quickstart_commands_run_in_the_compose_demo (no sh block under Check it worked)"
+  elif (
+    sudo() { "$@"; }
+    fleet-overlay() { compose exec -T sc-1 fleet-overlay "$@"; }
+    fleet-overlayctl() { compose exec -T sc-1 fleet-overlayctl --socket /var/lib/fleet-overlay/admin.sock "$@"; }
+    journalctl() { compose logs --no-log-prefix sc-1; }
+    eval "$commands"
+  ); then
+    pass "quickstart_commands_run_in_the_compose_demo"
+  else
+    fail "quickstart_commands_run_in_the_compose_demo"
+  fi
 fi
 
 exit "$failed"
