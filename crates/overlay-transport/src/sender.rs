@@ -637,10 +637,30 @@ async fn send_batch<T: Transport>(
 
 #[cfg(test)]
 mod tests {
+    use overlay_core::batch::Entry;
     use overlay_core::roster::Hostname;
+    use overlay_core::topic::table::TopicId;
 
     use super::*;
     use crate::testutil::{CountingStats, SendSpy, eventually, within};
+
+    /// A batch of two entries for the peer, pushed at `at`, as the batcher would have flushed
+    /// it.
+    fn flush_of(at: Instant) -> Flush {
+        Flush {
+            dest: peer(),
+            entries: ["the first attestation", "the second"]
+                .into_iter()
+                .map(|payload| Entry {
+                    topic_id: TopicId::new(1),
+                    payload: Bytes::from_static(payload.as_bytes()),
+                    pushed_at: at,
+                })
+                .collect(),
+            carrier: Carrier::Datagram,
+            stale_dropped: 0,
+        }
+    }
 
     /// A frame numbered `n`, so a test can tell which ones survived and in what order.
     fn frame(n: usize) -> Bytes {
@@ -878,6 +898,34 @@ mod tests {
             stats.queue_drops(&peer(), Class::Large, DropReason::Stale),
             1
         );
+    }
+
+    /// The second of D21's two age checks. A flush is checked on its way out of the batcher and
+    /// again here, because it can wait in this lane long enough to age out on the way, and an
+    /// attestation that late is worth nothing to the beacon node while still costing it the
+    /// validation. Nothing goes, and every entry the batch held is counted.
+    #[tokio::test(start_paused = true)]
+    async fn stale_batch_is_dropped_at_dequeue_and_never_sent() {
+        let link = SendSpy::stalled();
+        let (sender, stats) = sender(&link);
+        let start = tokio::time::Instant::now().into_std();
+        let stale_after = Duration::from_secs(1);
+
+        // A large frame the stalled spy will not take is what holds the drain: the batch waits
+        // behind it, which is the case the second check exists for.
+        sender.push(Class::Large, frame(0), start).unwrap();
+        sender
+            .push_batch(flush_of(start), stale_after, start)
+            .unwrap();
+        tokio::time::advance(stale_after + Duration::from_millis(1)).await;
+        link.release();
+
+        eventually("the batch to be given up on", || {
+            stats.stale_dropped(StaleReason::Dequeue) == 2
+        })
+        .await;
+        assert_eq!(numbers(&link), vec![0]);
+        assert!(link.datagrams().is_empty());
     }
 
     /// One peer's lane is not the bound that matters when a hundred of them are slow at once:
