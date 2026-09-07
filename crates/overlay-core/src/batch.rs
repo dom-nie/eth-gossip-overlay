@@ -145,6 +145,15 @@ mod tests {
         Bytes::from(vec![byte; 240])
     }
 
+    /// What a flush carries, in the order it carries it.
+    fn payloads(flush: &Flush) -> Vec<Bytes> {
+        flush
+            .entries
+            .iter()
+            .map(|entry| entry.payload.clone())
+            .collect()
+    }
+
     #[test]
     fn single_payload_is_not_flushed_before_the_window() {
         let clock = FakeClock::new();
@@ -161,6 +170,27 @@ mod tests {
 
         clock.advance(WINDOW - Duration::from_millis(1));
 
+        assert!(batcher.tick(clock.now()).is_empty());
+    }
+
+    #[test]
+    fn tick_after_window_flushes_the_open_batch() {
+        let clock = FakeClock::new();
+        let mut batcher = batcher();
+        batcher.push(
+            &dest("host-a"),
+            TopicId::new(1),
+            payload(1),
+            MAX_BYTES,
+            clock.now(),
+        );
+
+        clock.advance(WINDOW);
+        let flushes = batcher.tick(clock.now());
+
+        assert_eq!(flushes.len(), 1);
+        assert_eq!(flushes[0].dest, dest("host-a"));
+        assert_eq!(payloads(&flushes[0]), vec![payload(1)]);
         assert!(batcher.tick(clock.now()).is_empty());
     }
 }
