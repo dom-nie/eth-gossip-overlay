@@ -65,6 +65,7 @@ use std::time::{Duration, Instant};
 
 use fleet_overlay::app::App;
 use fleet_overlay::logging::{self, LogHandle};
+use overlay_bn::node_key::NodeKey;
 use overlay_bn::testutil::{FakeBn, FakeBnEvent};
 use overlay_core::config::{Config, Log, LogFormat, LogLevel};
 use overlay_core::roster::Hostname;
@@ -180,8 +181,10 @@ impl Builder {
             dir,
             nodes,
             settings: self.settings,
+            seed: SEED,
             cut: Vec::new(),
             probes: 0,
+            rotating: false,
         };
         for index in 0..fleet.nodes.len() {
             fleet.write_files(index);
@@ -202,10 +205,14 @@ pub struct Fleet {
     dir: tempfile::TempDir,
     nodes: Vec<Node>,
     settings: Settings,
+    /// The seed in force, which [`Fleet::rotate_seed`] replaces.
+    seed: [u8; 32],
     /// Pairs whose rosters no longer name each other, from [`Fleet::partition`].
     cut: Vec<(usize, usize)>,
     /// How many probe rounds [`Fleet::wait_full_mesh`] has run.
     probes: usize,
+    /// Whether a rotation has put a previous-seed file in every node's configuration.
+    rotating: bool,
 }
 
 impl Fleet {
@@ -402,8 +409,15 @@ impl Fleet {
         std::fs::write(node.dir.join("roster.yaml"), format!("hosts:\n{hosts}")).unwrap();
 
         let path = |name: &str| node.dir.join(name).display().to_string();
+        // The key, not the file, is what a reload acts on: its applier runs when the document
+        // changes, so adding and removing the key is what turns dual-seed acceptance on and off
+        // under a running sidecar (DX-N2).
+        let previous = match self.rotating {
+            true => format!("  fleet_seed_previous_file: {}\n", path("seed.previous")),
+            false => String::new(),
+        };
         let yaml = format!(
-            "overlay:\n  listen: \"{}\"\n  roster_file: {}\n  fleet_seed_file: {}\n\
+            "overlay:\n  listen: \"{}\"\n  roster_file: {}\n  fleet_seed_file: {}\n{}\
              \x20 keepalive_ms: 500\n  idle_timeout_ms: 5000\n\
              bn:\n  node_key_file: {}\n  identity_url: \"{}\"\n  libp2p_addr: \"{}\"\n\
              \x20 listen_addr: \"/ip4/127.0.0.1/tcp/0\"\n\
@@ -412,6 +426,7 @@ impl Fleet {
             node.overlay,
             path("roster.yaml"),
             self.dir.path().join("seed").display(),
+            previous,
             path("node.key"),
             node.bn_http,
             node.bn_addr,
@@ -443,6 +458,47 @@ impl Fleet {
         if let Some(running) = self.nodes[index].app.take() {
             running.stop.send_replace(true);
             let _ = running.task.await;
+        }
+    }
+
+    /// Runs the seed rotation of DX-N2 up to the restarts, so that every host accepts keys from
+    /// both seeds and a restarted sidecar derives its own from the new one.
+    ///
+    /// Two steps, because a reload cannot change the seed in force: `overlay.fleet_seed_file` is
+    /// restart-required, so a running sidecar keeps the seed it started on until it restarts.
+    /// The first step therefore pushes the *new* seed as the previous-seed file and adds the key
+    /// naming it, which is the change the reload applies and which leaves a host still running
+    /// the old seed pinning both. The second step lays the files out the way an operator leaves
+    /// them, new seed as `seed` and old as `seed.previous`, for the restarts to read. Nothing
+    /// reloads after that, so the hosts that have not restarted keep both seeds in force.
+    pub async fn rotate_seed(&mut self, new_seed: [u8; 32]) {
+        let old = self.seed;
+        self.rotating = true;
+        for node in &self.nodes {
+            write_secret(&node.dir.join("seed.previous"), &new_seed);
+        }
+        for index in 0..self.nodes.len() {
+            self.write_files(index);
+        }
+        self.reload_all().await;
+
+        self.seed = new_seed;
+        write_secret(&self.dir.path().join("seed"), &new_seed);
+        for node in &self.nodes {
+            write_secret(&node.dir.join("seed.previous"), &old);
+        }
+    }
+
+    /// Ends the rotation: the key naming the previous-seed file goes, a reload leaves every node
+    /// pinning the new seed alone, and the files go with it.
+    pub async fn retire_previous_seed(&mut self) {
+        self.rotating = false;
+        for index in 0..self.nodes.len() {
+            self.write_files(index);
+        }
+        self.reload_all().await;
+        for node in &self.nodes {
+            std::fs::remove_file(node.dir.join("seed.previous")).unwrap();
         }
     }
 
@@ -521,6 +577,7 @@ pub struct Node {
     metrics: SocketAddr,
     bn_http: String,
     bn_addr: String,
+    peer_id: String,
     bn: Option<Bn>,
     app: Option<Running>,
 }
@@ -531,6 +588,10 @@ impl Node {
         std::fs::create_dir(&dir).unwrap();
         let fake = FakeBn::start().await;
         let (bn_http, bn_addr) = (fake.http_addr().to_string(), fake.addr().to_string());
+        let peer_id = NodeKey::load_or_create(&dir.join("node.key"))
+            .unwrap()
+            .peer_id()
+            .to_string();
         Self {
             hostname: Hostname(format!("{prefix}-bn-{index:02}")),
             region: region.to_owned(),
@@ -539,6 +600,7 @@ impl Node {
             metrics: reserved(Transport::Tcp),
             bn_http,
             bn_addr,
+            peer_id,
             bn: Some(Bn::new(fake)),
             app: None,
         }
@@ -547,6 +609,18 @@ impl Node {
     /// This host's name, its identity everywhere in the fleet.
     pub fn hostname(&self) -> &Hostname {
         &self.hostname
+    }
+
+    /// The libp2p identity the beacon node trusts. A restart keeps it, and so does a seed
+    /// rotation, because the node key is a file on this host rather than something the fleet
+    /// seed derives (D01).
+    pub fn peer_id(&self) -> &str {
+        &self.peer_id
+    }
+
+    /// The `lighthouse.env` this node wrote before it bound anything (OPS-N1).
+    pub fn lighthouse_env(&self) -> Vec<u8> {
+        std::fs::read(self.dir.join("lighthouse.env")).unwrap()
     }
 
     /// This node's beacon node.
@@ -610,6 +684,8 @@ pub struct Bn {
     fake: FakeBn,
     received: Arc<Mutex<Vec<Message>>>,
     subscribed: Arc<Mutex<Vec<String>>>,
+    connects: Arc<AtomicUsize>,
+    disconnects: Arc<AtomicUsize>,
     drains: Vec<JoinHandle<()>>,
 }
 
@@ -623,12 +699,24 @@ impl Bn {
                 sink.lock().unwrap().push((topic, payload));
             }
         });
+        let (connects, disconnects) =
+            (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
         let mut events = fake.events();
-        let topics = Arc::clone(&subscribed);
+        let (topics, up, down) = (
+            Arc::clone(&subscribed),
+            Arc::clone(&connects),
+            Arc::clone(&disconnects),
+        );
         let watching = tokio::spawn(async move {
             while let Some(event) = events.recv().await {
-                if let FakeBnEvent::Subscribed { topic, .. } = event {
-                    topics.lock().unwrap().push(topic);
+                match event {
+                    FakeBnEvent::Connected(_) => {
+                        up.fetch_add(1, Ordering::Relaxed);
+                    }
+                    FakeBnEvent::Disconnected(_) => {
+                        down.fetch_add(1, Ordering::Relaxed);
+                    }
+                    FakeBnEvent::Subscribed { topic, .. } => topics.lock().unwrap().push(topic),
                 }
             }
         });
@@ -636,6 +724,8 @@ impl Bn {
             fake,
             received,
             subscribed,
+            connects,
+            disconnects,
             drains: vec![reading, watching],
         }
     }
@@ -666,6 +756,16 @@ impl Bn {
             .iter()
             .filter(|(seen, bytes)| seen == topic && bytes == payload)
             .count()
+    }
+
+    /// How many times a sidecar has connected to this beacon node.
+    pub fn connects(&self) -> usize {
+        self.connects.load(Ordering::Relaxed)
+    }
+
+    /// How many times one has gone away.
+    pub fn disconnects(&self) -> usize {
+        self.disconnects.load(Ordering::Relaxed)
     }
 
     /// Drops the swarm and the mock server, so the sidecar's link goes down and stays down.
