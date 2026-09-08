@@ -8,12 +8,12 @@
 //! chunk present, is a concatenation that never calls the codec.
 
 use bytes::{Bytes, BytesMut};
-use reed_solomon_simd::ReedSolomonEncoder;
+use reed_solomon_simd::{ReedSolomonDecoder, ReedSolomonEncoder};
 
 use crate::wire::MAX_PAYLOAD_BYTES;
 
-/// Every call the codec refuses is a shape [`Params::for_len`] already ruled out.
-const SPLIT_IS_ENCODABLE: &str = "Params::for_len proved the codec takes this split";
+/// Every shape the codec refuses is one [`Params::for_len`] already ruled out.
+const CODEC_TAKES: &str = "Params::for_len proved the codec takes this split";
 
 /// How one message is split: `k` data chunks of `chunk_bytes` each, `m` parity chunks after
 /// them, and the payload's own length so a receiver can drop the padding off the last data
@@ -104,14 +104,14 @@ fn write_parity(buf: &mut BytesMut, params: Params) {
     let chunk_bytes = params.chunk_bytes;
     let (k, m) = (usize::from(params.k), usize::from(params.m));
 
-    let mut encoder = ReedSolomonEncoder::new(k, m, chunk_bytes).expect(SPLIT_IS_ENCODABLE);
+    let mut encoder = ReedSolomonEncoder::new(k, m, chunk_bytes).expect(CODEC_TAKES);
     for index in 0..k {
         encoder
             .add_original_shard(&buf[index * chunk_bytes..(index + 1) * chunk_bytes])
-            .expect(SPLIT_IS_ENCODABLE);
+            .expect(CODEC_TAKES);
     }
 
-    let parity = encoder.encode().expect(SPLIT_IS_ENCODABLE);
+    let parity = encoder.encode().expect(CODEC_TAKES);
     for (index, shard) in parity.recovery_iter().enumerate() {
         let at = (k + index) * chunk_bytes;
         buf[at..at + chunk_bytes].copy_from_slice(shard);
@@ -139,9 +139,16 @@ pub fn decode(params: Params, have: &[(u16, Bytes)]) -> Result<Decoded, RsError>
         });
     }
 
-    Err(RsError::NotEnoughChunks {
-        have: have.len(),
-        need: usize::from(params.k),
+    if have.len() < usize::from(params.k) {
+        return Err(RsError::NotEnoughChunks {
+            have: have.len(),
+            need: usize::from(params.k),
+        });
+    }
+
+    Ok(Decoded {
+        payload: repair(params, &held),
+        used_parity: true,
     })
 }
 
@@ -165,6 +172,42 @@ fn concatenate(params: Params, held: &[Option<&Bytes>]) -> Option<Bytes> {
     }
     payload.truncate(params.total_len as usize);
     Some(payload.freeze())
+}
+
+/// The payload when a data chunk is missing and parity has to stand in for it. Only reached
+/// once `held` carries at least `k` chunks, which is all the codec needs.
+#[expect(
+    clippy::expect_used,
+    reason = "for_len proved the split, and the caller proved k distinct chunks are here"
+)]
+fn repair(params: Params, held: &[Option<&Bytes>]) -> Bytes {
+    let k = usize::from(params.k);
+    let mut decoder =
+        ReedSolomonDecoder::new(k, usize::from(params.m), params.chunk_bytes).expect(CODEC_TAKES);
+    for (index, chunk) in held.iter().enumerate() {
+        let Some(chunk) = chunk else { continue };
+        if index < k {
+            decoder.add_original_shard(index, chunk)
+        } else {
+            decoder.add_recovery_shard(index - k, chunk)
+        }
+        .expect(CODEC_TAKES);
+    }
+    let restored = decoder.decode().expect(CODEC_TAKES);
+
+    let mut payload = BytesMut::with_capacity(k * params.chunk_bytes);
+    for (index, chunk) in held[..k].iter().enumerate() {
+        match *chunk {
+            Some(chunk) => payload.extend_from_slice(chunk),
+            None => payload.extend_from_slice(
+                restored
+                    .restored_original(index)
+                    .expect("a data chunk that did not arrive"),
+            ),
+        }
+    }
+    payload.truncate(params.total_len as usize);
+    payload.freeze()
 }
 
 /// Why a message could not be split or put back together.
