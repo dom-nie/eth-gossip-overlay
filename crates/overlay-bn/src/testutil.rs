@@ -265,6 +265,10 @@ enum Cmd {
     },
     /// The next connection from this peer is an ordinary one, not an explicit peer.
     Public(PeerId),
+    /// Report `Accept` for nothing until [`Cmd::ReleaseValidation`].
+    HoldValidation,
+    /// Report `Accept` for everything held, and for what arrives afterwards.
+    ReleaseValidation,
     MeshPeers {
         topic: String,
         reply: oneshot::Sender<Vec<PeerId>>,
@@ -411,6 +415,30 @@ impl FakeBn {
             .find_map(|line| line.strip_prefix("gossipsub_idontwant_msgs_total "))
             .map(|count| count.trim().parse().unwrap())
             .unwrap_or(0)
+    }
+
+    /// How many messages the fake's gossipsub has taken off the wire for `topic`, duplicates
+    /// counted: what tells a test staging a race whether a copy has landed yet.
+    pub fn msgs_received_unfiltered(&self, topic: &str) -> u64 {
+        topic_counter(
+            &self.metrics_text(),
+            "gossipsub_topic_msg_recv_counts_unfiltered_total",
+            topic,
+        )
+    }
+
+    /// Holds back the `Accept` for every message from now on, so the fake keeps what it takes
+    /// and forwards none of it, the way a real beacon node holds a block while it validates
+    /// it. That window is where the race in §5.2 lives: a test publishes into it and
+    /// [`release_validation`](Self::release_validation) closes it.
+    pub async fn hold_validation(&self) {
+        self.commands.send(Cmd::HoldValidation).await.unwrap();
+    }
+
+    /// Reports `Accept` for everything held, which is what forwards it, and goes back to
+    /// reporting on receipt.
+    pub async fn release_validation(&self) {
+        self.commands.send(Cmd::ReleaseValidation).await.unwrap();
     }
 
     /// The identity the mock serves and the swarm runs under.
@@ -710,6 +738,8 @@ async fn drive(mut swarm: Swarm<FakeBnBehaviour>, mut commands: mpsc::Receiver<C
     let mut peer = None;
     let mut next_request = 0;
     let mut wedged = false;
+    // What a held `Accept` needs, from `hold_validation` until the release.
+    let mut held: Option<Vec<(MessageId, PeerId)>> = None;
     loop {
         tokio::select! {
             event = swarm.select_next_some(), if !wedged => match event {
@@ -736,11 +766,16 @@ async fn drive(mut swarm: Swarm<FakeBnBehaviour>, mut commands: mpsc::Receiver<C
                     message_id,
                     message,
                 })) => {
-                    swarm.behaviour_mut().gossip.report_message_validation_result(
-                        &message_id,
-                        &propagation_source,
-                        MessageAcceptance::Accept,
-                    );
+                    match &mut held {
+                        Some(queue) => queue.push((message_id.clone(), propagation_source)),
+                        None => {
+                            swarm.behaviour_mut().gossip.report_message_validation_result(
+                                &message_id,
+                                &propagation_source,
+                                MessageAcceptance::Accept,
+                            );
+                        }
+                    }
                     let _ = sinks.received.try_send((
                         message.topic.into_string(),
                         message.data,
@@ -776,6 +811,16 @@ async fn drive(mut swarm: Swarm<FakeBnBehaviour>, mut commands: mpsc::Receiver<C
                 }
                 Some(Cmd::Public(peer_id)) => {
                     public.insert(peer_id);
+                }
+                Some(Cmd::HoldValidation) => held = Some(Vec::new()),
+                Some(Cmd::ReleaseValidation) => {
+                    for (id, source) in held.take().unwrap_or_default() {
+                        swarm.behaviour_mut().gossip.report_message_validation_result(
+                            &id,
+                            &source,
+                            MessageAcceptance::Accept,
+                        );
+                    }
                 }
                 Some(Cmd::MeshPeers { topic, reply }) => {
                     let hash = TopicHash::from_raw(topic);
