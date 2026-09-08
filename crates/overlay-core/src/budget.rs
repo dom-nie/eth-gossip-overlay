@@ -17,6 +17,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::config::Config;
 use crate::pubqueue::{PUBLISH_LARGE_LANE_BYTES, PUBLISH_SMALL_LANE_ENTRIES};
 use crate::ratelimit::TokenBucket;
 use crate::reassemble;
@@ -132,6 +133,11 @@ impl FanoutBudget {
 /// without cgroup v2, which includes every developer machine that is not Linux.
 const CGROUP_MEMORY_MAX: &str = "/sys/fs/cgroup/memory.max";
 
+/// The ceiling the shipped unit sets, `MemoryMax=512M` in
+/// `deploy/systemd/eth-gossip-overlay.service`. What the budget is sized against on a host with
+/// no cgroup file to read; a test in `eth-gossip-overlay` holds the unit to it.
+pub const MEMORY_MAX_DEFAULT: u64 = 512 * 1024 * 1024;
+
 /// What one seen-cache entry costs: the 20-byte id in the set, the same id and an `Instant` in
 /// the order queue, and the slack a hash table carries around its live entries.
 pub const SEEN_ENTRY_BYTES: u64 = 64;
@@ -184,12 +190,30 @@ pub struct MemoryBudget {
     /// [`bounded_bytes`](Self::bounded_bytes) plus [`HEADROOM_PERCENT`], which is what a
     /// `MemoryMax` has to hold.
     pub total_bytes: u64,
+    /// The ceiling the rows were derived against, from the cgroup or [`MEMORY_MAX_DEFAULT`].
+    pub limit: u64,
+    /// How many hosts the roster held, this one included.
+    pub roster_len: usize,
+    /// The per-connection QUIC receive window the rows leave room for (DX-N3). What
+    /// `overlay-transport` puts on every connection, and what the `quic_receive_windows` row is
+    /// this many times over.
+    pub receive_window: u64,
 }
 
 impl MemoryBudget {
-    /// The budget for a fleet of `roster_size` hosts, this one included.
-    pub fn compute(roster_size: usize, lanes: SendLaneBounds) -> Self {
-        let peers = roster_size.saturating_sub(1) as u64;
+    /// The budget for a fleet of `roster_len` hosts, this one included, under a ceiling of
+    /// `memory_max` bytes.
+    pub fn compute(
+        cfg: &Config,
+        roster_len: usize,
+        memory_max: u64,
+        lanes: SendLaneBounds,
+    ) -> Self {
+        // Every row below is constants. `cfg` is here because the rows that will read a key are
+        // T-081's recent store and T-085's by-root cache, so their tickets add a row rather than
+        // change this signature.
+        let _ = cfg;
+        let peers = roster_len.saturating_sub(1) as u64;
         let rows = vec![
             ("seen_cache", SEEN_CAPACITY as u64 * SEEN_ENTRY_BYTES),
             (
@@ -208,11 +232,15 @@ impl MemoryBudget {
                     + (peers * lanes.large_bytes as u64).min(lanes.large_bytes_max as u64),
             ),
         ];
+        let receive_window = STREAM_RECEIVE_WINDOW;
         let bounded_bytes = rows.iter().map(|(_, bytes)| bytes).sum();
         Self {
             bounded_bytes,
             total_bytes: bounded_bytes + bounded_bytes * HEADROOM_PERCENT / 100,
             rows,
+            limit: memory_max,
+            roster_len,
+            receive_window,
         }
     }
 }
@@ -232,26 +260,38 @@ pub fn read_memory_max(path: &Path) -> Option<u64> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-/// Logs the budget at info and warns when it does not fit under `limit`.
+/// The ceiling to size the budget against: the cgroup's where there is one, and the shipped
+/// unit's [`MEMORY_MAX_DEFAULT`] otherwise. An operator who runs the sidecar outside the unit
+/// with no cgroup gets the number the documentation is written against rather than none.
+pub fn memory_max() -> u64 {
+    cgroup_memory_max().unwrap_or(MEMORY_MAX_DEFAULT)
+}
+
+/// Logs the budget at info and warns when it does not fit under the ceiling it was derived
+/// against.
 ///
 /// A warning is all it is: a sidecar that would exceed its ceiling still starts, because the
 /// estimate is a worst case that a real fleet does not reach, and refusing to start would take
 /// a beacon node's overlay away over arithmetic.
-pub fn check(budget: &MemoryBudget, limit: Option<u64>) {
-    let ceiling = limit.map_or_else(|| "none".to_owned(), |bytes| bytes.to_string());
+pub fn check(budget: &MemoryBudget) {
     tracing::info!(
         bounded_bytes = budget.bounded_bytes,
         total_bytes = budget.total_bytes,
         headroom_percent = HEADROOM_PERCENT,
-        memory_max = ceiling,
+        memory_max = budget.limit,
+        roster = budget.roster_len,
+        receive_window = budget.receive_window,
         rows = ?budget.rows,
         "memory budget"
     );
-    if limit.is_some_and(|limit| budget.total_bytes > limit) {
+    if budget.total_bytes > budget.limit {
         tracing::warn!(
             total_bytes = budget.total_bytes,
-            memory_max = ceiling,
-            "memory budget is above the cgroup limit; raise MemoryMax or shrink the roster"
+            memory_max = budget.limit,
+            roster = budget.roster_len,
+            receive_window = budget.receive_window,
+            "memory budget is above the limit: the QUIC receive window is already at its floor \
+             for this roster, so raise MemoryMax or shrink the roster"
         );
     }
 }
@@ -261,47 +301,45 @@ mod tests {
     use super::*;
     use crate::testlog::LOG;
 
-    /// A fleet the size of the motivating deployment, at T-033's lane bounds.
+    /// T-033's lane bounds, which are what the wiring passes.
+    const LANES: SendLaneBounds = SendLaneBounds {
+        small_frames: 600,
+        large_bytes: 1024 * 1024,
+        large_bytes_max: 64 * 1024 * 1024,
+    };
+
+    /// The budget for a fleet of `roster` hosts under the shipped unit's ceiling.
+    fn budget_for(roster: usize) -> MemoryBudget {
+        MemoryBudget::compute(&Config::default(), roster, MEMORY_MAX_DEFAULT, LANES)
+    }
+
+    /// A fleet the size of the motivating deployment.
     fn budget() -> MemoryBudget {
-        MemoryBudget::compute(
-            200,
-            SendLaneBounds {
-                small_frames: 600,
-                large_bytes: 1024 * 1024,
-                large_bytes_max: 64 * 1024 * 1024,
-            },
-        )
+        budget_for(200)
     }
 
     /// OPS-N4: the line goes out either way, because an operator sizing `MemoryMax` needs the
     /// number whether or not it currently fits. The warning is what an alert is written against,
-    /// so it has to be absent when the budget does fit and absent again when there is no ceiling
-    /// to compare it with, which is every host without cgroup v2 and every cgroup set to `max`.
+    /// so it has to be absent while the budget fits.
     #[test]
-    fn memory_budget_warns_only_when_above_cgroup_max() {
-        let budget = budget();
-        let over = budget.total_bytes - 1;
-        let under = budget.total_bytes;
-
+    fn memory_budget_warns_only_when_it_is_over_the_limit() {
+        let fits = budget_for(20);
         let mark = LOG.len();
-        check(&budget, Some(over));
-        let above = LOG.since(mark);
-        assert!(above.contains("memory budget"), "{above}");
-        assert!(above.contains(&budget.total_bytes.to_string()), "{above}");
-        assert!(above.contains(&over.to_string()), "{above}");
-        assert!(above.contains("WARN"), "{above}");
+        check(&fits);
+        let under = LOG.since(mark);
+        assert!(under.contains("memory budget"), "{under}");
+        assert!(under.contains(&fits.total_bytes.to_string()), "{under}");
+        assert!(under.contains(&fits.limit.to_string()), "{under}");
+        assert!(!under.contains("WARN"), "{under}");
 
+        // A roster far past what the other rows leave room for, so the receive window is at its
+        // floor and the rows no longer fit under the ceiling they were derived against.
+        let overflows = budget_for(4000);
         let mark = LOG.len();
-        check(&budget, Some(under));
-        let fits = LOG.since(mark);
-        assert!(fits.contains(&budget.total_bytes.to_string()), "{fits}");
-        assert!(!fits.contains("WARN"), "{fits}");
-
-        let mark = LOG.len();
-        check(&budget, None);
-        let unlimited = LOG.since(mark);
-        assert!(unlimited.contains("none"), "{unlimited}");
-        assert!(!unlimited.contains("WARN"), "{unlimited}");
+        check(&overflows);
+        let over = LOG.since(mark);
+        assert!(over.contains("WARN"), "{over}");
+        assert!(over.contains("4000"), "{over}");
     }
 
     /// The `None` cases, which is what a host without cgroup v2 and a cgroup with no ceiling
@@ -325,7 +363,6 @@ mod tests {
     fn memory_budget_totals_the_rows_and_adds_the_headroom() {
         let budget = budget();
 
-        assert_eq!(budget.rows.len(), 4);
         assert!(budget.rows.iter().any(|(name, _)| *name == "reassembler"));
         assert_eq!(
             budget.bounded_bytes,
@@ -347,7 +384,7 @@ mod tests {
             large_bytes_max: 8 * 1024 * 1024,
         };
         let row = |roster: usize| {
-            MemoryBudget::compute(roster, lanes)
+            MemoryBudget::compute(&Config::default(), roster, MEMORY_MAX_DEFAULT, lanes)
                 .rows
                 .iter()
                 .find(|(name, _)| *name == "peer_send_lanes")

@@ -44,7 +44,7 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 use bytes::Bytes;
 use ed25519_dalek::SigningKey;
-use overlay_core::budget::{FanoutBudget, FanoutKind};
+use overlay_core::budget::{FanoutBudget, FanoutKind, STREAM_RECEIVE_WINDOW};
 use overlay_core::config::{self, Overlay};
 use overlay_core::fanout::Outbound;
 use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
@@ -96,6 +96,11 @@ pub const REGION: &str = "eu";
 /// bound, which a test would have to push four thousand messages through a live overlay to
 /// reach; [`TestCluster::start_sidecar_with`] takes a smaller one still.
 pub const PUBLISHED_MAX: usize = 1024;
+
+/// What every cluster connection gives its peer inbound. A real budget derives it from the
+/// roster and the memory limit; a cluster of a handful of hosts on loopback never fills a
+/// window, so the floor keeps it the same number in every test.
+const RECEIVE_WINDOW: u64 = STREAM_RECEIVE_WINDOW;
 
 /// The seen cache every sidecar in a cluster runs, at §5.5's TTL and a capacity sized for a
 /// test rather than for a fleet.
@@ -806,7 +811,11 @@ fn bind_reserved(
             listen: SocketAddr::from((Ipv4Addr::LOCALHOST, port as u16)),
             ..cfg.clone()
         };
-        if let Ok(endpoint) = endpoint::bind(&cfg, tls::server_config(pins.clone(), key).unwrap()) {
+        if let Ok(endpoint) = endpoint::bind(
+            &cfg,
+            RECEIVE_WINDOW,
+            tls::server_config(pins.clone(), key).unwrap(),
+        ) {
             let addr = endpoint.local_addr().unwrap();
             return (endpoint, addr);
         }
@@ -1096,7 +1105,7 @@ impl<A: Admission> TestCluster<A> {
         let deadline = tokio::time::Instant::now() + WAIT;
         let endpoint = loop {
             let server = tls::server_config(self.pins.clone(), &self.nodes[index].key).unwrap();
-            match endpoint::bind(&cfg, server) {
+            match endpoint::bind(&cfg, RECEIVE_WINDOW, server) {
                 Ok(endpoint) => break endpoint,
                 Err(error) if tokio::time::Instant::now() < deadline => {
                     tracing::debug!(%error, "port not free yet");
@@ -1121,7 +1130,14 @@ impl<A: Admission> TestCluster<A> {
     ) -> Result<quinn::Connection, EndpointError> {
         let key = derive_tls_keypair(&self.seeds.current, as_host);
         let client = tls::client_config(self.pins.clone(), &key, &self.hostname(to)).unwrap();
-        endpoint::connect(&self.cfg, self.endpoint(from), self.addr(to), client).await
+        endpoint::connect(
+            &self.cfg,
+            RECEIVE_WINDOW,
+            self.endpoint(from),
+            self.addr(to),
+            client,
+        )
+        .await
     }
 
     /// A second connection from node `from` to node `to`, under `from`'s own identity.
@@ -1371,6 +1387,7 @@ impl<A: Admission> TestCluster<A> {
         let manager = ConnectionManager::spawn(
             Local {
                 cfg: self.cfg.clone(),
+                receive_window: RECEIVE_WINDOW,
                 self_id: SelfIdentity {
                     hostname: node.hostname.clone(),
                     region: Region(REGION.to_owned()),

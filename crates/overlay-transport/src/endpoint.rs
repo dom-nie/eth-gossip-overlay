@@ -62,6 +62,7 @@ pub enum EndpointError {
 /// are allowed in is decided there and never here.
 pub fn bind(
     cfg: &Overlay,
+    receive_window: u64,
     mut server: quinn::ServerConfig,
 ) -> Result<quinn::Endpoint, EndpointError> {
     let listen = cfg.listen;
@@ -69,7 +70,7 @@ pub fn bind(
         addr: listen,
         source,
     };
-    server.transport_config(Arc::new(transport_config(cfg)));
+    server.transport_config(Arc::new(transport_config(cfg, receive_window)));
     let socket = bind_socket(listen).map_err(failed)?;
     quinn::Endpoint::new(
         quinn::EndpointConfig::default(),
@@ -85,11 +86,12 @@ pub fn bind(
 /// nobody reads and there is no hostname to pass.
 pub async fn connect(
     cfg: &Overlay,
+    receive_window: u64,
     endpoint: &quinn::Endpoint,
     addr: SocketAddr,
     mut client: quinn::ClientConfig,
 ) -> Result<quinn::Connection, EndpointError> {
-    client.transport_config(Arc::new(transport_config(cfg)));
+    client.transport_config(Arc::new(transport_config(cfg, receive_window)));
     Ok(endpoint
         .connect_with(client, addr, PLACEHOLDER_NAME)?
         .await?)
@@ -130,14 +132,17 @@ fn bind_socket(listen: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
     Ok(socket)
 }
 
-/// The parameters every overlay connection runs under, dialled or accepted, in the one place
-/// T-076 edits when it adds the inbound stream limits, the receive windows and the initial
-/// congestion window.
+/// The parameters every overlay connection runs under, dialled or accepted.
+///
+/// `receive_window` is [`MemoryBudget::receive_window`](overlay_core::budget::MemoryBudget), the
+/// share of the memory limit this connection's peer may hold. It is passed in rather than
+/// derived here because the budget it comes out of is a whole-process number and this function
+/// sees one connection.
 ///
 /// §5.3 also asks for MTU discovery from 1200 bytes upward and for datagrams to carry the small
 /// class, and quinn does both unless a transport config says otherwise. Nothing here says
 /// otherwise; the tests hold quinn to it.
-pub fn transport_config(cfg: &Overlay) -> quinn::TransportConfig {
+pub fn transport_config(cfg: &Overlay, receive_window: u64) -> quinn::TransportConfig {
     let mut cubic = quinn::congestion::CubicConfig::default();
     // §5.3: a connection carrying one block every 12 s spends every block near slow start with
     // the RFC's ~14 kB window, and the fleet's paths are ones the operator controls end to end.
@@ -155,7 +160,10 @@ pub fn transport_config(cfg: &Overlay) -> quinn::TransportConfig {
         // DX-N3: quinn would let one peer open a hundred of each and hold 1.25 MB per stream.
         .max_concurrent_uni_streams(MAX_UNI_STREAMS.into())
         .max_concurrent_bidi_streams(MAX_BIDI_STREAMS.into())
-        .stream_receive_window(varint(STREAM_RECEIVE_WINDOW));
+        .stream_receive_window(varint(STREAM_RECEIVE_WINDOW))
+        // DX-N3: what one peer may hold across all its streams at once, which is
+        // `MemoryBudget`'s remainder divided by the roster. quinn's own default is unbounded.
+        .receive_window(varint(receive_window));
     transport
 }
 
@@ -182,12 +190,24 @@ mod tests {
     use arc_swap::ArcSwap;
     use bytes::Bytes;
     use ed25519_dalek::SigningKey;
-    use overlay_core::config::Overlay;
+    use overlay_core::budget::{self, MemoryBudget, SendLaneBounds};
+    use overlay_core::config::{Config, Overlay};
     use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
     use overlay_core::roster::{HostEntry, Hostname, Region, Roster};
 
     use super::*;
     use crate::tls::{self, PinTable};
+
+    /// What a two-host loopback pair gives each other inbound. Nothing here fills a window, so
+    /// the floor keeps every test on one number.
+    const TEST_RECEIVE_WINDOW: u64 = STREAM_RECEIVE_WINDOW;
+
+    /// T-033's lane bounds, which are what the binary passes the budget.
+    const LANES: SendLaneBounds = SendLaneBounds {
+        small_frames: crate::sender::SMALL_LANE_FRAMES,
+        large_bytes: crate::sender::LARGE_LANE_BYTES,
+        large_bytes_max: crate::sender::LARGE_QUEUED_BYTES_MAX,
+    };
 
     fn host(name: &str) -> Hostname {
         Hostname(name.to_owned())
@@ -235,6 +255,7 @@ mod tests {
     ) -> quinn::Endpoint {
         bind(
             cfg,
+            TEST_RECEIVE_WINDOW,
             tls::server_config(pins.clone(), &own_key(seeds, name)).unwrap(),
         )
         .unwrap()
@@ -295,6 +316,7 @@ mod tests {
 
         connect(
             &cfg,
+            TEST_RECEIVE_WINDOW,
             &dialler,
             addr,
             dial_config(&pins, &seeds, "bn-b", "bn-a"),
@@ -321,7 +343,7 @@ mod tests {
     /// who lowers them starves the fleet and one who raises them breaks the budget's arithmetic.
     #[test]
     fn inbound_stream_limits_are_the_named_constants() {
-        let transport = transport_config(&Overlay::default());
+        let transport = transport_config(&Overlay::default(), TEST_RECEIVE_WINDOW);
 
         assert_eq!(field(&transport, "max_concurrent_uni_streams"), "64");
         assert_eq!(field(&transport, "max_concurrent_bidi_streams"), "4");
@@ -332,6 +354,34 @@ mod tests {
         assert_eq!(STREAM_RECEIVE_WINDOW, 1024 * 1024);
     }
 
+    /// DX-N3's one derived parameter. A fleet's peers share the memory the other rows leave
+    /// over, so twice the roster is half the window each, and the floor is where it stops: a
+    /// connection allowed less than one stream's worth would stall the stream it is carrying.
+    #[test]
+    fn receive_window_shrinks_with_roster_size_and_never_below_the_stream_window() {
+        let window = |roster: usize| {
+            let budget = MemoryBudget::compute(
+                &Config::default(),
+                roster,
+                budget::MEMORY_MAX_DEFAULT,
+                LANES,
+            );
+            let read = field(
+                &transport_config(&Overlay::default(), budget.receive_window),
+                "receive_window",
+            );
+            assert_eq!(read, budget.receive_window.to_string());
+            budget.receive_window
+        };
+
+        assert!(
+            window(20) > window(200),
+            "a fleet of 200 shares the same bytes with ten times the peers"
+        );
+        assert!(window(200) >= STREAM_RECEIVE_WINDOW);
+        assert_eq!(window(100_000), STREAM_RECEIVE_WINDOW);
+    }
+
     #[test]
     fn transport_config_uses_keepalive_and_idle_from_config() {
         let cfg = Overlay {
@@ -340,7 +390,7 @@ mod tests {
             ..Overlay::default()
         };
 
-        let transport = transport_config(&cfg);
+        let transport = transport_config(&cfg, TEST_RECEIVE_WINDOW);
 
         assert_eq!(field(&transport, "keep_alive_interval"), "Some(250ms)");
         assert_eq!(field(&transport, "max_idle_timeout"), "Some(3000)");
@@ -351,7 +401,7 @@ mod tests {
     /// moved it would take the overlay's floor with it and no other test would notice.
     #[test]
     fn mtu_discovery_starts_at_1200() {
-        let transport = transport_config(&Overlay::default());
+        let transport = transport_config(&Overlay::default(), TEST_RECEIVE_WINDOW);
 
         assert_eq!(field(&transport, "initial_mtu"), "1200");
         assert!(
@@ -390,6 +440,7 @@ mod tests {
 
         let connection = connect(
             &cfg,
+            TEST_RECEIVE_WINDOW,
             &dialler,
             addr,
             dial_config(&pins, &seeds, "bn-b", "bn-a"),
@@ -434,6 +485,7 @@ mod tests {
 
         let connection = connect(
             &cfg,
+            TEST_RECEIVE_WINDOW,
             &dialler,
             addr,
             dial_config(&pins, &seeds, "bn-b", "bn-a"),
@@ -479,6 +531,7 @@ mod tests {
             let dialler = endpoint(&cfg, &pins, &seeds, "bn-b");
             let connection = connect(
                 &cfg,
+                TEST_RECEIVE_WINDOW,
                 &dialler,
                 addr,
                 dial_config(&pins, &seeds, "bn-b", "bn-a"),
@@ -518,6 +571,7 @@ mod tests {
 
         let connection = connect(
             &cfg,
+            TEST_RECEIVE_WINDOW,
             &dialler,
             SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port)),
             dial_config(&pins, &seeds, "bn-b", "bn-a"),
@@ -552,6 +606,7 @@ mod tests {
                 listen: taken,
                 ..Overlay::default()
             },
+            TEST_RECEIVE_WINDOW,
             tls::server_config(pins.clone(), &own_key(&seeds, "bn-a")).unwrap(),
         )
         .unwrap_err();

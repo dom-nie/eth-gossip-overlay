@@ -371,6 +371,10 @@ pub struct Local {
     /// The settings the endpoint was bound with. The dial path needs them again, because both
     /// halves of a connection run under one transport configuration (T-022).
     pub cfg: Overlay,
+    /// The share of the memory limit one peer may hold inbound, from
+    /// [`MemoryBudget::receive_window`](overlay_core::budget::MemoryBudget). Bound with the
+    /// endpoint and passed to every dial, so both halves agree (DX-N3).
+    pub receive_window: u64,
     /// Who this host is in the roster, which is what the tie-break compares and what a peer's
     /// declared region is checked against.
     pub self_id: SelfIdentity,
@@ -951,17 +955,23 @@ async fn dial_once<A: Admission>(
             tracing::error!(peer = %peer, %error, "cannot build a client configuration");
             None
         })?;
-    let connection = endpoint::connect(&shared.local.cfg, &shared.endpoint, entry.addr, client)
-        .await
-        .map_err(|error| match &error {
-            EndpointError::Connection(closed) => {
-                HandshakeFailure::from_connection_error(Role::Dial, closed)
-            }
-            _ => {
-                tracing::debug!(peer = %peer, %error, "dial did not leave the host");
-                None
-            }
-        })?;
+    let connection = endpoint::connect(
+        &shared.local.cfg,
+        shared.local.receive_window,
+        &shared.endpoint,
+        entry.addr,
+        client,
+    )
+    .await
+    .map_err(|error| match &error {
+        EndpointError::Connection(closed) => {
+            HandshakeFailure::from_connection_error(Role::Dial, closed)
+        }
+        _ => {
+            tracing::debug!(peer = %peer, %error, "dial did not leave the host");
+            None
+        }
+    })?;
     // The dialler's verifier already proved the key is this host's, so the lookup is for which
     // seed derived it. A miss means the table changed under the handshake.
     let pinned = tls::peer_identity(&shared.local.pins.load(), &connection).ok_or(Some(

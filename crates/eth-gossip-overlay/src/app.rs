@@ -176,7 +176,12 @@ pub fn check_config(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     // Deriving the key is the check: a seed that reads as 32 bytes but cannot make a keypair
     // would otherwise only fail at the first handshake.
     tls::identity(&derive_tls_keypair(&me.seeds.current, &me.self_id.hostname))?;
-    let budget = MemoryBudget::compute(me.roster.hosts.len(), SEND_LANES);
+    let budget = MemoryBudget::compute(
+        &cfg,
+        me.roster.hosts.len(),
+        budget::memory_max(),
+        SEND_LANES,
+    );
     Ok(format!(
         "hostname: {}\nregion: {}\nsite: {}\npeer id: {}\nroster: {} {}\nmemory budget: {} \
          ({} in bounded structures plus {}% headroom)\n",
@@ -245,8 +250,13 @@ impl App {
             .map_err(|err| StartupError::BnAddress(err.to_string()))?;
         write_trusted_peer_env(&link::lighthouse_env_line(&peer_id, &link_cfg.listen_addr));
 
-        let budget = MemoryBudget::compute(me.roster.hosts.len(), SEND_LANES);
-        budget::check(&budget, budget::cgroup_memory_max());
+        let budget = MemoryBudget::compute(
+            &cfg,
+            me.roster.hosts.len(),
+            budget::memory_max(),
+            SEND_LANES,
+        );
+        budget::check(&budget);
 
         let registry = prometheus::Registry::new();
         let metrics = Arc::new(Metrics::new(&registry)?);
@@ -328,7 +338,11 @@ impl App {
             &me.roster, &me.seeds,
         )));
         let own_key = derive_tls_keypair(&me.seeds.current, &me.self_id.hostname);
-        let endpoint = endpoint::bind(&cfg.overlay, tls::server_config(pins.clone(), &own_key)?)?;
+        let endpoint = endpoint::bind(
+            &cfg.overlay,
+            budget.receive_window,
+            tls::server_config(pins.clone(), &own_key)?,
+        )?;
         tracing::info!(listen = %cfg.overlay.listen, "overlay endpoint bound");
 
         let (roster_tx, _) = watch::channel(me.roster.clone());
@@ -337,6 +351,7 @@ impl App {
         let manager = ConnectionManager::spawn(
             Local {
                 cfg: cfg.overlay.clone(),
+                receive_window: budget.receive_window,
                 self_id: me.self_id.clone(),
                 pins: pins.clone(),
                 own_key,
