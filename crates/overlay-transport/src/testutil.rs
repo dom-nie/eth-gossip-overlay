@@ -59,8 +59,8 @@ use overlay_core::time::{Clock, SystemClock};
 use overlay_core::topic::Topic;
 use overlay_core::topic::table::{PeerTopicTable, TopicId};
 use overlay_core::topic::{Class, SubscriptionSets};
-use overlay_core::wire::Frame;
 use overlay_core::wire::MAX_PAYLOAD_BYTES;
+use overlay_core::wire::{Chunk, ChunkFlags, Frame};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
@@ -170,6 +170,7 @@ pub struct CountingStats {
     unannounced_topics: AtomicU64,
     chunks_sent: AtomicU64,
     relay_same_region: Mutex<BTreeMap<Hostname, u64>>,
+    chunks_received: Mutex<Vec<(Hostname, ChunkFlags, u16)>>,
     queue_depths: Mutex<HashMap<(Hostname, Class), (usize, usize)>>,
     queue_drops: Mutex<HashMap<(Hostname, Class, DropReason), u64>>,
     stale_dropped: Mutex<HashMap<StaleReason, u64>>,
@@ -285,6 +286,18 @@ impl CountingStats {
     /// `unannounced_topic_total`.
     pub fn unannounced_topics(&self) -> u64 {
         self.unannounced_topics.load(Ordering::Relaxed)
+    }
+
+    /// The chunks read off `peer`, each as the flags its frame carried and its index, in
+    /// arrival order. `chunks_received_total` is the bare count of the same thing.
+    pub fn chunks_received(&self, peer: &Hostname) -> Vec<(ChunkFlags, u16)> {
+        self.chunks_received
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(from, _, _)| from == peer)
+            .map(|(_, flags, index)| (*flags, *index))
+            .collect()
     }
 
     /// `relay_same_region_total{peer}`.
@@ -423,6 +436,13 @@ impl ReceiveStats for CountingStats {
 
     fn relayed_batch(&self) {
         self.relayed_batches.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn chunk_received(&self, peer: &Hostname, flags: ChunkFlags, chunk: &Chunk) {
+        self.chunks_received
+            .lock()
+            .unwrap()
+            .push((peer.clone(), flags, chunk.index));
     }
 
     fn relay_same_region(&self, peer: &Hostname) {

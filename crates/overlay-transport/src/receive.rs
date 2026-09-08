@@ -121,6 +121,11 @@ pub trait ReceiveStats: ManagerStats + TrafficStats {
     /// No sender does that, so it is the peer breaking the protocol; the entries are delivered
     /// locally and forwarded nowhere (D20).
     fn relay_same_region(&self, peer: &Hostname);
+
+    /// `chunks_received_total`: one chunk of a striped message read off a peer, whether it is
+    /// one this host was assigned or the in-region copy of somebody else's (§12). The flags and
+    /// the header are what a test reads to tell the two hops apart.
+    fn chunk_received(&self, peer: &Hostname, flags: ChunkFlags, chunk: &Chunk);
 }
 
 impl ReceiveStats for () {
@@ -132,6 +137,7 @@ impl ReceiveStats for () {
     fn fanout_suppressed(&self, _: &Hostname, _: FanoutKind) {}
     fn relayed_batch(&self) {}
     fn relay_same_region(&self, _: &Hostname) {}
+    fn chunk_received(&self, _: &Hostname, _: ChunkFlags, _: &Chunk) {}
 }
 
 /// What a payload's arrival owes.
@@ -2112,6 +2118,84 @@ mod tests {
             cluster.live(1).len() == 1 && cluster.live(0).len() == 1
         })
         .await;
+    }
+
+    /// A region of `hosts` sidecars with a peer of the test's own beside them, all subscribed to
+    /// blocks. Node 0 is the peer, the lowest hostname and so the one that dials; the sidecars
+    /// are nodes 1 upwards and pair with each other.
+    async fn striping_region(hosts: usize) -> (TestCluster, PeerInfo, Topic) {
+        let block = topic("beacon_block");
+        let kinds: Vec<NodeKind> = std::iter::once(NodeKind::Bare)
+            .chain(std::iter::repeat_n(NodeKind::Manager, hosts))
+            .collect();
+        let mut cluster = Builder::new(&kinds).start().await;
+        for node in 1..=hosts {
+            cluster.start_sidecar(node, subscriptions(&[&block], &[]));
+        }
+        eventually("the region to pair and subscribe", || {
+            (1..=hosts).all(|node| cluster.live(node).subscribers(&block).len() == hosts - 1)
+        })
+        .await;
+        let peer = cluster
+            .dial_announcing(
+                0,
+                1,
+                &cluster.self_hello(0),
+                vec![(TopicId::new(3), block.to_string())],
+            )
+            .await;
+        (cluster, peer, block)
+    }
+
+    /// One chunk of a striped message, as the host it was assigned to would be sent it.
+    fn chunk_frame(msg_id: MessageId, index: u16, flags: ChunkFlags) -> Bytes {
+        encode_datagram(&Frame::Chunk {
+            flags,
+            chunk: Chunk {
+                msg_id,
+                topic_id: 3,
+                k: 4,
+                m: 1,
+                index,
+                total_len: 32,
+                data: Bytes::from_static(b"12345678"),
+            },
+        })
+    }
+
+    /// D19 and §5.4 step 3: a chunk that arrives clear is the region's, so the host it landed on
+    /// hands it to every live in-region peer subscribed to the topic, with `FORWARDED` set, and
+    /// not back to the host it came from. That second hop is what turns one chunk per host into
+    /// a whole message per host without the origin sending one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clear_chunk_is_forwarded_in_region_with_forwarded_set_to_all_subscribed_peers_except_sender()
+     {
+        let (cluster, peer, _) = striping_region(3).await;
+        let sender = cluster.hostname(0);
+        let forwarder = cluster.hostname(1);
+
+        send(
+            &peer,
+            &[chunk_frame(MessageId([5; 20]), 2, ChunkFlags::NONE)],
+        )
+        .await;
+
+        for node in [2, 3] {
+            eventually("the rest of the region to be given it", || {
+                !cluster.stats(node).chunks_received(&forwarder).is_empty()
+            })
+            .await;
+            assert_eq!(
+                cluster.stats(node).chunks_received(&forwarder),
+                vec![(ChunkFlags::FORWARDED, 2)]
+            );
+        }
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            cluster.stats(1).messages(Direction::Out, &sender),
+            0,
+            "the chunk went back to the host it came from"
+        );
     }
 
     /// A chunk that is a piece of a message is a form this release cannot put together, so it is

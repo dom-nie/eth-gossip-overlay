@@ -49,6 +49,7 @@ use overlay_core::pubqueue::{DropReason as QueueDropReason, QueueStats};
 use overlay_core::roster::Hostname;
 use overlay_core::seen::SeenStats;
 use overlay_core::topic::Class;
+use overlay_core::wire::{Chunk, ChunkFlags};
 use overlay_transport::fanout::{Direction, PeerLabels, TrafficStats};
 use overlay_transport::manager::{ManagerStats, PeerCounts};
 use overlay_transport::receive::ReceiveStats;
@@ -266,6 +267,7 @@ pub struct Metrics {
     fanout_suppressed: IntCounterVec,
     relayed_batches: IntCounter,
     chunks_sent: IntCounter,
+    chunks_received: IntCounter,
     relay_same_region: IntCounterVec,
     unannounced_topic: IntCounter,
     fanout_lane_dropped: IntCounterVec,
@@ -457,11 +459,11 @@ impl Metrics {
         )?;
 
         let chunks_sent = b.counter(CHUNKS_SENT_TOTAL, "Chunks written to peers.")?;
+        let chunks_received = b.counter(CHUNKS_RECEIVED_TOTAL, "Chunks read from peers.")?;
 
         // Registered and then let go of: their producers land in T-074 and v3, and each of those
         // tickets adds the handle it needs. The registry keeps the collector alive, so the name
         // is on the scrape from this release on.
-        b.counter(CHUNKS_RECEIVED_TOTAL, "Chunks read from peers.")?;
         b.counter(
             PARITY_USED_TOTAL,
             "Messages that needed a parity chunk to reconstruct.",
@@ -524,6 +526,7 @@ impl Metrics {
             fanout_suppressed,
             relayed_batches,
             chunks_sent,
+            chunks_received,
             relay_same_region,
             unannounced_topic,
             fanout_lane_dropped,
@@ -779,6 +782,10 @@ impl ReceiveStats for Metrics {
 
     fn relay_same_region(&self, peer: &Hostname) {
         self.relay_same_region.with_label_values(&[&peer.0]).inc();
+    }
+
+    fn chunk_received(&self, _: &Hostname, _: ChunkFlags, _: &Chunk) {
+        self.chunks_received.inc();
     }
 }
 
