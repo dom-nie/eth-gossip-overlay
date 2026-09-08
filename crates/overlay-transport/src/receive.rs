@@ -845,6 +845,7 @@ mod tests {
     use overlay_core::budget::SUSTAINED_VIOLATION;
     use overlay_core::config;
     use overlay_core::reassemble::{INCOMPLETE_TTL, MAX_IN_FLIGHT};
+    use overlay_core::rs::Params;
     use overlay_core::seen::SeenCache;
     use overlay_core::time::{FakeClock, SystemClock};
     use overlay_core::topic::UNKNOWN_LARGE_THRESHOLD_BYTES;
@@ -2541,6 +2542,169 @@ mod tests {
             cluster.reassembler(1).in_flight(),
             1,
             "the chunk was refused rather than taken in"
+        );
+    }
+
+    /// A gossipsub wire form of about `bytes` from a pattern snappy cannot shrink, so a test
+    /// about how many chunks a message takes gets the number it asked for.
+    fn incompressible(bytes: usize) -> Vec<u8> {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        let raw: Vec<u8> = (0..bytes)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect();
+        snap::raw::Encoder::new().compress_vec(&raw).unwrap()
+    }
+
+    /// A cluster of `hosts` sidecars, one per region name, every one subscribed to blocks and
+    /// striping any region with two subscribers in it.
+    async fn striping_cluster(regions: &[&str], block: &Topic) -> TestCluster {
+        let hosts = regions.len();
+        let mut cluster = Builder::new(&vec![NodeKind::Manager; hosts])
+            .regions(regions)
+            .fanout(config::Fanout {
+                large: config::LargeFanout {
+                    stripe_min_recipients: 2,
+                    ..config::LargeFanout::default()
+                },
+                ..config::Fanout::default()
+            })
+            .start()
+            .await;
+        for node in 0..hosts {
+            cluster.start_sidecar(node, subscriptions(&[block], &[]));
+        }
+        eventually("every host to say it wants blocks", || {
+            (0..hosts).all(|node| cluster.live(node).subscribers(block).len() == hosts - 1)
+        })
+        .await;
+        cluster
+    }
+
+    /// Every index a host has been sent, whoever sent it, in ascending order.
+    fn indices(cluster: &TestCluster, node: usize, hosts: usize) -> Vec<u16> {
+        let mut seen: Vec<u16> = (0..hosts)
+            .flat_map(|peer| cluster.stats(node).chunks_received(&cluster.hostname(peer)))
+            .map(|(_, index)| index)
+            .collect();
+        seen.sort_unstable();
+        seen
+    }
+
+    /// §5.4 end to end: the origin sends each host one chunk and each host hands what it was
+    /// sent to the rest of the region, so every host ends up with the whole stripe having read
+    /// one message-worth of bytes off the origin between them. Each index arrives exactly once,
+    /// which is the second hop not doubling up.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_host_in_region_ends_up_with_all_k_plus_m_chunks() {
+        let block = topic("beacon_block");
+        let payload = incompressible(20 * 1024);
+        let hosts = 6;
+        let cluster = striping_cluster(&vec!["eu"; hosts], &block).await;
+        let split = Params::for_len(payload.len(), 2048, 0.10).expect("a split for this payload");
+        let chunks = usize::from(split.k) + usize::from(split.m);
+        let all: Vec<u16> = (0..split.k + split.m).collect();
+
+        assert!(cluster.from_bn(0, &block, &payload));
+
+        for node in 1..hosts {
+            eventually("the host to hold the whole stripe", || {
+                indices(&cluster, node, hosts).len() == chunks
+            })
+            .await;
+        }
+        tokio::time::sleep(SETTLE).await;
+        for node in 1..hosts {
+            assert_eq!(indices(&cluster, node, hosts), all, "node {node}");
+        }
+    }
+
+    /// §5.4: the origin builds one stripe per region and each region's second hop stays inside
+    /// it, so the WAN carries one message-worth of chunks and nothing comes back the other way.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cross_region_stripe_second_hop_stays_in_remote_region() {
+        let block = topic("beacon_block");
+        let payload = incompressible(20 * 1024);
+        let cluster =
+            striping_cluster(&["eu", "eu", "eu", "eu", "us", "us", "us", "us"], &block).await;
+        let split = Params::for_len(payload.len(), 2048, 0.10).expect("a split for this payload");
+        let chunks = usize::from(split.k) + usize::from(split.m);
+
+        assert!(cluster.from_bn(0, &block, &payload));
+
+        for node in 1..8 {
+            eventually("every host in both regions to hold the stripe", || {
+                indices(&cluster, node, 8).len() == chunks
+            })
+            .await;
+        }
+        tokio::time::sleep(SETTLE).await;
+        for home in 0..4 {
+            for remote in 4..8 {
+                assert!(
+                    cluster
+                        .stats(home)
+                        .chunks_received(&cluster.hostname(remote))
+                        .is_empty(),
+                    "node {remote} forwarded across the WAN to node {home}"
+                );
+                assert_eq!(
+                    cluster
+                        .stats(remote)
+                        .messages(Direction::Out, &cluster.hostname(home)),
+                    0,
+                    "node {remote} sent node {home} something"
+                );
+            }
+        }
+    }
+
+    /// D18: the stripe runs over the region's subscribers and the second hop offers a chunk to
+    /// the same set, so a host whose beacon node does not want blocks is sent none. A chunk it
+    /// took would be a chunk that bought nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unsubscribed_host_receives_no_chunks() {
+        let block = topic("beacon_block");
+        let subnet = topic("beacon_attestation_7");
+        let payload = incompressible(20 * 1024);
+        let hosts = 4;
+        let mut cluster = Builder::new(&vec![NodeKind::Manager; hosts])
+            .fanout(config::Fanout {
+                large: config::LargeFanout {
+                    stripe_min_recipients: 2,
+                    ..config::LargeFanout::default()
+                },
+                ..config::Fanout::default()
+            })
+            .start()
+            .await;
+        for node in 0..hosts - 1 {
+            cluster.start_sidecar(node, subscriptions(&[&block], &[]));
+        }
+        cluster.start_sidecar(hosts - 1, subscriptions(&[&subnet], &[]));
+        eventually("the region to say what each host wants", || {
+            cluster.live(0).subscribers(&block).len() == hosts - 2
+        })
+        .await;
+        let split = Params::for_len(payload.len(), 2048, 0.10).expect("a split for this payload");
+        let chunks = usize::from(split.k) + usize::from(split.m);
+
+        assert!(cluster.from_bn(0, &block, &payload));
+
+        for node in 1..hosts - 1 {
+            eventually("the subscribers to hold the stripe", || {
+                indices(&cluster, node, hosts).len() == chunks
+            })
+            .await;
+        }
+        tokio::time::sleep(SETTLE).await;
+        assert!(
+            indices(&cluster, hosts - 1, hosts).is_empty(),
+            "a host that wants no blocks was sent chunks"
         );
     }
 
