@@ -26,7 +26,7 @@
 //! buffer is allocated, every read is bounds-checked, and a shape that is not the object the
 //! topic names is an error rather than a panic.
 
-use types::{Hash256, MainnetEthSpec, SignedBeaconBlock};
+use types::{BeaconBlockHeader, Hash256, MainnetEthSpec, SignedBeaconBlock, Slot};
 
 use overlay_core::wire::MAX_PAYLOAD_BYTES;
 
@@ -74,8 +74,47 @@ pub fn block_header(payload: &[u8]) -> Result<(u64, [u8; 32]), HeaderError> {
 /// indexes and what a requester asks for both have to be what the object says it is.
 pub fn column_header(payload: &[u8]) -> Result<(u64, u8, [u8; 32]), HeaderError> {
     let bytes = decompress(payload)?;
-    let _fixed = bytes.get(..COLUMN_FIXED_MIN).ok_or(HeaderError::Truncated)?;
-    Err(HeaderError::Ssz)
+    let fixed = bytes
+        .get(..COLUMN_FIXED_MIN)
+        .ok_or(HeaderError::Truncated)?;
+    // The first offset of an SSZ container is the length of its fixed part, so a payload whose
+    // variable section starts inside the header is not a Fulu column sidecar at all. A Gloas one,
+    // whose fixed part is 56 bytes, is refused here rather than read as if it were.
+    let column_at = u32_at(fixed, 8) as usize;
+    if column_at < COLUMN_FIXED_MIN || column_at > bytes.len() {
+        return Err(HeaderError::Ssz);
+    }
+    let index = u8::try_from(u64_at(fixed, 0)).map_err(|_| HeaderError::Index)?;
+    let header = BeaconBlockHeader {
+        slot: Slot::new(u64_at(fixed, COLUMN_HEADER_AT)),
+        proposer_index: u64_at(fixed, COLUMN_HEADER_AT + 8),
+        parent_root: root_at(fixed, COLUMN_HEADER_AT + 16),
+        state_root: root_at(fixed, COLUMN_HEADER_AT + 48),
+        body_root: root_at(fixed, COLUMN_HEADER_AT + 80),
+    };
+    Ok((
+        header.slot.as_u64(),
+        index,
+        bytes32(header.canonical_root()),
+    ))
+}
+
+/// A slice the caller has already taken with `get`, read at `at`, so no range here can be out
+/// of bounds.
+fn u64_at(fixed: &[u8], at: usize) -> u64 {
+    let mut eight = [0; 8];
+    eight.copy_from_slice(&fixed[at..at + 8]);
+    u64::from_le_bytes(eight)
+}
+
+fn u32_at(fixed: &[u8], at: usize) -> u32 {
+    let mut four = [0; 4];
+    four.copy_from_slice(&fixed[at..at + 4]);
+    u32::from_le_bytes(four)
+}
+
+fn root_at(fixed: &[u8], at: usize) -> Hash256 {
+    Hash256::from_slice(&fixed[at..at + 32])
 }
 
 /// The gossipsub wire form is snappy over SSZ. The declared length is compared with the beacon
@@ -100,7 +139,7 @@ fn bytes32(root: Hash256) -> [u8; 32] {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use ssz::{Decode, Encode};
-    use types::{BeaconBlock, BeaconBlockHeader, ChainSpec, DataColumnSidecarFulu, Slot};
+    use types::{BeaconBlock, ChainSpec, DataColumnSidecarFulu};
 
     use super::*;
 
