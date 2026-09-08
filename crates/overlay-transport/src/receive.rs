@@ -1075,6 +1075,53 @@ mod tests {
         assert_eq!(cluster.stats(1).relayed_batches(), 1);
     }
 
+    /// MD-04: a relay carries topics its own beacon node never asked for. It has no id of its
+    /// own for one, so it interns one and announces it; until the peer has been told, the entry
+    /// is held back rather than sent under an id the peer would drop and count against D12's
+    /// alarm. Every batch here is a fresh attestation, which is what a real subnet delivers
+    /// while the announcement crosses the control stream.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_carries_a_topic_its_beacon_node_never_subscribed_to() {
+        let subnet = topic("beacon_attestation_7");
+        let its_own = topic("beacon_attestation_2");
+        let mut cluster = relay_cluster().start().await;
+        cluster.start_sidecar(1, subscriptions(&[&its_own], &[]));
+        cluster.start_sidecar(2, subscriptions(&[&subnet], &[]));
+        eventually("the two siblings to pair", || cluster.live(1).len() == 1).await;
+        let peer = cluster
+            .dial_announcing(
+                0,
+                1,
+                &cluster.self_hello(0),
+                vec![(TopicId::new(3), subnet.to_string())],
+            )
+            .await;
+
+        let mut sent = 0;
+        eventually("the region behind the relay to be given one", || {
+            sent += 1;
+            datagram(
+                &peer,
+                relay_batch(vec![entry(
+                    3,
+                    &payload(format!("one of many {sent}").as_bytes()),
+                )]),
+            );
+            !cluster.published(2).is_empty()
+        })
+        .await;
+
+        assert!(
+            cluster.published(1).is_empty(),
+            "the relay wants none of it"
+        );
+        assert_eq!(
+            cluster.stats(2).unknown_topic_ids(&cluster.hostname(1)),
+            0,
+            "an entry went out under an id the peer had not been told"
+        );
+    }
+
     /// D21: the relay re-coalesces through its own batcher, so an in-region subscriber gets one
     /// batch holding the entries it asked for and nothing else. The relay itself wants both
     /// topics and publishes both; the host beside it wants one and is sent one.
