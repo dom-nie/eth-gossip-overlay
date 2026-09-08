@@ -167,6 +167,9 @@ pub fn transport_config(cfg: &Overlay, receive_window: u64) -> quinn::TransportC
     transport
 }
 
+/// Warns when the kernel gave the socket less than §5.3's floor, naming the sysctl that caps it.
+fn warn_if_socket_buffers_capped(_recv: usize, _send: usize) {}
+
 /// `idle_timeout_ms` as the variable-length integer QUIC carries it in. A value too large to
 /// encode saturates rather than failing the bind: an operator who asks for a timeout of 146
 /// million years and one who asks for 49 days want the same thing, and neither is a reason to
@@ -196,6 +199,7 @@ mod tests {
     use overlay_core::roster::{HostEntry, Hostname, Region, Roster};
 
     use super::*;
+    use crate::testlog::LOG;
     use crate::tls::{self, PinTable};
 
     /// What a two-host loopback pair gives each other inbound. Nothing here fills a window, so
@@ -381,6 +385,29 @@ mod tests {
         );
         assert!(window(200) >= STREAM_RECEIVE_WINDOW);
         assert_eq!(window(100_000), STREAM_RECEIVE_WINDOW);
+    }
+
+    /// §5.3 asks the kernel for 8 MB each way and the kernel silently gives what
+    /// `net.core.rmem_max` allows, so a host where T-046's sysctl file never landed runs with a
+    /// buffer a burst overruns and nothing says so. The warning names the sysctl, because that
+    /// is the file the operator has to fix.
+    #[test]
+    fn warning_logged_when_effective_socket_buffer_below_requested() {
+        let mark = LOG.len();
+        warn_if_socket_buffers_capped(212_992, 212_992);
+        let capped = LOG.since(mark);
+        assert!(capped.contains("WARN"), "{capped}");
+        assert!(capped.contains("net.core.rmem_max"), "{capped}");
+        assert!(capped.contains("net.core.wmem_max"), "{capped}");
+        assert!(
+            capped.contains(&SOCKET_BUFFER_BYTES.to_string()),
+            "{capped}"
+        );
+
+        let mark = LOG.len();
+        warn_if_socket_buffers_capped(usize::MAX, usize::MAX);
+        let roomy = LOG.since(mark);
+        assert!(!roomy.contains("WARN"), "{roomy}");
     }
 
     #[test]
