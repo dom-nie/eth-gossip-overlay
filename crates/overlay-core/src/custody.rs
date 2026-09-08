@@ -641,4 +641,37 @@ mod tests {
 
         assert_eq!(gaps(&mut tracker, &clock).len(), 1);
     }
+
+    /// The bound peer-supplied bytes can reach. A column header is 356 bytes carrying a block
+    /// root nothing verifies, and nothing about it costs the sender anything, so one peer can
+    /// name as many blocks for one slot as it cares to invent. What it must not do is take the
+    /// blocks this host is actually repairing away with them: only a block this host decoded
+    /// itself anchors an entry, and an entry nothing anchors can crowd out nothing but another
+    /// entry of its own kind.
+    #[test]
+    fn invented_block_roots_do_not_evict_the_blocks_being_repaired() {
+        let clock = FakeClock::new();
+        let mut tracker = CustodyTracker::new(&mainnet());
+        let expected = tracker.expected_columns(&column_topics(&[0, 3, 7]));
+        let real = |slot: u64| [slot as u8; 32];
+        for slot in 1..=TRACKED_SLOTS as u64 {
+            tracker.on_block(slot, real(slot), expected.clone(), clock.now());
+        }
+
+        // Four times the bound, all at a slot the host is really tracking, so nothing about the
+        // slot number is what refuses them.
+        for invented in 0..4 * TRACKED_SLOTS as u8 {
+            tracker.on_column(1, 0, [0x80 | invented; 32]);
+        }
+        clock.advance(DEADLINE);
+
+        let kept: Vec<[u8; 32]> = gaps(&mut tracker, &clock)
+            .into_iter()
+            .map(|gap| gap.block_root)
+            .collect();
+        assert_eq!(
+            kept,
+            (1..=TRACKED_SLOTS as u64).map(real).collect::<Vec<[u8; 32]>>()
+        );
+    }
 }
