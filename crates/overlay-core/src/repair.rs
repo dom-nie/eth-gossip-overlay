@@ -264,25 +264,25 @@ mod tests {
         Hostname(name.to_owned())
     }
 
-    /// One chunk of a four-data, two-parity message. Nothing decodes it: every test here holds
-    /// fewer than `k` of them, which is what makes the message one to repair.
-    fn chunk(index: u16) -> Chunk {
+    /// One chunk of a `k`-data, two-parity message of 64-byte chunks. Nothing decodes it: every
+    /// test here holds fewer than `k` of them, which is what makes the message one to repair.
+    fn chunk(k: u16, index: u16) -> Chunk {
         Chunk {
             msg_id: MessageId([9; 20]),
             topic_id: 0,
-            k: 4,
+            k,
             m: 2,
             index,
-            total_len: 256,
+            total_len: u32::from(k) * 64,
             data: Bytes::from(vec![index as u8; 64]),
         }
     }
 
-    /// A reassembler holding `indices`, each from the peer named beside it.
-    fn collecting(indices: &[(u16, &str, bool)], now: Instant) -> Reassembler {
+    /// A reassembler holding `indices` of a `k`-data message, each from the peer named beside it.
+    fn collecting(k: u16, indices: &[(u16, &str, bool)], now: Instant) -> Reassembler {
         let reassembler = Reassembler::new(ReassembleConfig::default());
         for (index, from, forwarded) in indices {
-            reassembler.on_chunk(&chunk(*index), &topic(), &host(from), *forwarded, now);
+            reassembler.on_chunk(&chunk(k, *index), &topic(), &host(from), *forwarded, now);
         }
         reassembler
     }
@@ -296,7 +296,7 @@ mod tests {
     #[test]
     fn no_request_before_deadline() {
         let clock = FakeClock::new();
-        let reassembler = collecting(&[(0, "a", false)], clock.now());
+        let reassembler = collecting(4, &[(0, "a", false)], clock.now());
         let mut scheduler = Scheduler::default();
 
         clock.advance(DEADLINE - Duration::from_millis(1));
@@ -320,7 +320,7 @@ mod tests {
         let clock = FakeClock::new();
         // One data chunk and one parity chunk of a four-data message: two short of k, with
         // three data indices to choose from.
-        let reassembler = collecting(&[(0, "a", false), (4, "a", false)], clock.now());
+        let reassembler = collecting(4, &[(0, "a", false), (4, "a", false)], clock.now());
         let mut scheduler = Scheduler::default();
         clock.advance(DEADLINE);
 
@@ -378,7 +378,7 @@ mod tests {
     #[test]
     fn no_candidates_means_no_request_and_a_gave_up_count() {
         let clock = FakeClock::new();
-        let reassembler = collecting(&[(0, "a", false)], clock.now());
+        let reassembler = collecting(4, &[(0, "a", false)], clock.now());
         let mut scheduler = Scheduler::default();
         clock.advance(DEADLINE);
 
@@ -410,6 +410,42 @@ mod tests {
         assert_eq!(
             attempt_timeout(Duration::from_millis(200)),
             Duration::from_millis(500)
+        );
+    }
+
+    /// Who the scheduler asks over a message's life, and where it stops: three peers of the one
+    /// candidate list, never the same peer twice, and no fourth however many are left (D24).
+    #[test]
+    fn three_attempts_go_to_three_distinct_peers_and_a_fourth_is_not_made() {
+        let clock = FakeClock::new();
+        let reassembler = collecting(
+            6,
+            &[
+                (0, "a", false),
+                (1, "b", true),
+                (2, "c", true),
+                (3, "d", true),
+            ],
+            clock.now(),
+        );
+        let mut scheduler = Scheduler::default();
+        clock.advance(DEADLINE);
+
+        let mut asked = Vec::new();
+        for _ in 0..4 {
+            for decision in scheduler.tick(&reassembler, DEADLINE, reachable, clock.now()) {
+                match decision {
+                    Decision::Ask(request) => asked.push(request.peer),
+                    Decision::GaveUp(_) => asked.push(host("gave up")),
+                }
+            }
+            scheduler.answered(&MessageId([9; 20]));
+            clock.advance(REPAIR_TICK);
+        }
+
+        assert_eq!(
+            asked,
+            vec![host("b"), host("c"), host("d"), host("gave up")]
         );
     }
 }
