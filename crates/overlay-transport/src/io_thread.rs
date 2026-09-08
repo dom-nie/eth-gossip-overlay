@@ -4,6 +4,18 @@
 //! With `overlay.io_thread.pin_cpu` unset, which is what an operator gets unless they went
 //! looking, the endpoint is built on the runtime that builds the rest of the sidecar and this
 //! module costs one info log.
+//!
+//! With a core named, on Linux, the endpoint is built inside a `current_thread` runtime on a
+//! thread of its own, pinned there. That runtime owns one epoll instance and nothing else runs
+//! on it, so overlay reads never queue behind a chunk being encoded or a message being handed
+//! to the beacon node, and T-092 has one epoll to set busy-poll parameters on. Nothing above
+//! the transport changes: frames reach the router through the channels that were already
+//! there.
+//!
+//! The two failures an operator can cause are not the same size. A core the kernel refuses is
+//! a warning and an unpinned overlay, because a container with a narrower cpuset than the
+//! configuration expects should not lose the mesh over it. A thread that cannot be created at
+//! all is not a degraded overlay but a broken host, and ends the start.
 
 use std::thread;
 
@@ -71,6 +83,9 @@ impl IoHandle {
 }
 
 /// Runs the overlay endpoint where `overlay.io_thread` asks for it.
+///
+/// `build` is called on whichever runtime wins, because that is what decides the socket's
+/// reactor: an endpoint handed in already bound would already be registered somewhere else.
 pub fn spawn(
     cfg: &IoThread,
     build: impl FnOnce() -> Result<quinn::Endpoint, EndpointError> + Send + 'static,
