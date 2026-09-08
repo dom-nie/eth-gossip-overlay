@@ -238,6 +238,51 @@ mod tests {
             .to_owned()
     }
 
+    /// The congestion window a dialled connection starts with, which is the only place
+    /// `initial_window_bytes` becomes visible: quinn keeps the congestion controller out of
+    /// `TransportConfig`'s `Debug`, and `stats()` reads it off the live connection instead.
+    async fn initial_congestion_window(initial_window_bytes: u64) -> u64 {
+        let (seeds, pins) = fleet(&["bn-a", "bn-b"]);
+        let cfg = Overlay {
+            initial_window_bytes,
+            ..config("127.0.0.1:0")
+        };
+        let acceptor = endpoint(&cfg, &pins, &seeds, "bn-a");
+        let dialler = endpoint(&cfg, &pins, &seeds, "bn-b");
+        let addr = acceptor.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _held = acceptor
+                .accept()
+                .await
+                .expect("the endpoint is still open")
+                .await
+                .unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        connect(
+            &cfg,
+            &dialler,
+            addr,
+            dial_config(&pins, &seeds, "bn-b", "bn-a"),
+        )
+        .await
+        .unwrap()
+        .stats()
+        .path
+        .cwnd
+    }
+
+    /// §5.3's reason for the key: a connection carrying one block every 12 s never leaves slow
+    /// start with the RFC's ~14 kB window, so the operator sets where it starts. Both ends of
+    /// the comparison are configured values, because the assertion has to fail when nothing
+    /// reads the key at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn transport_config_applies_initial_window_from_config() {
+        assert!(initial_congestion_window(3_000_000).await >= 3_000_000);
+        assert!(initial_congestion_window(30_000).await < 3_000_000);
+    }
+
     #[test]
     fn transport_config_uses_keepalive_and_idle_from_config() {
         let cfg = Overlay {
