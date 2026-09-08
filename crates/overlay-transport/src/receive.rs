@@ -559,6 +559,7 @@ impl Ctx {
         let view = relaying.live.live();
         for (topic, payload) in new {
             let Some(topic_id) = self.own_id(&topic) else {
+                self.deps.stats.unannounced_topic();
                 continue;
             };
             // One lock for the whole region rather than one per peer. Nothing under it takes

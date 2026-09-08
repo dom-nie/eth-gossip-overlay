@@ -99,10 +99,18 @@ pub struct PeerLabels<'a> {
 pub trait TrafficStats: Send + Sync {
     /// One message of `class` and `bytes` payload crossed the overlay in `direction`.
     fn message(&self, direction: Direction, class: Class, peer: PeerLabels<'_>, bytes: usize);
+
+    /// `unannounced_topic_total`: a payload this host could not put on the wire, because it has
+    /// no id of its own for the topic that its peers have been told (D12). Both senders count
+    /// it here: a message from the beacon node on a topic the mirror has not caught up with,
+    /// and an entry a relay will not intern for (MD-04). It should stay at zero; anything else
+    /// means a table and the view that named the topic have disagreed.
+    fn unannounced_topic(&self);
 }
 
 impl TrafficStats for () {
     fn message(&self, _: Direction, _: Class, _: PeerLabels<'_>, _: usize) {}
+    fn unannounced_topic(&self) {}
 }
 
 /// The task that turns what the beacon node sent into frames on the overlay.
@@ -187,6 +195,7 @@ impl Fanout {
                 topic = %outbound.topic,
                 "no id for this topic yet, so no peer could read a frame carrying it"
             );
+            self.stats.unannounced_topic();
             return;
         };
         let bytes = outbound.payload.len();

@@ -167,6 +167,7 @@ pub struct CountingStats {
     duplicates: Mutex<HashMap<Class, u64>>,
     fanout_suppressed: Mutex<BTreeMap<(Hostname, FanoutKind), u64>>,
     relayed_batches: AtomicU64,
+    unannounced_topics: AtomicU64,
     relay_same_region: Mutex<BTreeMap<Hostname, u64>>,
     queue_depths: Mutex<HashMap<(Hostname, Class), (usize, usize)>>,
     queue_drops: Mutex<HashMap<(Hostname, Class, DropReason), u64>>,
@@ -280,6 +281,11 @@ impl CountingStats {
         self.relayed_batches.load(Ordering::Relaxed)
     }
 
+    /// `unannounced_topic_total`.
+    pub fn unannounced_topics(&self) -> u64 {
+        self.unannounced_topics.load(Ordering::Relaxed)
+    }
+
     /// `relay_same_region_total{peer}`.
     pub fn relay_same_region(&self, peer: &Hostname) -> u64 {
         count(&self.relay_same_region, peer)
@@ -378,6 +384,10 @@ impl TrafficStats for CountingStats {
             .or_default();
         counted.0 += 1;
         counted.1 += bytes as u64;
+    }
+
+    fn unannounced_topic(&self) {
+        self.unannounced_topics.fetch_add(1, Ordering::Relaxed);
     }
 }
 

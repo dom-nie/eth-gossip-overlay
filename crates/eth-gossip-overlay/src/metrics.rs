@@ -126,6 +126,8 @@ pub const FANOUT_SUPPRESSED_TOTAL: &str = "overlay_fanout_suppressed_total";
 pub const RELAYED_BATCHES_TOTAL: &str = "overlay_relayed_batches_total";
 /// Relay batches from a peer in this host's own region, which no sender should send.
 pub const RELAY_SAME_REGION_TOTAL: &str = "overlay_relay_same_region_total";
+/// Payloads that went nowhere because this host has no announced id for their topic.
+pub const UNANNOUNCED_TOPIC_TOTAL: &str = "overlay_unannounced_topic_total";
 /// Messages from the beacon node dropped because the fanout lane was full.
 pub const FANOUT_LANE_DROPPED_TOTAL: &str = "overlay_fanout_lane_dropped_total";
 /// Chunks written to peers.
@@ -264,6 +266,7 @@ pub struct Metrics {
     fanout_suppressed: IntCounterVec,
     relayed_batches: IntCounter,
     relay_same_region: IntCounterVec,
+    unannounced_topic: IntCounter,
     fanout_lane_dropped: IntCounterVec,
     peer_queue_depth: IntGaugeVec,
     peer_queue_drops: IntCounterVec,
@@ -413,6 +416,13 @@ impl Metrics {
             "Relay batches from a peer in this host's own region.",
             &[LABEL_PEER],
         )?;
+        // Bare: the topic is what an operator would want on it, and §12 carries no topic label
+        // anywhere. `TopicKind::Other` holds a string a peer chose, so even a kind label is a
+        // cardinality a peer decides.
+        let unannounced_topic = b.counter(
+            UNANNOUNCED_TOPIC_TOTAL,
+            "Payloads with no announced topic id of this host's own.",
+        )?;
         let fanout_lane_dropped = b.counter_vec(
             FANOUT_LANE_DROPPED_TOTAL,
             "Messages dropped because the fanout lane was full.",
@@ -512,6 +522,7 @@ impl Metrics {
             fanout_suppressed,
             relayed_batches,
             relay_same_region,
+            unannounced_topic,
             fanout_lane_dropped,
             peer_queue_depth,
             peer_queue_drops,
@@ -717,6 +728,10 @@ impl TrafficStats for Metrics {
         self.bytes
             .with_label_values(labels)
             .inc_by(bytes.try_into().unwrap_or(u64::MAX));
+    }
+
+    fn unannounced_topic(&self) {
+        self.unannounced_topic.inc();
     }
 }
 
