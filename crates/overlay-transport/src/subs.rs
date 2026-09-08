@@ -130,6 +130,7 @@ async fn announce(
     mut sets: watch::Receiver<SubscriptionSets>,
     topics: &Mutex<OwnTopics>,
 ) {
+    let mut interned = crate::hello::lock(topics).interned();
     loop {
         // The borrow ends before the first write: it is a read lock on the mirror's value, and
         // holding one across a network write would stall the mirror behind a slow peer.
@@ -140,7 +141,14 @@ async fn announce(
                 return;
             }
         }
-        if sets.changed().await.is_err() {
+        // Two things put a binding in this table: the mirror, and a relay interning a topic it
+        // was asked to carry (MD-04). A loop that waited on the mirror alone would leave the
+        // second unannounced for as long as the beacon node's subscriptions held still.
+        let woken = tokio::select! {
+            changed = sets.changed() => changed.is_ok(),
+            minted = interned.changed() => minted.is_ok(),
+        };
+        if !woken {
             return;
         }
     }
@@ -151,7 +159,9 @@ async fn announce(
 /// awaited, so the mirror's next change is never held up by a peer's flow control.
 fn owed(peer: &Hostname, sets: &SubscriptionSets, topics: &Mutex<OwnTopics>) -> Vec<Frame> {
     let mut own = crate::hello::lock(topics);
-    let OwnTopics { table, announcer } = &mut *own;
+    let OwnTopics {
+        table, announcer, ..
+    } = &mut *own;
     let mut frames = match on_changed(sets, [peer], table, announcer) {
         Ok(owed) => owed.into_iter().flat_map(|(_, frames)| frames).collect(),
         Err(error) => {

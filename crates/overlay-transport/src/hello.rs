@@ -30,8 +30,10 @@ use overlay_core::protocol::{
 };
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
 use overlay_core::subs::PeerState;
-use overlay_core::topic::table::{Announcer, OwnTopicTable, PeerTopicTable, TopicId};
+use overlay_core::topic::Topic;
+use overlay_core::topic::table::{Announcer, OwnTopicTable, PeerTopicTable, TableFull, TopicId};
 use overlay_core::wire::{Frame, Hello, Read, write_frame};
+use tokio::sync::watch;
 
 use crate::manager::{Admission, AdmitError, CloseCode, ManagerStats, PeerInfo};
 use crate::tls::{FailureReason, HandshakeFailure, PinEntry, Role};
@@ -406,12 +408,51 @@ fn stream_failed(connection: &quinn::Connection, error: &dyn fmt::Display) -> He
 /// This host's topic table and the record of what each peer has been told, behind one lock
 /// because a HELLO snapshot has to take both in one read (D12). The mirror interns into the same
 /// table from its own task (T-026).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct OwnTopics {
     /// The ids this host assigns.
     pub table: OwnTopicTable,
     /// What each peer has been told of them.
     pub announcer: Announcer,
+    /// How many topics have been interned outside the mirror's own `Changed` (MD-04). A `watch`
+    /// and not a `Notify`, because an announce loop that is between two waits must not miss the
+    /// wake: a watch keeps the value and the loop finds it on its next look.
+    interned: watch::Sender<u64>,
+}
+
+impl Default for OwnTopics {
+    fn default() -> Self {
+        Self {
+            table: OwnTopicTable::default(),
+            announcer: Announcer::default(),
+            interned: watch::channel(0).0,
+        }
+    }
+}
+
+impl OwnTopics {
+    /// Binds an id to `topic` and wakes every peer's announce loop, which is what puts the
+    /// binding on the wire (T-027). Idempotent: a topic already bound keeps its id and wakes
+    /// nobody.
+    ///
+    /// The mirror's own subscriptions go through
+    /// [`on_changed`](overlay_core::topic::table::on_changed) instead, which interns the whole
+    /// set at once and is followed by the `Changed` the announce loop already waits on. This is
+    /// for the relay path, which is asked to carry topics its own beacon node never subscribed
+    /// to (MD-04); the caller owns the bound on what may be interned that way.
+    pub fn intern(&mut self, topic: &Topic) -> Result<TopicId, TableFull> {
+        let (id, minted) = self.table.intern(topic)?;
+        if minted {
+            self.interned.send_modify(|count| *count += 1);
+        }
+        Ok(id)
+    }
+
+    /// A receiver that changes whenever [`intern`](Self::intern) mints an id, for the announce
+    /// loop to wait on beside the mirror.
+    pub fn interned(&self) -> watch::Receiver<u64> {
+        self.interned.subscribe()
+    }
 }
 
 /// The topic state, recovering the guard from a poisoned lock: nothing between a lock and its
@@ -488,7 +529,6 @@ impl Admission for HelloAdmission {
 
 #[cfg(test)]
 mod tests {
-    use overlay_core::topic::Topic;
 
     use super::*;
     use crate::manager::PeerEvent;
@@ -541,7 +581,9 @@ mod tests {
     /// What `peer` is still owed.
     fn owed(topics: &Arc<Mutex<OwnTopics>>, peer: &Hostname) -> Vec<Frame> {
         let mut own = lock(topics);
-        let OwnTopics { table, announcer } = &mut *own;
+        let OwnTopics {
+            table, announcer, ..
+        } = &mut *own;
         announcer.announce(peer, table)
     }
 
