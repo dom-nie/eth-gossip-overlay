@@ -595,19 +595,25 @@ mod tests {
         assert_eq!(errors, 1);
     }
 
-    /// The bound on what a host keeps: a slot the fleet has moved several past is one no repair
-    /// can still help, so it goes and the newest [`TRACKED_SLOTS`] stay.
+    /// The bound on what a host keeps: a block the fleet has moved several slots past is one no
+    /// repair can still help, so the oldest goes and the newest [`TRACKED_SLOTS`] stay. Each
+    /// block gets a root of its own, so a bound that dropped the wrong end would not pass.
     #[test]
     fn gaps_are_garbage_collected_after_n_slots() {
         let clock = FakeClock::new();
         let mut tracker = CustodyTracker::new(&mainnet());
         let expected = tracker.expected_columns(&column_topics(&[0, 3, 7]));
+        let root = |slot: u64| [slot as u8; 32];
         for slot in 1..=(TRACKED_SLOTS as u64 + 1) {
-            tracker.on_block(slot, ROOT, expected.clone(), clock.now());
+            tracker.on_block(slot, root(slot), expected.clone(), clock.now());
         }
         clock.advance(DEADLINE);
 
-        assert_eq!(gaps(&mut tracker, &clock).len(), TRACKED_SLOTS);
+        let kept: Vec<[u8; 32]> = gaps(&mut tracker, &clock)
+            .into_iter()
+            .map(|gap| gap.block_root)
+            .collect();
+        assert_eq!(kept, (2..=5).map(root).collect::<Vec<[u8; 32]>>());
     }
 
     /// Two blocks can exist for one slot, from a reorg or an equivocating proposer. The columns
