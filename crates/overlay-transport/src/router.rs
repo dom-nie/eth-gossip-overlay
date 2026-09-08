@@ -726,6 +726,43 @@ mod tests {
         );
     }
 
+    /// D18: the stripe runs over the region's subscribers, not over everything live in it. A
+    /// column chunk sent to a host whose beacon node discards the column is a chunk that bought
+    /// nothing, and it would leave a hole in the region's copy of the message. This is the one
+    /// rule striping and relay selection disagree on, and it is why the pool a relay is taken
+    /// from is built separately.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unsubscribed_hosts_are_not_in_the_stripe() {
+        let connection = connection().await;
+        let (block, attestation) = (topic("beacon_block"), topic("beacon_attestation_3"));
+        let live = view_in(
+            &connection,
+            vec![
+                ("bn-eu-a", "eu", peer_state(&[(1, &block)], &[1])),
+                ("bn-eu-b", "eu", peer_state(&[(1, &attestation)], &[1])),
+                ("bn-eu-c", "eu", peer_state(&[(1, &block)], &[1])),
+                ("bn-eu-d", "eu", peer_state(&[(1, &block)], &[1])),
+            ],
+        );
+
+        let plan = route(
+            &block,
+            Class::Large,
+            Some(chunked(0, 2, 1)),
+            &live,
+            &me(),
+            &striping(3),
+        );
+
+        assert_eq!(
+            plan,
+            RoutePlan::Large(vec![RegionPlan::Stripe {
+                region: Region("eu".to_owned()),
+                targets_per_chunk: vec![host("bn-eu-a"), host("bn-eu-c"), host("bn-eu-d")],
+            }])
+        );
+    }
+
     /// v1 sends both classes the same way, so the class changes nothing about the plan. T-072
     /// rewrites this test: a large message becomes a stripe over the same peers, and the two
     /// answers stop matching.
