@@ -661,4 +661,23 @@ mod tests {
             [Decision::AskColumn(request)] if request.peer == host("far")
         ));
     }
+
+    /// The Out clause of the ticket: a column with chunks already in flight belongs to the chunk
+    /// path, which asks for the indices it is short of rather than for the whole column again.
+    #[test]
+    fn partially_received_column_takes_the_chunk_path_and_gets_no_column_request() {
+        let clock = FakeClock::new();
+        let candidates = [(host("near"), Duration::from_millis(5))];
+        let gaps = [gap(&[4, 9], 0)];
+        let mut in_flight = BitSet::new(128);
+        in_flight.insert(4);
+        let mut scheduler = Scheduler::default();
+
+        let decided = scheduler.tick_columns(&gaps, THRESHOLD, &in_flight, &candidates, clock.now());
+
+        assert!(matches!(
+            decided.as_slice(),
+            [Decision::AskColumn(request)] if request.index == 9
+        ));
+    }
 }
