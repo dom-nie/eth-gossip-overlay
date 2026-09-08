@@ -2427,6 +2427,31 @@ mod tests {
         assert_eq!(cluster.stats(1).duplicates(Class::Large), 1);
     }
 
+    /// The other half of D19's rule. A message this host has put back together is one it holds
+    /// as surely as one in the seen cache, and the completed set is what remembers that once the
+    /// in-flight entry has gone. T-074's completion is what fills it in production.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clear_chunk_for_a_message_in_the_completed_set_is_not_forwarded() {
+        let (cluster, peer, _) = striping_region(3).await;
+        let done = MessageId([10; 20]);
+        let forwarder = cluster.hostname(1);
+        cluster.reassembler(1).complete(done);
+
+        send(&peer, &[chunk_frame(done, 0, ChunkFlags::NONE)]).await;
+
+        eventually("the host it was sent to to count it", || {
+            cluster.stats(1).chunks_received(&cluster.hostname(0)).len() == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        for node in [2, 3] {
+            assert!(
+                cluster.stats(node).chunks_received(&forwarder).is_empty(),
+                "node {node}"
+            );
+        }
+    }
+
     /// A chunk is a piece of a message and this release cannot put one back together, so it is
     /// counted, offered to the region and dropped. Nothing is published until T-074 reconstructs.
     #[tokio::test(flavor = "multi_thread")]
