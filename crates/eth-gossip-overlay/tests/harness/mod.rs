@@ -713,13 +713,6 @@ impl Node {
         self.bn().fake.subscribe(topic).await;
     }
 
-    /// Unsubscribes the beacon node from `topic`, which the sidecar mirrors: it stops
-    /// advertising the topic and stops publishing what arrives on it, while the id it minted for
-    /// the topic stays bound (D12).
-    pub async fn unsubscribe(&self, topic: &str) {
-        self.bn().fake.unsubscribe(topic).await;
-    }
-
     /// Wedges the beacon node: it stops reading its socket and answers nothing, while the
     /// connection stays open. Nothing on the sidecar's overlay path may wait for it (DX-N4).
     pub async fn wedge_bn(&self) {
