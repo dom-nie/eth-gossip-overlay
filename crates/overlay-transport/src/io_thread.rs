@@ -1,16 +1,18 @@
 //! Which runtime polls the overlay socket (§5.1, §11.1).
 //!
-//! Everything in E9 is off in the shipped defaults (D30) and everything in it is Linux only.
-//! With `overlay.io_thread.pin_cpu` unset, which is what an operator gets unless they went
-//! looking, the endpoint is built on the runtime that builds the rest of the sidecar and this
-//! module costs one info log.
+//! Everything in E9 is off in the shipped defaults (D30). With `overlay.io_thread.pin_cpu`
+//! unset, which is what an operator gets unless they went looking, the endpoint is built on the
+//! runtime that builds the rest of the sidecar and this module costs one info log.
 //!
-//! With a core named, on Linux, the endpoint is built inside a `current_thread` runtime on a
-//! thread of its own, pinned there. That runtime owns one epoll instance and nothing else runs
-//! on it, so overlay reads never queue behind a chunk being encoded or a message being handed
-//! to the beacon node, and T-092 has one epoll to set busy-poll parameters on. Nothing above
-//! the transport changes: frames reach the router through the channels that were already
-//! there.
+//! With a core named, the endpoint is built inside a `current_thread` runtime on a thread of
+//! its own. That runtime owns one epoll instance and nothing else runs on it, so overlay reads
+//! never queue behind a chunk being encoded or a message being handed to the beacon node, and
+//! T-092 has one epoll to set busy-poll parameters on. Nothing above the transport changes:
+//! frames reach the router through the channels that were already there.
+//!
+//! Pinning that thread to the core is the one Linux-only part, and it is deliberately the only
+//! one: a platform without `sched_setaffinity` still takes the whole path a fleet takes, so the
+//! handoff is exercised wherever the tests run and only the affinity call is not.
 //!
 //! The two failures an operator can cause are not the same size. A core the kernel refuses is
 //! a warning and an unpinned overlay, because a container with a narrower cpuset than the
@@ -90,10 +92,9 @@ pub fn spawn(
     cfg: &IoThread,
     build: impl FnOnce() -> Result<quinn::Endpoint, EndpointError> + Send + 'static,
 ) -> Result<IoHandle, IoThreadError> {
-    let Some(cpu) = pin_cpu(cfg) else {
+    let Some(cpu) = cfg.pin_cpu else {
         tracing::info!(
             pin_cpu = ?cfg.pin_cpu,
-            linux = cfg!(target_os = "linux"),
             "overlay endpoint on the main runtime"
         );
         return Ok(IoHandle {
@@ -105,20 +106,6 @@ pub fn spawn(
     dedicated(Some(cpu), build)
 }
 
-/// The core to run the endpoint on, which is what the configuration says.
-#[cfg(target_os = "linux")]
-fn pin_cpu(cfg: &IoThread) -> Option<u32> {
-    cfg.pin_cpu
-}
-
-/// No core anywhere else. A thread of its own with no affinity behind it would cost a context
-/// switch per read and buy nothing, so a configuration written for a fleet still starts a
-/// sidecar on a developer's machine, unchanged from before E9 existed.
-#[cfg(not(target_os = "linux"))]
-fn pin_cpu(_cfg: &IoThread) -> Option<u32> {
-    None
-}
-
 /// The endpoint on a `current_thread` runtime of its own, pinned to `cpu` where there is one.
 ///
 /// That runtime owns one epoll instance and registers the overlay socket with it as the
@@ -127,8 +114,8 @@ fn pin_cpu(_cfg: &IoThread) -> Option<u32> {
 /// whichever runtime created the connection, so a peer's timers stay with the connection
 /// manager and what the I/O thread owns is every read off the socket.
 ///
-/// `cpu` is an option so that the thread, the handoff and the join can be driven on a platform
-/// that has no core to ask for; a start reaches this with `Some`.
+/// `cpu` is an option for the tests that are about the thread rather than the core, which pass
+/// `None` and get no affinity call at all; a start always reaches this with `Some`.
 fn dedicated(
     cpu: Option<u32>,
     build: impl FnOnce() -> Result<quinn::Endpoint, EndpointError> + Send + 'static,
@@ -201,10 +188,15 @@ fn pin_current_thread(cpu: u32) -> bool {
     }
 }
 
-/// There is no `sched_setaffinity` off Linux. A start never asks for a core there, so this is
-/// only what gives the thread body one shape on every platform.
+/// There is no `sched_setaffinity` off Linux, so the thread runs wherever the scheduler puts
+/// it. Info rather than a warning: this line is unreachable on the platform the sidecar is
+/// deployed on, and only ever tells a developer why their knob did nothing.
 #[cfg(not(target_os = "linux"))]
-fn pin_current_thread(_cpu: u32) -> bool {
+fn pin_current_thread(cpu: u32) -> bool {
+    tracing::info!(
+        cpu,
+        "overlay I/O thread unpinned: CPU affinity is Linux only"
+    );
     false
 }
 
@@ -457,8 +449,9 @@ mod tests {
         assert_eq!(
             LOG.since(mark)
                 .lines()
-                .filter(|line| line.contains("CPU affinity is Linux only")
-                    && line.contains("cpu=30"))
+                .filter(
+                    |line| line.contains("CPU affinity is Linux only") && line.contains("cpu=30")
+                )
                 .count(),
             1
         );

@@ -53,9 +53,10 @@ async fn block_from_one_bn_reaches_every_other_bn_exactly_once() {
 /// runtimes through the channels that were already there, so a fleet with a core reserved has
 /// to deliver exactly what a fleet without one delivers.
 ///
-/// Off Linux this is the fallback: every node parses the key, takes the main runtime and
-/// reports the gauge at zero. That the endpoint really lands on the reserved core is the half
-/// of the answer only a Linux machine can give.
+/// Every node runs its endpoint on a thread of its own here, whatever the platform, so this is
+/// the cross-runtime path under real traffic and not a fallback. What a machine without
+/// `sched_setaffinity` cannot say is whether that thread sat on the reserved core, which is why
+/// the gauge is read for presence rather than for one.
 #[tokio::test(flavor = "multi_thread")]
 async fn fleet_scenario_one_passes_with_the_io_thread_configured() {
     let block = topic("beacon_block");

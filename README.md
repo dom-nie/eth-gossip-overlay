@@ -17,7 +17,7 @@ Start at [docs/quickstart.md](docs/quickstart.md): two hosts, from a downloaded 
 | [docs/quickstart.md](docs/quickstart.md) | two hosts, install to first arrival |
 | [docs/lighthouse.md](docs/lighthouse.md) | the beacon node's side: the drop-in, the two flags, `--target-peers` |
 | [docs/configuration.md](docs/configuration.md) | every key, its default, and whether it reloads |
-| [docs/performance.md](docs/performance.md) | where every byte of `MemoryMax` goes, and what a striped block costs |
+| [docs/performance.md](docs/performance.md) | where every byte of `MemoryMax` goes, what a striped block costs, and reserved cores |
 | [docs/security.md](docs/security.md) | the threat model, the three fences, holding and rotating the seed |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | one section per alert, which is where every alert links |
 | [docs/symptoms.md](docs/symptoms.md) | what to look into when no alert fired |
