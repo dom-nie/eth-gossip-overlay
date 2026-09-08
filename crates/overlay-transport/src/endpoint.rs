@@ -216,7 +216,7 @@ fn varint(bytes: u64) -> VarInt {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
@@ -234,7 +234,7 @@ mod tests {
 
     /// What a two-host loopback pair gives each other inbound. Nothing here fills a window, so
     /// the floor keeps every test on one number.
-    const TEST_RECEIVE_WINDOW: u64 = STREAM_RECEIVE_WINDOW;
+    pub(crate) const TEST_RECEIVE_WINDOW: u64 = STREAM_RECEIVE_WINDOW;
 
     /// T-033's lane bounds, which are what the binary passes the budget.
     const LANES: SendLaneBounds = SendLaneBounds {
@@ -250,7 +250,7 @@ mod tests {
     /// A fleet of `names` and the pin table both ends of a handshake read, derived from a seed
     /// the way the sidecar derives its own. Nothing here is a stand-in: a handshake between two
     /// of these endpoints proves what a handshake between two hosts would.
-    fn fleet(names: &[&str]) -> (Seeds, Arc<ArcSwap<PinTable>>) {
+    pub(crate) fn fleet(names: &[&str]) -> (Seeds, Arc<ArcSwap<PinTable>>) {
         let seeds = Seeds {
             current: FleetSeed::from([0x11; 32]),
             previous: None,
@@ -270,11 +270,11 @@ mod tests {
         (seeds, pins)
     }
 
-    fn own_key(seeds: &Seeds, name: &str) -> SigningKey {
+    pub(crate) fn own_key(seeds: &Seeds, name: &str) -> SigningKey {
         derive_tls_keypair(&seeds.current, &host(name))
     }
 
-    fn config(listen: &str) -> Overlay {
+    pub(crate) fn config(listen: &str) -> Overlay {
         Overlay {
             listen: listen.parse().unwrap(),
             ..Overlay::default()
