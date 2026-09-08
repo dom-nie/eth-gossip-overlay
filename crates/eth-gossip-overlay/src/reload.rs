@@ -1488,5 +1488,15 @@ mod tests {
             assert_eq!(published.hosts.len(), 4);
             assert_eq!(published.hosts[3].hostname, Hostname("bn-4".to_owned()));
         }
+
+        #[tokio::test(start_paused = true)]
+        async fn unchanged_file_does_not_reload() {
+            let h = Watched::start(3).await;
+
+            h.poll().await;
+            h.poll().await;
+
+            assert_eq!(h.stats.count(), 0);
+        }
     }
 }
