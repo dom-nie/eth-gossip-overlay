@@ -830,11 +830,10 @@ impl Ctx {
     /// this peer yet (MD-04).
     fn repair(&self, request: &RepairReq) -> Vec<Frame> {
         let not_found = || vec![Frame::RepairResp(RepairResp::NotFound)];
-        // Column identity is T-083's; nothing here can resolve a block root to a message yet.
-        let RepairReq::Missing { msg_id, missing } = request else {
+        let Some(msg_id) = self.asked_for(request) else {
             return not_found();
         };
-        let Some((topic, payload)) = self.deps.recent.get(msg_id) else {
+        let Some((topic, payload)) = self.deps.recent.get(&msg_id) else {
             return not_found();
         };
         let Ok(split) = Params::for_len(
@@ -843,6 +842,12 @@ impl Ctx {
             self.deps.large.parity_ratio,
         ) else {
             return not_found();
+        };
+        let missing: Vec<u16> = match request {
+            RepairReq::Missing { missing, .. } => missing.clone(),
+            // A peer that asked by identity holds none of the column, so it is owed every data
+            // chunk of it; parity would only cost bytes it has no shortfall to make up (D24).
+            RepairReq::Column { .. } => (0..split.k).collect(),
         };
         if missing.len() > usize::from(split.k) {
             tracing::debug!(
@@ -863,7 +868,7 @@ impl Ctx {
             .map(|(index, data)| Frame::Chunk {
                 flags: ChunkFlags::FORWARDED,
                 chunk: Chunk {
-                    msg_id: *msg_id,
+                    msg_id,
                     topic_id: topic_id.get(),
                     k: split.k,
                     m: split.m,
@@ -875,6 +880,18 @@ impl Ctx {
             .collect();
         answer.push(Frame::RepairResp(RepairResp::Chunks(Vec::new())));
         answer
+    }
+
+    /// Which message a request is about: the one it names, or the one the recent store files
+    /// under the column it names (T-081's index, T-083). A column nothing has indexed is one
+    /// this host cannot answer for, whatever else it holds.
+    fn asked_for(&self, request: &RepairReq) -> Option<MessageId> {
+        match request {
+            RepairReq::Missing { msg_id, .. } => Some(*msg_id),
+            RepairReq::Column { block_root, index } => {
+                self.deps.recent.get_by_column(*block_root, *index)
+            }
+        }
     }
 
     /// The id this host names `topic` by, once this peer has had the `TOPIC_ADD` that binds it
