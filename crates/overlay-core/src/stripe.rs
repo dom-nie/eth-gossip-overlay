@@ -57,7 +57,7 @@ fn rotation(msg_id: &MessageId) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
     use crate::msgid::MessageId;
@@ -78,6 +78,29 @@ mod tests {
         let mut id = [0u8; 20];
         id[..8].copy_from_slice(&rotation.to_le_bytes());
         MessageId(id)
+    }
+
+    /// §5.4: with about as many chunks as hosts each host takes one, and a region that is short
+    /// of hosts takes two rather than piling the remainder on whoever the rotation started on.
+    #[test]
+    fn more_chunks_than_hosts_wraps_around_evenly() {
+        let targets = assign(&msg_id(7), &hosts(100), 110);
+
+        let mut chunks_per_host: BTreeMap<Hostname, usize> = BTreeMap::new();
+        for target in targets {
+            *chunks_per_host.entry(target).or_default() += 1;
+        }
+        let two = chunks_per_host.values().filter(|n| **n == 2).count();
+        assert_eq!((two, chunks_per_host.len() - two), (10, 90));
+    }
+
+    /// A message smaller than the region is not padded out to it: the hosts past the last chunk
+    /// are sent nothing and are served by the second hop instead (§5.4, T-073).
+    #[test]
+    fn fewer_chunks_than_hosts_leaves_some_hosts_without_a_chunk() {
+        let targets = assign(&msg_id(4), &hosts(5), 3);
+
+        assert_eq!(targets, vec![host("bn-05"), host("bn-01"), host("bn-02")]);
     }
 
     /// Two origins that took the same message off public gossip and see the same live hosts
