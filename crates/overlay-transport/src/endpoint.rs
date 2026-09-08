@@ -173,7 +173,10 @@ pub fn transport_config(cfg: &Overlay, receive_window: u64) -> quinn::TransportC
         .stream_receive_window(varint(STREAM_RECEIVE_WINDOW))
         // DX-N3: what one peer may hold across all its streams at once, which is
         // `MemoryBudget`'s remainder divided by the roster. quinn's own default is unbounded.
-        .receive_window(varint(receive_window));
+        .receive_window(varint(receive_window))
+        // §5.3: one batch per datagram, so these hold a tick's worth for a whole fleet.
+        .datagram_send_buffer_size(DATAGRAM_BUFFER_BYTES)
+        .datagram_receive_buffer_size(Some(DATAGRAM_BUFFER_BYTES));
     transport
 }
 
