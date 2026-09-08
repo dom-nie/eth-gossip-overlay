@@ -32,6 +32,7 @@ use std::convert::Infallible;
 use std::io;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
@@ -46,6 +47,7 @@ use overlay_bn::publish::PublishStats;
 use overlay_core::budget::FanoutKind;
 use overlay_core::lanes::LaneStats;
 use overlay_core::pubqueue::{DropReason as QueueDropReason, QueueStats};
+use overlay_core::reassemble::{Evicted, ReassembleStats};
 use overlay_core::roster::Hostname;
 use overlay_core::seen::SeenStats;
 use overlay_core::topic::Class;
@@ -141,6 +143,9 @@ pub const PARITY_USED_TOTAL: &str = "overlay_parity_used_total";
 pub const REPAIR_REQUESTS_TOTAL: &str = "overlay_repair_requests_total";
 /// Seconds from the first chunk of a message to its reconstruction.
 pub const RECONSTRUCT_SECONDS: &str = "overlay_reconstruct_seconds";
+
+/// `reassembly_evicted_total`: messages dropped before they could be put back together.
+pub const REASSEMBLY_EVICTED_TOTAL: &str = "overlay_reassembly_evicted_total";
 /// What a peer's send lane holds now, in frames and in bytes.
 pub const PEER_QUEUE_DEPTH: &str = "overlay_peer_queue_depth";
 /// Frames a peer's send lane threw away.
@@ -268,6 +273,8 @@ pub struct Metrics {
     relayed_batches: IntCounter,
     chunks_sent: IntCounter,
     chunks_received: IntCounter,
+    parity_used: IntCounter,
+    reassembly_evicted: IntCounterVec,
     relay_same_region: IntCounterVec,
     unannounced_topic: IntCounter,
     fanout_lane_dropped: IntCounterVec,
@@ -460,14 +467,21 @@ impl Metrics {
 
         let chunks_sent = b.counter(CHUNKS_SENT_TOTAL, "Chunks written to peers.")?;
         let chunks_received = b.counter(CHUNKS_RECEIVED_TOTAL, "Chunks read from peers.")?;
-
-        // Registered and then let go of: their producers land in T-074 and v3, and each of those
-        // tickets adds the handle it needs. The registry keeps the collector alive, so the name
-        // is on the scrape from this release on.
-        b.counter(
+        let parity_used = b.counter(
             PARITY_USED_TOTAL,
             "Messages that needed a parity chunk to reconstruct.",
         )?;
+        // Bare but for the bound that took the message: which of the three fired is what tells
+        // an operator whether to raise a bound or look at why messages stop arriving.
+        let reassembly_evicted = b.counter_vec(
+            REASSEMBLY_EVICTED_TOTAL,
+            "Messages dropped before they could be reassembled.",
+            &[LABEL_REASON],
+        )?;
+
+        // Registered and then let go of: the producer lands in v3, which adds the handle it
+        // needs. The registry keeps the collector alive, so the name is on the scrape from this
+        // release on.
         b.counter(REPAIR_REQUESTS_TOTAL, "Repair requests sent.")?;
         let config_reload = b.counter_vec(
             CONFIG_RELOAD_TOTAL,
@@ -527,6 +541,8 @@ impl Metrics {
             relayed_batches,
             chunks_sent,
             chunks_received,
+            parity_used,
+            reassembly_evicted,
             relay_same_region,
             unannounced_topic,
             fanout_lane_dropped,
@@ -551,14 +567,6 @@ impl Metrics {
     /// The label names `metric` was registered with, or `None` if it was not registered here.
     pub fn label_names(&self, metric: &str) -> Option<&[String]> {
         self.registered.get(metric).map(Vec::as_slice)
-    }
-
-    /// How long a large message took from its first chunk to being whole again. T-074 is the
-    /// caller; the series exists from this release so the dashboard does not wait for it.
-    pub fn reconstructed(&self, class: Class, seconds: f64) {
-        self.reconstruct_seconds
-            .with_label_values(&[class_label(class)])
-            .observe(seconds);
     }
 
     /// Mirrors `BnLink.connected`, the flag the link keeps and T-045 hands on.
@@ -796,6 +804,24 @@ impl ReceiveStats for Metrics {
 
     fn chunk_received(&self, _: &Hostname, _: ChunkFlags, _: &Chunk) {
         self.chunks_received.inc();
+    }
+
+    fn parity_used(&self) {
+        self.parity_used.inc();
+    }
+
+    fn reconstructed(&self, class: Class, took: Duration) {
+        self.reconstruct_seconds
+            .with_label_values(&[class_label(class)])
+            .observe(took.as_secs_f64());
+    }
+}
+
+impl ReassembleStats for Metrics {
+    fn evicted(&self, reason: Evicted) {
+        self.reassembly_evicted
+            .with_label_values(&[reason.as_str()])
+            .inc();
     }
 }
 
