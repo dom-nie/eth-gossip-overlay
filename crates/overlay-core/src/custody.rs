@@ -262,6 +262,7 @@ impl Block {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testlog::LOG;
     use crate::time::{Clock, FakeClock};
 
     const DEADLINE: Duration = Duration::from_millis(250);
@@ -407,5 +408,31 @@ mod tests {
         let mainnet = CustodyTracker::new(&SpecSnapshot::MAINNET);
         assert_eq!(mainnet.threshold(), 64);
         assert!(!mainnet.expected_columns(&column_topics(&[200])).contains(200));
+    }
+
+    /// CL-N3's assertion. Expected columns are the beacon node's column subnets, so a network
+    /// where a subnet is not a column leaves nothing to derive them from. The tracker says so
+    /// once and reports nothing rather than repairing columns it guessed at.
+    #[test]
+    fn subnet_count_mismatch_logs_an_error_and_idles_column_repair() {
+        let clock = FakeClock::new();
+        let mark = LOG.len();
+        let mut tracker = CustodyTracker::new(&SpecSnapshot {
+            data_column_sidecar_subnet_count: 64,
+            number_of_columns: 128,
+            ..SpecSnapshot::MAINNET
+        });
+        let expected = tracker.expected_columns(&column_topics(&[0, 3, 7]));
+        tracker.on_block(1, ROOT, expected, clock.now());
+        clock.advance(DEADLINE);
+
+        assert_eq!(gaps(&mut tracker, &clock), Vec::new());
+
+        let errors = LOG
+            .since(mark)
+            .lines()
+            .filter(|line| line.contains("column repair is idle"))
+            .count();
+        assert_eq!(errors, 1);
     }
 }
