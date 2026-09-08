@@ -30,15 +30,18 @@ pub const REPAIR_ATTEMPT_MIN: Duration = Duration::from_millis(100);
 /// [`REPAIR_TOTAL_BUDGET`] (D24).
 pub const REPAIR_ATTEMPT_MAX: Duration = Duration::from_millis(500);
 
-/// How many columns one host asks for at once (T-083).
+/// How many repair requests one host has outstanding to one peer at once, chunks and columns
+/// together (T-082, T-083).
 ///
-/// `MAX_REPAIR_STREAMS_PER_PEER` is four and HELLO's control stream permanently holds one of
-/// them, so a conforming peer answers three at a time. Every column request goes to the same
-/// lowest-round-trip peer first, unlike a chunk repair, whose candidates are whoever sent that
-/// message a chunk; without a bound a host short of a slot's columns would open a stream per
-/// column against one peer and have most of them dropped. Two leaves the third for the chunk
-/// path, and a column that has to wait is asked for on a later tick.
-pub const MAX_COLUMNS_IN_FLIGHT: usize = 2;
+/// `overlay_transport::receive::MAX_REPAIR_STREAMS_PER_PEER` is four and HELLO's control stream
+/// permanently holds one of them, so a conforming peer answers three at a time and a fourth is
+/// dropped. Every column request goes to the same lowest-round-trip peer first, unlike a chunk
+/// repair, whose candidates are whoever sent that message a chunk, so without this a host short
+/// of a slot's columns would open a stream per column against one peer. The two paths count
+/// against one budget because the peer's streams are one budget; a peer at its cap is skipped
+/// for this tick and the next candidate takes the work, which is what keeps the rest of the
+/// region busy instead of idle. `overlay-transport` holds the drift test.
+pub const MAX_REPAIR_IN_FLIGHT_PER_PEER: usize = 3;
 
 /// How long a message is repaired for, measured from its deadline. Past it the message is given
 /// up on whoever is left to ask, because a block that arrives this late has already lost the race
@@ -281,7 +284,6 @@ impl Scheduler {
             .flat_map(|gap| gap.missing.iter().map(|index| (gap.block_root, *index)))
             .collect();
         self.columns.retain(|key, _| live.contains(key));
-        let mut outstanding = self.columns.values().filter(|repair| repair.asking).count();
         let wanted = gaps.iter().flat_map(|gap| {
             let budget = threshold.saturating_sub(gap.have_count);
             gap.missing
@@ -291,15 +293,9 @@ impl Scheduler {
         });
         let mut decided = Vec::new();
         for key in wanted.filter(|(_, index)| !in_flight.contains(*index)) {
-            if outstanding >= MAX_COLUMNS_IN_FLIGHT {
-                break;
-            }
             let Some(decision) = self.decide_column(key, candidates, now) else {
                 continue;
             };
-            if matches!(decision, Decision::AskColumn(_)) {
-                outstanding += 1;
-            }
             decided.push(decision);
         }
         decided
@@ -708,38 +704,40 @@ mod tests {
         ));
     }
 
-    /// The note T-082 left about stream budgets: three bidi streams reach a conforming peer and
-    /// every column request goes to the same lowest-round-trip host, so a host short of half a
-    /// slot's columns asks for two at a time rather than opening a stream per column.
+    /// The note T-082 left about stream budgets. A conforming peer answers three bidi streams at
+    /// once, so no peer is asked for a fourth thing while three are outstanding, whether they
+    /// are columns or chunks. The bound is per peer and not per host: the rest of the region
+    /// takes the columns the first peer has no room for, rather than the host waiting.
     #[test]
-    fn no_more_columns_are_asked_for_at_once_than_the_stream_budget_allows() {
+    fn no_peer_is_asked_for_more_at_once_than_its_stream_budget_allows() {
         let clock = FakeClock::new();
-        let candidates = [(host("near"), Duration::from_millis(5))];
-        let gaps = [gap(&[1, 2, 3, 4, 5], 0)];
+        let candidates = [
+            (host("near"), Duration::from_millis(5)),
+            (host("far"), Duration::from_millis(50)),
+        ];
+        let gaps = [gap(&[1, 2, 3, 4, 5, 6, 7, 8], 0)];
         let none = BitSet::new(128);
         let mut scheduler = Scheduler::default();
 
-        let asks = |decided: Vec<Decision>| {
-            decided
-                .into_iter()
-                .filter(|decision| matches!(decision, Decision::AskColumn(_)))
-                .count()
-        };
+        let decided = scheduler.tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now());
 
-        let first = scheduler.tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now());
-        assert_eq!(asks(first), MAX_COLUMNS_IN_FLIGHT);
+        let mut asked: Vec<Hostname> = decided
+            .into_iter()
+            .filter_map(|decision| match decision {
+                Decision::AskColumn(request) => Some(request.peer),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked.len(), 2 * MAX_REPAIR_IN_FLIGHT_PER_PEER);
+        asked.sort();
+        asked.dedup_by(|a, b| a == b);
+        assert_eq!(asked, vec![host("far"), host("near")]);
 
-        // And no more while those are outstanding.
+        // And nothing more while all six are outstanding.
         clock.advance(REPAIR_TICK);
         assert_eq!(
             scheduler.tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now()),
             Vec::new()
         );
-
-        // One answer frees one slot, and the next column takes it.
-        scheduler.answered_column(&([3; 32], 1));
-        clock.advance(REPAIR_TICK);
-        let next = scheduler.tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now());
-        assert_eq!(asks(next), 1);
     }
 }
