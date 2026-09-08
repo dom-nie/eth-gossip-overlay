@@ -195,12 +195,11 @@ async fn bn_publish_reaches_explicit_peer_on_a_topic_the_bn_is_not_subscribed_to
 /// CL-N2 (5). With `idontwant_on_publish` the sidecar sends an IDONTWANT ahead of any
 /// publish above the 1000-byte threshold, to every recipient including its explicit peer;
 /// the fake counts it in the fork's `idontwant_msgs` metric and records the id against the
-/// sidecar, which is what its `forward_msg` consults. That is as far as a fake can take
-/// "honours": the fork skips a peer that announced IDONTWANT for the id, but every way the
-/// sidecar can send one also hands the fake the message itself (or makes the sidecar an
-/// originating peer of it), so no forward to the sidecar is ever due and the skip cannot be
-/// seen from outside. What is asserted is the wire exchange and the count; the skip is the
-/// fork's code, which the beacon node compiles unchanged.
+/// sidecar, which is what its `forward_msg` consults. What is asserted here is that exchange
+/// and the count. The skip itself is in T-075's
+/// `racing_public_copy_is_withheld_by_the_bn_when_the_flag_is_on`, which holds the fake's
+/// validation so a forward to the sidecar is due while the sidecar's own copy of the message
+/// is still on the wire.
 ///
 /// The other half: both sides negotiate `/meshsub/1.3.0`, but neither registers the topic for
 /// partial messages, so a payload above the threshold arrives as one whole message with the

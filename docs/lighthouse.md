@@ -67,6 +67,17 @@ registration alone still works and the env file loses its second flag. `bn.liste
 address in it, `/ip4/127.0.0.1/tcp/7787` by default, and changing it needs a sidecar restart and
 a beacon node restart, because it is on the beacon node's command line.
 
+## IDONTWANT before a big publish
+
+Above a kilobyte the sidecar sends the beacon node an IDONTWANT for the message id ahead of the
+message itself, so a public copy of the same block or column that reaches the node while the
+sidecar is publishing is not pushed back over the localhost socket. The node honouring that from
+an explicit peer is one of the assumptions listed in [COMPATIBILITY.md](../COMPATIBILITY.md), with
+the test that checks it named beside it. The minimum version is the bottom of the supported range
+in that file, v8.2.2 today, because that is the only version the assumption has been run against;
+nothing is claimed for releases below it. `bn.idontwant_on_publish: false` turns the sidecar's
+half of it off.
+
 ## The flags that were already yours
 
 `--target-peers` stays where you had it, around 30 for a node that has to serve range sync and
