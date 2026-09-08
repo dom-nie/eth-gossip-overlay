@@ -661,6 +661,28 @@ mod tests {
         }
     }
 
+    /// What the eviction hook was told, so a test about a bound can say which one fired.
+    #[derive(Default)]
+    struct Evictions(Mutex<Vec<Evicted>>);
+
+    impl ReassembleStats for Evictions {
+        fn evicted(&self, reason: Evicted) {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(reason);
+        }
+    }
+
+    impl Evictions {
+        fn seen(&self) -> Vec<Evicted> {
+            self.0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone()
+        }
+    }
+
     fn host() -> Hostname {
         Hostname("bn-01".to_owned())
     }
@@ -814,10 +836,12 @@ mod tests {
     #[test]
     fn forwarded_bitmap_dies_with_the_entry() {
         let ttl = Duration::from_secs(4);
+        let evictions = Arc::new(Evictions::default());
         let reassembler = Reassembler::new(ReassembleConfig {
             incomplete_ttl: ttl,
             ..ReassembleConfig::default()
-        });
+        })
+        .with_stats(evictions.clone());
         let now = Instant::now();
         on(&reassembler, &chunk(1, 0, 4, 1), false, now);
 
@@ -828,21 +852,25 @@ mod tests {
             Outcome::Stored { forward: true }
         );
         assert_eq!(reassembler.in_flight(), 1);
+        assert_eq!(evictions.seen(), [Evicted::Expired]);
     }
 
     /// The count bound, for a peer that names message ids nothing will ever complete.
     #[test]
     fn max_in_flight_takes_the_oldest_entry() {
+        let evictions = Arc::new(Evictions::default());
         let reassembler = Reassembler::new(ReassembleConfig {
             max_in_flight: 2,
             ..ReassembleConfig::default()
-        });
+        })
+        .with_stats(evictions.clone());
         let now = Instant::now();
         for msg_id in 1..=3 {
             on(&reassembler, &chunk(msg_id, 0, 4, 1), false, now);
         }
 
         assert_eq!(reassembler.in_flight(), 2);
+        assert_eq!(evictions.seen(), [Evicted::MaxInFlight]);
         assert_eq!(
             on(&reassembler, &chunk(1, 0, 4, 1), false, now),
             Outcome::Stored { forward: true },
@@ -929,10 +957,12 @@ mod tests {
     /// far more memory than the sum of the bounds allows (§10).
     #[test]
     fn max_bytes_evicts_when_buffered_bytes_exceed_the_bound() {
+        let evictions = Arc::new(Evictions::default());
         let reassembler = Reassembler::new(ReassembleConfig {
             max_bytes: 16,
             ..ReassembleConfig::default()
-        });
+        })
+        .with_stats(evictions.clone());
         let now = Instant::now();
         for msg_id in 1..=2 {
             on(&reassembler, &chunk(msg_id, 0, 4, 1), false, now);
@@ -942,6 +972,7 @@ mod tests {
         on(&reassembler, &chunk(3, 0, 4, 1), false, now);
 
         assert_eq!(reassembler.in_flight(), 2);
+        assert_eq!(evictions.seen(), [Evicted::MaxBytes]);
         assert_eq!(
             on(&reassembler, &chunk(1, 0, 4, 1), false, now),
             Outcome::Stored { forward: true },
