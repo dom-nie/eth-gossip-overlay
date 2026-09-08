@@ -40,9 +40,8 @@
 //!   the fanout task, so a file that changed keys in one section carries the other's too.
 //!   `large.in_region` and `large.cross_region` keep the values the process started with,
 //!   because they need a restart and this must not smuggle them in.
-//! - `classes.large.repair_deadline_ms` (D24) has no applier: its consumer arrives with T-082,
-//!   which registers one. Until then a change is still applied, in that [`Reloader::config`]
-//!   answers with it.
+//! - `classes.large.repair_deadline_ms`: the channel T-082's repair scheduler reads its deadline
+//!   from on every tick, so a change takes hold on the next one (D24).
 //!
 //! The roster is not a config key and has no applier. It goes on its own watch channel, which
 //! T-023's connection manager and [`spawn_pin_table`] follow, and is the one entry in
@@ -56,11 +55,10 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use overlay_core::config::{
-    Config, Fanout, LargeClass, LargeFanout, PublishRateLimit, SmallClass,
-};
+use overlay_core::config::{Config, Fanout, LargeFanout, PublishRateLimit, SmallClass};
 use overlay_core::identity::{FleetSeed, Seeds, read_secret_file};
 use overlay_core::roster::Roster;
 use overlay_transport::tls::PinTable;
@@ -179,6 +177,9 @@ pub struct Deps {
     pub small: watch::Sender<SmallClass>,
     /// Where the fanout task reads the plan it routes under (T-063).
     pub fanout: watch::Sender<Fanout>,
+    /// How long T-082's repair scheduler waits after a message's first chunk before asking a
+    /// peer for what is missing (D24).
+    pub repair_deadline: watch::Sender<Duration>,
     /// The running subscriber, whose level and format are reloadable (D32).
     pub log: Arc<LogHandle>,
     /// Where the two reload counters live.
@@ -351,6 +352,13 @@ impl Reloader {
                 let (fanout, large) = (deps.fanout, started_with);
                 Box::new(move |cfg: &Config| {
                     fanout.send_replace(fanout_of(cfg, &large));
+                    Ok(())
+                })
+            }),
+            ("classes.large.repair_deadline_ms", {
+                let deadline = deps.repair_deadline;
+                Box::new(move |cfg: &Config| {
+                    deadline.send_replace(cfg.classes.large.repair_deadline);
                     Ok(())
                 })
             }),
@@ -630,7 +638,7 @@ mod tests {
 
     use arc_swap::ArcSwap;
     use overlay_core::config::{
-        LargeFanout, Log, LogFormat, LogLevel, PublishRateLimit, SmallCrossRegion,
+        LargeClass, LargeFanout, Log, LogFormat, LogLevel, PublishRateLimit, SmallCrossRegion,
     };
     use overlay_core::identity::{FleetSeed, Seeds, expected_tls_public_key, write_secret_file};
     use overlay_core::roster::{Hostname, Roster};

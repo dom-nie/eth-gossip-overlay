@@ -48,6 +48,7 @@ use overlay_core::budget::FanoutKind;
 use overlay_core::lanes::LaneStats;
 use overlay_core::pubqueue::{DropReason as QueueDropReason, QueueStats};
 use overlay_core::reassemble::{Evicted, ReassembleStats};
+use overlay_core::repair::Outcome as RepairOutcome;
 use overlay_core::roster::Hostname;
 use overlay_core::seen::SeenStats;
 use overlay_core::topic::Class;
@@ -139,7 +140,7 @@ pub const CHUNKS_SENT_TOTAL: &str = "overlay_chunks_sent_total";
 pub const CHUNKS_RECEIVED_TOTAL: &str = "overlay_chunks_received_total";
 /// Messages that needed a parity chunk to reconstruct.
 pub const PARITY_USED_TOTAL: &str = "overlay_parity_used_total";
-/// Repair requests this host sent.
+/// Repair requests this host sent, by how they ended.
 pub const REPAIR_REQUESTS_TOTAL: &str = "overlay_repair_requests_total";
 /// Seconds from the first chunk of a message to its reconstruction.
 pub const RECONSTRUCT_SECONDS: &str = "overlay_reconstruct_seconds";
@@ -274,6 +275,7 @@ pub struct Metrics {
     chunks_sent: IntCounter,
     chunks_received: IntCounter,
     parity_used: IntCounter,
+    repair_requests: IntCounterVec,
     reassembly_evicted: IntCounterVec,
     relay_same_region: IntCounterVec,
     unannounced_topic: IntCounter,
@@ -479,10 +481,14 @@ impl Metrics {
             &[LABEL_REASON],
         )?;
 
-        // Registered and then let go of: the producer lands in v3, which adds the handle it
-        // needs. The registry keeps the collector alive, so the name is on the scrape from this
-        // release on.
-        b.counter(REPAIR_REQUESTS_TOTAL, "Repair requests sent.")?;
+        // The label is what tells repair working from repair running: a fleet whose repairs
+        // complete is losing chunks, and one whose repairs give up is losing them to peers that
+        // cannot answer (§12, D24).
+        let repair_requests = b.counter_vec(
+            REPAIR_REQUESTS_TOTAL,
+            "Repair requests, by how they ended.",
+            &[LABEL_OUTCOME],
+        )?;
         let config_reload = b.counter_vec(
             CONFIG_RELOAD_TOTAL,
             "Configuration reloads.",
@@ -542,6 +548,7 @@ impl Metrics {
             chunks_sent,
             chunks_received,
             parity_used,
+            repair_requests,
             reassembly_evicted,
             relay_same_region,
             unannounced_topic,
@@ -814,6 +821,12 @@ impl ReceiveStats for Metrics {
         self.reconstruct_seconds
             .with_label_values(&[class_label(class)])
             .observe(took.as_secs_f64());
+    }
+
+    fn repair_request(&self, outcome: RepairOutcome) {
+        self.repair_requests
+            .with_label_values(&[outcome.as_str()])
+            .inc();
     }
 }
 

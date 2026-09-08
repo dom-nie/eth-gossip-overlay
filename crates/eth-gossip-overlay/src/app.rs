@@ -51,6 +51,7 @@ use overlay_transport::fanout::Fanout;
 use overlay_transport::hello::{HelloAdmission, OwnTopics, SelfHello};
 use overlay_transport::manager::{ConnectionManager, Handle, Local, PeerEvent};
 use overlay_transport::receive::{Deps as ReceiveDeps, PeerReceiver, Relaying};
+use overlay_transport::repair;
 use overlay_transport::sender::{
     self, LARGE_LANE_BYTES, LARGE_QUEUED_BYTES_MAX, LargeLedger, SMALL_LANE_FRAMES,
 };
@@ -380,37 +381,40 @@ impl App {
 
         let (small_tx, small_rx) = watch::channel(cfg.classes.small.clone());
         let (fanout_tx, fanout_rx) = watch::channel(cfg.overlay.fanout.clone());
+        let (repair_deadline_tx, repair_deadline_rx) =
+            watch::channel(cfg.classes.large.repair_deadline);
         let (batches, batching) = Batching::spawn(small_rx, metrics.clone());
         let (to_exchange, exchanged) = mpsc::channel(PEER_EVENT_QUEUE);
-        let receivers = tokio::spawn(receive_peers(
-            peer_events_rx,
-            to_exchange,
-            ReceiveDeps {
-                seen,
-                recent,
-                publish: Arc::new(publish),
-                sets: sets_rx.clone(),
-                reassembler: Arc::new(
-                    Reassembler::new(ReassembleConfig::default()).with_stats(metrics.clone()),
-                ),
-                stats: metrics.clone(),
-                node,
-                clock,
-                budget: FanoutBudget::default_for(
-                    me.roster.hosts.len(),
-                    cfg.classes.large.chunk_bytes,
-                    spec_rx.borrow().seconds_per_slot,
-                    Instant::now(),
-                ),
-                // The second hop a relay makes, handed over rather than reached for: one hop is
-                // structural everywhere else on this path (D20, T-063).
-                relaying: Relaying {
-                    live: manager.live_source(),
-                    topics: topics.clone(),
-                    batches: batches.clone(),
-                },
+        let reassembler =
+            Arc::new(Reassembler::new(ReassembleConfig::default()).with_stats(metrics.clone()));
+        let receive_deps = ReceiveDeps {
+            seen,
+            recent,
+            publish: Arc::new(publish),
+            sets: sets_rx.clone(),
+            reassembler,
+            stats: metrics.clone(),
+            node,
+            clock,
+            budget: FanoutBudget::default_for(
+                me.roster.hosts.len(),
+                cfg.classes.large.chunk_bytes,
+                spec_rx.borrow().seconds_per_slot,
+                Instant::now(),
+            ),
+            large: cfg.classes.large.clone(),
+            // The second hop a relay makes, handed over rather than reached for: one hop is
+            // structural everywhere else on this path (D20, T-063).
+            relaying: Relaying {
+                live: manager.live_source(),
+                topics: topics.clone(),
+                batches: batches.clone(),
             },
-        ));
+        };
+        // The repair scheduler reads the same reassembler the receive path fills and answers on
+        // the same connections, so it takes the same dependencies (§5.6, T-082).
+        let repair = repair::spawn(receive_deps.clone(), repair_deadline_rx);
+        let receivers = tokio::spawn(receive_peers(peer_events_rx, to_exchange, receive_deps));
         let exchange = subs::spawn(exchanged, sets_rx.clone(), topics.clone(), metrics.clone());
         let fanout = Fanout::spawn(
             fanout_lanes,
@@ -442,6 +446,7 @@ impl App {
                 limits: limits_tx,
                 small: small_tx,
                 fanout: fanout_tx,
+                repair_deadline: repair_deadline_tx,
                 log: log.clone(),
                 stats: metrics.clone(),
             },
@@ -484,6 +489,7 @@ impl App {
                 publisher,
                 inbound,
                 receivers,
+                repair,
                 exchange,
                 fanout,
                 batching,
