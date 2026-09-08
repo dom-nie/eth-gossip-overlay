@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use overlay_core::config::{Fanout, SmallCrossRegion};
+use overlay_core::config::{Fanout, InRegion, LargeFanout, SmallCrossRegion};
 use overlay_core::msgid::MessageId;
 use overlay_core::protocol::features;
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
@@ -113,12 +113,7 @@ pub fn route(
     if class == Class::Large
         && let Some(chunked) = chunked
     {
-        return striped(
-            chunked,
-            others(),
-            &subscribed,
-            cfg.large.stripe_min_recipients,
-        );
+        return striped(chunked, others(), &subscribed, &cfg.large, &self_id.region);
     }
     let relaying: BTreeSet<&Region> =
         match class == Class::Small && cfg.small.cross_region == SmallCrossRegion::Relays {
@@ -151,9 +146,12 @@ pub fn route(
 /// crosses the WAN once already and a relay would only add a hop to it (§5.4).
 ///
 /// A region takes the message whole below `stripe_min_recipients` and as a stripe at or above
-/// it. The stripe runs over the region's subscribers alone (D18): a chunk sent to a host whose
-/// beacon node discards the topic is a chunk that bought nothing, which is the opposite of the
-/// rule [`pool`] applies to relays, and deliberately so.
+/// it, and `large.in_region: direct` puts this host's own region on the whole path whatever its
+/// size, which is how an operator turns striping off where it would cost most to have it wrong
+/// while the stripes into other regions carry on. The stripe runs over the region's subscribers
+/// alone (D18): a chunk sent to a host whose beacon node discards the topic is a chunk that
+/// bought nothing, which is the opposite of the rule [`pool`] applies to relays, and
+/// deliberately so.
 ///
 /// Only a subscriber that advertised `STRIPING` is in the pool, and the rest of the region's
 /// subscribers take the message whole beside the stripe, which is why a region can produce two
@@ -164,7 +162,8 @@ fn striped<'a>(
     chunked: Chunked,
     peers: impl Iterator<Item = (&'a Hostname, &'a LivePeer)>,
     subscribed: &impl Fn(&LivePeer) -> bool,
-    stripe_min_recipients: usize,
+    cfg: &LargeFanout,
+    own_region: &Region,
 ) -> RoutePlan {
     let mut per_region: BTreeMap<&Region, (Vec<Hostname>, Vec<Hostname>)> = BTreeMap::new();
     for (hostname, peer) in peers.filter(|(_, peer)| subscribed(peer)) {
@@ -182,7 +181,8 @@ fn striped<'a>(
         per_region
             .into_iter()
             .flat_map(|(region, (striping, older))| {
-                if striping.len() < stripe_min_recipients {
+                let stripes = region != own_region || cfg.in_region == InRegion::Stripe;
+                if !stripes || striping.len() < cfg.stripe_min_recipients {
                     let mut targets: Vec<Hostname> = striping.into_iter().chain(older).collect();
                     targets.sort_unstable();
                     return vec![RegionPlan::Whole { targets }];
