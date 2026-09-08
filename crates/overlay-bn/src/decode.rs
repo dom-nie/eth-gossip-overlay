@@ -403,4 +403,22 @@ mod tests {
             .map(|index| topic(&format!("data_column_sidecar_{index}")))
             .collect()
     }
+
+    /// The refusal the exact first offset is for. A Gloas column sidecar's fixed part is 56
+    /// bytes and a Fulu one's is 356, so reading a Gloas payload as a Fulu one would take a slot
+    /// out of the middle of a root; a first offset anywhere else is a payload nobody built.
+    #[test]
+    fn column_header_refuses_a_first_offset_that_is_not_the_fixed_part() {
+        let (_, wire) = column_sidecar(1, 0);
+
+        for offset in [56u32, 300, 400] {
+            let mut other = wire.clone();
+            other[8..12].copy_from_slice(&offset.to_le_bytes());
+            assert_eq!(
+                column_header(&snappy(&other)),
+                Err(HeaderError::Ssz),
+                "first offset {offset}"
+            );
+        }
+    }
 }
