@@ -284,4 +284,24 @@ mod tests {
             [Decision::Ask(request)] if request.peer == host("a")
         ));
     }
+
+    /// The only decision a request carries besides who to ask: a host two chunks short of `k`
+    /// asks for two of them, and asks for data indices so completion is a concatenation rather
+    /// than a decode (D24, T-071).
+    #[test]
+    fn request_after_deadline_lists_missing_data_indices_first_and_only_as_many_as_needed() {
+        let clock = FakeClock::new();
+        // One data chunk and one parity chunk of a four-data message: two short of k, with
+        // three data indices to choose from.
+        let reassembler = collecting(&[(0, "a", false), (4, "a", false)], clock.now());
+        let mut scheduler = Scheduler::default();
+        clock.advance(DEADLINE);
+
+        let decided = scheduler.tick(&reassembler, DEADLINE, reachable, clock.now());
+
+        let [Decision::Ask(request)] = decided.as_slice() else {
+            panic!("expected one request, got {decided:?}");
+        };
+        assert_eq!(request.missing, vec![1, 2]);
+    }
 }
