@@ -182,7 +182,10 @@ async fn attempt(deps: Deps, peer: LivePeer, request: Request) -> Answered {
 /// What comes back is the same `CHUNK` frames a chunk repair is answered with, so it goes
 /// through the same reassembler and the same completion. The requester has no message id for
 /// the column until the chunks name one, and the id it is handed is checked against the payload
-/// like every other (T-074), so a peer cannot answer with something else.
+/// like every other (T-074). Nothing ties that payload to the `(block_root, index)` asked for,
+/// though: a peer can answer with some other message it holds, and what stops that mattering is
+/// that the answer still has to be a payload on a topic this beacon node subscribes to, and one
+/// this host would have taken from that peer anyway.
 async fn column_attempt(deps: Deps, peer: LivePeer, request: ColumnRequest) -> Answered {
     let key = (request.block_root, request.index);
     // A column index is a subnet index and reaches here from a `data_column_sidecar_{i}` topic,

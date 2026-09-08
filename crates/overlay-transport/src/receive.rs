@@ -3344,7 +3344,7 @@ mod tests {
         );
     }
 
-    /// The second of the recent store's two insert sites (§5.6): a message this host put back
+    /// The second of the recent store's three insert sites (§5.6): a message this host put back
     /// together is one that a peer which lost the same chunks can now repair from here. There is
     /// no announcement to go with it; the peer already knows this host holds the message,
     /// because it was this host that forwarded it a chunk of it (D23).

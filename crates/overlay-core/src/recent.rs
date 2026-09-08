@@ -18,7 +18,7 @@
 //! the entry, so it goes when the entry goes.
 //!
 //! `now` is a parameter rather than a clock of its own, so nothing here reads a time the caller
-//! did not give it: both insert sites already hold the injected clock, and a test drives expiry
+//! did not give it: every insert site already holds the injected clock, and a test drives expiry
 //! from a `FakeClock` of its own.
 
 use std::collections::{HashMap, VecDeque};
@@ -183,10 +183,10 @@ impl RecentLarge {
     }
 }
 
-/// One [`RecentLarge`] shared by the two insert sites, which are in different crates: T-016's
-/// inbound path in `overlay-bn` and T-074's completion in `overlay-transport`. Every method takes
-/// the lock for that one call and releases it before returning, so the store is never held across
-/// an `await`.
+/// One [`RecentLarge`] shared by the three insert sites, which are in different crates: T-016's
+/// inbound path in `overlay-bn`, and T-074's completion and T-032's whole delivery in
+/// `overlay-transport`. Every method takes the lock for that one call and releases it before
+/// returning, so the store is never held across an `await` and no decode runs under it.
 #[derive(Clone)]
 pub struct SharedRecentLarge {
     store: Arc<Mutex<RecentLarge>>,
