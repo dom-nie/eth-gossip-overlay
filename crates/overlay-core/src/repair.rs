@@ -265,8 +265,22 @@ impl Scheduler {
         candidates: &[(Hostname, Duration)],
         now: Instant,
     ) -> Vec<Decision> {
-        let _ = (gaps, threshold, in_flight, candidates, now);
-        Vec::new()
+        let live: HashSet<ColumnKey> = gaps
+            .iter()
+            .flat_map(|gap| gap.missing.iter().map(|index| (gap.block_root, *index)))
+            .collect();
+        self.columns.retain(|key, _| live.contains(key));
+        gaps.iter()
+            .flat_map(|gap| {
+                let budget = threshold.saturating_sub(gap.have_count);
+                gap.missing
+                    .iter()
+                    .take(budget)
+                    .map(|index| (gap.block_root, *index))
+            })
+            .filter(|(_, index)| !in_flight.contains(*index))
+            .filter_map(|key| self.decide_column(key, candidates, now))
+            .collect()
     }
 
     /// Records that the request for `key` has been answered, one way or another, so the next
@@ -275,6 +289,34 @@ impl Scheduler {
         if let Some(repair) = self.columns.get_mut(key) {
             repair.asking = false;
         }
+    }
+
+    fn decide_column(
+        &mut self,
+        key: ColumnKey,
+        candidates: &[(Hostname, Duration)],
+        now: Instant,
+    ) -> Option<Decision> {
+        let repair = self.columns.entry(key).or_insert_with(|| Repair::new(now));
+        if repair.asking || repair.gave_up {
+            return None;
+        }
+        let over_budget = now.saturating_duration_since(repair.due_at) > REPAIR_TOTAL_BUDGET;
+        let next = (!over_budget && repair.tried.len() < REPAIR_ATTEMPTS)
+            .then(|| candidates.iter().find(|(peer, _)| !repair.tried.contains(peer)))
+            .flatten();
+        let Some((peer, rtt)) = next else {
+            repair.gave_up = true;
+            return Some(Decision::GaveUpColumn(key));
+        };
+        repair.asking = true;
+        repair.tried.push(peer.clone());
+        Some(Decision::AskColumn(ColumnRequest {
+            block_root: key.0,
+            index: key.1,
+            peer: peer.clone(),
+            timeout: attempt_timeout(*rtt),
+        }))
     }
 
     fn decide<R>(&mut self, msg: &Incomplete, rtt: &R, now: Instant) -> Option<Decision>
