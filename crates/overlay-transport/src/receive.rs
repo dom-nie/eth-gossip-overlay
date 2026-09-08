@@ -3617,4 +3617,18 @@ mod tests {
             ]
         );
     }
+
+    /// A message this host never had, or one the recent store has already let go of, is answered
+    /// rather than left unanswered: the requester moves on to its next candidate at once instead
+    /// of spending an attempt's timeout on a host that cannot help (D24).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn responder_replies_not_found_for_unknown_message() {
+        let block = topic("beacon_block");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(1, &block)]).await;
+        told_about(&cluster, &block).await;
+
+        let answer = ask(&peer, MessageId([4; 20]), vec![0, 1]).await;
+
+        assert_eq!(answer, [Frame::RepairResp(RepairResp::NotFound)]);
+    }
 }
