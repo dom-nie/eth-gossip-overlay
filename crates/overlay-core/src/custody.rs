@@ -197,11 +197,11 @@ impl CustodyTracker {
         now: Instant,
         in_flight: &BitSet,
     ) -> Vec<ColumnGap> {
-        let _ = (deadline, in_flight, now);
+        let _ = in_flight;
         let mut gaps: Vec<(u64, ColumnGap)> = self
             .slots
             .iter()
-            .filter_map(|(slot, block)| Some((*slot, block.gap()?)))
+            .filter_map(|(slot, block)| Some((*slot, block.gap(deadline, now)?)))
             .collect();
         gaps.sort_by_key(|(slot, _)| *slot);
         gaps.into_iter().map(|(_, gap)| gap).collect()
@@ -223,8 +223,12 @@ impl CustodyTracker {
 }
 
 impl Block {
-    fn gap(&self) -> Option<ColumnGap> {
+    fn gap(&self, deadline: Duration, now: Instant) -> Option<ColumnGap> {
         let root = self.root?;
+        let seen_at = self.seen_at?;
+        if now.saturating_duration_since(seen_at) < deadline {
+            return None;
+        }
         let missing: Vec<u16> = self
             .expected
             .iter()
