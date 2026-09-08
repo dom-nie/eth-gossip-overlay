@@ -957,6 +957,49 @@ mod tests {
         }
     }
 
+    /// D19: one unidirectional stream per (message, target), whatever the assignment gave that
+    /// target. A stream per chunk would cost a 200 KB block a hundred streams per host instead
+    /// of one, which is the whole saving striping is for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chunks_for_one_target_travel_on_one_stream() {
+        let block = topic("beacon_block");
+        let id = MessageId([4; 20]);
+        let payload = incompressible(20 * 1024);
+        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare])
+            .start()
+            .await;
+        let connection = tokio::time::timeout(WAIT, cluster.connected_pair(0, 1))
+            .await
+            .expect("the pair to connect")
+            .0;
+        let (live, names, spies) = striped_view(&connection, &block, 3);
+        let (pusher, _fanout) = striping_fanout(live, &block, 2);
+        let split = Params::for_len(payload.len(), 2048, 0.10).expect("a split for this payload");
+        let chunks = usize::from(split.k) + usize::from(split.m);
+        assert!(
+            chunks > names.len(),
+            "every host should take several chunks"
+        );
+
+        pusher
+            .push(Class::Large, large(&block, id, payload))
+            .expect("the fanout lane has room");
+
+        eventually("every host to be written to", || {
+            spies.iter().all(|spy| !spy.sent().is_empty())
+        })
+        .await;
+        let mut written = 0;
+        for (n, name) in names.iter().enumerate() {
+            let streams = spies[n].sent();
+            assert_eq!(streams.len(), 1, "{name}");
+            let on_it = chunks_of(&streams[0]).await.len();
+            assert!(on_it > 1, "{name} took {on_it} chunks");
+            written += on_it;
+        }
+        assert_eq!(written, chunks);
+    }
+
     /// What a large plan means to the send loop: the regions too small to stripe are the whole
     /// answer, in the order the plan lists them, and a striped region turns into the chunk
     /// indices each of its hosts is owed.
