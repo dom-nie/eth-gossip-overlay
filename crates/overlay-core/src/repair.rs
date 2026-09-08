@@ -371,4 +371,27 @@ mod tests {
             vec![host("near"), host("near-too"), host("far"), host("origin")]
         );
     }
+
+    /// A message whose only sender has gone, or never advertised `REPAIR`, is not asked about at
+    /// all: nothing is sent to a peer that could not read the frame (D29), and public gossip is
+    /// what delivers the message (D24).
+    #[test]
+    fn no_candidates_means_no_request_and_a_gave_up_count() {
+        let clock = FakeClock::new();
+        let reassembler = collecting(&[(0, "a", false)], clock.now());
+        let mut scheduler = Scheduler::default();
+        clock.advance(DEADLINE);
+
+        assert_eq!(
+            scheduler.tick(&reassembler, DEADLINE, |_| None, clock.now()),
+            vec![Decision::GaveUp(MessageId([9; 20]))]
+        );
+
+        // And it is given up on once: a later tick has nothing more to say about it.
+        clock.advance(REPAIR_TICK);
+        assert_eq!(
+            scheduler.tick(&reassembler, DEADLINE, |_| None, clock.now()),
+            Vec::new()
+        );
+    }
 }
