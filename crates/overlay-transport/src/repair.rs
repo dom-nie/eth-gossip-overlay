@@ -19,6 +19,142 @@
 //! message whose only senders are such peers is given up on at once rather than stalling until
 //! the budget runs out, which is what makes public gossip the backup rather than the wait.
 
+use std::time::Duration;
+
+use overlay_core::msgid::MessageId;
+use overlay_core::protocol::{MAX_FRAME_BYTES, features};
+use overlay_core::repair::{Decision, Outcome, REPAIR_TICK, Request, Scheduler};
+use overlay_core::roster::Hostname;
+use overlay_core::wire::{self, Frame, Read, RepairReq, RepairResp};
+use tokio::sync::watch;
+use tokio::task::{JoinHandle, JoinSet};
+
+use crate::manager::{LivePeer, LiveView};
+use crate::receive::{Deps, RepairSink};
+
+/// Starts the repair scheduler for this host. It ends when the task is aborted, which is what a
+/// shutdown does to every other task the sidecar owns.
+///
+/// `deadline` is `classes.large.repair_deadline_ms` on the channel T-043's reload writes, read
+/// afresh on every tick so a change takes hold on the next one.
+pub fn spawn(deps: Deps, deadline: watch::Receiver<Duration>) -> JoinHandle<()> {
+    tokio::spawn(run(deps, deadline))
+}
+
+async fn run(deps: Deps, deadline: watch::Receiver<Duration>) {
+    let mut scheduler = Scheduler::default();
+    let mut attempts: JoinSet<(MessageId, Outcome)> = JoinSet::new();
+    let mut tick = tokio::time::interval(REPAIR_TICK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        while let Some(finished) = attempts.try_join_next() {
+            let Ok((msg_id, outcome)) = finished else {
+                continue;
+            };
+            deps.stats.repair_request(outcome);
+            scheduler.answered(&msg_id);
+        }
+        // One snapshot per tick, which is also one read of every peer's smoothed round trip:
+        // the estimate a candidate list is sorted by is the one taken when the list was built.
+        let view = deps.relaying.live.live();
+        let decided = scheduler.tick(
+            &deps.reassembler,
+            *deadline.borrow(),
+            |peer| reachable(&view, peer),
+            deps.clock.now(),
+        );
+        for decision in decided {
+            match decision {
+                Decision::GaveUp(msg_id) => {
+                    tracing::debug!(%msg_id, "nobody left to ask for this message");
+                    deps.stats.repair_request(Outcome::GaveUp);
+                }
+                Decision::Ask(request) => match view.get(&request.peer) {
+                    Some(peer) => {
+                        attempts.spawn(attempt(deps.clone(), peer.clone(), request));
+                    }
+                    // The candidate came out of this very snapshot, so this is unreachable
+                    // today; treating it as an attempt that answered nothing keeps the message
+                    // moving to the next candidate if that ever stops being true.
+                    None => {
+                        deps.stats.repair_request(Outcome::Timeout);
+                        scheduler.answered(&request.msg_id);
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// The round trip to `peer`, or `None` for one that must not be asked: a peer that has left the
+/// live set, and a peer that never advertised `REPAIR` (D29).
+fn reachable(view: &LiveView, peer: &Hostname) -> Option<Duration> {
+    let live = view.get(peer)?;
+    live.negotiated.allows(features::REPAIR).then_some(live.rtt)
+}
+
+/// One attempt, held to the timeout the request carries: four round trips to this peer, clamped
+/// (D24). The timeout covers the whole exchange rather than each read, which is what makes three
+/// attempts fit inside the total budget however the peer behaves.
+async fn attempt(deps: Deps, peer: LivePeer, request: Request) -> (MessageId, Outcome) {
+    let outcome = tokio::time::timeout(request.timeout, exchange(&deps, &peer, &request))
+        .await
+        .unwrap_or(Outcome::Timeout);
+    (request.msg_id, outcome)
+}
+
+/// The exchange itself: the request out, the chunks and the trailer back.
+///
+/// Each chunk goes into the reassembler as it arrives rather than after the trailer, so an
+/// answer cut short by the timeout still leaves this host with what did arrive. A chunk off this
+/// stream is guarded exactly as one off any other: `rs::supports` refuses a header the codec
+/// would panic on, and a header contradicting the chunks this host holds is refused too, because
+/// the answer goes through the same `on_chunk` and not around it (T-074).
+///
+/// A peer that answers with chunks that do not put the message back together is
+/// [`Outcome::NotFound`] like one that has nothing: to the requester the two are the same, a
+/// candidate that could not finish the job, and the next one is asked.
+async fn exchange(deps: &Deps, peer: &LivePeer, request: &Request) -> Outcome {
+    let Ok((mut send, mut recv)) = peer.connection.open_bi().await else {
+        return Outcome::Timeout;
+    };
+    let asked = Frame::RepairReq(RepairReq::Missing {
+        msg_id: request.msg_id,
+        missing: request.missing.clone(),
+    });
+    if wire::write_frame(&mut send, &asked).await.is_err() {
+        return Outcome::Timeout;
+    }
+    let _ = send.finish();
+
+    let sink = RepairSink::new(deps, &request.peer, peer);
+    let mut completed = false;
+    loop {
+        match wire::read_frame(&mut recv, MAX_FRAME_BYTES).await {
+            Ok(Read::Frame(Frame::Chunk { chunk, .. })) => completed |= sink.take(chunk),
+            Ok(Read::Frame(Frame::RepairResp(RepairResp::NotFound))) => return Outcome::NotFound,
+            Ok(Read::Frame(Frame::RepairResp(RepairResp::Chunks(chunks)))) => {
+                for chunk in chunks {
+                    completed |= sink.take(chunk);
+                }
+                break;
+            }
+            // A frame that does not belong on this stream, and a type from a newer release,
+            // cost the frame and not the answer (D10).
+            Ok(_) => continue,
+            Err(error) => {
+                tracing::debug!(peer = %request.peer, %error, "a repair answer ended early");
+                break;
+            }
+        }
+    }
+    match completed {
+        true => Outcome::Completed,
+        false => Outcome::NotFound,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use bytes::{Bytes, BytesMut};

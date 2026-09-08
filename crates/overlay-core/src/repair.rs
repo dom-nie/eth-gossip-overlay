@@ -41,7 +41,7 @@ pub fn attempt_timeout(rtt: Duration) -> Duration {
 }
 
 /// How one repair request ended, as the `outcome` label on `repair_requests_total` (§12).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Outcome {
     /// The chunks came back and the message with them.
     Completed,

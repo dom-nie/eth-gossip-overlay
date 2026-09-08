@@ -54,6 +54,7 @@ use overlay_core::protocol::{MAX_FRAME_BYTES, SUPPORTED_FEATURES};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
 use overlay_core::reassemble::{INCOMPLETE_TTL, MAX_IN_FLIGHT, ReassembleConfig, Reassembler};
 use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
+use overlay_core::repair::Outcome as RepairOutcome;
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::seen::{SeenCache, SharedSeenCache};
 use overlay_core::subs::{Bitmap, PeerState};
@@ -183,6 +184,7 @@ pub struct CountingStats {
     queue_depths: Mutex<HashMap<(Hostname, Class), (usize, usize)>>,
     queue_drops: Mutex<HashMap<(Hostname, Class, DropReason), u64>>,
     stale_dropped: Mutex<HashMap<StaleReason, u64>>,
+    repair_requests: Mutex<HashMap<RepairOutcome, u64>>,
 }
 
 impl CountingStats {
@@ -321,6 +323,16 @@ impl CountingStats {
             .unwrap()
             .get(&class)
             .cloned()
+            .unwrap_or_default()
+    }
+
+    /// `repair_requests_total{outcome}`.
+    pub fn repair_requests(&self, outcome: RepairOutcome) -> u64 {
+        self.repair_requests
+            .lock()
+            .unwrap()
+            .get(&outcome)
+            .copied()
             .unwrap_or_default()
     }
 
@@ -499,6 +511,15 @@ impl ReceiveStats for CountingStats {
             .entry(class)
             .or_default()
             .push(took);
+    }
+
+    fn repair_request(&self, outcome: RepairOutcome) {
+        *self
+            .repair_requests
+            .lock()
+            .unwrap()
+            .entry(outcome)
+            .or_default() += 1;
     }
 
     fn relay_same_region(&self, peer: &Hostname) {
@@ -779,6 +800,7 @@ impl Builder {
             admission: Box::new(admission),
             small: watch::channel(self.small).0,
             fanout: watch::channel(self.fanout).0,
+            repair_deadline: watch::channel(self.large.repair_deadline).0,
             large: self.large,
             in_flight: self.in_flight,
             incomplete_ttl: self.incomplete_ttl,
@@ -911,9 +933,12 @@ pub struct TestCluster<A: Admission = HelloAdmission> {
     /// What every sidecar's router routes under, on the same kind of channel and for the same
     /// reason (D36's threshold reloads).
     fanout: watch::Sender<config::Fanout>,
-    /// How every sidecar cuts a large message up. A value rather than a channel, because both
-    /// its keys need a restart (T-043).
+    /// How every sidecar cuts a large message up. A value rather than a channel, because the two
+    /// keys that decide the split need a restart (T-043).
     large: config::LargeClass,
+    /// How long every sidecar waits before asking a peer for the chunks it is missing, on the
+    /// channel a reload publishes on (T-082, T-043).
+    repair_deadline: watch::Sender<Duration>,
     /// The bounds every sidecar's reassembler runs under.
     in_flight: usize,
     incomplete_ttl: Duration,
@@ -1282,6 +1307,7 @@ impl<A: Admission> TestCluster<A> {
         let to_fanout = lanes.pusher();
         let tasks = vec![
             crate::subs::spawn(exchanged, watching, node.topics.clone(), stats.clone()),
+            crate::repair::spawn(deps.clone(), self.repair_deadline.subscribe()),
             tokio::spawn(receive_peers(events, to_exchange, deps, receivers.clone())),
             Fanout::spawn(
                 lanes,
@@ -1324,6 +1350,13 @@ impl<A: Admission> TestCluster<A> {
         let id = msgid::compute(&topic.to_string(), &payload, MAX_PAYLOAD_BYTES).id;
         if !sidecar.seen.insert(id) {
             return false;
+        }
+        // Insert site 1 of 2 for the recent store, as T-016's inbound path makes it: a large
+        // message the beacon node handed this host is one a peer can still ask it for (§5.6).
+        if class == Class::Large {
+            sidecar
+                .recent
+                .insert(id, topic.clone(), payload.clone(), Instant::now());
         }
         sidecar
             .to_fanout

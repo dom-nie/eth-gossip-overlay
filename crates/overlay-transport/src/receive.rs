@@ -66,6 +66,7 @@ use overlay_core::protocol::{MAX_FRAME_BYTES, features};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
 use overlay_core::reassemble::{Outcome, Reason, Reassembler};
 use overlay_core::recent::SharedRecentLarge;
+use overlay_core::repair::Outcome as RepairOutcome;
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
 use overlay_core::rs::{self, Params};
 use overlay_core::seen::SharedSeenCache;
@@ -84,7 +85,7 @@ use tokio::task::{JoinHandle, JoinSet};
 use crate::batching::{BatchHandle, Small};
 use crate::fanout::{Direction, PeerLabels, TrafficStats};
 use crate::hello::OwnTopics;
-use crate::manager::{CloseCode, LiveSource, ManagerStats, PeerInfo};
+use crate::manager::{CloseCode, LivePeer, LiveSource, ManagerStats, PeerInfo};
 use crate::subs;
 
 /// How long one frame may take to arrive once its stream has started (DX-N3). A peer that opens
@@ -153,6 +154,10 @@ pub trait ReceiveStats: ManagerStats + TrafficStats {
     /// `reconstruct_seconds{class}`: how long a message took from its first chunk to the moment
     /// it was queued for the beacon node.
     fn reconstructed(&self, class: Class, took: Duration);
+
+    /// `repair_requests_total{outcome}`: one repair request and what it came to, `gave_up`
+    /// included, which is the one that stands for a request nobody was left to send (§12, D24).
+    fn repair_request(&self, outcome: RepairOutcome);
 }
 
 impl ReceiveStats for () {
@@ -167,6 +172,7 @@ impl ReceiveStats for () {
     fn chunk_received(&self, _: &Hostname, _: ChunkFlags, _: &Chunk) {}
     fn parity_used(&self) {}
     fn reconstructed(&self, _: Class, _: Duration) {}
+    fn repair_request(&self, _: RepairOutcome) {}
 }
 
 /// What a payload's arrival owes.
@@ -291,6 +297,41 @@ impl Drop for PeerReceiver {
     #[cfg_attr(test, mutants::skip)]
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+/// Where the chunks a `REPAIR_RESP` carried go (T-082).
+///
+/// It is the peer's own receiver context, built from the live view rather than handed over by a
+/// [`PeerEvent::Up`](crate::manager::PeerEvent::Up), so a repaired chunk takes the same
+/// [`Reassembler::on_chunk`], the same completion and the same publish queue as one that arrived
+/// on that peer's stream. There is deliberately no second ingest path: what completion owes,
+/// from the seen cache to the `first_arrival` event, is owed the same whether the last chunk was
+/// asked for or not.
+pub struct RepairSink(Ctx);
+
+impl RepairSink {
+    /// Where to put what `peer` answers a repair request with. One per attempt, so the peer's
+    /// one line about a payload that did not check out stays one line.
+    pub fn new(deps: &Deps, peer: &Hostname, live: &LivePeer) -> Self {
+        Self(Ctx {
+            peer: peer.clone(),
+            region: live.region.clone(),
+            site: live.site.clone(),
+            state: live.state.clone(),
+            budget: Mutex::new(deps.budget.clone()),
+            deps: deps.clone(),
+            warned_invalid: AtomicBool::new(false),
+        })
+    }
+
+    /// One repaired chunk, answering whether it was the one that put the message back together.
+    ///
+    /// The responder set `FORWARDED` and the reassembler honours it, so nothing repaired is
+    /// passed on to a region that has already been offered the message (D11, D19). The
+    /// fan-out budget is never charged for the same reason: there is no second hop to charge.
+    pub fn take(&self, chunk: Chunk) -> bool {
+        self.0.chunk(ChunkFlags::FORWARDED, chunk).completed
     }
 }
 
@@ -434,6 +475,24 @@ enum StreamEnd {
     RateExceeded(FanoutKind),
 }
 
+/// What one chunk's arrival came to: whether the connection carries on, and whether that chunk
+/// was the one that put its message back together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Arrival {
+    after: After,
+    completed: bool,
+}
+
+impl Arrival {
+    /// An arrival that ends nothing, for the chunks that never reach the reassembler.
+    fn carry(completed: bool) -> Self {
+        Self {
+            after: After::Carry,
+            completed,
+        }
+    }
+}
+
 /// Whether the connection a frame arrived on carries on. A peer that has been over its fan-out
 /// budget for too long is the one thing on this path that ends it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -512,7 +571,7 @@ impl Ctx {
                 );
                 After::Carry
             }
-            Frame::Chunk { flags, chunk } => self.chunk(flags, chunk),
+            Frame::Chunk { flags, chunk } => self.chunk(flags, chunk).after,
             Frame::Batch { flags, entries } => self.batch(flags, entries, arrived),
             other => {
                 tracing::debug!(
@@ -537,11 +596,11 @@ impl Ctx {
     /// What the region is owed is that answer and not this function's: a chunk that arrived with
     /// `FORWARDED` is the second hop and there is no third, and an index some other origin's copy
     /// already carried has been forwarded once (D11, D19).
-    fn chunk(&self, flags: ChunkFlags, chunk: Chunk) -> After {
+    fn chunk(&self, flags: ChunkFlags, chunk: Chunk) -> Arrival {
         self.deps.stats.chunk_received(&self.peer, flags, &chunk);
         let Some(topic) = self.topic(chunk.topic_id) else {
             self.deps.stats.unknown_topic_id(&self.peer);
-            return After::Carry;
+            return Arrival::carry(false);
         };
         let class = Class::of(topic.kind(), chunk.total_len as usize);
         self.deps
@@ -552,7 +611,7 @@ impl Ctx {
         // the chunks still arriving are the stripe finishing and there is nothing owed for them.
         if self.deps.seen.contains(&chunk.msg_id) {
             self.deps.stats.duplicate(class);
-            return After::Carry;
+            return Arrival::carry(false);
         }
         let now = self.deps.clock.now();
         let outcome = self.deps.reassembler.on_chunk(
@@ -573,11 +632,14 @@ impl Ctx {
                 Charge::CloseRateExceeded => After::Close(FanoutKind::Chunk),
             },
         };
-        self.reassembled(&topic, class, outcome, now);
-        after
+        Arrival {
+            after,
+            completed: self.reassembled(&topic, class, outcome, now),
+        }
     }
 
-    /// What a chunk's arrival came to once the region has been offered it.
+    /// What a chunk's arrival came to once the region has been offered it, answering whether
+    /// that chunk was the one that put the message back together (T-082 counts that).
     ///
     /// A message that came back goes through the same three steps a whole one does, in the same
     /// order: the advertised gate (DX-N1), the seen cache (D08, site 3 of 3) and the publish
@@ -586,7 +648,7 @@ impl Ctx {
     ///
     /// A payload the beacon node would refuse is counted against the origin rather than the peer
     /// that happened to send the last chunk, because the origin is who cut it up (D03).
-    fn reassembled(&self, topic: &Topic, class: Class, outcome: Outcome, now: Instant) {
+    fn reassembled(&self, topic: &Topic, class: Class, outcome: Outcome, now: Instant) -> bool {
         match outcome {
             Outcome::Completed {
                 msg_id,
@@ -606,6 +668,7 @@ impl Ctx {
                     }
                     self.deps.stats.reconstructed(class, took);
                 }
+                true
             }
             Outcome::Rejected {
                 reason: Reason::InvalidPayload,
@@ -613,13 +676,18 @@ impl Ctx {
             } => {
                 self.deps.stats.invalid_payload(&origin);
                 self.warn_invalid(topic, "the reassembled payload is not one its id names");
+                false
             }
             Outcome::Rejected { reason, origin } => {
                 tracing::debug!(%origin, ?reason, "dropping a chunk this host cannot use");
+                false
             }
-            Outcome::Stored { .. } | Outcome::Duplicate { .. } | Outcome::LateAfterCompletion => {}
+            Outcome::Stored { .. } | Outcome::Duplicate { .. } | Outcome::LateAfterCompletion => {
+                false
+            }
             Outcome::HeaderConflict => {
                 tracing::debug!(peer = %self.peer, "a chunk header that contradicts the first");
+                false
             }
         }
     }
