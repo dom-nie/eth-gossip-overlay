@@ -308,7 +308,8 @@ mod tests {
     fn memory_budget_totals_the_rows_and_adds_the_headroom() {
         let budget = budget();
 
-        assert_eq!(budget.rows.len(), 3);
+        assert_eq!(budget.rows.len(), 4);
+        assert!(budget.rows.iter().any(|(name, _)| *name == "reassembler"));
         assert_eq!(
             budget.bounded_bytes,
             budget.rows.iter().map(|(_, bytes)| bytes).sum::<u64>()
@@ -328,7 +329,14 @@ mod tests {
             large_bytes: 1024 * 1024,
             large_bytes_max: 8 * 1024 * 1024,
         };
-        let row = |roster: usize| MemoryBudget::compute(roster, lanes).rows[2].1;
+        let row = |roster: usize| {
+            MemoryBudget::compute(roster, lanes)
+                .rows
+                .iter()
+                .find(|(name, _)| *name == "peer_send_lanes")
+                .map(|(_, bytes)| *bytes)
+                .unwrap()
+        };
 
         assert_eq!(row(1), 0, "a fleet of one has no peers to queue for");
         assert!(row(5) > row(2));
