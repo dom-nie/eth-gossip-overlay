@@ -1420,6 +1420,8 @@ mod tests {
 
     /// The roster file watcher (T-086) over T-043's real reloader, on a paused clock.
     mod watcher {
+        use std::sync::atomic::AtomicU64;
+
         use super::*;
 
         /// A watcher polling a roster file in a temp directory, holding everything a test
@@ -1571,6 +1573,72 @@ mod tests {
             assert_eq!(report.applied, ["roster"]);
             assert!(report.error.is_none(), "{report:?}");
             assert_eq!(h.roster.borrow_and_update().hosts.len(), 3);
+        }
+
+        /// A stand-in for T-023's connection manager: one connection per roster host, opened
+        /// when the host appears and abandoned when it goes, which is what `manager::reconcile`
+        /// does with a dial task. Each connection is numbered, so a test can tell one that
+        /// stayed up from one that was replaced.
+        #[derive(Default)]
+        struct FakeManager {
+            connections: Mutex<BTreeMap<Hostname, u64>>,
+            opened: AtomicU64,
+        }
+
+        impl FakeManager {
+            /// Follows the roster a reload publishes, for as long as the reloader owns it.
+            fn follow(self: &Arc<Self>, mut roster: watch::Receiver<Roster>) -> JoinHandle<()> {
+                let manager = self.clone();
+                tokio::spawn(async move {
+                    loop {
+                        manager.reconcile(&roster.borrow_and_update());
+                        if roster.changed().await.is_err() {
+                            return;
+                        }
+                    }
+                })
+            }
+
+            fn reconcile(&self, roster: &Roster) {
+                let mut connections = self.connections.lock().unwrap();
+                connections.retain(|host, _| roster.get(host).is_some());
+                for host in &roster.hosts {
+                    connections
+                        .entry(host.hostname.clone())
+                        .or_insert_with(|| self.opened.fetch_add(1, Ordering::Relaxed));
+                }
+            }
+
+            /// The connection held to `host`, if there is one.
+            fn connection(&self, host: &str) -> Option<u64> {
+                self.connections
+                    .lock()
+                    .unwrap()
+                    .get(&Hostname(host.to_owned()))
+                    .copied()
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn automatic_reload_adds_hosts_without_dropping_existing_connections() {
+            let h = Watched::start(2).await;
+            let manager = Arc::new(FakeManager::default());
+            let _task = manager.follow(h.roster.clone());
+            h.settle().await;
+            let before = manager
+                .connection("bn-2")
+                .expect("bn-2 was never connected");
+
+            h.write(&roster_yaml(4));
+            h.poll().await;
+
+            assert_eq!(h.stats.last().applied, ["roster"]);
+            assert_eq!(
+                manager.connection("bn-2"),
+                Some(before),
+                "the reload replaced a connection it did not have to"
+            );
+            assert!(manager.connection("bn-4").is_some(), "bn-4 was not dialled");
         }
     }
 }
