@@ -88,6 +88,33 @@ pub enum Decision {
     GaveUp(MessageId),
 }
 
+/// Which indices to ask for, given a split of `k` data chunks, the `held` chunks of any kind
+/// that have arrived and the `missing` indices ascending (D24).
+///
+/// `k - held` more chunks of any kind put the message back together, so that is what is asked
+/// for and nothing beyond it: a host that holds a parity chunk has already been covered for one
+/// data index and does not ask for it again. The indices listed are data ones, because a message
+/// whose every data chunk is present comes back by concatenation and never reaches the codec
+/// (T-071).
+///
+/// Parity indices only make up a shortfall. A message the reassembler is collecting cannot have
+/// one, since every parity chunk it holds lowers `k - held` by the same one it removes from the
+/// missing data indices; the arm is D24's rule stated where the request is built, so a shorter
+/// list still asks for enough to reach `k`.
+pub fn wanted(k: u16, held: usize, missing: &[u16]) -> Vec<u16> {
+    let need = usize::from(k).saturating_sub(held);
+    let is_data = |index: &u16| usize::from(*index) < usize::from(k);
+    let mut want: Vec<u16> = missing.iter().copied().filter(is_data).take(need).collect();
+    want.extend(
+        missing
+            .iter()
+            .copied()
+            .filter(|index| !is_data(index))
+            .take(need - want.len()),
+    );
+    want
+}
+
 /// Which peers to ask for a message, in the order to ask them (D23).
 ///
 /// In-region peers that sent a `FORWARDED` chunk come first, by round trip; then the origin, the
@@ -207,7 +234,7 @@ impl Scheduler {
         repair.tried.push(peer.clone());
         Some(Decision::Ask(Request {
             msg_id: msg.msg_id,
-            missing: msg.missing.clone(),
+            missing: wanted(msg.k, msg.held, &msg.missing),
             timeout: attempt_timeout(rtt(&peer).unwrap_or(REPAIR_ATTEMPT_MAX)),
             peer,
         }))

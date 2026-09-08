@@ -203,6 +203,11 @@ pub struct Incomplete {
     /// Every peer that sent a chunk of it and whether that chunk carried `FORWARDED`, in
     /// arrival order.
     pub senders: Vec<(Hostname, bool)>,
+    /// How many data chunks the message was cut into, which is how many of any kind put it back
+    /// together and so what a repair request counts against (D24).
+    pub k: u16,
+    /// How many chunks of it have arrived, whether data or parity.
+    pub held: usize,
 }
 
 /// The chunks in flight and the messages already finished with, shared by every peer's receiver.
@@ -293,6 +298,8 @@ impl Reassembler {
                 msg_id: *msg_id,
                 missing: entry.missing(),
                 senders: entry.senders.clone(),
+                k: entry.params.k,
+                held: entry.chunks.len(),
             })
             .collect()
     }
@@ -1007,8 +1014,9 @@ mod tests {
     }
 
     /// What T-082 asks for when a message has not finished in time (D23, D24): the indices no
-    /// chunk arrived for, ascending so the data ones come first, and every peer that sent one
-    /// with the flag its chunk carried, in arrival order.
+    /// chunk arrived for, ascending so the data ones come first, every peer that sent one with
+    /// the flag its chunk carried in arrival order, and the split and count a request works out
+    /// `k - held` from.
     #[test]
     fn incomplete_older_than_lists_missing_indices_and_senders_with_their_forwarded_flag() {
         let reassembler = Reassembler::new(ReassembleConfig::default());
@@ -1028,6 +1036,8 @@ mod tests {
                 msg_id: MessageId([1; 20]),
                 missing: vec![1, 3, 4],
                 senders: vec![(origin, false), (sibling, true)],
+                k: 4,
+                held: 2,
             }]
         );
     }
