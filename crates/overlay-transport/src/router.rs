@@ -238,7 +238,7 @@ fn pool(view: &LiveView, self_id: &SelfIdentity, region: &Region) -> Vec<Hostnam
 
 #[cfg(test)]
 mod tests {
-    use overlay_core::config::{Fanout, LargeFanout, SmallCrossRegion, SmallFanout};
+    use overlay_core::config::{Fanout, InRegion, LargeFanout, SmallCrossRegion, SmallFanout};
     use overlay_core::msgid::MessageId;
     use overlay_core::roster::{Hostname, Region, SelfIdentity};
     use overlay_core::rs::Params;
@@ -676,6 +676,54 @@ mod tests {
                 },
                 RegionPlan::Whole {
                     targets: vec![host("bn-eu-c")],
+                },
+            ])
+        );
+    }
+
+    /// `overlay.fanout.large.in_region: direct` is the operator's way of turning striping off
+    /// where it costs the most to be wrong, the region this host is in, while the stripes it
+    /// builds for other regions carry on. Nothing else in the plan changes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_large_in_region_direct_sends_the_own_region_whole_and_stripes_the_others() {
+        let connection = connection().await;
+        let block = topic("beacon_block");
+        let live = view_in(
+            &connection,
+            vec![
+                ("bn-eu-a", REGION, peer_state(&[(1, &block)], &[1])),
+                ("bn-eu-b", REGION, peer_state(&[(1, &block)], &[1])),
+                ("bn-us-a", "us", peer_state(&[(1, &block)], &[1])),
+                ("bn-us-b", "us", peer_state(&[(1, &block)], &[1])),
+            ],
+        );
+        let direct = Fanout {
+            large: LargeFanout {
+                in_region: InRegion::Direct,
+                stripe_min_recipients: 2,
+                ..LargeFanout::default()
+            },
+            ..Fanout::default()
+        };
+
+        let plan = route(
+            &block,
+            Class::Large,
+            Some(chunked(1, 2, 1)),
+            &live,
+            &me(),
+            &direct,
+        );
+
+        assert_eq!(
+            plan,
+            RoutePlan::Large(vec![
+                RegionPlan::Whole {
+                    targets: vec![host("bn-eu-a"), host("bn-eu-b")],
+                },
+                RegionPlan::Stripe {
+                    region: Region("us".to_owned()),
+                    targets_per_chunk: vec![host("bn-us-b"), host("bn-us-a"), host("bn-us-b")],
                 },
             ])
         );
