@@ -126,12 +126,14 @@ fn pool(view: &LiveView, self_id: &SelfIdentity, region: &Region) -> Vec<Hostnam
 
 #[cfg(test)]
 mod tests {
-    use overlay_core::config::{Fanout, SmallCrossRegion, SmallFanout};
+    use overlay_core::config::{Fanout, LargeFanout, SmallCrossRegion, SmallFanout};
+    use overlay_core::msgid::MessageId;
     use overlay_core::roster::{Hostname, Region, SelfIdentity};
+    use overlay_core::rs::Params;
     use overlay_core::subs::PeerState;
     use overlay_core::topic::{Class, Topic};
 
-    use super::{RoutePlan, route};
+    use super::{RegionPlan, RoutePlan, route};
     use crate::manager::LiveView;
     use crate::testutil::{Builder, NodeKind, REGION, WAIT, peer_state, view};
 
@@ -153,6 +155,36 @@ mod tests {
                 ..SmallFanout::default()
             },
             ..Fanout::default()
+        }
+    }
+
+    /// A fanout that stripes a region holding `min_recipients` or more subscribers.
+    fn striping(min_recipients: usize) -> Fanout {
+        Fanout {
+            large: LargeFanout {
+                stripe_min_recipients: min_recipients,
+                ..LargeFanout::default()
+            },
+            ..Fanout::default()
+        }
+    }
+
+    /// A message id whose first eight bytes little-endian are `rotation`, which is the number
+    /// the stripe takes the remainder of (D18).
+    fn id(rotation: u64) -> MessageId {
+        let mut id = [0u8; 20];
+        id[..8].copy_from_slice(&rotation.to_le_bytes());
+        MessageId(id)
+    }
+
+    /// A message that splits into `k + m` chunks. The two counts are all a route plan reads;
+    /// what is in a chunk is T-073's.
+    fn split(k: u16, m: u16) -> Params {
+        Params {
+            k,
+            m,
+            chunk_bytes: 2048,
+            total_len: u32::from(k) * 2048,
         }
     }
 
@@ -423,6 +455,39 @@ mod tests {
         assert_eq!(
             plan,
             RoutePlan::Direct(vec![host("bn-us-01"), host("bn-us-02"), host("bn-us-03")])
+        );
+    }
+
+    /// §5.4: a region with a handful of subscribers takes the message whole. A stripe over so
+    /// few hosts costs a chunk header and a stream apiece and saves the origin nothing, and it
+    /// is what keeps a tiny fleet or a rare topic on the path v1 shipped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_large_below_min_recipients_is_whole() {
+        let connection = connection().await;
+        let block = topic("beacon_block");
+        let live = view_in(
+            &connection,
+            vec![
+                ("bn-eu-a", "eu", peer_state(&[(1, &block)], &[1])),
+                ("bn-eu-b", "eu", peer_state(&[(1, &block)], &[1])),
+            ],
+        );
+
+        let plan = route(
+            &block,
+            &id(0),
+            Class::Large,
+            Some(split(2, 1)),
+            &live,
+            &me(),
+            &striping(3),
+        );
+
+        assert_eq!(
+            plan,
+            RoutePlan::Large(vec![RegionPlan::Whole {
+                targets: vec![host("bn-eu-a"), host("bn-eu-b")],
+            }])
         );
     }
 
