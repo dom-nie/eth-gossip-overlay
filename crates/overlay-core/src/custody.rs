@@ -21,8 +21,8 @@ use crate::header::Header;
 use crate::spec::SpecSnapshot;
 use crate::topic::{Topic, TopicKind};
 
-/// How many blocks of column state a host keeps, of each kind [`CustodyTracker::trim`] tells
-/// apart.
+/// How many blocks of column state a host keeps, of each of the two kinds it tells apart: the
+/// ones a block anchored, and the ones a column opened on its own.
 ///
 /// Long enough that a block still under repair is still tracked (repair gives up 1.5 s after the
 /// deadline, D24) and short enough that the whole structure is a handful of bitsets whatever
