@@ -12,6 +12,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::header::Header;
 use crate::msgid::MessageId;
 use crate::roster::{Hostname, SelfIdentity};
 use crate::topic::{Class, Topic};
@@ -46,6 +47,9 @@ pub struct FirstArrival<'a> {
     pub at: SystemTime,
     /// Which side it came in on.
     pub source: Source<'a>,
+    /// What the payload's header said, when there was a decoder to read it (T-083). A build
+    /// without the `column-repair` feature has none, and the line carries no slot.
+    pub header: Option<Header>,
 }
 
 /// The side a message arrived from. Win rate is the share of these that are
@@ -118,7 +122,8 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::*;
-    use crate::msgid::MessageId;
+    use crate::header::Header;
+use crate::msgid::MessageId;
     use crate::roster::{Hostname, Region, SelfIdentity};
     use crate::testlog::LOG;
     use crate::topic::{Class, Topic};
@@ -166,6 +171,7 @@ mod tests {
             node: &node,
             at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
             source: Source::Bn,
+            header: None,
         });
 
         let line = line_with(mark, &hex(1));
@@ -201,6 +207,7 @@ mod tests {
             node: &node,
             at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
             source: Source::Overlay { origin: &origin },
+            header: None,
         });
 
         let line = line_with(mark, &hex(3));
@@ -226,6 +233,7 @@ mod tests {
             node: &node,
             at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
             source: Source::Bn,
+            header: None,
         });
 
         assert!(line_with(mark, &hex(4)).contains(r#"site="""#));
@@ -244,9 +252,52 @@ mod tests {
             node: &node,
             at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
             source: Source::Bn,
+            header: None,
         });
 
         // Another test's line may land in the same slice, so the id is what rules this one out.
         assert!(line_with(mark, &hex(2)).is_empty());
+    }
+
+    /// T-083 gives the block topics a slot and a root, so an operator following one block across
+    /// the fleet has the consensus name for it and not only the gossipsub id, and T-084's import
+    /// event joins to these lines by the same root.
+    #[test]
+    fn first_arrival_events_for_blocks_carry_slot_and_root() {
+        let node = node();
+        let topic = block();
+        let mark = LOG.len();
+
+        emit_first_arrival(&FirstArrival {
+            id: MessageId([5; 20]),
+            class: Class::Large,
+            topic: &topic,
+            node: &node,
+            at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
+            source: Source::Bn,
+            header: Some(Header::Block {
+                slot: 9_876,
+                root: [0xab; 32],
+            }),
+        });
+
+        let line = line_with(mark, &hex(5));
+        assert!(line.contains("slot=9876"), "{line}");
+        assert!(line.contains(&format!("block_root={}", "ab".repeat(32))), "{line}");
+
+        // A large message with no header keeps the schema it had: the keys are absent, not null.
+        let mark = LOG.len();
+        emit_first_arrival(&FirstArrival {
+            id: MessageId([6; 20]),
+            class: Class::Large,
+            topic: &topic,
+            node: &node,
+            at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
+            source: Source::Bn,
+            header: None,
+        });
+        let line = line_with(mark, &hex(6));
+        assert!(!line.contains("slot="), "{line}");
+        assert!(!line.contains("block_root="), "{line}");
     }
 }
