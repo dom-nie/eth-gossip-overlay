@@ -268,6 +268,8 @@ pub enum RsError {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use proptest::prelude::*;
 
     use super::*;
@@ -474,5 +476,47 @@ mod tests {
             prop_assert_eq!(&decoded.payload[..], &payload[..]);
             prop_assert_eq!(decoded.used_parity, subset.iter().any(|i| *i >= params.k));
         }
+    }
+
+    /// Run by hand with `--release --ignored --nocapture` to put numbers in a PR; a debug build
+    /// reports the codec about a hundred times slower than it runs. A 200 KB block at the
+    /// shipped defaults, decoded both ways: every data chunk present, and the ten parity chunks
+    /// standing in for ten that were lost.
+    #[test]
+    #[ignore]
+    fn bench_encode_and_decode_200kb() {
+        const ROUNDS: u32 = 200;
+        let len = 200 * 1024;
+        let payload = payload(len);
+        let params = Params::for_len(len, 2048, 0.10).unwrap();
+        let chunks = encode(&payload, params);
+        let all_data = held(&chunks, 0..params.k);
+        let ten_lost = held(
+            &chunks,
+            (0..params.k - params.m).chain(params.k..params.k + params.m),
+        );
+
+        let micros = |work: &dyn Fn()| {
+            let started = Instant::now();
+            for _ in 0..ROUNDS {
+                work();
+            }
+            started.elapsed().as_secs_f64() * 1e6 / f64::from(ROUNDS)
+        };
+
+        println!(
+            "k={} m={}: encode {:.1} us, decode all data {:.1} us, decode with parity {:.1} us",
+            params.k,
+            params.m,
+            micros(&|| {
+                std::hint::black_box(encode(&payload, params));
+            }),
+            micros(&|| {
+                std::hint::black_box(decode(params, &all_data).unwrap());
+            }),
+            micros(&|| {
+                std::hint::black_box(decode(params, &ten_lost).unwrap());
+            }),
+        );
     }
 }
