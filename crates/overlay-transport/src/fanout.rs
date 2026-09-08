@@ -339,10 +339,12 @@ mod tests {
 
     use bytes::{Bytes, BytesMut};
     use overlay_core::msgid::MessageId;
+    use overlay_core::rs::Params;
     use overlay_core::subs::PeerState;
+    use overlay_core::wire::{self, Chunk, ChunkFlags, Read};
 
     use super::*;
-    use crate::manager::LiveSource;
+    use crate::manager::{LiveSource, LiveView};
     use crate::sender::{LARGE_QUEUED_BYTES_MAX, LargeLedger, PeerSender};
     use crate::testutil::{
         Builder, NodeKind, REGION, SendSpy, TestCluster, WAIT, datagram_limit, eventually,
@@ -674,6 +676,143 @@ mod tests {
         )
         .await;
         assert!(links[0].sent().is_empty());
+    }
+
+    /// A view of `hosts` peers in one region, each subscribed to `block` under the id this
+    /// host's table hands out, each with a sender a test can read, and each having negotiated
+    /// the bit a stripe needs. Sorted-hostname order is the map's own, which is what the
+    /// assignment is computed against (D18).
+    fn striped_view(
+        connection: &quinn::Connection,
+        block: &Topic,
+        hosts: usize,
+    ) -> (LiveView, Vec<Hostname>, Vec<SendSpy>) {
+        let names: Vec<Hostname> = (0..hosts).map(|n| Hostname(format!("bn-{n:02}"))).collect();
+        let peers: Vec<(Hostname, PeerState)> = names
+            .iter()
+            .map(|name| (name.clone(), peer_state(&[(1, block)], &[1])))
+            .collect();
+        let spies: Vec<SendSpy> = (0..hosts).map(|_| SendSpy::open()).collect();
+        let deps = crate::sender::Deps {
+            ledger: Arc::new(LargeLedger::new(LARGE_QUEUED_BYTES_MAX)),
+            stats: Arc::new(()),
+        };
+        let mut live = view(connection, peers);
+        for ((hostname, peer), spy) in live.0.iter_mut().zip(&spies) {
+            peer.negotiated.features = overlay_core::protocol::SUPPORTED_FEATURES;
+            peer.sender = PeerSender::spawn(hostname.clone(), spy.clone(), deps.clone());
+        }
+        (live, names, spies)
+    }
+
+    /// Starts a fanout over `live` with `block` interned, and hands back what pushes into it.
+    fn striping_fanout(
+        live: LiveView,
+        block: &Topic,
+        stripe_min_recipients: usize,
+    ) -> (overlay_core::lanes::LanePusher<Outbound>, JoinHandle<()>) {
+        let topics = Arc::new(Mutex::new(OwnTopics::default()));
+        lock(&topics).table.intern(block).expect("a fresh table");
+        let lanes = ClassLanes::new(Arc::new(()));
+        let pusher = lanes.pusher();
+        let fanout = Fanout::spawn(
+            lanes,
+            LiveSource::fixed(live),
+            SelfIdentity {
+                hostname: Hostname("bn-me".to_owned()),
+                region: Region(REGION.to_owned()),
+                site: None,
+            },
+            tokio::sync::watch::channel(config::Fanout {
+                large: config::LargeFanout {
+                    stripe_min_recipients,
+                    ..config::LargeFanout::default()
+                },
+                ..config::Fanout::default()
+            })
+            .1,
+            topics,
+            crate::batching::Batching::spawn(
+                tokio::sync::watch::channel(config::SmallClass::default()).1,
+                Arc::new(()),
+            )
+            .0,
+            Arc::new(()),
+            Arc::default(),
+        );
+        (pusher, fanout)
+    }
+
+    /// Every `CHUNK` on one stream, in the order it was written.
+    async fn chunks_of(frame: &Bytes) -> Vec<(ChunkFlags, Chunk)> {
+        let mut stream = &frame[..];
+        let mut chunks = Vec::new();
+        while let Ok(Read::Frame(Frame::Chunk { flags, chunk })) =
+            wire::read_frame(&mut stream, overlay_core::protocol::MAX_FRAME_BYTES).await
+        {
+            chunks.push((flags, chunk));
+        }
+        chunks
+    }
+
+    /// A large message for `topic` under an id a test picked, so the rotation the assignment
+    /// starts at is the test's to compute as well.
+    fn large(topic: &Topic, id: MessageId, payload: Vec<u8>) -> Outbound {
+        Outbound {
+            topic: topic.clone(),
+            class: Class::Large,
+            id,
+            payload: Bytes::from(payload),
+            received_at: Instant::now(),
+        }
+    }
+
+    /// §5.4 step 2 and D18: chunk `i` goes to the host `stripe::assign` names and to nobody
+    /// else, and it leaves with `FORWARDED` clear, which is what asks the host that receives it
+    /// to hand it to the rest of the region (D11).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn origin_sends_each_chunk_to_its_assigned_host_with_forwarded_clear() {
+        let block = topic("beacon_block");
+        let id = MessageId([9; 20]);
+        let payload = incompressible(20 * 1024);
+        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare])
+            .start()
+            .await;
+        let connection = tokio::time::timeout(WAIT, cluster.connected_pair(0, 1))
+            .await
+            .expect("the pair to connect")
+            .0;
+        let (live, names, spies) = striped_view(&connection, &block, 6);
+        let (pusher, _fanout) = striping_fanout(live, &block, 2);
+        let split = Params::for_len(payload.len(), 2048, 0.10).expect("a split for this payload");
+        let chunks = usize::from(split.k) + usize::from(split.m);
+        let assignment = overlay_core::stripe::assign(&id, &names, chunks);
+
+        pusher
+            .push(Class::Large, large(&block, id, payload))
+            .expect("the fanout lane has room");
+
+        eventually("every assigned host to be written to", || {
+            names
+                .iter()
+                .enumerate()
+                .all(|(n, name)| spies[n].sent().len() == usize::from(assignment.contains(name)))
+        })
+        .await;
+        for (n, name) in names.iter().enumerate() {
+            let mut indices = Vec::new();
+            for frame in spies[n].sent() {
+                for (flags, chunk) in chunks_of(&frame).await {
+                    assert_eq!(flags, ChunkFlags::NONE, "{name}");
+                    assert_eq!((chunk.k, chunk.m), (split.k, split.m), "{name}");
+                    indices.push(chunk.index);
+                }
+            }
+            let expected: Vec<u16> = (0..split.k + split.m)
+                .filter(|index| assignment[usize::from(*index)] == *name)
+                .collect();
+            assert_eq!(indices, expected, "{name}");
+        }
     }
 
     /// What a large plan means to this release: the regions too small to stripe are the whole
