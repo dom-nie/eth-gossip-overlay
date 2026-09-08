@@ -2727,32 +2727,42 @@ mod tests {
         seen
     }
 
-    /// §5.4 end to end: the origin sends each host one chunk and each host hands what it was
-    /// sent to the rest of the region, so every host ends up with the whole stripe having read
-    /// one message-worth of bytes off the origin between them. Each index arrives exactly once,
+    /// §5.4 end to end: the origin sends each host a share of the chunks and each host hands
+    /// what it was sent to the rest of the region, so every host ends up with the message having
+    /// read one message-worth of bytes off the origin between them. No index arrives twice,
     /// which is the second hop not doubling up.
+    ///
+    /// A host is not sent every index. It stops passing chunks on the moment it holds the
+    /// message (D19), so the tail of its own share never makes the rounds, and the last few
+    /// indices exist only on the hosts the origin sent them to. That is the point: the region
+    /// stops spending bandwidth once it has what it was after.
     #[tokio::test(flavor = "multi_thread")]
-    async fn every_host_in_region_ends_up_with_all_k_plus_m_chunks() {
+    async fn every_host_in_region_ends_up_with_the_message_and_no_index_twice() {
         let block = topic("beacon_block");
         let payload = incompressible(20 * 1024);
         let hosts = 6;
         let cluster = striping_cluster(&vec!["eu"; hosts], &block).await;
-        let split = Params::for_len(payload.len(), 2048, 0.10).expect("a split for this payload");
-        let chunks = usize::from(split.k) + usize::from(split.m);
-        let all: Vec<u16> = (0..split.k + split.m).collect();
 
         assert!(cluster.from_bn(0, &block, &payload));
 
         for node in 1..hosts {
-            eventually("the host to hold the whole stripe", || {
-                indices(&cluster, node, hosts).len() == chunks
+            eventually("the host to put the message together", || {
+                cluster.published(node).len() == 1
             })
             .await;
         }
         tokio::time::sleep(SETTLE).await;
         for node in 1..hosts {
-            assert_eq!(indices(&cluster, node, hosts), all, "node {node}");
+            assert_eq!(cluster.published(node)[0].payload, payload, "node {node}");
+            let held = indices(&cluster, node, hosts);
+            let mut once = held.clone();
+            once.dedup();
+            assert_eq!(held, once, "node {node} was sent an index twice");
         }
+        assert!(
+            cluster.published(0).is_empty(),
+            "the origin published to itself"
+        );
     }
 
     /// §5.4: the origin builds one stripe per region and each region's second hop stays inside
@@ -2763,14 +2773,12 @@ mod tests {
         let payload = incompressible(20 * 1024);
         let cluster =
             striping_cluster(&["eu", "eu", "eu", "eu", "us", "us", "us", "us"], &block).await;
-        let split = Params::for_len(payload.len(), 2048, 0.10).expect("a split for this payload");
-        let chunks = usize::from(split.k) + usize::from(split.m);
 
         assert!(cluster.from_bn(0, &block, &payload));
 
         for node in 1..8 {
-            eventually("every host in both regions to hold the stripe", || {
-                indices(&cluster, node, 8).len() == chunks
+            eventually("every host in both regions to hold the message", || {
+                cluster.published(node).len() == 1
             })
             .await;
         }
@@ -2822,14 +2830,11 @@ mod tests {
             cluster.live(0).subscribers(&block).len() == hosts - 2
         })
         .await;
-        let split = Params::for_len(payload.len(), 2048, 0.10).expect("a split for this payload");
-        let chunks = usize::from(split.k) + usize::from(split.m);
-
         assert!(cluster.from_bn(0, &block, &payload));
 
         for node in 1..hosts - 1 {
-            eventually("the subscribers to hold the stripe", || {
-                indices(&cluster, node, hosts).len() == chunks
+            eventually("the subscribers to hold the message", || {
+                cluster.published(node).len() == 1
             })
             .await;
         }
