@@ -29,6 +29,11 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 tracing.workspace = true
 zeroize.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# `sched_setaffinity` for the I/O thread (T-091). Nothing else in this crate is platform
+# specific, so the dependency is scoped rather than the calls being cfg'd around an import.
+nix = { workspace = true }
+
 [dev-dependencies]
 mutants.workspace = true
 snap.workspace = true

@@ -5,14 +5,45 @@
 //! looking, the endpoint is built on the runtime that builds the rest of the sidecar and this
 //! module costs one info log.
 
+use std::thread;
+
 use overlay_core::config::IoThread;
+use tokio::sync::oneshot;
 
 use crate::endpoint::EndpointError;
+
+/// What the I/O thread is called, so `ps -L -o psr,comm` names it beside the core it is on
+/// (`docs/performance.md`).
+const THREAD_NAME: &str = "overlay-io";
+
+/// Why the overlay could not be brought up.
+#[derive(Debug, thiserror::Error)]
+pub enum IoThreadError {
+    /// The endpoint could not be bound, wherever it was going to run.
+    #[error(transparent)]
+    Endpoint(#[from] EndpointError),
+    /// The thread or its runtime could not be created. A host with no room for one more thread
+    /// has something worse wrong with it than an unpinned overlay, so this ends the start
+    /// instead of falling back.
+    #[error("overlay I/O thread: {0}")]
+    Thread(#[from] std::io::Error),
+}
 
 /// A bound endpoint and whatever is carrying it.
 pub struct IoHandle {
     endpoint: quinn::Endpoint,
     pinned: bool,
+    worker: Option<Worker>,
+}
+
+/// What the I/O thread sends back once it knows whether it has an endpoint, and whether it is
+/// running on the core it was asked for.
+type Bound = Result<(quinn::Endpoint, bool), IoThreadError>;
+
+/// The I/O thread and the channel that ends it.
+struct Worker {
+    stop: oneshot::Sender<()>,
+    thread: thread::JoinHandle<()>,
 }
 
 impl IoHandle {
@@ -30,23 +61,122 @@ impl IoHandle {
 
     /// Ends whatever this handle is carrying. Call it after the connection manager's own
     /// shutdown, which needs the endpoint's driver alive to close the connections politely.
-    pub async fn shutdown(self) {}
+    pub async fn shutdown(self) {
+        let Some(worker) = self.worker else { return };
+        let _ = worker.stop.send(());
+        // Joined on the blocking pool, so a shutdown deadline can still fire over a thread that
+        // will not end (§11's two seconds).
+        let _ = tokio::task::spawn_blocking(move || worker.thread.join()).await;
+    }
 }
 
 /// Runs the overlay endpoint where `overlay.io_thread` asks for it.
 pub fn spawn(
     cfg: &IoThread,
     build: impl FnOnce() -> Result<quinn::Endpoint, EndpointError> + Send + 'static,
-) -> Result<IoHandle, EndpointError> {
-    tracing::info!(
-        pin_cpu = ?cfg.pin_cpu,
-        linux = cfg!(target_os = "linux"),
-        "overlay endpoint on the main runtime"
-    );
+) -> Result<IoHandle, IoThreadError> {
+    let Some(cpu) = cfg.pin_cpu else {
+        tracing::info!(
+            pin_cpu = ?cfg.pin_cpu,
+            linux = cfg!(target_os = "linux"),
+            "overlay endpoint on the main runtime"
+        );
+        return Ok(IoHandle {
+            endpoint: build()?,
+            pinned: false,
+            worker: None,
+        });
+    };
+    dedicated(Some(cpu), build)
+}
+
+/// The endpoint on a `current_thread` runtime of its own, pinned to `cpu` where there is one.
+///
+/// That runtime owns one epoll instance and registers the overlay socket with it as the
+/// endpoint is built, which is the isolation §11.1 asks for and what T-092 will set busy-poll
+/// parameters on. Only the endpoint's own driver moves: quinn spawns a connection's driver on
+/// whichever runtime created the connection, so a peer's timers stay with the connection
+/// manager and what the I/O thread owns is every read off the socket.
+///
+/// `cpu` is an option so that the thread, the handoff and the join can be driven on a platform
+/// that has no core to ask for; a start reaches this with `Some`.
+fn dedicated(
+    cpu: Option<u32>,
+    build: impl FnOnce() -> Result<quinn::Endpoint, EndpointError> + Send + 'static,
+) -> Result<IoHandle, IoThreadError> {
+    let (ready, bound) = std::sync::mpsc::sync_channel::<Bound>(1);
+    let (stop, stopped) = oneshot::channel();
+    let thread = thread::Builder::new()
+        .name(THREAD_NAME.to_owned())
+        .spawn(move || {
+            let pinned = cpu.is_some_and(pin_current_thread);
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(err) => {
+                    let _ = ready.send(Err(err.into()));
+                    return;
+                }
+            };
+            match runtime.block_on(async { build() }) {
+                Ok(endpoint) => {
+                    if ready.send(Ok((endpoint, pinned))).is_err() {
+                        return;
+                    }
+                    // Drives the endpoint until the handle says to stop; a `current_thread`
+                    // runtime runs its spawned tasks inside whatever it is blocking on.
+                    runtime.block_on(async {
+                        let _ = stopped.await;
+                    });
+                }
+                Err(err) => {
+                    let _ = ready.send(Err(err.into()));
+                }
+            }
+        })?;
+
+    let (endpoint, pinned) = bound.recv().map_err(|_| {
+        std::io::Error::other("the I/O thread ended before the endpoint was bound")
+    })??;
     Ok(IoHandle {
-        endpoint: build()?,
-        pinned: false,
+        endpoint,
+        pinned,
+        worker: Some(Worker { stop, thread }),
     })
+}
+
+/// Pins the calling thread to `cpu`, reporting whether the kernel took it.
+///
+/// A core that does not exist, or one this process is not allowed on, is a warning and not a
+/// refusal to start: an operator whose container has a narrower cpuset than the configuration
+/// expects should lose the pinning, not the overlay (§11.1). `overlay_io_thread_pinned` is how
+/// they find out.
+#[cfg(target_os = "linux")]
+fn pin_current_thread(cpu: u32) -> bool {
+    let mut set = nix::sched::CpuSet::new();
+    // Pid zero is the calling thread, which is the one the runtime will run on.
+    let pinned = set
+        .set(cpu as usize)
+        .and_then(|()| nix::sched::sched_setaffinity(nix::unistd::Pid::from_raw(0), &set));
+    match pinned {
+        Ok(()) => {
+            tracing::info!(cpu, "overlay I/O thread pinned");
+            true
+        }
+        Err(err) => {
+            tracing::warn!(cpu, %err, "overlay I/O thread not pinned; carrying on unpinned");
+            false
+        }
+    }
+}
+
+/// There is no `sched_setaffinity` off Linux. A start never asks for a core there, so this is
+/// only what gives the thread body one shape on every platform.
+#[cfg(not(target_os = "linux"))]
+fn pin_current_thread(_cpu: u32) -> bool {
+    false
 }
 
 #[cfg(test)]
