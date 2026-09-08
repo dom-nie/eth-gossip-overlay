@@ -2993,6 +2993,52 @@ mod tests {
         );
     }
 
+    /// §12's win rate and T-044's event log at the third insert site: a message this host put
+    /// back together is one the overlay brought it before its beacon node had it, so it counts
+    /// as a first arrival and is logged as one. Without this every block a striping fleet wins
+    /// is missing from the numerator of `OverlayWinRateFalling` while the beacon node's own
+    /// copies still count in the denominator, and the ratio reads "never wins" exactly when the
+    /// overlay is working.
+    ///
+    /// The event names the origin that cut the message up rather than whoever sent the last
+    /// chunk, and carries the first chunk's arrival, which is when this host heard of the
+    /// message at all. That is what the fleet-spread query in `docs/rollout.md` compares
+    /// across hosts.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn completion_counts_a_first_arrival_and_logs_it_against_the_origin() {
+        let mark = LOG.len();
+        let block = topic("beacon_block");
+        // A payload no other test sends, so its id picks this test's line out of the shared log.
+        let payload = payload(b"a striped block only the reassembly test sends");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        let (msg_id, params, frames) = striped(0, &block, &payload, 64);
+
+        send(&peer, &frames[..usize::from(params.k)]).await;
+
+        eventually("the message to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert_eq!(cluster.stats(1).first_seen(Class::Large), 1);
+        let line = LOG
+            .since(mark)
+            .lines()
+            .find(|line| line.contains(&msg_id.to_string()))
+            .unwrap_or_default()
+            .to_owned();
+        assert!(line.contains(r#"event="first_arrival""#), "{line}");
+        assert!(line.contains(r#"source="overlay""#), "{line}");
+        assert!(line.contains(r#"class="large""#), "{line}");
+        assert!(
+            line.contains(&format!("origin_peer={}", cluster.hostname(0))),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!("node={}", cluster.hostname(1))),
+            "{line}"
+        );
+    }
+
     /// DX-N1 at the third ingress site: a host reassembles a message for a topic its own beacon
     /// node never asked for, and publishes nothing. The chunks were still worth taking in, since
     /// the region was owed them.
