@@ -133,10 +133,15 @@ impl FanoutBudget {
 /// without cgroup v2, which includes every developer machine that is not Linux.
 const CGROUP_MEMORY_MAX: &str = "/sys/fs/cgroup/memory.max";
 
-/// The ceiling the shipped unit sets, `MemoryMax=512M` in
+/// The ceiling the shipped unit sets, `MemoryMax=1G` in
 /// `deploy/systemd/eth-gossip-overlay.service`. What the budget is sized against on a host with
 /// no cgroup file to read; a test in `eth-gossip-overlay` holds the unit to it.
-pub const MEMORY_MAX_DEFAULT: u64 = 512 * 1024 * 1024;
+///
+/// It was 512M until MD-05. Nothing in Architecture.md or the panel record ever justified that
+/// number, and the bounds it had to hold, D17's lanes and CL-N5's caches and DX-N3's windows,
+/// each did; at 512M the rows for a 200-host fleet did not fit and the largest roster that did
+/// was 181.
+pub const MEMORY_MAX_DEFAULT: u64 = 1024 * 1024 * 1024;
 
 /// What one seen-cache entry costs: the 20-byte id in the set, the same id and an `Instant` in
 /// the order queue, and the slack a hash table carries around its live entries.
@@ -413,7 +418,7 @@ mod tests {
         ("peer_send_lanes", 128_241_664),
         ("gossipsub", 34_132_480),
         ("by_root_cache", 0),
-        ("quic_receive_windows", 208_666_624),
+        ("quic_receive_windows", 609_453_420),
     ];
 
     /// OPS-N4's whole point: every bounded structure at its worst case, summed, fits under the

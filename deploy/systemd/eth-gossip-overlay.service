@@ -46,7 +46,10 @@ PrivateTmp=yes
 
 CPUWeight=200
 # No CPUQuota=: CFS throttling would stall a fanout in the middle of a block.
-MemoryMax=512M
+# The bounded structures at a 200-host roster come to about 816 MiB once OPS-N4's 25% headroom
+# is on them; docs/performance.md has the row-by-row table. Raise this and the alert's literal
+# and the dashboard's threshold lines have to move with it.
+MemoryMax=1G
 # Cores reserved for the sidecar on hosts that have them, excluded from the beacon node's own
 # AllowedCPUs=. Host-specific, so it is off here.
 #AllowedCPUs=<CPU_LIST>

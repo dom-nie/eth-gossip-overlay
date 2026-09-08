@@ -90,9 +90,13 @@ fn sets(text: &str, key: &str) -> bool {
 /// back to on a host with no cgroup file. A unit that raises `MemoryMax` without raising that
 /// constant would have every such host sizing itself against a limit it no longer runs under.
 #[test]
-fn unit_has_no_cpuquota_and_has_memorymax_512m() {
+fn unit_has_no_cpuquota_and_has_memorymax_1g() {
     let text = read(UNIT);
-    let ceiling = format!("MemoryMax={}M", budget::MEMORY_MAX_DEFAULT / (1024 * 1024));
+    let gib = 1024 * 1024 * 1024;
+    let ceiling = match budget::MEMORY_MAX_DEFAULT {
+        bytes if bytes.is_multiple_of(gib) => format!("MemoryMax={}G", bytes / gib),
+        bytes => format!("MemoryMax={}M", bytes / (1024 * 1024)),
+    };
 
     assert!(
         has_directive(&text, &ceiling),
