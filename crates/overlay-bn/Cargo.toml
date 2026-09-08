@@ -7,6 +7,11 @@ license.workspace = true
 repository.workspace = true
 
 [features]
+# The custody column decoder and the tracker wiring behind it (T-083). It is the one place the
+# overlay reads a consensus object, so it is the one place `types` is a production dependency
+# (D05); `cargo tree -p overlay-bn -e normal` lists it only with this on. The binary enables it.
+column-repair = ["dep:types"]
+
 # `FakeBn` and its helpers, for the fleet harness in `eth-gossip-overlay` (T-051). Lighthouse's own
 # crates come with it, so nothing but a test build may turn it on: the harness enables it
 # through a dev-dependency, which resolver 3 never unifies into a normal build.
