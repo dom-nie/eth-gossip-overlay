@@ -171,6 +171,11 @@ impl CustodyTracker {
         self.trim();
     }
 
+    /// Records that column `index` of `block_root` arrived for `slot`.
+    pub fn on_column(&mut self, slot: u64, index: u16, block_root: [u8; 32]) {
+        let _ = (slot, index, block_root);
+    }
+
     /// Every block whose deadline has passed and which is still short of the threshold, with the
     /// columns to repair in the order to repair them.
     ///
@@ -280,5 +285,21 @@ mod tests {
                 have_count: 0,
             }]
         );
+    }
+
+    #[test]
+    fn on_column_clears_its_expectation() {
+        let clock = FakeClock::new();
+        let mut tracker = tracking(&clock, &[0, 3, 7]);
+        clock.advance(DEADLINE);
+
+        tracker.on_column(1, 3, ROOT);
+
+        let reported = gaps(&mut tracker, &clock);
+        let [gap] = reported.as_slice() else {
+            panic!("one block is being tracked");
+        };
+        assert_eq!(gap.missing, vec![0, 7]);
+        assert_eq!(gap.have_count, 1);
     }
 }
