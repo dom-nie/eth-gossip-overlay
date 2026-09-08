@@ -197,11 +197,10 @@ impl CustodyTracker {
         now: Instant,
         in_flight: &BitSet,
     ) -> Vec<ColumnGap> {
-        let _ = in_flight;
         let mut gaps: Vec<(u64, ColumnGap)> = self
             .slots
             .iter()
-            .filter_map(|(slot, block)| Some((*slot, block.gap(deadline, now)?)))
+            .filter_map(|(slot, block)| Some((*slot, block.gap(deadline, now, in_flight)?)))
             .collect();
         gaps.sort_by_key(|(slot, _)| *slot);
         gaps.into_iter().map(|(_, gap)| gap).collect()
@@ -223,17 +222,25 @@ impl CustodyTracker {
 }
 
 impl Block {
-    fn gap(&self, deadline: Duration, now: Instant) -> Option<ColumnGap> {
+    fn gap(&self, deadline: Duration, now: Instant, in_flight: &BitSet) -> Option<ColumnGap> {
         let root = self.root?;
         let seen_at = self.seen_at?;
         if now.saturating_duration_since(seen_at) < deadline {
             return None;
         }
-        let missing: Vec<u16> = self
+        let wanted = |index: &u16| !self.have.contains(*index);
+        let mut missing: Vec<u16> = self
             .expected
             .iter()
-            .filter(|index| !self.have.contains(*index))
+            .filter(wanted)
+            .filter(|index| in_flight.contains(*index))
             .collect();
+        missing.extend(
+            self.expected
+                .iter()
+                .filter(wanted)
+                .filter(|index| !in_flight.contains(*index)),
+        );
         (!missing.is_empty()).then_some(ColumnGap {
             block_root: root,
             missing,
