@@ -763,20 +763,31 @@ mod tests {
         );
     }
 
-    /// v1 sends both classes the same way, so the class changes nothing about the plan. T-072
-    /// rewrites this test: a large message becomes a stripe over the same peers, and the two
-    /// answers stop matching.
+    /// Both halves of what makes a stripe. The class alone does not: an unchunked large message
+    /// takes the same plan as a small one, which is what a sender that cannot chunk yet routes
+    /// and what keeps the whole-message path alive beside the striped one (§5.4). Nor do the
+    /// chunks alone: a small-class message is whole payloads batched together, so a split of
+    /// one is meaningless there and is ignored.
     #[tokio::test(flavor = "multi_thread")]
-    async fn class_does_not_change_v1_plan() {
+    async fn only_a_large_message_with_chunks_is_striped() {
         let connection = connection().await;
         let block = topic("beacon_block");
         let peer = host("bn-a");
         let live = view(&connection, vec![(peer, peer_state(&[(1, &block)], &[1]))]);
+        let plan = |class, chunked| route(&block, class, chunked, &live, &me(), &striping(1));
 
-        let small = route(&block, Class::Small, None, &live, &me(), &Fanout::default());
-        let large = route(&block, Class::Large, None, &live, &me(), &Fanout::default());
+        let unchunked = plan(Class::Large, None);
+        let small = plan(Class::Small, Some(chunked(0, 1, 1)));
+        let large = plan(Class::Large, Some(chunked(0, 1, 1)));
 
-        assert_eq!(small, RoutePlan::Direct(vec![host("bn-a")]));
-        assert_eq!(small, large);
+        assert_eq!(unchunked, RoutePlan::Direct(vec![host("bn-a")]));
+        assert_eq!(small, unchunked);
+        assert_eq!(
+            large,
+            RoutePlan::Large(vec![RegionPlan::Stripe {
+                region: Region(REGION.to_owned()),
+                targets_per_chunk: vec![host("bn-a"); 2],
+            }])
+        );
     }
 }
