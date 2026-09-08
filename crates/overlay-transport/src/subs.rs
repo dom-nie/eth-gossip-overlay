@@ -335,6 +335,40 @@ mod tests {
         );
     }
 
+    /// MD-04: a relay interns a topic it is asked to carry, and the only thing that can put the
+    /// binding on the wire is the intern itself. This host's own subscriptions never change
+    /// here, so a loop that woke on the mirror alone would leave the id unannounced for as long
+    /// as the beacon node's set held still, which on a settled fleet is for ever.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn topic_interned_outside_the_mirror_is_announced_to_an_established_peer() {
+        let block = topic("beacon_block");
+        let carried = topic("beacon_attestation_9");
+        let (cluster, _sets, mut peers, manager) = exchange(&[&[]], advertising(&[&block])).await;
+        assert_eq!(
+            next_frame(&mut peers[0]).await,
+            Frame::TopicAdd {
+                id: 0,
+                topic: block.to_string()
+            }
+        );
+        assert_eq!(
+            next_frame(&mut peers[0]).await,
+            Frame::Subs { bitmap: bits(&[0]) }
+        );
+
+        let id = hello::lock(cluster.topics(manager))
+            .intern(&carried)
+            .unwrap();
+
+        assert_eq!(
+            next_frame(&mut peers[0]).await,
+            Frame::TopicAdd {
+                id: id.get(),
+                topic: carried.to_string()
+            }
+        );
+    }
+
     /// Every live peer hears about a change, because the bitmap is the only thing that makes a
     /// sibling send anything: one that missed it would keep routing on the set before it.
     #[tokio::test(flavor = "multi_thread")]
