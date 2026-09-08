@@ -1167,6 +1167,47 @@ mod tests {
         );
     }
 
+    /// MD-04's bound: a relay interns only a topic whose fork digest it already knows, because
+    /// `Topic::parse` takes any of ~2^32 of them and the fan-out budget counts bytes, so a peer
+    /// naming digests would be writing into this host's id space for free. An entry it will not
+    /// name goes nowhere and is counted, which is the difference between a batch this host
+    /// dropped and a batch that correctly held nothing new.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn relay_entry_on_an_unknown_fork_digest_is_counted_and_not_refanned() {
+        let subnet = topic("beacon_attestation_7");
+        let foreign = Topic::parse("/eth2/deadbeef/beacon_attestation_7/ssz_snappy").unwrap();
+        let payload = payload(b"an attestation from a fork this host has never heard of");
+        let mut cluster = relay_cluster().start().await;
+        for node in [1, 2] {
+            cluster.start_sidecar(node, subscriptions(&[&subnet], &[]));
+        }
+        eventually("the two siblings to pair and subscribe", || {
+            cluster.live(1).subscribers(&subnet).len() == 1
+        })
+        .await;
+        let peer = cluster
+            .dial_announcing(
+                0,
+                1,
+                &cluster.self_hello(0),
+                vec![
+                    (TopicId::new(3), subnet.to_string()),
+                    (TopicId::new(4), foreign.to_string()),
+                ],
+            )
+            .await;
+
+        datagram(&peer, relay_batch(vec![entry(4, &payload)]));
+
+        eventually("the entry to be counted", || {
+            cluster.stats(1).unannounced_topics() == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(cluster.stats(1).relayed_batches(), 1, "the batch arrived");
+        assert!(cluster.published(2).is_empty());
+    }
+
     /// D21: the relay re-coalesces through its own batcher, so an in-region subscriber gets one
     /// batch holding the entries it asked for and nothing else. The relay itself wants both
     /// topics and publishes both; the host beside it wants one and is sent one.
