@@ -1252,6 +1252,7 @@ impl<A: Admission> TestCluster<A> {
         let (small, batching) = Batching::spawn(self.small.subscribe(), stats.clone());
         let deps = Deps {
             seen: seen.clone(),
+            recent: recent.clone(),
             publish: published.clone(),
             sets: watching.clone(),
             reassembler: reassembler.clone(),

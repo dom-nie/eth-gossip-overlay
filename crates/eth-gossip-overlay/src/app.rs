@@ -387,6 +387,7 @@ impl App {
             to_exchange,
             ReceiveDeps {
                 seen,
+                recent,
                 publish: Arc::new(publish),
                 sets: sets_rx.clone(),
                 reassembler: Arc::new(

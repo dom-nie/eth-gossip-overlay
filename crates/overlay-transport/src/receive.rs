@@ -64,6 +64,7 @@ use overlay_core::msgid::{self, Branch, MessageId};
 use overlay_core::protocol::{MAX_FRAME_BYTES, features};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
 use overlay_core::reassemble::{Outcome, Reason, Reassembler};
+use overlay_core::recent::SharedRecentLarge;
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
 use overlay_core::seen::SharedSeenCache;
 use overlay_core::subs::PeerState;
@@ -173,6 +174,9 @@ enum Delivery {
 pub struct Deps {
     /// The seen cache all three insert sites share (D08).
     pub seen: SharedSeenCache,
+    /// Where a message this host reassembled is kept so a peer can repair it from here (§5.6).
+    /// The beacon node link (T-016) holds the other handle to the same store.
+    pub recent: SharedRecentLarge,
     /// T-017's publish queue, behind the trait that keeps `overlay-transport` clear of libp2p.
     pub publish: Arc<dyn PublishSink>,
     /// What the mirror says the beacon node is subscribed to, which is the gate (DX-N1).
@@ -523,7 +527,7 @@ impl Ctx {
                 // When the first chunk came off the socket, which is when this host heard of the
                 // message: the wall clock reading now, less how long the rest of it took.
                 let arrived = self.deps.clock.wall() - took;
-                if self.publish_reassembled(topic, class, msg_id, payload, &origin, arrived) {
+                if self.publish_reassembled(topic, class, msg_id, payload, &origin, arrived, now) {
                     if used_parity {
                         self.deps.stats.parity_used();
                     }
@@ -557,7 +561,14 @@ impl Ctx {
     ///
     /// `origin` is the host that cut the message up rather than whoever sent the last chunk,
     /// and `arrived` is when the first chunk landed, so the fleet-spread query compares the
-    /// moment each host heard of the message.
+    /// moment each host heard of the message. `now` is when the message came back, which is
+    /// what the recent store ages it from.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one message and the four readings that describe it: what it is, who cut it \
+                  up, when this host heard of it, and when it came back. Each has its own \
+                  type, so a call site cannot mix two up"
+    )]
     fn publish_reassembled(
         &self,
         topic: &Topic,
@@ -566,6 +577,7 @@ impl Ctx {
         payload: Bytes,
         origin: &Hostname,
         arrived: SystemTime,
+        now: Instant,
     ) -> bool {
         if !self.deps.sets.borrow().advertised.contains(topic) {
             self.deps.stats.unwanted_topic(&self.peer);
@@ -576,6 +588,12 @@ impl Ctx {
             return false;
         }
         self.deps.stats.first_seen(class);
+        // Insert site 2 of 2 for the recent store (§5.6); T-016's inbound path is the other. A
+        // reassembled message is always large class, and the peers that sent its chunks are the
+        // ones that may still be missing some of them.
+        self.deps
+            .recent
+            .insert(id, topic.clone(), payload.clone(), now);
         events::emit_first_arrival(&FirstArrival {
             id,
             class,
@@ -961,6 +979,7 @@ mod tests {
     use overlay_core::budget::SUSTAINED_VIOLATION;
     use overlay_core::config;
     use overlay_core::reassemble::{MAX_IN_FLIGHT, ReassembleConfig};
+    use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge};
     use overlay_core::rs::Params;
     use overlay_core::seen::SeenCache;
     use overlay_core::time::{FakeClock, SystemClock};
@@ -2262,6 +2281,7 @@ mod tests {
                     16,
                     Arc::new(SystemClock),
                 )),
+                recent: SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)),
                 publish: published.clone(),
                 sets: watching,
                 reassembler: Arc::new(Reassembler::new(ReassembleConfig::default())),

@@ -82,6 +82,12 @@ impl Inbound {
     /// becomes an [`Outbound`] on `out`, stamped with `clock`'s time, and a new large one is
     /// logged as this host's first arrival under `node`'s name (T-044) and kept in `recent` for
     /// a peer that may have to repair it (§5.6).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the inbound path's wiring: where messages come from, the two stores it \
+                  records them in, where they go, who this host is, and one handle per \
+                  consumer. Every parameter has its own type, so a call site cannot mix two up"
+    )]
     pub fn spawn(
         lanes: ClassLanes<BnMessage>,
         commands: mpsc::Sender<BnCommand>,
