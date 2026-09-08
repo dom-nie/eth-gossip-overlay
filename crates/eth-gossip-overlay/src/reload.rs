@@ -1498,5 +1498,32 @@ mod tests {
 
             assert_eq!(h.stats.count(), 0);
         }
+
+        #[tokio::test(start_paused = true)]
+        async fn missing_or_unparseable_file_keeps_the_current_roster_and_the_next_poll_recovers() {
+            let mut h = Watched::start(3).await;
+            fs::remove_file(&h.roster_path).unwrap();
+
+            h.poll().await;
+
+            assert_eq!(h.stats.count(), 0, "a file that is gone is not a reload");
+            assert_eq!(h.roster.borrow_and_update().hosts.len(), 3);
+
+            h.write("hosts:\n  - hostname: bn-1\n    region: eu\n    addr: \"not one\"\n");
+            h.poll().await;
+
+            let report = h.stats.last();
+            assert!(
+                matches!(report.error, Some(ReloadError::Roster(_))),
+                "{report:?}"
+            );
+            assert_eq!(h.roster.borrow_and_update().hosts.len(), 3);
+
+            h.write(&roster_yaml(4));
+            h.poll().await;
+
+            assert_eq!(h.stats.last().applied, ["roster"]);
+            assert_eq!(h.roster.borrow_and_update().hosts.len(), 4);
+        }
     }
 }
