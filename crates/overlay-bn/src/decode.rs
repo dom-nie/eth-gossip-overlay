@@ -49,8 +49,10 @@ pub enum HeaderError {
 
 /// The slot a block is for and its block root, from the payload the beacon node gossips.
 pub fn block_header(payload: &[u8]) -> Result<(u64, [u8; 32]), HeaderError> {
-    let _ = decompress(payload)?;
-    Err(HeaderError::Ssz)
+    let bytes = decompress(payload)?;
+    let block = SignedBeaconBlock::<MainnetEthSpec>::any_from_ssz_bytes(&bytes)
+        .map_err(|_| HeaderError::Ssz)?;
+    Ok((block.slot().as_u64(), bytes32(block.canonical_root())))
 }
 
 /// The slot, index and block root of a data column sidecar, from the payload the beacon node
