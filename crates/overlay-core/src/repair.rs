@@ -281,17 +281,28 @@ impl Scheduler {
             .flat_map(|gap| gap.missing.iter().map(|index| (gap.block_root, *index)))
             .collect();
         self.columns.retain(|key, _| live.contains(key));
-        gaps.iter()
-            .flat_map(|gap| {
-                let budget = threshold.saturating_sub(gap.have_count);
-                gap.missing
-                    .iter()
-                    .take(budget)
-                    .map(|index| (gap.block_root, *index))
-            })
-            .filter(|(_, index)| !in_flight.contains(*index))
-            .filter_map(|key| self.decide_column(key, candidates, now))
-            .collect()
+        let mut outstanding = self.columns.values().filter(|repair| repair.asking).count();
+        let wanted = gaps.iter().flat_map(|gap| {
+            let budget = threshold.saturating_sub(gap.have_count);
+            gap.missing
+                .iter()
+                .take(budget)
+                .map(|index| (gap.block_root, *index))
+        });
+        let mut decided = Vec::new();
+        for key in wanted.filter(|(_, index)| !in_flight.contains(*index)) {
+            if outstanding >= MAX_COLUMNS_IN_FLIGHT {
+                break;
+            }
+            let Some(decision) = self.decide_column(key, candidates, now) else {
+                continue;
+            };
+            if matches!(decision, Decision::AskColumn(_)) {
+                outstanding += 1;
+            }
+            decided.push(decision);
+        }
+        decided
     }
 
     /// Records that the request for `key` has been answered, one way or another, so the next
@@ -708,8 +719,15 @@ mod tests {
         let none = BitSet::new(128);
         let mut scheduler = Scheduler::default();
 
+        let asks = |decided: Vec<Decision>| {
+            decided
+                .into_iter()
+                .filter(|decision| matches!(decision, Decision::AskColumn(_)))
+                .count()
+        };
+
         let first = scheduler.tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now());
-        assert_eq!(first.len(), MAX_COLUMNS_IN_FLIGHT);
+        assert_eq!(asks(first), MAX_COLUMNS_IN_FLIGHT);
 
         // And no more while those are outstanding.
         clock.advance(REPAIR_TICK);
@@ -721,11 +739,7 @@ mod tests {
         // One answer frees one slot, and the next column takes it.
         scheduler.answered_column(&([3; 32], 1));
         clock.advance(REPAIR_TICK);
-        assert_eq!(
-            scheduler
-                .tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now())
-                .len(),
-            1
-        );
+        let next = scheduler.tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now());
+        assert_eq!(asks(next), 1);
     }
 }
