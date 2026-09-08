@@ -2498,6 +2498,46 @@ mod tests {
         );
     }
 
+    /// DX-N3: a clear chunk asks this host to fan out to its whole region, so its bytes are
+    /// charged to the peer that sent it. Over budget the chunk is still taken in for
+    /// reassembly, because the payload is good and this host wants it; what the peer does not
+    /// get is a region fanned out on its say-so.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chunk_over_the_fanout_budget_is_stored_but_not_forwarded_and_counted() {
+        let (cluster, peer, _) = striping_region_with(2, |builder| {
+            builder.budget(FanoutBudget::new(1, 1, Instant::now()))
+        })
+        .await;
+        let sender = cluster.hostname(0);
+
+        send(
+            &peer,
+            &[chunk_frame(MessageId([12; 20]), 0, ChunkFlags::NONE)],
+        )
+        .await;
+
+        eventually("the chunk to be refused a second hop", || {
+            cluster
+                .stats(1)
+                .fanout_suppressed(&sender, FanoutKind::Chunk)
+                == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert!(
+            cluster
+                .stats(2)
+                .chunks_received(&cluster.hostname(1))
+                .is_empty(),
+            "it was forwarded anyway"
+        );
+        assert_eq!(
+            cluster.reassembler(1).in_flight(),
+            1,
+            "the chunk was refused rather than taken in"
+        );
+    }
+
     /// A chunk is a piece of a message and this release cannot put one back together, so it is
     /// counted, offered to the region and dropped. Nothing is published until T-074 reconstructs.
     #[tokio::test(flavor = "multi_thread")]
