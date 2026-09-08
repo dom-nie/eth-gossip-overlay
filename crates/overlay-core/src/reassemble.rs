@@ -221,6 +221,38 @@ impl Forwarded {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rs::{self, Params};
+    use crate::topic::Topic;
+
+    const TOPIC: &str = "/eth2/6a95a1a9/beacon_block/ssz_snappy";
+
+    fn block() -> Topic {
+        Topic::parse(TOPIC).expect("a topic in the only shape the parser takes")
+    }
+
+    /// A gossipsub payload of about `bytes`, the split a sender would give it, and the chunks
+    /// that come out of it. The id is the one the payload hashes to, because the reassembler
+    /// checks its work against it.
+    fn striped(bytes: usize, chunk_bytes: usize) -> (MessageId, Params, Vec<Bytes>, Bytes) {
+        let raw: Vec<u8> = (0..bytes).map(|i| (i * 31 % 251) as u8).collect();
+        let payload = Bytes::from(snap::raw::Encoder::new().compress_vec(&raw).expect("snappy"));
+        let params = Params::for_len(payload.len(), chunk_bytes, 0.25).expect("a split");
+        let id = msgid::compute(TOPIC, &payload, MAX_PAYLOAD_BYTES).id;
+        (id, params, rs::encode(&payload, params), payload)
+    }
+
+    /// One chunk of `params`' split as it would arrive off a peer's stream.
+    fn header(msg_id: MessageId, params: Params, index: u16, data: Bytes) -> Chunk {
+        Chunk {
+            msg_id,
+            topic_id: 7,
+            k: params.k,
+            m: params.m,
+            index,
+            total_len: params.total_len,
+            data,
+        }
+    }
 
     fn chunk(msg_id: u8, index: u16, k: u16, m: u16) -> Chunk {
         Chunk {
@@ -239,7 +271,89 @@ mod tests {
     }
 
     fn on(reassembler: &Reassembler, chunk: &Chunk, forwarded: bool, now: Instant) -> Outcome {
-        reassembler.on_chunk(chunk, chunk.data.clone(), &host(), forwarded, now)
+        reassembler.on_chunk(chunk, &block(), &host(), forwarded, now)
+    }
+
+    /// Feeds `indices` of a striped message in the order given and answers what the last one
+    /// came to.
+    fn feed(
+        reassembler: &Reassembler,
+        msg_id: MessageId,
+        params: Params,
+        chunks: &[Bytes],
+        indices: &[u16],
+        now: Instant,
+    ) -> Outcome {
+        let mut last = Outcome::LateAfterCompletion;
+        for &index in indices {
+            let chunk = header(msg_id, params, index, chunks[usize::from(index)].clone());
+            last = on(reassembler, &chunk, false, now);
+        }
+        last
+    }
+
+    fn completed(outcome: Outcome) -> (Bytes, bool) {
+        match outcome {
+            Outcome::Completed {
+                payload,
+                used_parity,
+                ..
+            } => (payload, used_parity),
+            other => panic!("the message should have completed, not {other:?}"),
+        }
+    }
+
+    /// The normal case (§5.4 step 4): every data chunk arrives, so the message is the chunks
+    /// joined back together and the codec is never called.
+    #[test]
+    fn completes_when_k_data_chunks_present_without_parity() {
+        let (msg_id, params, chunks, payload) = striped(4096, 512);
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        let data: Vec<u16> = (0..params.k).collect();
+
+        let last = feed(&reassembler, msg_id, params, &chunks, &data, now);
+
+        let (got, used_parity) = completed(last);
+        assert_eq!(got, payload);
+        assert!(!used_parity, "no data chunk was missing");
+        assert_eq!(reassembler.in_flight(), 0, "the entry went with the message");
+    }
+
+    /// A host was down or a chunk was lost, so one of the parity chunks stands in for a data
+    /// one. `used_parity` is what `parity_used_total` counts (§12).
+    #[test]
+    fn completes_with_parity_when_a_data_chunk_is_missing_and_reports_used_parity() {
+        let (msg_id, params, chunks, payload) = striped(4096, 512);
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        let mut indices: Vec<u16> = (1..params.k).collect();
+        indices.push(params.k);
+
+        let last = feed(&reassembler, msg_id, params, &chunks, &indices, now);
+
+        let (got, used_parity) = completed(last);
+        assert_eq!(got, payload);
+        assert!(used_parity, "a data chunk was missing");
+    }
+
+    /// The last data chunk is zero-padded, so the header's total length is what says where the
+    /// payload ended. A message whose length is not a whole number of chunks would otherwise
+    /// reach the beacon node with the padding still on it.
+    #[test]
+    fn payload_is_truncated_to_total_length() {
+        let (msg_id, params, chunks, payload) = striped(3000, 512);
+        assert!(
+            payload.len() % params.chunk_bytes != 0,
+            "the test needs a payload the split has to pad"
+        );
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        let data: Vec<u16> = (0..params.k).collect();
+
+        let last = feed(&reassembler, msg_id, params, &chunks, &data, now);
+
+        assert_eq!(completed(last).0.len(), payload.len());
     }
 
     /// D19 per index: the first clear copy is the one this host owes its region, and the second
@@ -247,7 +361,7 @@ mod tests {
     /// copy is the ordinary case rather than the odd one.
     #[test]
     fn first_clear_chunk_of_an_index_forwards_and_a_second_does_not() {
-        let reassembler = Reassembler::new(MAX_IN_FLIGHT, INCOMPLETE_TTL);
+        let reassembler = Reassembler::new(ReassembleConfig::default());
         let now = Instant::now();
 
         assert_eq!(
@@ -256,7 +370,7 @@ mod tests {
         );
         assert_eq!(
             on(&reassembler, &chunk(1, 0, 4, 1), false, now),
-            Outcome::Stored { forward: false }
+            Outcome::Duplicate { forward: false }
         );
         assert_eq!(
             on(&reassembler, &chunk(1, 1, 4, 1), false, now),
@@ -268,7 +382,7 @@ mod tests {
     /// follows is still forwarded.
     #[test]
     fn forwarded_chunk_never_asks_for_a_forward() {
-        let reassembler = Reassembler::new(MAX_IN_FLIGHT, INCOMPLETE_TTL);
+        let reassembler = Reassembler::new(ReassembleConfig::default());
         let now = Instant::now();
 
         assert_eq!(
@@ -277,7 +391,7 @@ mod tests {
         );
         assert_eq!(
             on(&reassembler, &chunk(1, 0, 4, 1), false, now),
-            Outcome::Stored { forward: true }
+            Outcome::Duplicate { forward: true }
         );
     }
 
@@ -285,7 +399,7 @@ mod tests {
     /// already, so a copy arriving afterwards is late and goes nowhere (D19).
     #[test]
     fn chunk_of_a_completed_message_is_late_and_asks_for_nothing() {
-        let reassembler = Reassembler::new(MAX_IN_FLIGHT, INCOMPLETE_TTL);
+        let reassembler = Reassembler::new(ReassembleConfig::default());
         let now = Instant::now();
         reassembler.complete(MessageId([1; 20]));
 
@@ -301,7 +415,10 @@ mod tests {
     #[test]
     fn forwarded_bitmap_dies_with_the_entry() {
         let ttl = Duration::from_secs(4);
-        let reassembler = Reassembler::new(MAX_IN_FLIGHT, ttl);
+        let reassembler = Reassembler::new(ReassembleConfig {
+            incomplete_ttl: ttl,
+            ..ReassembleConfig::default()
+        });
         let now = Instant::now();
         on(&reassembler, &chunk(1, 0, 4, 1), false, now);
 
@@ -317,7 +434,10 @@ mod tests {
     /// The count bound, for a peer that names message ids nothing will ever complete.
     #[test]
     fn max_in_flight_takes_the_oldest_entry() {
-        let reassembler = Reassembler::new(2, INCOMPLETE_TTL);
+        let reassembler = Reassembler::new(ReassembleConfig {
+            max_in_flight: 2,
+            ..ReassembleConfig::default()
+        });
         let now = Instant::now();
         for msg_id in 1..=3 {
             on(&reassembler, &chunk(msg_id, 0, 4, 1), false, now);
@@ -335,12 +455,12 @@ mod tests {
     /// the bitmap past the message it belongs to.
     #[test]
     fn index_past_the_split_claims_nothing() {
-        let reassembler = Reassembler::new(MAX_IN_FLIGHT, INCOMPLETE_TTL);
+        let reassembler = Reassembler::new(ReassembleConfig::default());
         let now = Instant::now();
 
         assert_eq!(
             on(&reassembler, &chunk(1, 5, 4, 1), false, now),
-            Outcome::Stored { forward: false }
+            Outcome::HeaderConflict
         );
     }
 
@@ -348,7 +468,7 @@ mod tests {
     /// message this host is done with.
     #[test]
     fn completion_drops_the_entry_it_finished() {
-        let reassembler = Reassembler::new(MAX_IN_FLIGHT, INCOMPLETE_TTL);
+        let reassembler = Reassembler::new(ReassembleConfig::default());
         let now = Instant::now();
         on(&reassembler, &chunk(1, 0, 4, 1), false, now);
         assert_eq!(reassembler.in_flight(), 1);
