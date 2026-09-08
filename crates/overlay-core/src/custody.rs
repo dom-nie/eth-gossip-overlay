@@ -69,17 +69,6 @@ impl BitSet {
         self.0.iter().filter(|held| **held).count()
     }
 
-    /// How many indices the set has room for.
-    pub fn len(&self) -> usize {
-        self.0.len()
-    }
-
-    /// Whether the set has room for nothing, which is what a tracker sized by a snapshot with
-    /// no columns in it holds.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
     /// The indices in the set, ascending.
     pub fn iter(&self) -> impl Iterator<Item = u16> + '_ {
         self.0
