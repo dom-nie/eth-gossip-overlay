@@ -2199,11 +2199,20 @@ mod tests {
     /// blocks. Node 0 is the peer, the lowest hostname and so the one that dials; the sidecars
     /// are nodes 1 upwards and pair with each other.
     async fn striping_region(hosts: usize) -> (TestCluster, PeerInfo, Topic) {
+        striping_region_with(hosts, |builder| builder).await
+    }
+
+    /// The same, with `with` applied to the builder first, for a test that needs a clock of its
+    /// own or bounds it can reach.
+    async fn striping_region_with(
+        hosts: usize,
+        with: impl FnOnce(Builder) -> Builder,
+    ) -> (TestCluster, PeerInfo, Topic) {
         let block = topic("beacon_block");
         let kinds: Vec<NodeKind> = std::iter::once(NodeKind::Bare)
             .chain(std::iter::repeat_n(NodeKind::Manager, hosts))
             .collect();
-        let mut cluster = Builder::new(&kinds).start().await;
+        let mut cluster = with(Builder::new(&kinds)).start().await;
         for node in 1..=hosts {
             cluster.start_sidecar(node, subscriptions(&[&block], &[]));
         }
@@ -2450,6 +2459,43 @@ mod tests {
                 "node {node}"
             );
         }
+    }
+
+    /// D19's bound: the forwarded state is the entry's, so it is gone when the entry is, and
+    /// nothing outside the reassembler had to be sized or expired for it. After the ttl the same
+    /// clear chunk is one this host has no record of, and it is offered to the region again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forwarded_state_dies_with_the_reassembler_entry() {
+        let ttl = Duration::from_secs(4);
+        let clock = FakeClock::new();
+        let (cluster, peer, _) = striping_region_with(2, |builder| {
+            builder
+                .clock(Arc::new(clock.clone()))
+                .reassembly(MAX_IN_FLIGHT, ttl)
+        })
+        .await;
+        let forwarder = cluster.hostname(1);
+        let again = MessageId([11; 20]);
+
+        send(&peer, &[chunk_frame(again, 0, ChunkFlags::NONE)]).await;
+        eventually("the first copy to be forwarded", || {
+            cluster.stats(2).chunks_received(&forwarder).len() == 1
+        })
+        .await;
+        assert_eq!(cluster.reassembler(1).in_flight(), 1);
+
+        clock.advance(ttl + Duration::from_secs(1));
+        send(&peer, &[chunk_frame(again, 0, ChunkFlags::NONE)]).await;
+
+        eventually("the same chunk to be forwarded again", || {
+            cluster.stats(2).chunks_received(&forwarder).len() == 2
+        })
+        .await;
+        assert_eq!(
+            cluster.reassembler(1).in_flight(),
+            1,
+            "the entry count is the only state that grew"
+        );
     }
 
     /// A chunk is a piece of a message and this release cannot put one back together, so it is
