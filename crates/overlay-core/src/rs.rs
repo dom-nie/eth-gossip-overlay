@@ -220,4 +220,21 @@ mod tests {
         assert_eq!(chunks.len(), 110);
         assert!(chunks.iter().all(|chunk| chunk.len() == 2048));
     }
+
+    #[test]
+    fn first_k_chunks_are_the_payload_with_zero_padding() {
+        let len = 5 * 2048 + 100;
+        let payload = payload(len);
+        let params = Params::for_len(len, 2048, 0.10).unwrap();
+
+        let chunks = encode(&payload, params);
+
+        assert_eq!(params.k, 6);
+        let data: Vec<u8> = chunks[..6]
+            .iter()
+            .flat_map(|chunk| chunk.iter().copied())
+            .collect();
+        assert_eq!(data[..len], payload[..]);
+        assert!(data[len..].iter().all(|byte| *byte == 0));
+    }
 }
