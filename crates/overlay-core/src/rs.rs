@@ -70,6 +70,14 @@ impl Params {
     }
 }
 
+/// Whether the codec can put a split of `k` data and `m` parity chunks back together. A
+/// receiver rebuilds [`Params`] from a chunk header rather than from [`Params::for_len`], so
+/// nothing has proved the split is one the codec takes, and the codec panics rather than
+/// refusing; this is what a header off the wire is checked against first.
+pub fn supports(k: u16, m: u16) -> bool {
+    ReedSolomonEncoder::supports(usize::from(k), usize::from(m))
+}
+
 /// Splits `payload` into `params.k` data chunks and the `params.m` parity chunks that follow
 /// them, `k + m` in all, each `params.chunk_bytes` long. A chunk's index is its position in the
 /// returned vector, which is what a [`crate::wire::Chunk`] header carries.

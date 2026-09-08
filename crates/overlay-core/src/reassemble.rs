@@ -1,52 +1,197 @@
-//! What a striped message's chunks are collected in, and the one question the receive path asks
-//! of that state per chunk: forward this one, or not (D19).
+//! Where a striped message's chunks are collected, put back together and handed on once (§5.4
+//! step 4), and where the receive path asks, per chunk, whether it owes that chunk to the rest
+//! of its region (D19).
 //!
-//! Putting the pieces back together is T-074's. This release sends chunks (T-073) and forwards
-//! them, so what it needs here is the state that decides a forward and nothing else: an entry per
-//! message in flight carrying a bitmap of the indices already forwarded, and the set of message
-//! ids that have been completed. A clear chunk is forwarded once per index and a message already
-//! held is not forwarded at all, so two origins that made the same assignment cost their region
-//! one second hop rather than two.
+//! A chunk header is self-describing, so nothing here needs to know who was assigned what: the
+//! first chunk of a message fixes `k`, `m`, the chunk length and the total length, and a later
+//! chunk that disagrees is a [`Outcome::HeaderConflict`] rather than something that can corrupt
+//! the entry. As soon as `k` distinct chunks are present the message is decoded, checked
+//! against the id its chunks claimed, and answered as [`Outcome::Completed`] for the caller to
+//! gate, remember and publish. Everything that arrives afterwards is late and costs one lookup.
 //!
-//! The bitmap lives in the entry rather than in a table of its own, which is what bounds it: an
-//! entry goes when the message completes, when it has waited [`INCOMPLETE_TTL`] without
-//! completing, or when [`MAX_IN_FLIGHT`] messages are already in flight, and the forwarded state
-//! goes with it. Nothing else in this module grows.
+//! Who sent what is kept as well, because repair asks the peers that already have the message:
+//! in-region peers that sent a `FORWARDED` chunk first, then the origin (D23). There is no
+//! announcement to go with it.
+//!
+//! # What bounds this
+//!
+//! A host takes every block and all 128 data columns of a slot, so a few hundred messages can be
+//! in flight at once. Three bounds keep that from growing without end: [`MAX_IN_FLIGHT`] on the
+//! count, [`MAX_BYTES`] on the chunk bytes held, and [`INCOMPLETE_TTL`] on how long a message
+//! that never completed keeps its place. Each of them takes the oldest entry first and counts
+//! what it took, and the forwarded bitmap and the sender list go with the entry, so nothing in
+//! this module is sized or expired on its own.
 //!
 //! `now` is a parameter rather than a clock of its own, so a test drives arrival and expiry with
 //! plain `Instant` arithmetic and the receive path passes the clock it already holds.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
-use crate::msgid::MessageId;
+use crate::msgid::{self, Branch, MessageId};
 use crate::roster::Hostname;
-use crate::wire::Chunk;
+use crate::rs::{self, Decoded, Params};
+use crate::topic::Topic;
+use crate::wire::{Chunk, MAX_PAYLOAD_BYTES};
 
 /// Messages one host collects chunks for at once. A slot brings one block and 128 data columns,
 /// so a host that is a few slots behind on the ones it has not finished still fits, and a peer
 /// that invents message ids reaches the bound instead of the host's memory (§10).
 pub const MAX_IN_FLIGHT: usize = 512;
 
+/// Chunk bytes one host holds for messages it has not finished with.
+///
+/// One slot is a 200 KB block and 128 data columns of about 40 KB, which is 5.2 MiB of payload,
+/// and a message is buffered as its chunks, so the parity chunks put roughly a tenth on top:
+/// about 5.7 MiB for a slot. Four slots of that, which is the same margin [`MAX_IN_FLIGHT`]
+/// carries over the 129 messages a slot brings, is 23 MiB, rounded up here to the 32 MiB
+/// T-017's large publish lane is bounded by, so the two large-class buffers are the same size
+/// (§10). T-076's memory budget table takes this row from this constant.
+pub const MAX_BYTES: usize = 32 * 1024 * 1024;
+
 /// How long a message that never completed keeps its entry. Longer than the repair deadline plus
 /// the 1.5 s a repair is given after it (D24), so T-082 still finds the senders it would ask.
 pub const INCOMPLETE_TTL: Duration = Duration::from_secs(4);
 
-/// What one chunk's arrival came to.
+/// What one host's reassembly is held to. The sidecar passes [`ReassembleConfig::default`],
+/// which is the three constants above; a test passes less so the bounds are reachable without a
+/// slot's traffic.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ReassembleConfig {
+    /// Messages in flight at once, oldest evicted past it.
+    pub max_in_flight: usize,
+    /// Chunk bytes held for them, oldest message evicted past it.
+    pub max_bytes: usize,
+    /// How long a message that never completed keeps its entry.
+    pub incomplete_ttl: Duration,
+}
+
+impl Default for ReassembleConfig {
+    fn default() -> Self {
+        Self {
+            max_in_flight: MAX_IN_FLIGHT,
+            max_bytes: MAX_BYTES,
+            incomplete_ttl: INCOMPLETE_TTL,
+        }
+    }
+}
+
+/// What one chunk's arrival came to.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// The chunk was recorded. `forward` is D19's answer: it arrived clear, this host does not
-    /// hold the message, and no copy of this index has been forwarded before.
+    /// The chunk was recorded and the message still needs more. `forward` is D19's answer: it
+    /// arrived clear, this host does not hold the message, and no copy of this index has been
+    /// forwarded before.
     Stored {
+        /// Whether the caller owes this chunk to the rest of its region.
+        forward: bool,
+    },
+    /// The chunk was the one that made `k` of them, and the message is back.
+    Completed {
+        /// The id its chunks carried, which is also the id the payload hashes to.
+        msg_id: MessageId,
+        /// The sender's id for the topic, as the chunk header named it.
+        topic_id: u16,
+        /// The message, padding removed.
+        payload: Bytes,
+        /// Whether a parity chunk had to stand in for a data one (§12).
+        used_parity: bool,
+        /// When the first chunk of this message arrived, which is what `reconstruct_seconds`
+        /// and the repair deadline are both measured from.
+        first_chunk_at: Instant,
+        /// The first sender of a clear chunk, else the first sender: the host this message is
+        /// counted against when its payload turns out to be one no beacon node would take.
+        origin: Hostname,
+        /// The same as [`Stored`](Self::Stored)'s, because completing is not holding: at the
+        /// moment this chunk arrived the message was still missing, so the region is owed it.
+        forward: bool,
+    },
+    /// An index this host already has. The bytes are dropped; `forward` can still be true, for
+    /// the clear copy of an index a `FORWARDED` one arrived under first (D11, D19).
+    Duplicate {
         /// Whether the caller owes this chunk to the rest of its region.
         forward: bool,
     },
     /// The message was already complete, so the chunk is a copy of something this host has and
     /// costs nothing but the counter.
     LateAfterCompletion,
+    /// The header disagrees with the first chunk of the same message, or names an index the
+    /// split it declares has no chunk for. Either a bug or a forged chunk (§8).
+    HeaderConflict,
+    /// The chunk, or the message it completed, is one this host will not publish.
+    Rejected(Reason),
+}
+
+impl Outcome {
+    /// Whether the caller owes this chunk to the rest of its region (D19). Decided before
+    /// anything is decoded, so cut-through does not wait for a message to finish.
+    pub fn forward(&self) -> bool {
+        match self {
+            Self::Stored { forward }
+            | Self::Completed { forward, .. }
+            | Self::Duplicate { forward } => *forward,
+            _ => false,
+        }
+    }
+}
+
+/// Why a chunk, or the message it completed, goes no further.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reason {
+    /// The first chunk of a message describes a split no message could have been cut into: a
+    /// chunk length the codec cannot take, or a total length that does not fit in `k` of them.
+    BadHeader,
+    /// The message came back, and its payload took the invalid snappy branch, declared more than
+    /// the maximum, or is not the payload its id names (D03). The caller counts
+    /// `invalid_payload_total{peer}` against the origin and warns once per peer.
+    InvalidPayload,
+    /// `k` chunks were present and the codec could not turn them into a message. Nothing a
+    /// header this module accepted describes should reach this.
+    Undecodable,
+}
+
+/// Which bound took an entry away, as the label on `reassembly_evicted_total`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Evicted {
+    /// [`ReassembleConfig::max_in_flight`] was reached by a new message.
+    MaxInFlight,
+    /// [`ReassembleConfig::max_bytes`] was passed by a stored chunk.
+    MaxBytes,
+    /// The message waited [`ReassembleConfig::incomplete_ttl`] without completing.
+    Expired,
+}
+
+impl Evicted {
+    /// The `reason` label this eviction carries (§12).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MaxInFlight => "max_in_flight",
+            Self::MaxBytes => "max_bytes",
+            Self::Expired => "ttl",
+        }
+    }
+}
+
+/// Where an evicted message is counted. Every eviction is a message this host will not put back
+/// together, so a rate above zero is reassembly losing to one of its bounds.
+pub trait ReassembleStats: Send + Sync {
+    /// `reassembly_evicted_total{reason}`: one message dropped before it completed.
+    fn evicted(&self, reason: Evicted);
+}
+
+/// A message still missing chunks, and who to ask for them (D23).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Incomplete {
+    /// The message the indices belong to.
+    pub msg_id: MessageId,
+    /// The indices no chunk has arrived for, ascending, so the data ones come first (D24).
+    pub missing: Vec<u16>,
+    /// Every peer that sent a chunk of it and whether that chunk carried `FORWARDED`, in
+    /// arrival order.
+    pub senders: Vec<(Hostname, bool)>,
 }
 
 /// The chunks in flight and the messages already finished with, shared by every peer's receiver.
@@ -57,62 +202,97 @@ pub enum Outcome {
 pub struct Reassembler(Mutex<State>);
 
 impl Reassembler {
-    /// State for `max_in_flight` messages, each kept `incomplete_ttl` after its first chunk.
-    /// [`MAX_IN_FLIGHT`] and [`INCOMPLETE_TTL`] are what the sidecar passes; a test passes less
-    /// so the bounds are reachable without a slot's traffic.
-    pub fn new(max_in_flight: usize, incomplete_ttl: Duration) -> Self {
+    /// State held to `cfg`. [`ReassembleConfig::default`] is what the sidecar passes.
+    pub fn new(cfg: ReassembleConfig) -> Self {
         Self(Mutex::new(State {
-            max_in_flight,
-            incomplete_ttl,
+            cfg,
+            bytes: 0,
             in_flight: HashMap::new(),
             order: VecDeque::new(),
             completed: HashSet::new(),
             completed_order: VecDeque::new(),
+            stats: None,
         }))
     }
 
-    /// Records one chunk of a striped message and answers whether the caller owes it to the rest
-    /// of its region.
+    /// Reports evictions to `stats`. Without this nothing is called, so a test and a caller with
+    /// no registry pay nothing for the hook.
+    pub fn with_stats(self, stats: Arc<dyn ReassembleStats>) -> Self {
+        self.state().stats = Some(stats);
+        self
+    }
+
+    /// Records one chunk of a striped message, answers whether the caller owes it to the rest of
+    /// its region, and hands the message back on the chunk that completes it.
     ///
-    /// `bytes` and `from` are what T-074 reconstructs from and what T-082 asks for the chunks
-    /// this host is missing (D23). Neither is kept yet: this release forwards a chunk and drops
-    /// it, so keeping either would be state nothing reads.
+    /// `topic` is the topic the sender's id resolved to, which the completion check needs: a
+    /// gossipsub message id covers the topic string as well as the payload (D03).
+    ///
+    /// The forward is decided before anything is decoded, which is what keeps cut-through ahead
+    /// of reassembly (§5.4 step 3, D19).
     pub fn on_chunk(
         &self,
-        hdr: &Chunk,
-        _bytes: Bytes,
-        _from: &Hostname,
+        chunk: &Chunk,
+        topic: &Topic,
+        from: &Hostname,
         forwarded: bool,
         now: Instant,
     ) -> Outcome {
         let mut state = self.state();
         state.expire(now);
-        if state.completed.contains(&hdr.msg_id) {
+        if state.completed.contains(&chunk.msg_id) {
             return Outcome::LateAfterCompletion;
         }
-        let indices = usize::from(hdr.k) + usize::from(hdr.m);
-        let entry = state.entry(hdr.msg_id, now);
-        // A forwarded chunk is the second hop and there is no third (D11), so its index is left
-        // clear: the copy that arrives clear afterwards is the one this host owes its region.
-        let forward = !forwarded && entry.forwarded.claim(hdr.index, indices);
-        Outcome::Stored { forward }
+        let params = Params {
+            k: chunk.k,
+            m: chunk.m,
+            chunk_bytes: chunk.data.len(),
+            total_len: chunk.total_len,
+        };
+        if usize::from(chunk.index) >= indices(params) {
+            return Outcome::HeaderConflict;
+        }
+        match state.in_flight.get(&chunk.msg_id) {
+            Some(entry) if entry.params != params => return Outcome::HeaderConflict,
+            Some(_) => {}
+            None if !usable(params) => return Outcome::Rejected(Reason::BadHeader),
+            None => state.open(chunk.msg_id, chunk.topic_id, params, now),
+        }
+        state.store(chunk, topic, from, forwarded)
     }
 
     /// Records `msg_id` as one this host holds, which is what stops a late chunk of it being
-    /// forwarded a second time round the region (D19). T-074's completion is what calls it once
-    /// a message is reconstructed.
+    /// forwarded a second time round the region (D19). Completion calls it; so does a caller
+    /// that has the message from somewhere else.
     pub fn complete(&self, msg_id: MessageId) {
+        self.state().finish(msg_id);
+    }
+
+    /// Every message whose first chunk arrived at least `deadline` ago and which is still
+    /// missing chunks, oldest first: T-082's candidate list, with the indices to ask for and the
+    /// peers to ask (D23, D24).
+    pub fn incomplete_older_than(&self, deadline: Duration, now: Instant) -> Vec<Incomplete> {
+        let state = self.state();
+        state
+            .order
+            .iter()
+            .filter_map(|msg_id| Some((msg_id, state.in_flight.get(msg_id)?)))
+            .filter(|(_, entry)| now.saturating_duration_since(entry.first_chunk_at) >= deadline)
+            .map(|(msg_id, entry)| Incomplete {
+                msg_id: *msg_id,
+                missing: entry.missing(),
+                senders: entry.senders.clone(),
+            })
+            .collect()
+    }
+
+    /// Drops what has expired and trims the completed set, for a host whose chunks have stopped
+    /// arriving: every other entry point does the same on its way past, so this is what a timer
+    /// calls when nothing else is.
+    pub fn gc(&self, now: Instant) {
         let mut state = self.state();
-        state.forget(&msg_id);
-        if state.completed.insert(msg_id) {
-            state.completed_order.push_back(msg_id);
-        }
-        while state.completed_order.len() > state.max_in_flight {
-            let Some(oldest) = state.completed_order.pop_front() else {
-                break;
-            };
-            state.completed.remove(&oldest);
-        }
+        state.expire(now);
+        state.trim_completed();
     }
 
     /// How many messages are in flight, which is the only thing that grows as chunks arrive.
@@ -125,89 +305,244 @@ impl Reassembler {
     }
 }
 
+/// How many chunks the split in a header describes.
+fn indices(params: Params) -> usize {
+    usize::from(params.k) + usize::from(params.m)
+}
+
+/// Whether a split rebuilt from a header is one a message could have been cut into and the codec
+/// can put back together. The encoder's own limits live in someone else's crate and it panics
+/// rather than refusing, so a header off the wire is checked against them before it is stored.
+fn usable(params: Params) -> bool {
+    params.k > 0
+        && params.chunk_bytes > 0
+        && params.chunk_bytes.is_multiple_of(2)
+        && params.total_len as usize <= usize::from(params.k) * params.chunk_bytes
+        && params.total_len as usize <= MAX_PAYLOAD_BYTES
+        // A split with no parity never reaches the codec: holding k of its k chunks means every
+        // data chunk is here, which decodes by concatenation.
+        && (params.m == 0 || rs::supports(params.k, params.m))
+}
+
 /// Everything one host holds about messages it has not finished with.
 struct State {
-    max_in_flight: usize,
-    incomplete_ttl: Duration,
+    cfg: ReassembleConfig,
+    /// The chunk bytes of every entry, which is what [`ReassembleConfig::max_bytes`] bounds.
+    bytes: usize,
     in_flight: HashMap<MessageId, Entry>,
-    /// The ids of `in_flight` in arrival order, so the oldest is what the bound takes.
+    /// The ids of `in_flight` in arrival order, so the oldest is what a bound takes.
     order: VecDeque<MessageId>,
     completed: HashSet<MessageId>,
     completed_order: VecDeque<MessageId>,
+    stats: Option<Arc<dyn ReassembleStats>>,
 }
 
 impl State {
-    /// The entry for `msg_id`, opened at `now` if this is its first chunk. Opening one may take
-    /// the oldest entry away, which is the bound on how many a peer can make this host hold.
-    fn entry(&mut self, msg_id: MessageId, now: Instant) -> &mut Entry {
-        if !self.in_flight.contains_key(&msg_id) {
-            while self.in_flight.len() >= self.max_in_flight {
-                let Some(oldest) = self.order.pop_front() else {
-                    break;
-                };
-                self.in_flight.remove(&oldest);
+    /// Opens an entry for `msg_id`, which may take the oldest one away: that is the bound on how
+    /// many messages a peer can make this host hold.
+    fn open(&mut self, msg_id: MessageId, topic_id: u16, params: Params, now: Instant) {
+        while self.in_flight.len() >= self.cfg.max_in_flight {
+            if !self.drop_oldest(Evicted::MaxInFlight) {
+                break;
             }
-            self.order.push_back(msg_id);
-            self.in_flight.insert(msg_id, Entry::new(now));
         }
+        self.order.push_back(msg_id);
         self.in_flight
-            .entry(msg_id)
-            .or_insert_with(|| Entry::new(now))
+            .insert(msg_id, Entry::new(topic_id, params, now));
     }
 
-    /// Drops every entry whose first chunk arrived more than `incomplete_ttl` ago. The deque is
-    /// in arrival order and a repeat never refreshes it, so expiry only ever looks at the front.
+    /// Records one chunk against an entry that is already open, and answers what its arrival
+    /// came to. The forward is claimed before the message is decoded (D19).
+    fn store(&mut self, chunk: &Chunk, topic: &Topic, from: &Hostname, forwarded: bool) -> Outcome {
+        let Some(entry) = self.in_flight.get_mut(&chunk.msg_id) else {
+            return Outcome::Rejected(Reason::BadHeader);
+        };
+        // A forwarded chunk is the second hop and there is no third (D11), so its index is left
+        // clear: the copy that arrives clear afterwards is the one this host owes its region.
+        let forward = !forwarded && entry.forwarded.set(chunk.index);
+        entry.saw(from, forwarded);
+        if !entry.received.set(chunk.index) {
+            return Outcome::Duplicate { forward };
+        }
+        entry.chunks.push((chunk.index, chunk.data.clone()));
+        entry.bytes += chunk.data.len();
+        self.bytes += chunk.data.len();
+
+        match self.finished(&chunk.msg_id, topic, forward) {
+            Some(outcome) => outcome,
+            None => {
+                self.trim_bytes();
+                Outcome::Stored { forward }
+            }
+        }
+    }
+
+    /// The message, if this chunk was the one that made `k` of them. Decoding takes the entry
+    /// away and records the id either way: a payload no beacon node would take is still one this
+    /// host is done with, so its late chunks stay cheap (D03).
+    fn finished(&mut self, msg_id: &MessageId, topic: &Topic, forward: bool) -> Option<Outcome> {
+        let entry = self.in_flight.get(msg_id)?;
+        if entry.chunks.len() < usize::from(entry.params.k) {
+            return None;
+        }
+        let decoded = rs::decode(entry.params, &entry.chunks);
+        let (topic_id, first_chunk_at) = (entry.topic_id, entry.first_chunk_at);
+        let origin = entry.origin()?;
+        self.finish(*msg_id);
+
+        let Ok(Decoded {
+            payload,
+            used_parity,
+        }) = decoded
+        else {
+            return Some(Outcome::Rejected(Reason::Undecodable));
+        };
+        let computed = msgid::compute(&topic.to_string(), &payload, MAX_PAYLOAD_BYTES);
+        if computed.branch != Branch::Valid || computed.id != *msg_id {
+            return Some(Outcome::Rejected(Reason::InvalidPayload));
+        }
+        Some(Outcome::Completed {
+            msg_id: *msg_id,
+            topic_id,
+            payload,
+            used_parity,
+            first_chunk_at,
+            origin,
+            forward,
+        })
+    }
+
+    /// Drops every entry whose first chunk arrived more than the ttl ago. The deque is in
+    /// arrival order and a repeat never refreshes it, so expiry only ever looks at the front.
     fn expire(&mut self, now: Instant) {
         while let Some(oldest) = self.order.front() {
             let expired = self.in_flight.get(oldest).is_none_or(|entry| {
-                now.saturating_duration_since(entry.first_chunk_at) > self.incomplete_ttl
+                now.saturating_duration_since(entry.first_chunk_at) > self.cfg.incomplete_ttl
             });
-            if !expired {
+            if !expired || !self.drop_oldest(Evicted::Expired) {
                 return;
             }
-            let Some(oldest) = self.order.pop_front() else {
-                return;
-            };
-            self.in_flight.remove(&oldest);
         }
     }
 
-    /// Drops one message's entry, for a message that has been finished with.
-    fn forget(&mut self, msg_id: &MessageId) {
-        if self.in_flight.remove(msg_id).is_some() {
-            self.order.retain(|held| held != msg_id);
+    /// Drops the oldest entries until the chunk bytes held are back inside the bound. A single
+    /// message can never pass it on its own: [`MAX_BYTES`] is more than three times what the
+    /// longest message the overlay carries takes.
+    fn trim_bytes(&mut self) {
+        while self.bytes > self.cfg.max_bytes {
+            if !self.drop_oldest(Evicted::MaxBytes) {
+                return;
+            }
+        }
+    }
+
+    /// Takes the oldest entry away and counts it, answering whether there was one to take.
+    fn drop_oldest(&mut self, reason: Evicted) -> bool {
+        let Some(oldest) = self.order.pop_front() else {
+            return false;
+        };
+        if let Some(entry) = self.in_flight.remove(&oldest) {
+            self.bytes -= entry.bytes;
+            if let Some(stats) = &self.stats {
+                stats.evicted(reason);
+            }
+        }
+        true
+    }
+
+    /// Records a message as one this host is done with and lets go of what it was collecting.
+    fn finish(&mut self, msg_id: MessageId) {
+        if let Some(entry) = self.in_flight.remove(&msg_id) {
+            self.bytes -= entry.bytes;
+            self.order.retain(|held| *held != msg_id);
+        }
+        if self.completed.insert(msg_id) {
+            self.completed_order.push_back(msg_id);
+        }
+        self.trim_completed();
+    }
+
+    /// Holds the completed set to the same count as the messages in flight, oldest first.
+    fn trim_completed(&mut self) {
+        while self.completed_order.len() > self.cfg.max_in_flight {
+            let Some(oldest) = self.completed_order.pop_front() else {
+                return;
+            };
+            self.completed.remove(&oldest);
         }
     }
 }
 
 /// One message being collected.
 struct Entry {
+    topic_id: u16,
+    params: Params,
     first_chunk_at: Instant,
-    forwarded: Forwarded,
+    /// The chunks held, paired with the index their header carried, which is the shape
+    /// [`rs::decode`] takes. Held in arrival order rather than by index, so a forged header
+    /// cannot make this host reserve a slot per index of a split nothing will ever fill.
+    chunks: Vec<(u16, Bytes)>,
+    bytes: usize,
+    received: Bits,
+    forwarded: Bits,
+    senders: Vec<(Hostname, bool)>,
 }
 
 impl Entry {
-    fn new(first_chunk_at: Instant) -> Self {
+    fn new(topic_id: u16, params: Params, first_chunk_at: Instant) -> Self {
         Self {
+            topic_id,
+            params,
             first_chunk_at,
-            forwarded: Forwarded::default(),
+            chunks: Vec::new(),
+            bytes: 0,
+            received: Bits::default(),
+            forwarded: Bits::default(),
+            senders: Vec::new(),
         }
+    }
+
+    /// Records that `from` has a chunk of this message, which is what repair reads (D23). A peer
+    /// that sends a second chunk under the same flag is already on the list, so the list is as
+    /// long as the peers that have written, not as the chunks they wrote.
+    fn saw(&mut self, from: &Hostname, forwarded: bool) {
+        if !self
+            .senders
+            .iter()
+            .any(|(peer, flag)| peer == from && *flag == forwarded)
+        {
+            self.senders.push((from.clone(), forwarded));
+        }
+    }
+
+    /// The peer this message is counted against: the first to send a clear chunk, which is the
+    /// origin, and failing that whoever sent the first chunk at all.
+    fn origin(&self) -> Option<Hostname> {
+        self.senders
+            .iter()
+            .find(|(_, forwarded)| !forwarded)
+            .or_else(|| self.senders.first())
+            .map(|(peer, _)| peer.clone())
+    }
+
+    /// The indices no chunk has arrived for, ascending.
+    fn missing(&self) -> Vec<u16> {
+        (0..indices(self.params))
+            .filter(|index| !self.received.has(*index))
+            .filter_map(|index| u16::try_from(index).ok())
+            .collect()
     }
 }
 
-/// The indices of one message this host has already forwarded, one bit each.
+/// A set of one message's indices, one bit each.
 #[derive(Default)]
-struct Forwarded(Vec<u64>);
+struct Bits(Vec<u64>);
 
-impl Forwarded {
-    /// Sets the bit for `index` and reports whether it was this call that set it. An index at or
-    /// past `indices` belongs to no chunk of this message and claims nothing: a header that
-    /// disagrees with the first one is T-074's `HeaderConflict`, and until then it must not be
-    /// able to grow the bitmap past the message it is for.
-    fn claim(&mut self, index: u16, indices: usize) -> bool {
-        if usize::from(index) >= indices {
-            return false;
-        }
+impl Bits {
+    /// Sets the bit for `index` and reports whether it was this call that set it. The caller has
+    /// already refused an index the message has no chunk for, which is what keeps this from
+    /// growing past the split it belongs to.
+    fn set(&mut self, index: u16) -> bool {
         let (word, bit) = (usize::from(index) / 64, usize::from(index) % 64);
         if self.0.len() <= word {
             self.0.resize(word + 1, 0);
@@ -215,6 +550,13 @@ impl Forwarded {
         let claimed = self.0[word] & (1 << bit) == 0;
         self.0[word] |= 1 << bit;
         claimed
+    }
+
+    /// Whether the bit for `index` is set.
+    fn has(&self, index: usize) -> bool {
+        self.0
+            .get(index / 64)
+            .is_some_and(|word| word & (1 << (index % 64)) != 0)
     }
 }
 
@@ -235,7 +577,11 @@ mod tests {
     /// checks its work against it.
     fn striped(bytes: usize, chunk_bytes: usize) -> (MessageId, Params, Vec<Bytes>, Bytes) {
         let raw: Vec<u8> = (0..bytes).map(|i| (i * 31 % 251) as u8).collect();
-        let payload = Bytes::from(snap::raw::Encoder::new().compress_vec(&raw).expect("snappy"));
+        let payload = Bytes::from(
+            snap::raw::Encoder::new()
+                .compress_vec(&raw)
+                .expect("snappy"),
+        );
         let params = Params::for_len(payload.len(), chunk_bytes, 0.25).expect("a split");
         let id = msgid::compute(TOPIC, &payload, MAX_PAYLOAD_BYTES).id;
         (id, params, rs::encode(&payload, params), payload)
@@ -317,7 +663,11 @@ mod tests {
         let (got, used_parity) = completed(last);
         assert_eq!(got, payload);
         assert!(!used_parity, "no data chunk was missing");
-        assert_eq!(reassembler.in_flight(), 0, "the entry went with the message");
+        assert_eq!(
+            reassembler.in_flight(),
+            0,
+            "the entry went with the message"
+        );
     }
 
     /// A host was down or a chunk was lost, so one of the parity chunks stands in for a data

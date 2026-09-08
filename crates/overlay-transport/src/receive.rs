@@ -59,7 +59,7 @@ use overlay_core::events::{self, FirstArrival};
 use overlay_core::msgid::{self, Branch, MessageId};
 use overlay_core::protocol::{MAX_FRAME_BYTES, features};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
-use overlay_core::reassemble::{Outcome, Reassembler};
+use overlay_core::reassemble::Reassembler;
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
 use overlay_core::seen::SharedSeenCache;
 use overlay_core::subs::PeerState;
@@ -463,12 +463,12 @@ impl Ctx {
         }
         let outcome = self.deps.reassembler.on_chunk(
             &chunk,
-            chunk.data.clone(),
+            &topic,
             &self.peer,
             flags.contains(ChunkFlags::FORWARDED),
             self.deps.clock.now(),
         );
-        if outcome != (Outcome::Stored { forward: true }) {
+        if !outcome.forward() {
             return After::Carry;
         }
         match self.charge(FanoutKind::Chunk, chunk.data.len(), self.deps.clock.now()) {
@@ -848,7 +848,7 @@ mod tests {
     use bytes::BytesMut;
     use overlay_core::budget::SUSTAINED_VIOLATION;
     use overlay_core::config;
-    use overlay_core::reassemble::{INCOMPLETE_TTL, MAX_IN_FLIGHT};
+    use overlay_core::reassemble::{MAX_IN_FLIGHT, ReassembleConfig};
     use overlay_core::rs::Params;
     use overlay_core::seen::SeenCache;
     use overlay_core::time::{FakeClock, SystemClock};
@@ -2113,7 +2113,7 @@ mod tests {
                 )),
                 publish: published.clone(),
                 sets: watching,
-                reassembler: Arc::new(Reassembler::new(MAX_IN_FLIGHT, INCOMPLETE_TTL)),
+                reassembler: Arc::new(Reassembler::new(ReassembleConfig::default())),
                 stats,
                 node: Arc::new(SelfIdentity {
                     hostname: Hostname("stalled-host".to_owned()),

@@ -39,7 +39,7 @@ use overlay_core::budget::{self, FanoutBudget, MemoryBudget, SendLaneBounds};
 use overlay_core::config::Config;
 use overlay_core::identity::{Seeds, derive_tls_keypair};
 use overlay_core::lanes::ClassLanes;
-use overlay_core::reassemble::{INCOMPLETE_TTL, MAX_IN_FLIGHT, Reassembler};
+use overlay_core::reassemble::{INCOMPLETE_TTL, MAX_IN_FLIGHT, ReassembleConfig, Reassembler};
 use overlay_core::roster::{Hostname, Roster, SelfIdentity, resolve_self};
 use overlay_core::seen::{SEEN_CAPACITY, SEEN_TTL, SeenCache, SharedSeenCache};
 use overlay_core::time::SystemClock;
@@ -368,7 +368,7 @@ impl App {
                 seen,
                 publish: Arc::new(publish),
                 sets: sets_rx.clone(),
-                reassembler: Arc::new(Reassembler::new(MAX_IN_FLIGHT, INCOMPLETE_TTL)),
+                reassembler: Arc::new(Reassembler::new(ReassembleConfig::default())),
                 stats: metrics.clone(),
                 node,
                 clock,

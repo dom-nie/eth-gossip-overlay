@@ -52,7 +52,7 @@ use overlay_core::lanes::{ClassLanes, LanePusher};
 use overlay_core::msgid;
 use overlay_core::protocol::{MAX_FRAME_BYTES, SUPPORTED_FEATURES};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
-use overlay_core::reassemble::{INCOMPLETE_TTL, MAX_IN_FLIGHT, Reassembler};
+use overlay_core::reassemble::{INCOMPLETE_TTL, MAX_IN_FLIGHT, ReassembleConfig, Reassembler};
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::seen::{SeenCache, SharedSeenCache};
 use overlay_core::subs::{Bitmap, PeerState};
@@ -1190,7 +1190,11 @@ impl<A: Admission> TestCluster<A> {
             Arc::new(SystemClock),
         ));
         let (subscriptions, watching) = watch::channel(sets);
-        let reassembler = Arc::new(Reassembler::new(self.in_flight, self.incomplete_ttl));
+        let reassembler = Arc::new(Reassembler::new(ReassembleConfig {
+            max_in_flight: self.in_flight,
+            incomplete_ttl: self.incomplete_ttl,
+            ..ReassembleConfig::default()
+        }));
         let identity = SelfIdentity {
             hostname: node.hostname.clone(),
             region: node.self_hello.region.clone(),
