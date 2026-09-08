@@ -121,4 +121,22 @@ mod tests {
         }
         assert!(Params::for_len(4096, 2048, 0.10).is_ok());
     }
+
+    #[test]
+    fn params_rejects_a_split_no_chunk_header_could_carry() {
+        assert_eq!(
+            Params::for_len(MAX_PAYLOAD_BYTES + 1, 2048, 0.10),
+            Err(RsError::PayloadTooLarge {
+                total_len: MAX_PAYLOAD_BYTES + 1
+            })
+        );
+        assert!(Params::for_len(MAX_PAYLOAD_BYTES, 2048, 0.10).is_ok());
+        assert_eq!(
+            Params::for_len(MAX_PAYLOAD_BYTES, 64, 0.10),
+            Err(RsError::TooManyChunks {
+                k: 163_840,
+                m: 16_384
+            })
+        );
+    }
 }
