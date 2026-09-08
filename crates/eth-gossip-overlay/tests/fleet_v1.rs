@@ -15,7 +15,6 @@ use harness::{Fleet, SETTLE, Scrape, WAIT, topic};
 use overlay_core::protocol::features;
 use overlay_core::relay;
 use overlay_core::roster::Hostname;
-use overlay_core::rs::Params;
 use overlay_transport::sender::{DropReason, LARGE_LANE_BYTES};
 use overlay_transport::testutil::features::mask;
 
@@ -1030,8 +1029,8 @@ fn reassembled(scrape: &Scrape) -> f64 {
 /// sidecar splits the gossipsub wire form, and snappy leaves an incompressible payload a few
 /// bytes longer than it started.
 fn chunks_per_message(bytes: usize, parity_ratio: f64) -> usize {
-    let params = Params::for_len(bytes + 64, 2048, parity_ratio).expect("a split");
-    usize::from(params.k) + usize::from(params.m)
+    let data = (bytes + 64).div_ceil(2048).max(1);
+    data + ((parity_ratio * data as f64).ceil() as usize).max(1)
 }
 
 /// §5.4 end to end, which is what the whole large class exists for: a block one beacon node
@@ -1082,8 +1081,8 @@ async fn block_striped_across_region_is_published_once_on_every_node() {
         "the origin was published its own block"
     );
     let now = fleet.metrics().await;
-    for node in 1..hosts {
-        assert_eq!(reassembled(&now[node]), 1.0, "node {node}");
+    for (node, scrape) in now.iter().enumerate().skip(1) {
+        assert_eq!(reassembled(scrape), 1.0, "node {node}");
     }
     assert_eq!(
         reassembled(&now[0]),
@@ -1127,14 +1126,14 @@ async fn block_still_completes_when_one_stripe_host_is_down() {
         .await;
     fleet.settle().await;
     let now = fleet.metrics().await;
-    for node in 1..hosts - 1 {
+    for (node, scrape) in now.iter().enumerate().take(hosts - 1).skip(1) {
         assert_eq!(
             fleet.node(node).bn().count(&block, &payload),
             1,
             "node {node}"
         );
         assert!(
-            now[node].sum(PARITY_USED_TOTAL, &[]) > 0.0,
+            scrape.sum(PARITY_USED_TOTAL, &[]) > 0.0,
             "node {node} completed without the parity it should have needed"
         );
     }
@@ -1181,21 +1180,21 @@ async fn two_origins_with_divergent_live_views_publish_once_with_at_most_2k_plus
     fleet.settle().await;
     let stripe = chunks_per_message(payload.len(), 0.1);
     let now = fleet.metrics().await;
-    for node in 0..hosts {
+    for (node, scrape) in now.iter().enumerate() {
         assert!(
             fleet.node(node).bn().count(&block, &payload) <= 1,
             "node {node} imported the block twice"
         );
-        let chunks = now[node].sum(CHUNKS_RECEIVED_TOTAL, &[])
-            - before[node].sum(CHUNKS_RECEIVED_TOTAL, &[]);
+        let chunks =
+            scrape.sum(CHUNKS_RECEIVED_TOTAL, &[]) - before[node].sum(CHUNKS_RECEIVED_TOTAL, &[]);
         assert!(
             chunks <= 2.0 * stripe as f64,
             "node {node} read {chunks} chunks of a {stripe} chunk message"
         );
     }
-    for origin in 0..2 {
+    for (origin, scrape) in now.iter().enumerate().take(2) {
         assert!(
-            reassembled(&now[origin]) <= 1.0,
+            reassembled(scrape) <= 1.0,
             "origin {origin} reassembled more than the one stripe it could hear"
         );
     }
@@ -1234,13 +1233,13 @@ async fn one_third_of_a_region_lost_mid_slot_completes_via_parity_or_repair_befo
         .await;
     fleet.settle().await;
     let now = fleet.metrics().await;
-    for node in 1..4 {
+    for (node, scrape) in now.iter().enumerate().take(4).skip(1) {
         assert!(
-            now[node].sum(PARITY_USED_TOTAL, &[]) > 0.0,
+            scrape.sum(PARITY_USED_TOTAL, &[]) > 0.0,
             "node {node} did not need the parity a third of the region was carrying"
         );
         assert_eq!(
-            now[node].sum(REPAIR_REQUESTS_TOTAL, &[]),
+            scrape.sum(REPAIR_REQUESTS_TOTAL, &[]),
             0.0,
             "node {node} asked for chunks parity had already covered"
         );
