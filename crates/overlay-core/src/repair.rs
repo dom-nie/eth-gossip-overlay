@@ -448,4 +448,31 @@ mod tests {
             vec![host("b"), host("c"), host("d"), host("gave up")]
         );
     }
+
+    /// The budget is a wall the candidate list does not get past: 1.5 s after the deadline the
+    /// message is given up on whoever is left to ask, because one that arrives later has already
+    /// lost the race (D24).
+    #[test]
+    fn budget_of_1500_ms_from_the_deadline_ends_in_gave_up_even_with_candidates_left() {
+        let clock = FakeClock::new();
+        let reassembler = collecting(
+            6,
+            &[(0, "a", false), (1, "b", true), (2, "c", true)],
+            clock.now(),
+        );
+        let mut scheduler = Scheduler::default();
+        clock.advance(DEADLINE);
+
+        assert!(matches!(
+            scheduler.tick(&reassembler, DEADLINE, reachable, clock.now()).as_slice(),
+            [Decision::Ask(request)] if request.peer == host("b")
+        ));
+        scheduler.answered(&MessageId([9; 20]));
+        clock.advance(REPAIR_TOTAL_BUDGET + Duration::from_millis(1));
+
+        assert_eq!(
+            scheduler.tick(&reassembler, DEADLINE, reachable, clock.now()),
+            vec![Decision::GaveUp(MessageId([9; 20]))]
+        );
+    }
 }
