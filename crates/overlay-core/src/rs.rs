@@ -110,4 +110,15 @@ mod tests {
         assert_eq!((rounded_up.k, rounded_up.m), (51, 6));
         assert_eq!((no_parity_asked_for.k, no_parity_asked_for.m), (100, 1));
     }
+
+    #[test]
+    fn params_rejects_chunk_bytes_not_multiple_of_64() {
+        for chunk_bytes in [2000, 0] {
+            assert_eq!(
+                Params::for_len(4096, chunk_bytes, 0.10),
+                Err(RsError::BadChunkBytes { chunk_bytes })
+            );
+        }
+        assert!(Params::for_len(4096, 2048, 0.10).is_ok());
+    }
 }
