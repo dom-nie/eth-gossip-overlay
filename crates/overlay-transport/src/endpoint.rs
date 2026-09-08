@@ -279,12 +279,13 @@ mod tests {
     }
 
     /// quinn's `TransportConfig` has setters and no getters, so its `Debug` output is the only
-    /// way to read a value back out. A name that is not in it is a broken test rather than
-    /// anything a sidecar could do.
+    /// way to read a value back out. The leading space is what tells `receive_window` from
+    /// `stream_receive_window`. A name that is not in it is a broken test rather than anything a
+    /// sidecar could do.
     fn field(transport: &quinn::TransportConfig, name: &str) -> String {
         let debug = format!("{transport:?}");
         let (_, rest) = debug
-            .split_once(&format!("{name}: "))
+            .split_once(&format!(" {name}: "))
             .expect("TransportConfig's Debug names every field it has");
         rest.split(',')
             .next()

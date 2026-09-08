@@ -21,7 +21,7 @@ use crate::config::Config;
 use crate::pubqueue::{PUBLISH_LARGE_LANE_BYTES, PUBLISH_SMALL_LANE_ENTRIES};
 use crate::ratelimit::TokenBucket;
 use crate::reassemble;
-use crate::seen::SEEN_CAPACITY;
+use crate::seen::{SEEN_CAPACITY, SEEN_TTL};
 
 /// How long a peer may stay over its budget before the connection is closed with
 /// `RateExceeded` (DX-N3).
@@ -155,6 +155,16 @@ pub const REASSEMBLY_ENTRY_BYTES: u64 = 4096;
 /// The headroom OPS-N4 asks the budget to leave under `MemoryMax`, as a percentage.
 pub const HEADROOM_PERCENT: u64 = 25;
 
+/// How long gossipsub's duplicate cache holds a message id, as a multiple of [`SEEN_TTL`]:
+/// CL-N5 set `duplicate_cache_time` to twice the seen cache, so at the same arrival rate it
+/// holds twice as many ids.
+pub const GOSSIPSUB_DUPLICATE_CACHE_MULTIPLE: u64 = 2;
+
+/// How long gossipsub's message cache holds a whole message: `history_length` heartbeats of one
+/// second each (CL-N5). Both numbers live in `overlay-bn`, which links libp2p and this crate
+/// must not, so a test there holds the two parameters to these.
+pub const GOSSIPSUB_HISTORY_SECS: u64 = 5;
+
 /// What one QUIC stream may hold unread (DX-N3), and the floor the derived connection window
 /// can never go below: a connection allowed less than one stream's worth would stall the single
 /// stream it is carrying. It lives here rather than beside the rest of the transport parameters
@@ -177,10 +187,10 @@ pub struct SendLaneBounds {
 /// operator sizes `MemoryMax` against (OPS-N4).
 ///
 /// Every row is a structure with a bound in code, so the sum is a ceiling rather than a
-/// measurement: nothing here grows with traffic. T-076 owns the table in `docs/performance.md`
-/// and adds a row as each remaining structure lands (the recent store, the by-root cache,
-/// gossipsub's duplicate cache and message cache, and the QUIC receive windows once it sets
-/// them); this release has the four that exist.
+/// measurement: nothing here grows with traffic. `docs/performance.md` carries the same table
+/// generated from here. Two rows read zero because the structure they name has not been built:
+/// `recent_store` is T-081's and `by_root_cache` is T-085's, and each ticket fills its own row
+/// in rather than adding one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryBudget {
     /// Each structure's worst case, in the order the startup line prints them.
@@ -214,8 +224,11 @@ impl MemoryBudget {
         // change this signature.
         let _ = cfg;
         let peers = roster_len.saturating_sub(1) as u64;
-        let rows = vec![
+        let mut rows = vec![
             ("seen_cache", SEEN_CAPACITY as u64 * SEEN_ENTRY_BYTES),
+            // T-081's store has not been built. The row is here at zero so the table names the
+            // structure and that ticket has a place to put its arithmetic.
+            ("recent_store", 0),
             (
                 "publish_queue",
                 PUBLISH_SMALL_LANE_ENTRIES as u64 * SMALL_MESSAGE_BYTES
@@ -231,8 +244,20 @@ impl MemoryBudget {
                 peers * lanes.small_frames as u64 * SMALL_MESSAGE_BYTES
                     + (peers * lanes.large_bytes as u64).min(lanes.large_bytes_max as u64),
             ),
+            ("gossipsub", gossipsub_caches()),
+            // T-085's window is a config key that does not exist yet. The row is here at zero so
+            // the table names the structure and that ticket has a place to put its arithmetic.
+            ("by_root_cache", 0),
         ];
-        let receive_window = STREAM_RECEIVE_WINDOW;
+        // DX-N3 derives the one parameter that is not a constant: whatever the rows above leave
+        // under the usable limit, shared out over the roster. The QUIC row below is that share
+        // times the peers, so the remainder is spent once and never counted twice.
+        let receive_window = usable(memory_max)
+            .saturating_sub(rows.iter().map(|(_, bytes)| bytes).sum())
+            / roster_len.max(1) as u64;
+        let receive_window = receive_window.max(STREAM_RECEIVE_WINDOW);
+        rows.push(("quic_receive_windows", peers * receive_window));
+
         let bounded_bytes = rows.iter().map(|(_, bytes)| bytes).sum();
         Self {
             bounded_bytes,
@@ -243,6 +268,26 @@ impl MemoryBudget {
             receive_window,
         }
     }
+}
+
+/// What the rows may add up to: the limit less [`HEADROOM_PERCENT`], which is the 0.8 of
+/// `MemoryMax` DX-N3 derives the receive window against. It is the same arithmetic
+/// [`MemoryBudget::total_bytes`] runs the other way, so a budget that spends exactly this fits
+/// exactly.
+pub fn usable(memory_max: u64) -> u64 {
+    memory_max * 100 / (100 + HEADROOM_PERCENT)
+}
+
+/// What gossipsub holds beside the sidecar's own structures (CL-N5): message ids in the
+/// duplicate cache, and whole messages in the message cache.
+///
+/// Neither has a capacity bound, so both are the arrival rate times how long they keep an
+/// entry. The rate is the one the seen cache is sized for, [`SEEN_CAPACITY`] entries over
+/// [`SEEN_TTL`], since every message the beacon node forwards crosses the link once.
+fn gossipsub_caches() -> u64 {
+    let per_second = SEEN_CAPACITY as u64 / SEEN_TTL.as_secs().max(1);
+    SEEN_CAPACITY as u64 * GOSSIPSUB_DUPLICATE_CACHE_MULTIPLE * SEEN_ENTRY_BYTES
+        + per_second * GOSSIPSUB_HISTORY_SECS * SMALL_MESSAGE_BYTES
 }
 
 /// The memory ceiling this process runs under, from cgroup v2. `None` where the file is absent
