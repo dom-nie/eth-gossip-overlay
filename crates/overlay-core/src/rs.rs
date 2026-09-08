@@ -158,6 +158,9 @@ pub fn decode(params: Params, have: &[(u16, Bytes)]) -> Result<Decoded, RsError>
 fn place(params: Params, have: &[(u16, Bytes)]) -> Result<Vec<Option<&Bytes>>, RsError> {
     let mut held = vec![None; usize::from(params.k) + usize::from(params.m)];
     for (index, chunk) in have {
+        if chunk.len() != params.chunk_bytes {
+            return Err(RsError::BadChunkLength);
+        }
         let slot = held
             .get_mut(usize::from(*index))
             .ok_or(RsError::IndexOutOfRange)?;
@@ -251,6 +254,10 @@ pub enum RsError {
         /// How many any combination of data and parity has to add up to.
         need: usize,
     },
+    /// A chunk is not `chunk_bytes` long. Every chunk of a message is the same size, padding
+    /// included, so a short one cannot be the last one.
+    #[error("a chunk that is not the chunk size")]
+    BadChunkLength,
     /// The same index arrived twice.
     #[error("the same chunk index twice")]
     DuplicateIndex,
