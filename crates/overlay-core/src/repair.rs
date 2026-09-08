@@ -7,6 +7,213 @@
 //! [`Reassembler::incomplete_older_than`], and [`Scheduler::tick`] is not `async`, so a caller
 //! cannot hold it across an `await` even by accident.
 
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
+use crate::msgid::MessageId;
+use crate::reassemble::{Incomplete, Reassembler};
+use crate::roster::Hostname;
+
+/// How often the scheduler looks at what is still incomplete. Short against the 250 ms deadline,
+/// so a message is asked about within a tick of the moment it is due.
+pub const REPAIR_TICK: Duration = Duration::from_millis(50);
+
+/// How many peers one message is asked before public gossip is left to deliver it (D24).
+pub const REPAIR_ATTEMPTS: usize = 3;
+
+/// The floor on one attempt's timeout, for a peer close enough that four round trips are no time
+/// at all (D24).
+pub const REPAIR_ATTEMPT_MIN: Duration = Duration::from_millis(100);
+
+/// The ceiling on one attempt's timeout, so three attempts to a distant peer still fit inside
+/// [`REPAIR_TOTAL_BUDGET`] (D24).
+pub const REPAIR_ATTEMPT_MAX: Duration = Duration::from_millis(500);
+
+/// How long a message is repaired for, measured from its deadline. Past it the message is given
+/// up on whoever is left to ask, because a block that arrives this late has already lost the race
+/// the overlay exists to win (D24).
+pub const REPAIR_TOTAL_BUDGET: Duration = Duration::from_millis(1500);
+
+/// How long one attempt is given: four round trips to the peer, clamped (D24). The round trip is
+/// quinn's smoothed estimate, read once when the candidate list is built.
+pub fn attempt_timeout(rtt: Duration) -> Duration {
+    (4 * rtt).clamp(REPAIR_ATTEMPT_MIN, REPAIR_ATTEMPT_MAX)
+}
+
+/// How one repair request ended, as the `outcome` label on `repair_requests_total` (§12).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    /// The chunks came back and the message with them.
+    Completed,
+    /// The peer does not hold the message, so the next candidate is asked.
+    NotFound,
+    /// The peer did not answer within the attempt's timeout.
+    Timeout,
+    /// Nobody is left to ask, or the budget ran out. No request was sent and public gossip
+    /// delivers the message (D24).
+    GaveUp,
+}
+
+impl Outcome {
+    /// The `outcome` label this carries (§12).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::NotFound => "not_found",
+            Self::Timeout => "timeout",
+            Self::GaveUp => "gave_up",
+        }
+    }
+}
+
+/// One request the scheduler decided to make.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Request {
+    /// The message the indices belong to.
+    pub msg_id: MessageId,
+    /// Who to ask.
+    pub peer: Hostname,
+    /// The indices to ask for, data first (D24).
+    pub missing: Vec<u16>,
+    /// How long the answer is waited for, from [`attempt_timeout`].
+    pub timeout: Duration,
+}
+
+/// What one tick decided about one message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Decision {
+    /// Open a stream to the peer and ask it for these indices.
+    Ask(Request),
+    /// Stop asking about this message and count [`Outcome::GaveUp`].
+    GaveUp(MessageId),
+}
+
+/// Which peers to ask for a message, in the order to ask them (D23).
+///
+/// In-region peers that sent a `FORWARDED` chunk come first, by round trip; then the origin, the
+/// peer that sent a chunk with the flag clear. There is no region check here because a forwarded
+/// chunk can only have come from an in-region peer, which is what makes this D24's "same region
+/// first, then RTT" order without a second lookup.
+///
+/// `rtt` answers `None` for a peer that cannot be asked at all: one that has left the live set,
+/// or one that never advertised `REPAIR` (D29). A peer that sent both a forwarded and a clear
+/// chunk is asked once, in the earlier of its two places.
+///
+/// The sort is stable, so peers whose round trips are equal keep the order their chunks arrived
+/// in, which on a quiet fleet is every peer.
+pub fn candidates<R>(senders: &[(Hostname, bool)], rtt: R) -> Vec<Hostname>
+where
+    R: Fn(&Hostname) -> Option<Duration>,
+{
+    let mut forwarded: Vec<(&Hostname, Duration)> = senders
+        .iter()
+        .filter(|(_, forwarded)| *forwarded)
+        .filter_map(|(peer, _)| Some((peer, rtt(peer)?)))
+        .collect();
+    forwarded.sort_by_key(|(_, rtt)| *rtt);
+
+    let origins = senders
+        .iter()
+        .filter(|(_, forwarded)| !forwarded)
+        .filter(|(peer, _)| rtt(peer).is_some())
+        .map(|(peer, _)| peer);
+
+    let mut order = Vec::new();
+    for peer in forwarded.iter().map(|(peer, _)| *peer).chain(origins) {
+        if !order.contains(peer) {
+            order.push(peer.clone());
+        }
+    }
+    order
+}
+
+/// What one host has asked about, and how long it has been asking.
+///
+/// One entry per message under repair, opened the first tick its deadline is seen to have passed
+/// and dropped the tick it is no longer incomplete, so this is bounded by the reassembler's own
+/// [`MAX_IN_FLIGHT`](crate::reassemble::MAX_IN_FLIGHT).
+#[derive(Default)]
+pub struct Scheduler(HashMap<MessageId, Repair>);
+
+/// One message's repair: when it became due, who has been asked, and whether an answer is still
+/// outstanding.
+struct Repair {
+    due_at: Instant,
+    tried: Vec<Hostname>,
+    asking: bool,
+    gave_up: bool,
+}
+
+impl Scheduler {
+    /// What to do now about every message whose first chunk arrived `deadline` ago and which is
+    /// still missing chunks.
+    ///
+    /// Deliberately not `async` and deliberately taking no stream: the reassembler's lock is
+    /// taken and dropped inside `incomplete_older_than` before anything here runs, and the
+    /// network work happens to the [`Decision`]s this returns. That is the DoD's rule about the
+    /// lock and the `await` made structural rather than remembered.
+    ///
+    /// `deadline` is read afresh on every call, so a reload of `classes.large.repair_deadline_ms`
+    /// takes hold on the next tick (T-043).
+    pub fn tick<R>(
+        &mut self,
+        reassembler: &Reassembler,
+        deadline: Duration,
+        rtt: R,
+        now: Instant,
+    ) -> Vec<Decision>
+    where
+        R: Fn(&Hostname) -> Option<Duration>,
+    {
+        let incomplete = reassembler.incomplete_older_than(deadline, now);
+        self.0
+            .retain(|msg_id, _| incomplete.iter().any(|msg| msg.msg_id == *msg_id));
+        incomplete
+            .iter()
+            .filter_map(|msg| self.decide(msg, &rtt, now))
+            .collect()
+    }
+
+    /// Records that the request for `msg_id` has been answered, one way or another, so the next
+    /// tick may ask the next candidate.
+    pub fn answered(&mut self, msg_id: &MessageId) {
+        if let Some(repair) = self.0.get_mut(msg_id) {
+            repair.asking = false;
+        }
+    }
+
+    fn decide<R>(&mut self, msg: &Incomplete, rtt: &R, now: Instant) -> Option<Decision>
+    where
+        R: Fn(&Hostname) -> Option<Duration>,
+    {
+        let repair = self.0.entry(msg.msg_id).or_insert_with(|| Repair {
+            due_at: now,
+            tried: Vec::new(),
+            asking: false,
+            gave_up: false,
+        });
+        if repair.asking || repair.gave_up {
+            return None;
+        }
+        let over_budget = now.saturating_duration_since(repair.due_at) > REPAIR_TOTAL_BUDGET;
+        let peer = (!over_budget && repair.tried.len() < REPAIR_ATTEMPTS)
+            .then(|| candidates(&msg.senders, rtt))
+            .and_then(|order| order.into_iter().find(|peer| !repair.tried.contains(peer)));
+        let Some(peer) = peer else {
+            repair.gave_up = true;
+            return Some(Decision::GaveUp(msg.msg_id));
+        };
+        repair.asking = true;
+        repair.tried.push(peer.clone());
+        Some(Decision::Ask(Request {
+            msg_id: msg.msg_id,
+            missing: msg.missing.clone(),
+            timeout: attempt_timeout(rtt(&peer).unwrap_or(REPAIR_ATTEMPT_MAX)),
+            peer,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
