@@ -3016,6 +3016,31 @@ mod tests {
         );
     }
 
+    /// The second of the recent store's two insert sites (§5.6): a message this host put back
+    /// together is one that a peer which lost the same chunks can now repair from here. There is
+    /// no announcement to go with it; the peer already knows this host holds the message,
+    /// because it was this host that forwarded it a chunk of it (D23).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn completed_reassembly_inserts_into_the_recent_store() {
+        let block = topic("beacon_block");
+        let payload = incompressible(4096);
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        let (msg_id, params, frames) = striped(0, &block, &payload, 512);
+
+        send(&peer, &frames[..usize::from(params.k)]).await;
+
+        eventually("the message to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        let (held_topic, held) = cluster
+            .recent(1)
+            .get(&msg_id)
+            .expect("the reassembled block is held for repair");
+        assert_eq!(held_topic, block);
+        assert_eq!(held, payload);
+    }
+
     /// §12's win rate and T-044's event log at the third insert site: a message this host put
     /// back together is one the overlay brought it before its beacon node had it, so it counts
     /// as a first arrival and is logged as one. Without this every block a striping fleet wins

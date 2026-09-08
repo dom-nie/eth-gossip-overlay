@@ -53,6 +53,7 @@ use overlay_core::msgid;
 use overlay_core::protocol::{MAX_FRAME_BYTES, SUPPORTED_FEATURES};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
 use overlay_core::reassemble::{INCOMPLETE_TTL, MAX_IN_FLIGHT, ReassembleConfig, Reassembler};
+use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::seen::{SeenCache, SharedSeenCache};
 use overlay_core::subs::{Bitmap, PeerState};
@@ -1236,6 +1237,7 @@ impl<A: Admission> TestCluster<A> {
             Arc::new(SystemClock),
         ));
         published.watching(seen.clone());
+        let recent = SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES));
         let (subscriptions, watching) = watch::channel(sets);
         let reassembler = Arc::new(Reassembler::new(ReassembleConfig {
             max_in_flight: self.in_flight,
@@ -1294,6 +1296,7 @@ impl<A: Admission> TestCluster<A> {
         ];
         self.nodes[index].sidecar = Some(Sidecar {
             seen,
+            recent,
             reassembler,
             to_fanout,
             published,
@@ -1340,6 +1343,12 @@ impl<A: Admission> TestCluster<A> {
     /// published (D08).
     pub fn seen(&self, index: usize) -> &SharedSeenCache {
         &self.sidecar(index).seen
+    }
+
+    /// Node `index`'s recent store, which is what a repair request would be answered from
+    /// (§5.6).
+    pub fn recent(&self, index: usize) -> &SharedRecentLarge {
+        &self.sidecar(index).recent
     }
 
     /// What node `index` has queued for its beacon node, oldest first.
@@ -1437,6 +1446,8 @@ struct Sidecar {
     /// The cache all three insert sites share, so what the overlay delivered is remembered
     /// when the beacon node echoes it back (§5.5).
     seen: SharedSeenCache,
+    /// The large payloads a peer could still ask this node to repair (§5.6).
+    recent: SharedRecentLarge,
     /// What the receive path asks whether a chunk is owed to the region (D19).
     reassembler: Arc<Reassembler>,
     to_fanout: LanePusher<Outbound>,
