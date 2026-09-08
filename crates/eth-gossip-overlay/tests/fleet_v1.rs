@@ -1083,6 +1083,16 @@ async fn block_striped_across_region_is_published_once_on_every_node() {
     let now = fleet.metrics().await;
     for (node, scrape) in now.iter().enumerate().skip(1) {
         assert_eq!(reassembled(scrape), 1.0, "node {node}");
+        // What `OverlayWinRateFalling` divides: a block the overlay brought counts on the
+        // overlay's side of `first_seen_total`, or the alert reads "never wins" on a striping
+        // fleet that is working (§12, D08).
+        assert!(
+            scrape.sum(
+                FIRST_SEEN_TOTAL,
+                &[(LABEL_CLASS, "large"), (LABEL_SOURCE, SOURCE_OVERLAY)]
+            ) > 0.0,
+            "node {node} won a block the win rate cannot see"
+        );
     }
     assert_eq!(
         reassembled(&now[0]),

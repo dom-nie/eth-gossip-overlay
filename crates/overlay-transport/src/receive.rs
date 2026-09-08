@@ -516,15 +516,18 @@ impl Ctx {
                 payload,
                 used_parity,
                 first_chunk_at,
+                origin,
                 ..
             } => {
-                if self.publish_reassembled(topic, class, msg_id, payload) {
+                let took = now.saturating_duration_since(first_chunk_at);
+                // When the first chunk came off the socket, which is when this host heard of the
+                // message: the wall clock reading now, less how long the rest of it took.
+                let arrived = self.deps.clock.wall() - took;
+                if self.publish_reassembled(topic, class, msg_id, payload, &origin, arrived) {
                     if used_parity {
                         self.deps.stats.parity_used();
                     }
-                    self.deps
-                        .stats
-                        .reconstructed(class, now.saturating_duration_since(first_chunk_at));
+                    self.deps.stats.reconstructed(class, took);
                 }
             }
             Outcome::Rejected {
@@ -545,13 +548,24 @@ impl Ctx {
     }
 
     /// Gate, remember and queue one reassembled message, answering whether it reached the queue.
-    /// The insert is immediately before the enqueue and there is no other insert on this path.
+    ///
+    /// This is the third of D08's three seen-cache insert sites, and the insert is immediately
+    /// before the enqueue with no other insert on this path. First-seen accounting belongs with
+    /// the insert and not with the enqueue: "first seen" means the cache did not already hold
+    /// the id, so a fourth insert site would owe `first_seen_total` and the `first_arrival`
+    /// event as well, the way [`deliver`](Self::deliver) and T-016's inbound path do.
+    ///
+    /// `origin` is the host that cut the message up rather than whoever sent the last chunk,
+    /// and `arrived` is when the first chunk landed, so the fleet-spread query compares the
+    /// moment each host heard of the message.
     fn publish_reassembled(
         &self,
         topic: &Topic,
         class: Class,
         id: MessageId,
         payload: Bytes,
+        origin: &Hostname,
+        arrived: SystemTime,
     ) -> bool {
         if !self.deps.sets.borrow().advertised.contains(topic) {
             self.deps.stats.unwanted_topic(&self.peer);
@@ -561,6 +575,15 @@ impl Ctx {
             self.deps.stats.duplicate(class);
             return false;
         }
+        self.deps.stats.first_seen(class);
+        events::emit_first_arrival(&FirstArrival {
+            id,
+            class,
+            topic,
+            node: &self.deps.node,
+            at: arrived,
+            source: events::Source::Overlay { origin },
+        });
         self.deps.publish.enqueue(PublishItem {
             topic: topic.clone(),
             id,
