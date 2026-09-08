@@ -79,7 +79,7 @@ mod tests {
     #[test]
     fn hello_advertises_the_version_and_limits_this_release_committed_to() {
         assert_eq!(PROTOCOL_MINOR, 0);
-        assert_eq!(SUPPORTED_FEATURES, 1);
+        assert_eq!(SUPPORTED_FEATURES, 3);
         assert_eq!(MAX_FRAME_BYTES, 10_486_784);
         assert_eq!(MAX_BATCH_ENTRIES, 1024);
     }
