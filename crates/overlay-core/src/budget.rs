@@ -21,6 +21,7 @@ use crate::config::Config;
 use crate::pubqueue::{PUBLISH_LARGE_LANE_BYTES, PUBLISH_SMALL_LANE_ENTRIES};
 use crate::ratelimit::TokenBucket;
 use crate::reassemble;
+use crate::recent::RECENT_MAX_BYTES;
 use crate::seen::{SEEN_CAPACITY, SEEN_TTL};
 
 /// How long a peer may stay over its budget before the connection is closed with
@@ -193,9 +194,8 @@ pub struct SendLaneBounds {
 ///
 /// Every row is a structure with a bound in code, so the sum is a ceiling rather than a
 /// measurement: nothing here grows with traffic. `docs/performance.md` carries the same table
-/// generated from here. Two rows read zero because the structure they name has not been built:
-/// `recent_store` is T-081's and `by_root_cache` is T-085's, and each ticket fills its own row
-/// in rather than adding one.
+/// generated from here. One row reads zero because the structure it names has not been built:
+/// `by_root_cache` is T-085's, and that ticket fills its own row in rather than adding one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryBudget {
     /// Each structure's worst case, in the order the startup line prints them.
@@ -224,16 +224,13 @@ impl MemoryBudget {
         memory_max: u64,
         lanes: SendLaneBounds,
     ) -> Self {
-        // Every row below is constants. `cfg` is here because the rows that will read a key are
-        // T-081's recent store and T-085's by-root cache, so their tickets add a row rather than
-        // change this signature.
+        // Every row below is constants. `cfg` is here because the row that will read a key is
+        // T-085's by-root cache, so that ticket adds a row rather than changes this signature.
         let _ = cfg;
         let peers = roster_len.saturating_sub(1) as u64;
         let mut rows = vec![
             ("seen_cache", SEEN_CAPACITY as u64 * SEEN_ENTRY_BYTES),
-            // T-081's store has not been built. The row is here at zero so the table names the
-            // structure and that ticket has a place to put its arithmetic.
-            ("recent_store", 0),
+            ("recent_store", RECENT_MAX_BYTES as u64),
             (
                 "publish_queue",
                 PUBLISH_SMALL_LANE_ENTRIES as u64 * SMALL_MESSAGE_BYTES
