@@ -21,6 +21,7 @@ pub mod repair;
 pub mod roster;
 pub mod rs;
 pub mod seen;
+pub mod spec;
 pub mod stripe;
 pub mod subs;
 #[cfg(test)]
