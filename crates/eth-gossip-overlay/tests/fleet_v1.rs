@@ -7,7 +7,7 @@ use eth_gossip_overlay::metrics::{
     BN_SUBSCRIPTIONS, FIRST_SEEN_TOTAL, LABEL_CLASS, LABEL_DIRECTION, LABEL_PEER, LABEL_REASON,
     LABEL_SOURCE, LABEL_UNIT, MESSAGES_TOTAL, PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL, PEER_QUEUE_DEPTH,
     PEER_QUEUE_DROPS_TOTAL, PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF, RELAYED_BATCHES_TOTAL,
-    SOURCE_OVERLAY, UNIT_BYTES, UNWANTED_TOPIC_TOTAL,
+    SOURCE_OVERLAY, UNANNOUNCED_TOPIC_TOTAL, UNIT_BYTES, UNWANTED_TOPIC_TOTAL,
 };
 use harness::{Fleet, SETTLE, Scrape, WAIT, topic};
 use overlay_core::protocol::features;
@@ -669,10 +669,11 @@ async fn cross_region_small_batches_cost_one_wan_copy_per_relay() {
     assert_eq!(after - before, relays as f64, "WAN copies per batch");
 }
 
-/// DX-N5 scenario 13, and DX-N1: a relay fans a batch out for its region whether or not it
-/// wants anything in it. The host the origin relays through has unsubscribed from the subnet,
-/// so it counts the entry as unwanted and offers its own beacon node nothing, and the two hosts
-/// beside it are given the attestation all the same (D20).
+/// DX-N5 scenario 13, DX-N1 and MD-04: a relay carries a batch for its region whether or not it
+/// wants anything in it. The host the origin relays through has never subscribed to the subnet,
+/// which is the ordinary case for an attestation subnet on a fleet where duties are spread: it
+/// interns an id, announces it, counts the entries as unwanted and offers its own beacon node
+/// nothing, and the two hosts beside it are given the attestation all the same (D20).
 #[tokio::test(flavor = "multi_thread")]
 async fn unsubscribed_relay_refans_but_does_not_publish() {
     let subnet = topic("beacon_attestation_11");
@@ -680,9 +681,6 @@ async fn unsubscribed_relay_refans_but_does_not_publish() {
         .regions(&[("eu", 1), ("us", 3)])
         .start()
         .await;
-    for node in fleet.nodes() {
-        node.subscribe(&subnet).await;
-    }
     fleet.wait_full_mesh(WAIT).await;
     fleet.set_relays(1, 1).await;
     // Which host the origin relays through is a hash of its own name over the region's hosts in
@@ -692,20 +690,35 @@ async fn unsubscribed_relay_refans_but_does_not_publish() {
         .collect();
     let chosen = relay::select(fleet.node(0).hostname(), &pool, 1);
     let relay = 1 + pool.iter().position(|host| *host == chosen[0]).unwrap();
-    let before = fleet.node(relay).metrics().await.sum(BN_SUBSCRIPTIONS, &[]);
-
-    fleet.node(relay).unsubscribe(&subnet).await;
+    let subscribers: Vec<usize> = (1..4).filter(|node| *node != relay).collect();
+    let before = fleet.metrics().await;
+    for node in std::iter::once(0).chain(subscribers.iter().copied()) {
+        fleet.node(node).subscribe(&subnet).await;
+    }
     fleet
-        .wait_for_metrics(
-            "the relay to stop advertising the subnet",
-            WAIT,
-            |scrapes| scrapes[relay].sum(BN_SUBSCRIPTIONS, &[]) < before,
-        )
+        .wait_for_metrics("everyone but the relay to want the subnet", WAIT, |now| {
+            std::iter::once(0)
+                .chain(subscribers.iter().copied())
+                .all(|node| {
+                    now[node].sum(BN_SUBSCRIPTIONS, &[]) > before[node].sum(BN_SUBSCRIPTIONS, &[])
+                })
+        })
         .await;
+    fleet.settle().await;
+    // The first attestation is what makes the relay intern an id for the subnet, and it is lost
+    // while the TOPIC_ADD crosses the control stream: an entry never goes out under a binding
+    // the peer has not been told (MD-04).
+    fleet
+        .node(0)
+        .bn()
+        .publish(&subnet, b"the one that pays for the announcement")
+        .await;
+    fleet.settle().await;
+
     let payload = b"an attestation the relay does not want".to_vec();
     fleet.node(0).bn().publish(&subnet, &payload).await;
 
-    for node in (1..4).filter(|node| *node != relay) {
+    for node in subscribers {
         fleet
             .wait_for("the hosts beside the relay to import it", WAIT, |fleet| {
                 fleet.node(node).bn().count(&subnet, &payload) == 1
@@ -722,6 +735,11 @@ async fn unsubscribed_relay_refans_but_does_not_publish() {
         ) > 0.0
     );
     assert!(scrape.sum(RELAYED_BATCHES_TOTAL, &[]) > 0.0);
+    assert_eq!(
+        scrape.sum(UNANNOUNCED_TOPIC_TOTAL, &[]),
+        0.0,
+        "the relay refused to name a topic it was asked to carry"
+    );
 }
 
 /// DX-N5 scenario 15 for the relay half, and DX-N4: nothing on the overlay receive path waits
