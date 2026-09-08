@@ -50,6 +50,7 @@ use overlay_transport::batching::Batching;
 use overlay_transport::endpoint;
 use overlay_transport::fanout::Fanout;
 use overlay_transport::hello::{HelloAdmission, OwnTopics, SelfHello};
+use overlay_transport::io_thread::{self, IoHandle};
 use overlay_transport::manager::{ConnectionManager, Handle, Local, PeerEvent};
 use overlay_transport::receive::{Deps as ReceiveDeps, PeerReceiver, Relaying};
 use overlay_transport::repair;
@@ -109,9 +110,10 @@ pub enum StartupError {
     /// `bn.libp2p_addr` or `bn.listen_addr` is not a multiaddress.
     #[error("bn.libp2p_addr or bn.listen_addr: {0}")]
     BnAddress(String),
-    /// The overlay endpoint could not bind `overlay.listen`.
+    /// The overlay endpoint could not bind `overlay.listen`, or could not be given the thread
+    /// `overlay.io_thread` asks for.
     #[error(transparent)]
-    Endpoint(#[from] endpoint::EndpointError),
+    Endpoint(#[from] io_thread::IoThreadError),
     /// A §12 metric could not be registered, which is a programming error rather than an
     /// operator's.
     #[error("metrics registry: {0}")]
@@ -219,6 +221,9 @@ pub struct App {
     notify: Notify,
     progress: Progress,
     manager: Handle,
+    /// The endpoint's runtime, stopped after the manager: closing the connections politely is
+    /// work the endpoint's own driver does, and that driver is what this ends.
+    io: IoHandle,
     /// The swarm task, stopped last: every other task holds a command sender, and the link's
     /// loop ends when the last one is dropped, which is the swarm's cue to disconnect.
     link: JoinHandle<()>,
@@ -346,11 +351,13 @@ impl App {
             &me.roster, &me.seeds,
         )));
         let own_key = derive_tls_keypair(&me.seeds.current, &me.self_id.hostname);
-        let endpoint = endpoint::bind(
-            &cfg.overlay,
-            budget.receive_window,
-            tls::server_config(pins.clone(), &own_key)?,
-        )?;
+        let server = tls::server_config(pins.clone(), &own_key)?;
+        let overlay = cfg.overlay.clone();
+        let receive_window = budget.receive_window;
+        let io = io_thread::spawn(&cfg.overlay.io_thread, move || {
+            endpoint::bind(&overlay, receive_window, server)
+        })?;
+        metrics.set_io_thread_pinned(io.pinned());
         tracing::info!(listen = %cfg.overlay.listen, "overlay endpoint bound");
 
         let (roster_tx, _) = watch::channel(me.roster.clone());
@@ -364,7 +371,7 @@ impl App {
                 pins: pins.clone(),
                 own_key,
             },
-            endpoint,
+            io.endpoint(),
             roster_tx.subscribe(),
             HelloAdmission::new(SelfHello::new(&me.self_id), topics.clone(), metrics.clone()),
             peer_events,
@@ -483,6 +490,7 @@ impl App {
             notify: Notify::new(),
             progress,
             manager,
+            io,
             link: link.task,
             tasks: vec![
                 metrics_task,
@@ -572,6 +580,7 @@ impl App {
         drop(self.commands);
         let _ = self.link.await;
         self.manager.shutdown().await;
+        self.io.shutdown().await;
     }
 }
 

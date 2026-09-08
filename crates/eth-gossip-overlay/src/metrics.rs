@@ -155,6 +155,9 @@ pub const PEER_QUEUE_DROPS_TOTAL: &str = "overlay_peer_queue_drops_total";
 pub const CONFIG_RELOAD_TOTAL: &str = "overlay_config_reload_total";
 /// Automatic roster reloads the shrink guard refused.
 pub const ROSTER_RELOAD_REJECTED_TOTAL: &str = "overlay_roster_reload_rejected_total";
+/// 1 while the overlay endpoint is running on the core `overlay.io_thread.pin_cpu` names, 0
+/// when nothing was reserved and 0 when the kernel refused the core (T-091).
+pub const IO_THREAD_PINNED: &str = "overlay_io_thread_pinned";
 /// Always 1; the labels carry the build.
 pub const BUILD_INFO: &str = "overlay_build_info";
 
@@ -285,6 +288,7 @@ pub struct Metrics {
     stale_dropped: IntCounterVec,
     config_reload: IntCounterVec,
     roster_reload_rejected: IntCounter,
+    io_thread_pinned: IntGauge,
     reconstruct_seconds: HistogramVec,
     registered: BTreeMap<String, Vec<String>>,
 }
@@ -498,6 +502,10 @@ impl Metrics {
             ROSTER_RELOAD_REJECTED_TOTAL,
             "Automatic roster reloads the shrink guard refused.",
         )?;
+        let io_thread_pinned = b.gauge(
+            IO_THREAD_PINNED,
+            "1 while the overlay endpoint runs on the core io_thread.pin_cpu names.",
+        )?;
 
         b.gauge_vec(
             BUILD_INFO,
@@ -559,6 +567,7 @@ impl Metrics {
             reconstruct_seconds,
             config_reload,
             roster_reload_rejected,
+            io_thread_pinned,
             registered: b.registered,
         })
     }
@@ -579,6 +588,12 @@ impl Metrics {
     /// Mirrors `BnLink.connected`, the flag the link keeps and T-045 hands on.
     pub fn set_bn_connected(&self, connected: bool) {
         self.bn_connected.set(i64::from(connected));
+    }
+
+    /// Whether the overlay endpoint got the core it asked for (T-091). Set once at startup: the
+    /// core is restart-required, and nothing moves the endpoint under a running process.
+    pub fn set_io_thread_pinned(&self, pinned: bool) {
+        self.io_thread_pinned.set(i64::from(pinned));
     }
 }
 
