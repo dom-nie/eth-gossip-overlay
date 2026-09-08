@@ -431,13 +431,13 @@ mod tests {
         }
     }
 
-    /// The other half of the fallback rule, and the half this platform can hold: a core in the
-    /// configuration is not a core anywhere but Linux, so the endpoint stays where it would
-    /// have been and the thread is never created. An operator developing on a laptop against a
-    /// production configuration gets a working sidecar, not a broken one.
+    /// A core in the configuration always buys the thread; what it cannot always buy is the
+    /// core. Off Linux the endpoint still moves to a runtime of its own, unpinned, so the path
+    /// a fleet runs is the path a developer and this test binary run, and only the affinity
+    /// call is somewhere they cannot follow.
     #[cfg(not(target_os = "linux"))]
-    #[tokio::test]
-    async fn pin_cpu_set_off_linux_still_runs_on_the_main_runtime() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pin_cpu_set_off_linux_runs_an_unpinned_thread() {
         let mark = LOG.len();
         let (seeds, pins) = fleet(&["bn-a"]);
         let cfg = config("127.0.0.1:0");
@@ -452,14 +452,13 @@ mod tests {
         )
         .unwrap();
 
-        assert!(io.worker.is_none(), "an I/O thread was started anyway");
+        assert!(io.worker.is_some(), "no I/O thread was started");
         assert!(!io.pinned());
         assert_eq!(
             LOG.since(mark)
                 .lines()
-                .filter(|line| line.contains("overlay endpoint on the main runtime")
-                    && line.contains("pin_cpu=Some(30)")
-                    && line.contains("linux=false"))
+                .filter(|line| line.contains("CPU affinity is Linux only")
+                    && line.contains("cpu=30"))
                 .count(),
             1
         );
