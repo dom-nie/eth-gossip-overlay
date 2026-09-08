@@ -52,7 +52,7 @@ use tokio::task::JoinHandle;
 use crate::batching::{BatchHandle, Small};
 use crate::hello::{OwnTopics, lock};
 use crate::manager::{LivePeer, LiveSource};
-use crate::router::{RoutePlan, route};
+use crate::router::{RegionPlan, RoutePlan, route};
 
 /// What a whole message costs on the wire besides its payload: the `type` and `flags` bytes and
 /// the chunk header (`msg_id`, `topic_id`, `k`, `m`, `index`, `total_len`, data length). The
@@ -182,12 +182,16 @@ impl Fanout {
         let (targets, relays) = match route(
             &outbound.topic,
             outbound.class,
+            // The split a large message takes is T-073's, along with the chunk send that goes
+            // with it, so this release asks for no stripe and every class travels whole.
+            None,
             &view,
             &self.self_id,
             &self.cfg.borrow(),
         ) {
             RoutePlan::Direct(targets) => (targets, Vec::new()),
             RoutePlan::SmallRelayed { direct, relays } => (direct, relays),
+            RoutePlan::Large(regions) => (whole(regions), Vec::new()),
             RoutePlan::Nothing => return,
         };
         let Some(topic_id) = self.own_id(&outbound.topic) else {
@@ -306,6 +310,20 @@ pub(crate) fn datagram_limit(self_host: &Hostname, live: &LivePeer) -> Option<us
         return Some(forced);
     }
     live.connection.max_datagram_size()
+}
+
+/// The hosts of a large message's plan that take it whole, in region and then hostname order.
+/// T-073 sends the striped regions their chunks; a region that is too small to stripe is on the
+/// path every message took in v1 (§5.4).
+fn whole(regions: Vec<RegionPlan>) -> Vec<Hostname> {
+    regions
+        .into_iter()
+        .filter_map(|region| match region {
+            RegionPlan::Whole { targets } => Some(targets),
+            RegionPlan::Stripe { .. } => None,
+        })
+        .flatten()
+        .collect()
 }
 
 /// Whether a whole message of `payload_bytes` is within the frame limit the peer advertised in

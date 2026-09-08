@@ -8,18 +8,21 @@
 //! the topic (§5.4), in hostname order and this host aside, or [`RoutePlan::Nothing`] when that
 //! leaves nobody. A small-class message crossing to a region large enough to be worth the hop
 //! gets [`RoutePlan::SmallRelayed`] instead: the region's own subscribers reached through a few
-//! of its hosts rather than one WAN copy each (D20, D36). T-072 adds the stripe a large message
-//! takes over a region as a variant of the same enum.
+//! of its hosts rather than one WAN copy each (D20, D36). A message the caller has split into
+//! chunks gets [`RoutePlan::Large`]: one stripe or one whole delivery per region, each built
+//! from this host's own view of that region (§5.4, D18).
 //!
-//! `class` and `cfg` are what tell those apart. A large message is routed the way v1 routed
-//! everything until T-072, and so is a small one under `small.cross_region: direct`.
+//! `class`, `chunked` and `cfg` are what tell those apart. A message nobody has chunked goes out
+//! whole however large it is, and so does a small one under `small.cross_region: direct`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use overlay_core::config::{Fanout, SmallCrossRegion};
-use overlay_core::relay;
+use overlay_core::msgid::MessageId;
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
+use overlay_core::rs::Params;
 use overlay_core::topic::{Class, Topic};
+use overlay_core::{relay, stripe};
 
 use crate::manager::{LivePeer, LiveView};
 use crate::subs;
@@ -39,13 +42,53 @@ pub enum RoutePlan {
         /// hostname order. None of them need be subscribed to the topic (D20).
         relays: Vec<Hostname>,
     },
+    /// One plan per region that holds a live subscriber, in region order (§5.4).
+    Large(Vec<RegionPlan>),
     /// No live peer wants it, so it goes nowhere.
     Nothing,
+}
+
+/// A large message the caller has already cut into chunks (T-071), which is what asking for a
+/// stripe means. The pair travels together because neither half answers on its own: the id is
+/// what two origins rotate the same way, and the split is what says how many chunks there are
+/// to place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Chunked {
+    /// The message id, whose first eight bytes rotate the stripe (D18).
+    pub id: MessageId,
+    /// How the message was split; `k + m` is how many hosts the stripe places.
+    pub split: Params,
+}
+
+/// How one region takes a large message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RegionPlan {
+    /// The whole message to each of these hosts, in hostname order. The region holds fewer
+    /// subscribers than `stripe_min_recipients`, and a stripe over a handful of hosts costs
+    /// more in chunk headers and streams than the copies it saves (§5.4).
+    Whole {
+        /// Who takes the message whole.
+        targets: Vec<Hostname>,
+    },
+    /// Chunk `i` to `targets_per_chunk[i]`, the assignment D18 fixes. Each host forwards what
+    /// it was sent to the rest of its own region, so the stripe is one hop of two and the
+    /// second never leaves `region` (§5.4, T-073).
+    Stripe {
+        /// The region this stripe covers, as its hosts declared it (D15).
+        region: Region,
+        /// Where each chunk goes, `k + m` long.
+        targets_per_chunk: Vec<Hostname>,
+    },
 }
 
 /// The plan for a message on `topic`, from the live set as it stood when `view` was taken. Pure:
 /// it reads its arguments and nothing else, so the hard part of routing is a function a test can
 /// ask a question of.
+///
+/// `chunked` is what turns a large message into a stripe: it carries the id the assignment is
+/// rotated by and the split that says how many chunks there are (T-071). A message routed
+/// without it goes out whole however large it is, which is every small-class message and every
+/// message from a sender that cannot chunk one yet.
 ///
 /// The recipients come off the view here rather than from [`LiveView::subscribers`], which
 /// hands back borrowed names: cloning those into the plan would cost a second `Vec` on the path
@@ -53,6 +96,7 @@ pub enum RoutePlan {
 pub fn route(
     topic: &Topic,
     class: Class,
+    chunked: Option<Chunked>,
     view: &LiveView,
     self_id: &SelfIdentity,
     cfg: &Fanout,
@@ -62,6 +106,16 @@ pub fn route(
         view.iter()
             .filter(|(hostname, _)| **hostname != self_id.hostname)
     };
+    if class == Class::Large
+        && let Some(chunked) = chunked
+    {
+        return striped(
+            chunked,
+            others(),
+            &subscribed,
+            cfg.large.stripe_min_recipients,
+        );
+    }
     let relaying: BTreeSet<&Region> =
         match class == Class::Small && cfg.small.cross_region == SmallCrossRegion::Relays {
             true => relaying_regions(view, self_id, &subscribed, cfg.small.relay_min_remote_hosts),
@@ -86,6 +140,47 @@ pub fn route(
         (_, true) => RoutePlan::Direct(direct),
         _ => RoutePlan::SmallRelayed { direct, relays },
     }
+}
+
+/// One plan per region that holds a live subscriber, in region order: this host's own region
+/// without this host, and every other region striped into directly, because a stripe crosses
+/// the WAN once already and a relay would only add a hop to it (§5.4).
+///
+/// A region takes the message whole below `stripe_min_recipients` and as a stripe at or above
+/// it. The stripe runs over the region's subscribers alone (D18): a chunk sent to a host whose
+/// beacon node discards the topic is a chunk that bought nothing, which is the opposite of the
+/// rule [`pool`] applies to relays, and deliberately so.
+fn striped<'a>(
+    chunked: Chunked,
+    peers: impl Iterator<Item = (&'a Hostname, &'a LivePeer)>,
+    subscribed: &impl Fn(&LivePeer) -> bool,
+    stripe_min_recipients: usize,
+) -> RoutePlan {
+    let mut per_region: BTreeMap<&Region, Vec<Hostname>> = BTreeMap::new();
+    for (hostname, peer) in peers.filter(|(_, peer)| subscribed(peer)) {
+        per_region
+            .entry(&peer.region)
+            .or_default()
+            .push(hostname.clone());
+    }
+    if per_region.is_empty() {
+        return RoutePlan::Nothing;
+    }
+    let chunks = usize::from(chunked.split.k) + usize::from(chunked.split.m);
+    RoutePlan::Large(
+        per_region
+            .into_iter()
+            .map(
+                |(region, hosts)| match hosts.len() >= stripe_min_recipients {
+                    true => RegionPlan::Stripe {
+                        region: region.clone(),
+                        targets_per_chunk: stripe::assign(&chunked.id, &hosts, chunks),
+                    },
+                    false => RegionPlan::Whole { targets: hosts },
+                },
+            )
+            .collect(),
+    )
 }
 
 /// The remote regions whose subscribers are reached through relays: the ones holding at least
@@ -133,7 +228,7 @@ mod tests {
     use overlay_core::subs::PeerState;
     use overlay_core::topic::{Class, Topic};
 
-    use super::{RegionPlan, RoutePlan, route};
+    use super::{Chunked, RegionPlan, RoutePlan, route};
     use crate::manager::LiveView;
     use crate::testutil::{Builder, NodeKind, REGION, WAIT, peer_state, view};
 
@@ -169,22 +264,20 @@ mod tests {
         }
     }
 
-    /// A message id whose first eight bytes little-endian are `rotation`, which is the number
-    /// the stripe takes the remainder of (D18).
-    fn id(rotation: u64) -> MessageId {
+    /// A message split into `k + m` chunks, whose id rotates a stripe by `rotation`: its first
+    /// eight bytes little-endian are the number the assignment takes the remainder of (D18).
+    /// The two chunk counts are all a route plan reads; what is in a chunk is T-073's.
+    fn chunked(rotation: u64, k: u16, m: u16) -> Chunked {
         let mut id = [0u8; 20];
         id[..8].copy_from_slice(&rotation.to_le_bytes());
-        MessageId(id)
-    }
-
-    /// A message that splits into `k + m` chunks. The two counts are all a route plan reads;
-    /// what is in a chunk is T-073's.
-    fn split(k: u16, m: u16) -> Params {
-        Params {
-            k,
-            m,
-            chunk_bytes: 2048,
-            total_len: u32::from(k) * 2048,
+        Chunked {
+            id: MessageId(id),
+            split: Params {
+                k,
+                m,
+                chunk_bytes: 2048,
+                total_len: u32::from(k) * 2048,
+            },
         }
     }
 
@@ -250,7 +343,7 @@ mod tests {
             ],
         );
 
-        let plan = route(&block, Class::Large, &live, &me(), &Fanout::default());
+        let plan = route(&block, Class::Large, None, &live, &me(), &Fanout::default());
 
         assert_eq!(plan, RoutePlan::Direct(vec![first, second]));
     }
@@ -273,7 +366,7 @@ mod tests {
             ],
         );
 
-        let plan = route(&block, Class::Large, &live, &me(), &Fanout::default());
+        let plan = route(&block, Class::Large, None, &live, &me(), &Fanout::default());
 
         assert_eq!(plan, RoutePlan::Direct(vec![wants_it]));
     }
@@ -295,7 +388,7 @@ mod tests {
             ],
         );
 
-        let plan = route(&block, Class::Large, &live, &me(), &Fanout::default());
+        let plan = route(&block, Class::Large, None, &live, &me(), &Fanout::default());
 
         assert_eq!(plan, RoutePlan::Direct(vec![peer]));
     }
@@ -312,13 +405,14 @@ mod tests {
             vec![(host("bn-a"), peer_state(&[(1, &attestation)], &[1]))],
         );
 
-        let plan = route(&block, Class::Large, &live, &me(), &Fanout::default());
+        let plan = route(&block, Class::Large, None, &live, &me(), &Fanout::default());
 
         assert_eq!(plan, RoutePlan::Nothing);
         assert_eq!(
             route(
                 &block,
                 Class::Large,
+                None,
                 &LiveView::default(),
                 &me(),
                 &Fanout::default()
@@ -343,7 +437,7 @@ mod tests {
                 .collect(),
         );
 
-        let plan = route(&block, Class::Large, &live, &me(), &Fanout::default());
+        let plan = route(&block, Class::Large, None, &live, &me(), &Fanout::default());
 
         assert_eq!(
             plan,
@@ -368,7 +462,7 @@ mod tests {
             ],
         );
 
-        let plan = route(&block, Class::Large, &live, &me(), &Fanout::default());
+        let plan = route(&block, Class::Large, None, &live, &me(), &Fanout::default());
 
         assert_eq!(plan, RoutePlan::Direct(vec![subscriber]));
     }
@@ -392,7 +486,7 @@ mod tests {
             ],
         );
 
-        let plan = route(&subnet, Class::Small, &live, &me(), &relaying(3, 2));
+        let plan = route(&subnet, Class::Small, None, &live, &me(), &relaying(3, 2));
 
         assert_eq!(
             plan,
@@ -419,7 +513,7 @@ mod tests {
             ],
         );
 
-        let plan = route(&subnet, Class::Small, &live, &me(), &relaying(3, 2));
+        let plan = route(&subnet, Class::Small, None, &live, &me(), &relaying(3, 2));
 
         assert_eq!(
             plan,
@@ -450,7 +544,7 @@ mod tests {
             ..Fanout::default()
         };
 
-        let plan = route(&subnet, Class::Small, &live, &me(), &direct);
+        let plan = route(&subnet, Class::Small, None, &live, &me(), &direct);
 
         assert_eq!(
             plan,
@@ -475,9 +569,8 @@ mod tests {
 
         let plan = route(
             &block,
-            &id(0),
             Class::Large,
-            Some(split(2, 1)),
+            Some(chunked(0, 2, 1)),
             &live,
             &me(),
             &striping(3),
@@ -501,8 +594,8 @@ mod tests {
         let peer = host("bn-a");
         let live = view(&connection, vec![(peer, peer_state(&[(1, &block)], &[1]))]);
 
-        let small = route(&block, Class::Small, &live, &me(), &Fanout::default());
-        let large = route(&block, Class::Large, &live, &me(), &Fanout::default());
+        let small = route(&block, Class::Small, None, &live, &me(), &Fanout::default());
+        let large = route(&block, Class::Large, None, &live, &me(), &Fanout::default());
 
         assert_eq!(small, RoutePlan::Direct(vec![host("bn-a")]));
         assert_eq!(small, large);
