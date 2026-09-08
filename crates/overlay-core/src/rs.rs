@@ -130,7 +130,7 @@ pub struct Decoded {
 /// Rebuilds the message from the chunks in `have`, each paired with the index its header
 /// carried. Any `params.k` of the `k + m` are enough.
 pub fn decode(params: Params, have: &[(u16, Bytes)]) -> Result<Decoded, RsError> {
-    let held = place(params, have);
+    let held = place(params, have)?;
 
     if let Some(payload) = concatenate(params, &held) {
         return Ok(Decoded {
@@ -152,13 +152,21 @@ pub fn decode(params: Params, have: &[(u16, Bytes)]) -> Result<Decoded, RsError>
     })
 }
 
-/// The chunks laid out by index, `None` where one did not arrive.
-fn place(params: Params, have: &[(u16, Bytes)]) -> Vec<Option<&Bytes>> {
+/// The chunks laid out by index, `None` where one did not arrive. A peer that sends an index
+/// twice or an index this message has no chunk for is refused rather than counted, because
+/// either would let a sender that is not the origin look like it filled a gap.
+fn place(params: Params, have: &[(u16, Bytes)]) -> Result<Vec<Option<&Bytes>>, RsError> {
     let mut held = vec![None; usize::from(params.k) + usize::from(params.m)];
     for (index, chunk) in have {
-        held[usize::from(*index)] = Some(chunk);
+        let slot = held
+            .get_mut(usize::from(*index))
+            .ok_or(RsError::IndexOutOfRange)?;
+        if slot.is_some() {
+            return Err(RsError::DuplicateIndex);
+        }
+        *slot = Some(chunk);
     }
-    held
+    Ok(held)
 }
 
 /// The payload when every data chunk is here, which is the normal case and the reason the split
@@ -243,6 +251,12 @@ pub enum RsError {
         /// How many any combination of data and parity has to add up to.
         need: usize,
     },
+    /// The same index arrived twice.
+    #[error("the same chunk index twice")]
+    DuplicateIndex,
+    /// An index this message has no chunk for.
+    #[error("a chunk index this message does not have")]
+    IndexOutOfRange,
 }
 
 #[cfg(test)]
