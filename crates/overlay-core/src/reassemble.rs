@@ -855,6 +855,32 @@ mod tests {
         assert_eq!(evictions.seen(), [Evicted::Expired]);
     }
 
+    /// The time bound, for a message whose missing chunks never arrive. `gc` is what a host with
+    /// no traffic left to expire entries on its way past calls; every other entry point expires
+    /// what has run out on the way in.
+    #[test]
+    fn incomplete_entry_is_evicted_after_ttl() {
+        let ttl = Duration::from_secs(4);
+        let reassembler = Reassembler::new(ReassembleConfig {
+            incomplete_ttl: ttl,
+            ..ReassembleConfig::default()
+        });
+        let now = Instant::now();
+        on(&reassembler, &chunk(1, 0, 4, 1), false, now);
+
+        reassembler.gc(now + ttl);
+        assert_eq!(reassembler.in_flight(), 1, "the ttl had not run out");
+        reassembler.gc(now + ttl + Duration::from_millis(1));
+
+        assert_eq!(reassembler.in_flight(), 0);
+        assert!(
+            reassembler
+                .incomplete_older_than(Duration::ZERO, now + ttl)
+                .is_empty(),
+            "an expired message is still a repair candidate"
+        );
+    }
+
     /// The count bound, for a peer that names message ids nothing will ever complete.
     #[test]
     fn max_in_flight_takes_the_oldest_entry() {
