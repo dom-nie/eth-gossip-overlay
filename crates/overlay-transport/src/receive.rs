@@ -2,10 +2,11 @@
 //!
 //! One task per live peer reads both carriers. It accepts unidirectional streams and reads the
 //! frames off each, and it reads the peer's datagrams, which is where the small class arrives
-//! (§5.3). A whole message is a `CHUNK` with `k = 1, m = 0`; any other chunk is a stripe, which
-//! this release does not know how to put together and hands to [`Stripes`] (T-074). A `BATCH`
-//! feeds each entry through the same path on either carrier, because an entry names its own
-//! topic and an id this host cannot resolve costs that entry alone (D21).
+//! (§5.3). A whole message is a `CHUNK` with `k = 1, m = 0`; any other chunk is one piece of a
+//! striped message, which this host offers to the rest of its region and hands to the
+//! [`Reassembler`] that T-074 will put the message back together in. A `BATCH` feeds each entry
+//! through the same path on either carrier, because an entry names its own topic and an id this
+//! host cannot resolve costs that entry alone (D21).
 //!
 //! The two carriers differ in what a frame this release cannot read costs. A stream has a `u32`
 //! length prefix, so an unknown frame type is stepped over and reading goes on; a datagram is
@@ -41,11 +42,12 @@
 //! this module holds nothing of. That is what keeps duplicates bounded by the number of beacon
 //! nodes that received a message from public gossip (§5.5).
 //!
-//! The exception is a `BATCH` carrying `RELAY` from a peer in another region, which asks this
-//! host to fan it out inside its own (D11, D20). That second hop is [`Relaying`], handed to the
-//! receiver rather than reached for, and it is metered: the bytes are charged to the peer's
-//! fan-out budget, and a peer that asks for more of it than its share closes (DX-N3). T-073's
-//! cut-through forwarding gets the same treatment behind its own flag.
+//! There are two exceptions, both handed to the receiver rather than reached for, and both
+//! through [`Relaying`]: a `BATCH` carrying `RELAY` from a peer in another region, which asks
+//! this host to fan it out inside its own (D11, D20), and a `CHUNK` arriving without
+//! `FORWARDED`, which this host passes to the rest of its region the moment it lands (D19).
+//! Both are metered the same way: the bytes are charged to the peer's fan-out budget, and a peer
+//! that asks for more of it than its share closes (DX-N3).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -173,22 +175,24 @@ pub struct Deps {
     /// The budget each peer gets a copy of. A bucket that starts full is what a peer that
     /// connects an hour later would have anyway, since a refill saturates at the capacity.
     pub budget: FanoutBudget,
-    /// What a `RELAY` batch is fanned out with.
+    /// What the two second hops are made with.
     pub relaying: Relaying,
 }
 
-/// The second hop, as the receive path is handed it: what a relay needs to fan a `RELAY` batch
-/// out inside its own region and nothing more (D20). Nothing else here can send, which is what
-/// makes one hop structural for everything but this.
+/// The second hop, as the receive path is handed it: what this host needs to fan a `RELAY`
+/// batch out inside its own region (D20) and to pass a chunk on to it (D19), and nothing more.
+/// Nothing else here can send, which is what makes one hop structural for everything but these
+/// two.
 #[derive(Clone)]
 pub struct Relaying {
-    /// The live set, read once per batch for the in-region subscribers of each entry's topic.
+    /// The live set, read once per batch or chunk for the in-region subscribers of its topic.
     pub live: LiveSource,
-    /// This host's own topic ids, which a re-fanned entry travels under: an entry is named by
-    /// whoever sends it, and the relay is the sender of the second hop (D13).
+    /// This host's own topic ids, which a re-fanned entry or a forwarded chunk travels under: a
+    /// frame is named by whoever sends it, and this host is the sender of the second hop (D13).
     pub topics: Arc<Mutex<OwnTopics>>,
     /// The batcher the entries are re-coalesced through, so each in-region subscriber gets one
-    /// batch holding only what it asked for (D21).
+    /// batch holding only what it asked for (D21). Chunks do not pass through it: a chunk is
+    /// large class and travels on a stream of its own (§5.4).
     pub batches: BatchHandle,
 }
 

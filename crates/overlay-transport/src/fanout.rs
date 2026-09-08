@@ -6,6 +6,7 @@
 //! | Message | Carrier |
 //! |---|---|
 //! | small class, toward a peer that advertised `DATAGRAM_BATCHES` and takes datagrams | the batcher (T-061), then one `BATCH` datagram per window ([`crate::batching`]), carrying `RELAY` when the peer is a relay for it |
+//! | large class into a region big enough to stripe, toward a peer that advertised `STRIPING` | the chunks that peer was assigned (T-071, T-072), all on one unidirectional stream |
 //! | everything else | a `CHUNK` with `k = 1, m = 0` on a unidirectional stream of its own |
 //!
 //! The whole-message form is what every release can read, so it is both v1's only path and what
@@ -13,6 +14,10 @@
 //! `DATAGRAM_BATCHES` (D29), which is what makes the upgrade a rolling one. It also carries the
 //! small-class payloads no `BATCH` can: an entry's length is a `u16` and small class is decided
 //! by kind, so an `AttesterSlashing` runs past what a batch entry holds (D21).
+//!
+//! A striped message costs the origin about one message-worth of chunks per region however many
+//! hosts are in them, because each host is sent one chunk and passes it to the rest of its own
+//! region (§5.4). That second hop is [`crate::receive`]'s.
 //!
 //! A small-class batch crossing to a region large enough to be worth the hop goes to a few of
 //! that region's hosts with `RELAY` set, and each of them delivers it inside its own region
