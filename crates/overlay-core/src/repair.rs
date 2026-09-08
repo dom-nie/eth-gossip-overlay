@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use crate::custody::{BitSet, ColumnGap};
 use crate::msgid::MessageId;
 use crate::reassemble::{Incomplete, Reassembler};
 use crate::roster::Hostname;
@@ -79,13 +80,34 @@ pub struct Request {
     pub timeout: Duration,
 }
 
-/// What one tick decided about one message.
+/// How a column is named where no message id exists: the block it belongs to and its index
+/// (D23, T-083).
+pub type ColumnKey = ([u8; 32], u16);
+
+/// One column the scheduler decided to ask a peer for by identity (T-083).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColumnRequest {
+    /// The block the column belongs to.
+    pub block_root: [u8; 32],
+    /// The column index, which is also its subnet.
+    pub index: u16,
+    /// Who to ask: an in-region live peer, by round trip.
+    pub peer: Hostname,
+    /// How long the answer is waited for, from [`attempt_timeout`].
+    pub timeout: Duration,
+}
+
+/// What one tick decided about one message or one column.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
     /// Open a stream to the peer and ask it for these indices.
     Ask(Request),
+    /// Open a stream to the peer and ask it for this column by identity (T-083).
+    AskColumn(ColumnRequest),
     /// Stop asking about this message and count [`Outcome::GaveUp`].
     GaveUp(MessageId),
+    /// Stop asking about this column and count [`Outcome::GaveUp`].
+    GaveUpColumn(ColumnKey),
 }
 
 /// Which indices to ask for, given a split of `k` data chunks, the `held` chunks of any kind
@@ -160,7 +182,10 @@ where
 /// and dropped the tick it is no longer incomplete, so this is bounded by the reassembler's own
 /// [`MAX_IN_FLIGHT`](crate::reassemble::MAX_IN_FLIGHT).
 #[derive(Default)]
-pub struct Scheduler(HashMap<MessageId, Repair>);
+pub struct Scheduler {
+    messages: HashMap<MessageId, Repair>,
+    columns: HashMap<ColumnKey, Repair>,
+}
 
 /// One message's repair: when it became due, who has been asked, and whether an answer is still
 /// outstanding.
@@ -169,6 +194,17 @@ struct Repair {
     tried: Vec<Hostname>,
     asking: bool,
     gave_up: bool,
+}
+
+impl Repair {
+    fn new(now: Instant) -> Self {
+        Self {
+            due_at: now,
+            tried: Vec::new(),
+            asking: false,
+            gave_up: false,
+        }
+    }
 }
 
 impl Scheduler {
@@ -197,7 +233,7 @@ impl Scheduler {
         // this host is done asking about it. The set is built once rather than scanned per
         // entry, because both sides of that comparison are bounded by `MAX_IN_FLIGHT`.
         let still_late: HashSet<MessageId> = incomplete.iter().map(|msg| msg.msg_id).collect();
-        self.0.retain(|msg_id, _| still_late.contains(msg_id));
+        self.messages.retain(|msg_id, _| still_late.contains(msg_id));
         incomplete
             .iter()
             .filter_map(|msg| self.decide(msg, &rtt, now))
@@ -207,7 +243,36 @@ impl Scheduler {
     /// Records that the request for `msg_id` has been answered, one way or another, so the next
     /// tick may ask the next candidate.
     pub fn answered(&mut self, msg_id: &MessageId) {
-        if let Some(repair) = self.0.get_mut(msg_id) {
+        if let Some(repair) = self.messages.get_mut(msg_id) {
+            repair.asking = false;
+        }
+    }
+
+    /// What to do now about the columns of every block past its deadline (T-083).
+    ///
+    /// `gaps` arrive from the custody tracker already in priority order, so this walks each
+    /// one's `missing` from the front and stops at `threshold - have_count`: past that the
+    /// beacon node can reconstruct the rest and another request buys nothing (§2).
+    ///
+    /// A column the reassembler already holds chunks of is left to [`Scheduler::tick`] above:
+    /// the chunk path knows which indices are missing and which peers sent the rest, and asking
+    /// for the whole column by identity would fetch what this host already has.
+    pub fn tick_columns(
+        &mut self,
+        gaps: &[ColumnGap],
+        threshold: usize,
+        in_flight: &BitSet,
+        candidates: &[(Hostname, Duration)],
+        now: Instant,
+    ) -> Vec<Decision> {
+        let _ = (gaps, threshold, in_flight, candidates, now);
+        Vec::new()
+    }
+
+    /// Records that the request for `key` has been answered, one way or another, so the next
+    /// tick may ask the next candidate.
+    pub fn answered_column(&mut self, key: &ColumnKey) {
+        if let Some(repair) = self.columns.get_mut(key) {
             repair.asking = false;
         }
     }
@@ -216,12 +281,10 @@ impl Scheduler {
     where
         R: Fn(&Hostname) -> Option<Duration>,
     {
-        let repair = self.0.entry(msg.msg_id).or_insert_with(|| Repair {
-            due_at: now,
-            tried: Vec::new(),
-            asking: false,
-            gave_up: false,
-        });
+        let repair = self
+            .messages
+            .entry(msg.msg_id)
+            .or_insert_with(|| Repair::new(now));
         if repair.asking || repair.gave_up {
             return None;
         }
@@ -440,6 +503,7 @@ mod tests {
                 match decision {
                     Decision::Ask(request) => asked.push(request.peer),
                     Decision::GaveUp(_) => asked.push(host("gave up")),
+                    other => panic!("the chunk path decided {other:?}"),
                 }
             }
             scheduler.answered(&MessageId([9; 20]));
@@ -499,6 +563,60 @@ mod tests {
                 .tick(&reassembler, reloaded, reachable, clock.now())
                 .as_slice(),
             [Decision::Ask(_)]
+        ));
+    }
+
+    /// A gap for one block: `have` columns already in, `missing` still wanted.
+    fn gap(missing: &[u16], have_count: usize) -> ColumnGap {
+        ColumnGap {
+            block_root: [3; 32],
+            missing: missing.to_vec(),
+            have_count,
+        }
+    }
+
+    /// Mainnet's threshold, which is the only number `tick_columns` takes from the snapshot.
+    const THRESHOLD: usize = 64;
+
+    /// D23's answer for a column nobody announced: in-region live peers by round trip, and the
+    /// next one the moment the first says it does not hold it.
+    #[test]
+    fn never_seen_column_is_requested_from_in_region_peers_in_rtt_order_and_moves_on_after_not_found()
+    {
+        let clock = FakeClock::new();
+        let candidates = [
+            (host("near"), Duration::from_millis(5)),
+            (host("far"), Duration::from_millis(50)),
+        ];
+        let gaps = [gap(&[4], 0)];
+        let none = BitSet::new(128);
+        let mut scheduler = Scheduler::default();
+
+        let first = scheduler.tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now());
+        assert_eq!(
+            first,
+            vec![Decision::AskColumn(ColumnRequest {
+                block_root: [3; 32],
+                index: 4,
+                peer: host("near"),
+                timeout: REPAIR_ATTEMPT_MIN,
+            })]
+        );
+
+        // Nothing more is asked while the first request is outstanding.
+        assert_eq!(
+            scheduler.tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now()),
+            Vec::new()
+        );
+
+        scheduler.answered_column(&([3; 32], 4));
+        clock.advance(REPAIR_TICK);
+
+        assert!(matches!(
+            scheduler
+                .tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now())
+                .as_slice(),
+            [Decision::AskColumn(request)] if request.peer == host("far")
         ));
     }
 }

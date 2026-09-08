@@ -70,6 +70,8 @@ async fn run(deps: Deps, deadline: watch::Receiver<Duration>) {
                     tracing::debug!(%msg_id, "nobody left to ask for this message");
                     deps.stats.repair_request(Outcome::GaveUp);
                 }
+                // T-083's column arms, wired in below.
+                Decision::AskColumn(_) | Decision::GaveUpColumn(_) => {}
                 Decision::Ask(request) => match view.get(&request.peer) {
                     Some(peer) => {
                         attempts.spawn(attempt(deps.clone(), peer.clone(), request));
