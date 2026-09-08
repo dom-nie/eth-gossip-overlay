@@ -20,6 +20,7 @@ use overlay_core::events::{self, FirstArrival};
 use overlay_core::fanout::Outbound;
 use overlay_core::lanes::{ClassLanes, LanePusher};
 use overlay_core::msgid::MessageId;
+use overlay_core::recent::SharedRecentLarge;
 use overlay_core::roster::SelfIdentity;
 use overlay_core::seen::SharedSeenCache;
 use overlay_core::time::Clock;
@@ -65,6 +66,7 @@ pub struct Inbound {
     lanes: ClassLanes<BnMessage>,
     commands: mpsc::Sender<BnCommand>,
     seen: SharedSeenCache,
+    recent: SharedRecentLarge,
     out: LanePusher<Outbound>,
     node: Arc<SelfIdentity>,
     clock: Arc<dyn Clock>,
@@ -78,11 +80,13 @@ pub struct Inbound {
 impl Inbound {
     /// Starts draining `lanes`. Every message is reported `Accept` on `commands`; a new one
     /// becomes an [`Outbound`] on `out`, stamped with `clock`'s time, and a new large one is
-    /// logged as this host's first arrival under `node`'s name (T-044).
+    /// logged as this host's first arrival under `node`'s name (T-044) and kept in `recent` for
+    /// a peer that may have to repair it (§5.6).
     pub fn spawn(
         lanes: ClassLanes<BnMessage>,
         commands: mpsc::Sender<BnCommand>,
         seen: SharedSeenCache,
+        recent: SharedRecentLarge,
         out: LanePusher<Outbound>,
         node: Arc<SelfIdentity>,
         clock: Arc<dyn Clock>,
@@ -92,6 +96,7 @@ impl Inbound {
             lanes,
             commands,
             seen,
+            recent,
             out,
             node,
             clock,
@@ -176,6 +181,16 @@ impl Inbound {
             payload: msg.data.into(),
             received_at,
         };
+        // Insert site 1 of 2 for the recent store (§5.6); T-074's completion is the other. Only
+        // the large class is ever repaired, so only the large class is worth the bytes.
+        if class == Class::Large {
+            self.recent.insert(
+                id,
+                outbound.topic.clone(),
+                outbound.payload.clone(),
+                received_at,
+            );
+        }
         // The pusher has already counted the drop on its own LaneStats, and for the large
         // lane logged it; this is the series T-041 reads under the inbound path's name.
         if self.out.push(class, outbound).is_err() {
@@ -636,6 +651,7 @@ mod tests {
             lanes,
             commands.clone(),
             seen.clone(),
+            SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)),
             out.pusher(),
             Arc::new(node()),
             Arc::new(clock),

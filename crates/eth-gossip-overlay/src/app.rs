@@ -40,6 +40,7 @@ use overlay_core::config::Config;
 use overlay_core::identity::{Seeds, derive_tls_keypair};
 use overlay_core::lanes::ClassLanes;
 use overlay_core::reassemble::{ReassembleConfig, Reassembler};
+use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
 use overlay_core::roster::{Hostname, Roster, SelfIdentity, resolve_self};
 use overlay_core::seen::{SEEN_CAPACITY, SEEN_TTL, SeenCache, SharedSeenCache};
 use overlay_core::time::SystemClock;
@@ -280,6 +281,9 @@ impl App {
             capacity = SEEN_CAPACITY,
             "seen cache ready"
         );
+        // What a repair request is answered from, filled by the beacon node link and by the
+        // reassembler, which is why both are handed the one handle (§5.6).
+        let recent = SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES));
 
         let progress = Progress::default();
         let (spec_tx, spec_rx) = spec_watch();
@@ -329,6 +333,7 @@ impl App {
             bn_lanes,
             commands.clone(),
             seen.clone(),
+            recent.clone(),
             fanout_lanes.pusher(),
             node.clone(),
             clock.clone(),
