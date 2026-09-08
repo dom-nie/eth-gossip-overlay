@@ -6,6 +6,7 @@ pub mod fanout;
 pub mod hello;
 pub mod manager;
 pub mod receive;
+pub mod repair;
 pub mod router;
 pub mod sender;
 pub mod subs;
