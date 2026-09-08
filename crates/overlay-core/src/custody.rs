@@ -184,8 +184,14 @@ impl CustodyTracker {
         now: Instant,
         in_flight: &BitSet,
     ) -> Vec<ColumnGap> {
-        let _ = (deadline, now, in_flight);
-        Vec::new()
+        let _ = (deadline, in_flight, now);
+        let mut gaps: Vec<(u64, ColumnGap)> = self
+            .slots
+            .iter()
+            .filter_map(|(slot, block)| Some((*slot, block.gap()?)))
+            .collect();
+        gaps.sort_by_key(|(slot, _)| *slot);
+        gaps.into_iter().map(|(_, gap)| gap).collect()
     }
 
     /// Keeps the newest [`TRACKED_SLOTS`] slots and drops the rest. A slot the fleet has moved
@@ -204,6 +210,20 @@ impl CustodyTracker {
 }
 
 impl Block {
+    fn gap(&self) -> Option<ColumnGap> {
+        let root = self.root?;
+        let missing: Vec<u16> = self
+            .expected
+            .iter()
+            .filter(|index| !self.have.contains(*index))
+            .collect();
+        (!missing.is_empty()).then_some(ColumnGap {
+            block_root: root,
+            missing,
+            have_count: self.have.count(),
+        })
+    }
+
     fn new(columns: usize) -> Self {
         Self {
             root: None,
