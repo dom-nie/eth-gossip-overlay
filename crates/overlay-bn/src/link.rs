@@ -728,7 +728,8 @@ mod tests {
     use crate::node_key::NodeKey;
     use crate::spec::spec_watch;
     use crate::testutil::{
-        self, FakeBn, FakeBnEvent, IDLE_TIMEOUT, LOG, RpcAnswer, link_config, node_key, ok_json,
+        self, FakeBn, FakeBnEvent, IDLE_TIMEOUT, LOG, PublicPeer, Received, RpcAnswer, link_config,
+        node_key, ok_json,
     };
 
     /// Long enough for a dial, a noise handshake and a gossipsub exchange on a loaded CI box,
@@ -1324,6 +1325,78 @@ mod tests {
         assert!(nothing_large_within_a_second(&mut harness.lanes).await);
         assert_eq!(recv_counts(&harness, BLOCK_TOPIC), (0, 0));
         assert_eq!(bn.idontwant_msgs(), 0, "{}", bn.metrics_text());
+    }
+
+    /// What the race is staged with. The sidecar's own copy of the message has to still be
+    /// on the wire when the beacon node picks who to forward to, because a copy that has
+    /// landed is a duplicate the beacon node withholds on its own account, flag or no flag.
+    /// Megabytes take milliseconds to cross a loopback socket while the IDONTWANT ahead of
+    /// them is a control message on the fork's priority queue and arrives at once, which is
+    /// the same gap a real block opens.
+    const RACING_PAYLOAD_BYTES: usize = 4 << 20;
+
+    /// Spins until `ready` holds and fails with `what` after [`WAIT`]. A yield rather than a
+    /// sleep: what a staged race leaves to look in is microseconds, not milliseconds.
+    async fn until(what: &str, mut ready: impl FnMut() -> bool) {
+        tokio::time::timeout(WAIT, async {
+            while !ready() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{what}"));
+    }
+
+    /// A sidecar, its beacon node and one public peer of the node, all subscribed to the block
+    /// topic, with the node holding validation so the test owns the window between it taking a
+    /// message and forwarding it.
+    async fn staged_race(
+        idontwant_on_publish: bool,
+    ) -> (FakeBn, Harness, PublicPeer, mpsc::Receiver<Received>) {
+        let mut bn = FakeBn::start_with_metrics().await;
+        let received = bn.received();
+        let mut cfg = link_config(&bn);
+        cfg.gossip.idontwant_on_publish = idontwant_on_publish;
+        let mut harness = spawn(cfg, &bn);
+        subscribe_bn(&mut harness, &bn, BLOCK_TOPIC).await;
+        subscribe_link(&harness, &mut bn, &[BLOCK_TOPIC]).await;
+        let public = bn.attach_public_peer(BLOCK_TOPIC).await;
+        bn.hold_validation().await;
+        (bn, harness, public, received)
+    }
+
+    /// T-075 (4). The race CL-N4 leaves: the beacon node takes a public copy of a message the
+    /// sidecar is about to publish and would forward it back over the localhost socket. The
+    /// sidecar publishes inside the window the node's held validation opens, and the count
+    /// read before the release is what says the window was still open, so what withholds the
+    /// copy is the IDONTWANT and not the sidecar's own copy having landed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn racing_public_copy_is_withheld_by_the_bn_when_the_flag_is_on() {
+        let (bn, mut harness, public, mut received) = staged_race(true).await;
+        let payload = incompressible(RACING_PAYLOAD_BYTES);
+        let public_id = public.publish(BLOCK_TOPIC, &payload).await;
+        tokio::time::timeout(WAIT, received.recv())
+            .await
+            .expect("the fake never took the public copy")
+            .unwrap();
+
+        let id = publish(&harness.commands, BLOCK_TOPIC, &compress(&payload))
+            .await
+            .unwrap();
+        until("the sidecar's IDONTWANT never reached the beacon node", || {
+            bn.idontwant_msgs() > 0
+        })
+        .await;
+        assert_eq!(
+            bn.msgs_received_unfiltered(BLOCK_TOPIC),
+            1,
+            "the sidecar's own copy landed before the forward, so the race was not staged"
+        );
+        bn.release_validation().await;
+
+        assert_eq!(id, public_id);
+        assert!(nothing_large_within_a_second(&mut harness.lanes).await);
+        assert_eq!(recv_counts(&harness, BLOCK_TOPIC), (0, 0));
     }
 
     #[tokio::test(flavor = "multi_thread")]
