@@ -102,16 +102,16 @@ groups:
           summary: "{{ $labels.instance }} refused an automatic roster reload"
           runbook: docs/troubleshooting.md#overlayrosterreloadrejected
 
-      # OPS-N4, at 80% of the ceiling. Prometheus cannot read the unit's MemoryMax, so 512M is
+      # OPS-N4, at 80% of the ceiling. Prometheus cannot read the unit's MemoryMax, so 1G is
       # the literal here and it is the value deploy/systemd/eth-gossip-overlay.service sets. Raise or
       # lower MemoryMax and this number has to move with it (docs/rollout.md says so too).
       - alert: OverlayMemoryHigh
-        expr: process_resident_memory_bytes{job="eth-gossip-overlay"} / (512 * 1024 * 1024) > 0.8
+        expr: process_resident_memory_bytes{job="eth-gossip-overlay"} / (1024 * 1024 * 1024) > 0.8
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "{{ $labels.instance }} is over 80% of the unit's 512M MemoryMax"
+          summary: "{{ $labels.instance }} is over 80% of the unit's 1G MemoryMax"
           runbook: docs/troubleshooting.md#overlaymemoryhigh
 
       # §12: restarts. The unit restarts always and backs a crash loop off to a minute, so a

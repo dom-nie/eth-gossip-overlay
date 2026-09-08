@@ -340,6 +340,16 @@ fn reference_table() -> String {
 /// which is the example every other number in `docs/performance.md` is taken at.
 const BUDGET_ROSTER: usize = 200;
 
+/// A byte count the way the unit writes it, so the document and
+/// `deploy/systemd/eth-gossip-overlay.service` spell the same ceiling the same way.
+fn systemd_size(bytes: u64) -> String {
+    let gib = 1024 * 1024 * 1024;
+    match bytes {
+        bytes if bytes.is_multiple_of(gib) => format!("{}G", bytes / gib),
+        bytes => format!("{}M", bytes / (1024 * 1024)),
+    }
+}
+
 /// The generated half of `docs/performance.md`: every bounded structure's worst case at the
 /// Appendix A defaults, the sum, the headroom OPS-N4 asks for, and the ceiling it all has to
 /// fit under.
@@ -354,9 +364,9 @@ fn budget_table() -> String {
 
     let mut table = format!(
         "At the shipped defaults, a roster of {BUDGET_ROSTER} hosts and the unit's \
-         `MemoryMax={}M`, which gives every connection a receive window of {} MiB.\n\n\
+         `MemoryMax={}`, which gives every connection a receive window of {} MiB.\n\n\
          | Structure | Bytes | MiB |\n|---|---:|---:|\n",
-        budget.limit / (1024 * 1024),
+        systemd_size(budget.limit),
         mib(budget.receive_window),
     );
     for (name, bytes) in &budget.rows {

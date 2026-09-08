@@ -883,11 +883,11 @@
               },
               {
                 "color": "orange",
-                "value": 429496730
+                "value": 858993459
               },
               {
                 "color": "red",
-                "value": 536870912
+                "value": 1073741824
               }
             ]
           }
@@ -905,7 +905,7 @@
           "sort": "desc"
         }
       },
-      "description": "The lines are 80% of the shipped unit's MemoryMax and MemoryMax itself, both 512M. Change MemoryMax and these thresholds and OverlayMemoryHigh's literal have to change with it."
+      "description": "The lines are 80% of the shipped unit's MemoryMax and MemoryMax itself, both 1G. Change MemoryMax and these thresholds and OverlayMemoryHigh's literal have to change with it."
     },
     {
       "type": "timeseries",

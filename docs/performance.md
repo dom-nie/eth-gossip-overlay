@@ -6,11 +6,11 @@ the second is arithmetic over the code's own constants.
 
 ## Memory
 
-`MemoryMax=512M` in the shipped unit is the ceiling this table is written against (OPS-N4).
-Every row is a structure with a bound in code, so the sum is a worst case and not a
-measurement: nothing in it grows with traffic, and a real fleet sits far below it. Two rows read
-zero because the structure they name has not been built yet, `recent_store` (T-081) and
-`by_root_cache` (T-085); each ticket fills its own row in.
+`MemoryMax=1G` in the shipped unit is the ceiling this table is written against (OPS-N4). Every
+row is a structure with a bound in code, so the sum is a worst case and not a measurement:
+nothing in it grows with traffic, and a real fleet sits far below it. Two rows read zero because
+the structure they name has not been built yet, `recent_store` (T-081) and `by_root_cache`
+(T-085); each ticket fills its own row in.
 
 `quic_receive_windows` is the one row that is not a constant. It is whatever the other rows
 leave under the ceiling, shared out over the roster and floored at the 1 MiB stream window
@@ -19,7 +19,7 @@ Once the floor binds, it cannot shrink further and the sidecar warns at startup.
 
 <!-- generated from crates/overlay-core/src/budget.rs, do not edit by hand -->
 
-At the shipped defaults, a roster of 200 hosts and the unit's `MemoryMax=512M`, which gives every connection a receive window of 1.0 MiB.
+At the shipped defaults, a roster of 200 hosts and the unit's `MemoryMax=1G`, which gives every connection a receive window of 2.9 MiB.
 
 | Structure | Bytes | MiB |
 |---|---:|---:|
@@ -30,18 +30,24 @@ At the shipped defaults, a roster of 200 hosts and the unit's `MemoryMax=512M`, 
 | `peer_send_lanes` | 128241664 | 122.3 |
 | `gossipsub` | 34132480 | 32.6 |
 | `by_root_cache` | 0 | 0.0 |
-| `quic_receive_windows` | 208666624 | 199.0 |
-| **Sum of the bounds** | 455143936 | 434.1 |
-| **Plus 25% headroom** | 568929920 | 542.6 |
-| `MemoryMax` | 536870912 | 512.0 |
+| `quic_receive_windows` | 609453420 | 581.2 |
+| **Sum of the bounds** | 855930732 | 816.3 |
+| **Plus 25% headroom** | 1069913415 | 1020.3 |
+| `MemoryMax` | 1073741824 | 1024.0 |
 
 <!-- end generated -->
 
-At 200 hosts the worst case with its headroom is 542.6 MiB against a 512 MiB ceiling, so the
-example above does not fit and the sidecar says so at startup. The floor is what makes it
-visible: with the other rows where they are, a 200-host roster has 0.87 MiB per connection to
-give and the window cannot go below 1 MiB, so the last 30 MiB has nowhere to come from. A
-roster of 181 hosts is the largest that fits at these defaults.
+Because the QUIC row is the remainder, the sum sits on the usable line whatever the roster, and
+the floor is what eventually breaks that: the other rows grow with the fleet until there is less
+than 1 MiB per connection to hand out, and past that point the total goes over. At these
+defaults that happens at 498 hosts. A row that grows for any other reason brings it forward, so
+a fleet well inside the limit today is not necessarily inside it after a bound moves.
+
+The ceiling was 512M until MD-05, where this table first got computed and the 200-host example
+did not fit; the largest roster that did was 181. Nothing had grown, and 512M had never been
+justified anywhere the bounds it holds were, so the ceiling moved rather than the bounds. If you
+change `MemoryMax` yourself, `OverlayMemoryHigh` in `deploy/prometheus/alerts.yml` and the two
+threshold lines on the dashboard's memory panel carry it as a literal and have to move with it.
 
 The sidecar logs this table at startup and again from `eth-gossip-overlay check-config`, at your
 own roster size and against `/sys/fs/cgroup/memory.max` where there is one, so what a host

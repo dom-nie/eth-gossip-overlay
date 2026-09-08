@@ -21,7 +21,7 @@ examples:
 Two things about the rules. `OverlayMemoryHigh` and `OverlaySidecarRestarting` read `process_*`
 series, which every target with a process collector exports, so they select on
 `job="eth-gossip-overlay"`; if your scrape job has another name, change theirs. And `OverlayMemoryHigh`
-carries `512M` as a literal, because Prometheus cannot see the unit's `MemoryMax`. If you change
+carries `1G` as a literal, because Prometheus cannot see the unit's `MemoryMax`. If you change
 `MemoryMax` in `deploy/systemd/eth-gossip-overlay.service`, change the rule and the dashboard's
 threshold lines to match, or the alert goes off at the wrong number in whichever direction you
 moved.
