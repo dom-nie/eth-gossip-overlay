@@ -3669,13 +3669,19 @@ mod tests {
     /// Asks node 1 for `missing` of `msg_id` on a stream of its own and reads back everything it
     /// answers, up to and including the `REPAIR_RESP` that ends the exchange.
     async fn ask(peer: &PeerInfo, msg_id: MessageId, missing: Vec<u16>) -> Vec<Frame> {
+        ask_for(peer, RepairReq::Missing { msg_id, missing }).await
+    }
+
+    /// The same for a column named by identity, which is what a peer that never saw one sends.
+    async fn ask_column(peer: &PeerInfo, block_root: [u8; 32], index: u8) -> Vec<Frame> {
+        ask_for(peer, RepairReq::Column { block_root, index }).await
+    }
+
+    async fn ask_for(peer: &PeerInfo, request: RepairReq) -> Vec<Frame> {
         let (mut send, mut recv) = peer.connection.open_bi().await.unwrap();
-        wire::write_frame(
-            &mut send,
-            &Frame::RepairReq(RepairReq::Missing { msg_id, missing }),
-        )
-        .await
-        .unwrap();
+        wire::write_frame(&mut send, &Frame::RepairReq(request))
+            .await
+            .unwrap();
         send.finish().unwrap();
 
         let mut answer = Vec::new();
@@ -3726,6 +3732,42 @@ mod tests {
                 (ChunkFlags::FORWARDED, 1, chunks[1].clone()),
                 (ChunkFlags::FORWARDED, 3, chunks[3].clone()),
             ]
+        );
+    }
+
+    /// The arm T-082 left answering `not_found`. A peer that never saw a column has no message
+    /// id for it, so it names the column and this host resolves it through the recent store's
+    /// index (D23, T-081's hook). Every data chunk comes back, because a requester asking by
+    /// identity holds none of them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn responder_answers_a_column_request_by_block_root_and_index() {
+        let column = topic("data_column_sidecar_5");
+        let (cluster, peer) = peer_of(subscriptions(&[&column], &[]), &[(1, &column)]).await;
+        let body = large_payload(8 * 1024);
+        let msg_id = holding(&cluster, &column, &body);
+        cluster.recent(1).index_column([9; 32], 5, msg_id);
+        told_about(&cluster, &column).await;
+
+        let answer = ask_column(&peer, [9; 32], 5).await;
+
+        let split = Params::for_len(body.len(), 2048, 0.10).unwrap();
+        let sent: Vec<u16> = answer
+            .iter()
+            .filter_map(|frame| match frame {
+                Frame::Chunk { chunk, .. } => Some(chunk.index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(sent, (0..split.k).collect::<Vec<u16>>());
+        assert_eq!(
+            answer.last(),
+            Some(&Frame::RepairResp(RepairResp::Chunks(Vec::new())))
+        );
+
+        assert_eq!(
+            ask_column(&peer, [8; 32], 5).await,
+            [Frame::RepairResp(RepairResp::NotFound)],
+            "a column this host does not hold is answered, not left hanging"
         );
     }
 
