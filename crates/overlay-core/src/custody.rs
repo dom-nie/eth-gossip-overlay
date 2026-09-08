@@ -379,4 +379,33 @@ mod tests {
         assert_eq!(gap.missing[..3], [5, 17, 90]);
         assert_eq!(gap.missing[3..], never_seen);
     }
+
+    /// CL-N3: every column number comes from the beacon node. A network with twice mainnet's
+    /// columns has twice the threshold and a set with room for an index mainnet has no column
+    /// for, and nothing in this crate says 64 or 128.
+    #[test]
+    fn threshold_and_bitset_size_come_from_the_spec_snapshot() {
+        let wide = SpecSnapshot {
+            data_column_sidecar_subnet_count: 256,
+            number_of_columns: 256,
+            ..SpecSnapshot::MAINNET
+        };
+        let clock = FakeClock::new();
+
+        let mut tracker = CustodyTracker::new(&wide);
+        assert_eq!(tracker.threshold(), 128);
+        let expected = tracker.expected_columns(&column_topics(&[200]));
+        assert!(expected.contains(200));
+        tracker.on_block(1, ROOT, expected, clock.now());
+        tracker.on_column(1, 200, ROOT);
+        clock.advance(DEADLINE);
+        assert_eq!(
+            tracker.missing_past_deadline(DEADLINE, clock.now(), &BitSet::new(256)),
+            Vec::new()
+        );
+
+        let mainnet = CustodyTracker::new(&SpecSnapshot::MAINNET);
+        assert_eq!(mainnet.threshold(), 64);
+        assert!(!mainnet.expected_columns(&column_topics(&[200])).contains(200));
+    }
 }
