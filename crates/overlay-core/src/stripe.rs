@@ -80,6 +80,23 @@ mod tests {
         MessageId(id)
     }
 
+    /// A region of one host is the smallest stripe there is, and it is the whole message in
+    /// chunks: nobody else is live to take any of them.
+    #[test]
+    fn single_host_region_gets_every_chunk() {
+        let targets = assign(&msg_id(11), &hosts(1), 4);
+
+        assert_eq!(targets, vec![host("bn-01"); 4]);
+    }
+
+    /// A region with nobody live in it takes nothing, which is what a region behind a broken WAN
+    /// link looks like from here (§9). The caller sends the chunks nowhere rather than dividing
+    /// by a region of no hosts.
+    #[test]
+    fn empty_region_takes_no_chunks() {
+        assert!(assign(&msg_id(11), &[], 4).is_empty());
+    }
+
     /// §5.4: with about as many chunks as hosts each host takes one, and a region that is short
     /// of hosts takes two rather than piling the remainder on whoever the rotation started on.
     #[test]
