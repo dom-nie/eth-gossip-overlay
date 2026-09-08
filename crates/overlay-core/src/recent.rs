@@ -17,6 +17,201 @@
 //! did not give it: both insert sites already hold the injected clock, and a test drives expiry
 //! from a `FakeClock` of its own.
 
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+
+use bytes::Bytes;
+
+use crate::msgid::MessageId;
+use crate::topic::Topic;
+
+/// How long a payload can still be asked for (§5.6). The same minute the seen cache remembers
+/// the id for, so a peer that has not yet forgotten a message finds its bytes here.
+pub const RECENT_TTL: Duration = Duration::from_secs(60);
+
+/// Payload bytes one host keeps for repair.
+///
+/// §10's slot is one 200 KB block and 128 data columns of about 40 KB, which is 5.2 MiB, and
+/// [`RECENT_TTL`] is five mainnet slots of it: 26 MiB. Payloads are kept whole rather than as
+/// chunks, so unlike the reassembler's bound there is no parity to leave room for. T-076's
+/// memory budget table takes this row from here.
+pub const RECENT_MAX_BYTES: usize = 5 * (200 * 1024 + 128 * 40 * 1024);
+
+/// How T-083 names a column: the root of the block it belongs to and its index, which is also
+/// its subnet.
+type ColumnKey = ([u8; 32], u8);
+
+struct Entry {
+    topic: Topic,
+    payload: Bytes,
+    at: Instant,
+    column: Option<ColumnKey>,
+}
+
+/// The large messages this host took recently, oldest first, bounded by the bytes they come to.
+///
+/// Nothing here refreshes: an entry keeps the arrival time of the insert that created it, so the
+/// queue stays in insertion order and both bounds only ever look at its front.
+pub struct RecentLarge {
+    ttl: Duration,
+    max_bytes: usize,
+    bytes: usize,
+    entries: HashMap<MessageId, Entry>,
+    order: VecDeque<MessageId>,
+    columns: HashMap<ColumnKey, MessageId>,
+}
+
+impl RecentLarge {
+    /// A store that forgets a payload `ttl` after it arrived and never holds more than
+    /// `max_bytes` of them. The sidecar passes [`RECENT_TTL`] and [`RECENT_MAX_BYTES`]; a test
+    /// passes less so the bound is reachable without a slot's traffic.
+    pub fn new(ttl: Duration, max_bytes: usize) -> Self {
+        Self {
+            ttl,
+            max_bytes,
+            bytes: 0,
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+            columns: HashMap::new(),
+        }
+    }
+
+    /// Keeps `payload` under `msg_id`. An id already held is left as it arrived, so a second
+    /// insert neither charges the bound again nor extends the minute.
+    ///
+    /// A payload larger than the whole bound takes the store down to itself and then goes too,
+    /// which is the bound holding rather than a case to special-case: nothing this host accepts
+    /// off the wire is that size.
+    pub fn insert(&mut self, msg_id: MessageId, topic: Topic, payload: Bytes, now: Instant) {
+        self.expire(now);
+        if self.entries.contains_key(&msg_id) {
+            return;
+        }
+        self.bytes += payload.len();
+        self.entries.insert(
+            msg_id,
+            Entry {
+                topic,
+                payload,
+                at: now,
+                column: None,
+            },
+        );
+        self.order.push_back(msg_id);
+        while self.bytes > self.max_bytes && self.pop_oldest() {}
+    }
+
+    /// The topic and bytes held for `msg_id`, for a responder about to answer a repair request
+    /// with them. Expiry happens on `insert` and `gc`, not here, so an entry past its minute
+    /// that neither has removed yet still answers.
+    pub fn get(&self, msg_id: &MessageId) -> Option<(Topic, Bytes)> {
+        self.entries
+            .get(msg_id)
+            .map(|entry| (entry.topic.clone(), entry.payload.clone()))
+    }
+
+    /// Records that the message held under `msg_id` is the column `index` of `block_root`, so a
+    /// peer that never saw the column can still ask for it (T-083). An id the store no longer
+    /// holds is ignored: there would be nothing for the key to resolve to.
+    pub fn index_column(&mut self, block_root: [u8; 32], index: u8, msg_id: MessageId) {
+        let Some(entry) = self.entries.get_mut(&msg_id) else {
+            return;
+        };
+        if let Some(previous) = entry.column.replace((block_root, index)) {
+            self.columns.remove(&previous);
+        }
+        self.columns.insert((block_root, index), msg_id);
+    }
+
+    /// Which message is column `index` of `block_root`, for a caller that then reads it with
+    /// [`get`](Self::get).
+    pub fn get_by_column(&self, block_root: [u8; 32], index: u8) -> Option<MessageId> {
+        self.columns.get(&(block_root, index)).copied()
+    }
+
+    /// Drops every entry past its minute now, for a caller that wants the memory back between
+    /// inserts. `insert` does the same sweep on its own before adding.
+    pub fn gc(&mut self, now: Instant) {
+        self.expire(now);
+    }
+
+    fn expire(&mut self, now: Instant) {
+        while self
+            .order
+            .front()
+            .and_then(|id| self.entries.get(id))
+            .is_some_and(|entry| entry.at + self.ttl <= now)
+        {
+            self.pop_oldest();
+        }
+    }
+
+    // mutants::skip: expire drains through this until the front is unexpired, so a pop_oldest
+    // that does not pop loops forever. The mutant hangs the suite instead of failing it, and no
+    // test can tell the difference.
+    #[cfg_attr(test, mutants::skip)]
+    fn pop_oldest(&mut self) -> bool {
+        let Some(id) = self.order.pop_front() else {
+            return false;
+        };
+        let Some(entry) = self.entries.remove(&id) else {
+            return true;
+        };
+        self.bytes -= entry.payload.len();
+        if let Some(key) = entry.column {
+            self.columns.remove(&key);
+        }
+        true
+    }
+}
+
+/// One [`RecentLarge`] shared by the two insert sites, which are in different crates: T-016's
+/// inbound path in `overlay-bn` and T-074's completion in `overlay-transport`. Every method takes
+/// the lock for that one call and releases it before returning, so the store is never held across
+/// an `await`.
+#[derive(Clone)]
+pub struct SharedRecentLarge(Arc<Mutex<RecentLarge>>);
+
+impl SharedRecentLarge {
+    /// Wraps `store` so clones of the handle share it.
+    pub fn new(store: RecentLarge) -> Self {
+        Self(Arc::new(Mutex::new(store)))
+    }
+
+    /// [`RecentLarge::insert`] under the lock.
+    pub fn insert(&self, msg_id: MessageId, topic: Topic, payload: Bytes, now: Instant) {
+        self.lock().insert(msg_id, topic, payload, now);
+    }
+
+    /// [`RecentLarge::get`] under the lock.
+    pub fn get(&self, msg_id: &MessageId) -> Option<(Topic, Bytes)> {
+        self.lock().get(msg_id)
+    }
+
+    /// [`RecentLarge::index_column`] under the lock.
+    pub fn index_column(&self, block_root: [u8; 32], index: u8, msg_id: MessageId) {
+        self.lock().index_column(block_root, index, msg_id);
+    }
+
+    /// [`RecentLarge::get_by_column`] under the lock.
+    pub fn get_by_column(&self, block_root: [u8; 32], index: u8) -> Option<MessageId> {
+        self.lock().get_by_column(block_root, index)
+    }
+
+    /// [`RecentLarge::gc`] under the lock.
+    pub fn gc(&self, now: Instant) {
+        self.lock().gc(now);
+    }
+
+    fn lock(&self) -> MutexGuard<'_, RecentLarge> {
+        // Nothing that runs under this lock can panic, so a poisoned store cannot happen; if one
+        // ever did, its containers would still be consistent and losing every repair answer
+        // would be the worse failure.
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
