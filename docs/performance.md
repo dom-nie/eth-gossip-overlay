@@ -92,3 +92,65 @@ overrun the receive path and buy back retransmits. The measurement worth having 
 real hosts ([rollout.md](rollout.md)), which is where the window has something to win; this pair is
 here to show that the tuning does not break anything and that the fleet still completes a slot's
 columns on every host in about a quarter of a second.
+
+## The overlay I/O thread on a reserved core
+
+Optional, Linux only, and off unless you set it. Nothing here is needed at the overlay's traffic
+rates (Architecture.md §11.1); it is for operators who already reserve cores per service and
+want the last of the jitter out of arrival times.
+
+By default the QUIC endpoint shares the tokio runtime that runs the router, the batcher and the
+beacon node link. A block arriving from a sibling is read by whichever worker thread is free,
+which on a busy host means it can queue behind a chunk being encoded or a message being handed
+to the beacon node.
+
+With a core named in `config.yaml`, the endpoint gets a single-threaded runtime of its own,
+pinned to that core:
+
+```yaml
+overlay:
+  io_thread:
+    pin_cpu: 30
+```
+
+That runtime owns one epoll instance and nothing else runs on it, so a packet arriving is read
+by a thread that was waiting for it. The rest of the sidecar is unchanged: frames reach the
+router through the same channels either way.
+
+### When it is worth setting
+
+Set it when all three hold. The host is bare metal, not a container sharing cores with
+neighbours you do not control. The sidecar's cgroup already has cores of its own,
+`AllowedCPUs=30-31` next to the beacon node's `AllowedCPUs=0-29` in the §11 layout. And you are
+measuring arrival times, so you can tell whether it changed anything.
+
+Leave it unset otherwise. An unset core costs nothing at all, and a pinned thread on a host
+whose cores are shared moves the contention rather than removing it.
+
+`pin_cpu` is read at startup only. Changing it needs a restart, not a `SIGHUP`.
+
+### Checking that it took
+
+`overlay_io_thread_pinned` is 1 when the endpoint is running on the core that was asked for, and
+0 both when no core was named and when the kernel refused the one that was. The refusal is a
+warning in the log, not a failed start: a cpuset narrower than the configuration expects should
+cost an operator the pinning and not the overlay.
+
+```console
+$ curl -s 127.0.0.1:7789/metrics | grep io_thread
+overlay_io_thread_pinned 1
+```
+
+The kernel's own answer is the thread's processor number. `psr` is the core a thread last ran
+on and `comm` is its name, which the sidecar sets to `overlay-io`:
+
+```console
+$ ps -L -o pid,tid,psr,comm -p "$(pidof eth-gossip-overlay)"
+    PID     TID PSR COMMAND
+ 118420  118420   3 eth-gossip-overl
+ 118420  118437  30 overlay-io
+ 118420  118438   7 tokio-runtime-wo
+```
+
+Sample it more than once. Every other thread moves between the cores its cgroup allows;
+`overlay-io` is the one that does not.
