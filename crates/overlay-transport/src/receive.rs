@@ -3631,4 +3631,30 @@ mod tests {
 
         assert_eq!(answer, [Frame::RepairResp(RepairResp::NotFound)]);
     }
+
+    /// The bound on what one request may cost this host (D24). Any `k` chunks put a message back
+    /// together, so a peer asking for more than that is not repairing anything, and encoding the
+    /// whole split for it would be work its own arithmetic never asked for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn responder_refuses_requests_above_k_indices() {
+        let block = topic("beacon_block");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(1, &block)]).await;
+        let body = large_payload(8 * 1024);
+        let msg_id = holding(&cluster, &block, &body);
+        told_about(&cluster, &block).await;
+        let split = Params::for_len(body.len(), 2048, 0.10).unwrap();
+
+        let wanted: Vec<u16> = (0..split.k).collect();
+        assert_eq!(
+            ask(&peer, msg_id, wanted).await.len(),
+            usize::from(split.k) + 1
+        );
+
+        let one_too_many: Vec<u16> = (0..=split.k).collect();
+
+        assert_eq!(
+            ask(&peer, msg_id, one_too_many).await,
+            [Frame::RepairResp(RepairResp::NotFound)]
+        );
+    }
 }
