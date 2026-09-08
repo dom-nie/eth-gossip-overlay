@@ -1558,5 +1558,19 @@ mod tests {
             assert_eq!(h.stats.rejected(), 0);
             assert_eq!(h.roster.borrow_and_update().hosts.len(), 4);
         }
+
+        #[tokio::test(start_paused = true)]
+        async fn manual_reload_of_the_same_shrinking_roster_applies() {
+            let mut h = Watched::start(8).await;
+            h.write(&roster_yaml(3));
+            h.poll().await;
+            assert_eq!(h.stats.rejected(), 1);
+
+            let report = h.handle.reload(Trigger::Manual).await.unwrap();
+
+            assert_eq!(report.applied, ["roster"]);
+            assert!(report.error.is_none(), "{report:?}");
+            assert_eq!(h.roster.borrow_and_update().hosts.len(), 3);
+        }
     }
 }
