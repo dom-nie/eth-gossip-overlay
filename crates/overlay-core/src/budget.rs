@@ -412,13 +412,13 @@ mod tests {
     /// total. The numbers are the ones `docs/performance.md` prints.
     const AT_TWO_HUNDRED_HOSTS: &[(&str, u64)] = &[
         ("seen_cache", 12_800_000),
-        ("recent_store", 0),
+        ("recent_store", 27_238_400),
         ("publish_queue", 35_651_584),
         ("reassembler", 35_651_584),
         ("peer_send_lanes", 128_241_664),
         ("gossipsub", 34_132_480),
         ("by_root_cache", 0),
-        ("quic_receive_windows", 609_453_420),
+        ("quic_receive_windows", 582_351_212),
     ];
 
     /// OPS-N4's whole point: every bounded structure at its worst case, summed, fits under the
