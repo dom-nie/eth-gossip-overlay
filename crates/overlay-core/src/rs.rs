@@ -90,6 +90,19 @@ pub enum RsError {
 mod tests {
     use super::*;
 
+    /// Pseudo-random bytes, so a chunk that came back from the wrong offset is visible.
+    fn payload(len: usize) -> Vec<u8> {
+        let mut state = 0x9E37_79B1u32;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect()
+    }
+
     #[test]
     fn params_for_200kb_and_2kb_chunks_gives_k_100_m_10() {
         let params = Params::for_len(200 * 1024, 2048, 0.10).unwrap();
@@ -138,5 +151,15 @@ mod tests {
                 m: 16_384
             })
         );
+    }
+
+    #[test]
+    fn encode_produces_k_plus_m_chunks_of_equal_length() {
+        let params = Params::for_len(200 * 1024, 2048, 0.10).unwrap();
+
+        let chunks = encode(&payload(200 * 1024), params);
+
+        assert_eq!(chunks.len(), 110);
+        assert!(chunks.iter().all(|chunk| chunk.len() == 2048));
     }
 }
