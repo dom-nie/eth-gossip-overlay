@@ -869,7 +869,17 @@ mod tests {
         sets: SubscriptionSets,
         announced: &[(u16, &Topic)],
     ) -> (TestCluster, PeerInfo) {
-        peer_of_queueing(sets, announced, PUBLISHED_MAX).await
+        peer_of_with(sets, announced, |builder| builder).await
+    }
+
+    /// The same with a clock the test drives, for the one assertion about how long something
+    /// took.
+    async fn peer_of_clocked(
+        sets: SubscriptionSets,
+        announced: &[(u16, &Topic)],
+        clock: Arc<dyn Clock>,
+    ) -> (TestCluster, PeerInfo) {
+        peer_of_with(sets, announced, |builder| builder.clock(clock)).await
     }
 
     /// The same with a publish queue of `published_max` entries, for the one test about a beacon
@@ -879,9 +889,38 @@ mod tests {
         announced: &[(u16, &Topic)],
         published_max: usize,
     ) -> (TestCluster, PeerInfo) {
-        let mut cluster = Builder::new(&[NodeKind::Bare, NodeKind::Manager])
-            .start()
-            .await;
+        dialled(
+            Builder::new(&[NodeKind::Bare, NodeKind::Manager]),
+            sets,
+            announced,
+            published_max,
+        )
+        .await
+    }
+
+    /// The same with `with` applied to the builder first.
+    async fn peer_of_with(
+        sets: SubscriptionSets,
+        announced: &[(u16, &Topic)],
+        with: impl FnOnce(Builder) -> Builder,
+    ) -> (TestCluster, PeerInfo) {
+        dialled(
+            with(Builder::new(&[NodeKind::Bare, NodeKind::Manager])),
+            sets,
+            announced,
+            PUBLISHED_MAX,
+        )
+        .await
+    }
+
+    /// Starts the cluster `builder` describes and dials its sidecar from the test's own peer.
+    async fn dialled(
+        builder: Builder,
+        sets: SubscriptionSets,
+        announced: &[(u16, &Topic)],
+        published_max: usize,
+    ) -> (TestCluster, PeerInfo) {
+        let mut cluster = builder.start().await;
         cluster.start_sidecar_with(1, sets, published_max);
         let announced = announced
             .iter()
@@ -2796,6 +2835,148 @@ mod tests {
             cluster.stats(1).bytes(Direction::Out, &cluster.hostname(2)),
             8,
             "the forward is what the sending end counts"
+        );
+    }
+
+    /// The chunks a striped message arrives as, under the id its payload hashes to on `topic`,
+    /// and the split they were cut with.
+    fn striped(
+        topic_id: u16,
+        topic: &Topic,
+        payload: &[u8],
+        chunk_bytes: usize,
+    ) -> (MessageId, Params, Vec<Bytes>) {
+        let msg_id = msgid::compute(&topic.to_string(), payload, wire::MAX_PAYLOAD_BYTES).id;
+        let params = Params::for_len(payload.len(), chunk_bytes, 0.25).expect("a split");
+        let frames = overlay_core::rs::encode(payload, params)
+            .into_iter()
+            .enumerate()
+            .map(|(index, data)| {
+                encode_datagram(&Frame::Chunk {
+                    flags: ChunkFlags::NONE,
+                    chunk: Chunk {
+                        msg_id,
+                        topic_id,
+                        k: params.k,
+                        m: params.m,
+                        index: index as u16,
+                        total_len: params.total_len,
+                        data,
+                    },
+                })
+            })
+            .collect();
+        (msg_id, params, frames)
+    }
+
+    /// D08 site 3 of 3 and DX-N4: the message a host puts back together is remembered and then
+    /// queued for its beacon node, in that order, so a copy that arrives while the queue is
+    /// draining is dropped rather than published twice. Nothing on the way waits for the node:
+    /// every step from the chunk to the queue is a synchronous call, which is what
+    /// `PublishSink::enqueue` taking no future buys.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn completion_inserts_into_the_seen_cache_then_enqueues_without_awaiting() {
+        let block = topic("beacon_block");
+        let payload = incompressible(4096);
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        let (msg_id, params, frames) = striped(0, &block, &payload, 512);
+
+        send(&peer, &frames[..usize::from(params.k)]).await;
+
+        eventually("the message to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        let published = cluster.published(1);
+        assert_eq!(published[0].id, msg_id);
+        assert_eq!(published[0].payload, payload);
+        assert_eq!(published[0].class, Class::Large);
+        assert!(cluster.seen(1).contains(&msg_id));
+        assert_eq!(
+            cluster.held_when_published(1),
+            vec![true],
+            "the enqueue ran before the seen cache knew the id"
+        );
+    }
+
+    /// DX-N1 at the third ingress site: a host reassembles a message for a topic its own beacon
+    /// node never asked for, and publishes nothing. The chunks were still worth taking in, since
+    /// the region was owed them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn completion_on_an_unadvertised_topic_is_dropped_counted_and_not_enqueued() {
+        let block = topic("beacon_block");
+        let column = topic("data_column_sidecar_37");
+        let payload = incompressible(4096);
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[&column]), &[(0, &column)]).await;
+        let (_, params, frames) = striped(0, &column, &payload, 512);
+
+        send(&peer, &frames[..usize::from(params.k)]).await;
+
+        let sender = cluster.hostname(0);
+        eventually("the message to be refused", || {
+            cluster.stats(1).unwanted_topics(&sender) == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert!(cluster.published(1).is_empty());
+        assert!(cluster.seen(1).is_empty());
+    }
+
+    /// D03 at completion: a message whose payload does not decompress is one no beacon node
+    /// would take, so it is counted against the host the chunks came from and neither
+    /// remembered nor published. The chunks that keep arriving afterwards are still late, which
+    /// is what keeps a broken origin cheap.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reassembled_payload_that_does_not_decompress_is_counted_and_not_published() {
+        let block = topic("beacon_block");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        let (_, params, frames) = striped(0, &block, b"not snappy at all, at any length", 64);
+
+        send(&peer, &frames[..usize::from(params.k)]).await;
+
+        let sender = cluster.hostname(0);
+        eventually("the message to be refused", || {
+            cluster.stats(1).invalid_payloads(&sender) == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert!(cluster.published(1).is_empty());
+        assert!(cluster.seen(1).is_empty());
+    }
+
+    /// §12: a message put back together from chunks is timed from its first chunk, and one that
+    /// needed a parity chunk says so, because that is the signal a host or a chunk was lost.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn completion_times_the_reconstruction_and_reports_a_parity_chunk() {
+        let block = topic("beacon_block");
+        let payload = incompressible(4096);
+        let clock = FakeClock::new();
+        let (cluster, peer) = peer_of_clocked(
+            subscriptions(&[&block], &[]),
+            &[(0, &block)],
+            Arc::new(clock.clone()),
+        )
+        .await;
+        let (_, params, frames) = striped(0, &block, &payload, 512);
+        let mut with_parity: Vec<Bytes> = frames[1..usize::from(params.k)].to_vec();
+        with_parity.push(frames[usize::from(params.k)].clone());
+
+        send(&peer, &with_parity[..1]).await;
+        eventually("the first chunk to land", || {
+            cluster.stats(1).chunks_received(&cluster.hostname(0)).len() == 1
+        })
+        .await;
+        clock.advance(Duration::from_millis(40));
+        send(&peer, &with_parity[1..]).await;
+
+        eventually("the message to be queued", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert_eq!(cluster.stats(1).parity_used(), 1);
+        assert_eq!(
+            cluster.stats(1).reconstructed(Class::Large),
+            vec![Duration::from_millis(40)]
         );
     }
 
