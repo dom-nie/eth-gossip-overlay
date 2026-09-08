@@ -314,4 +314,104 @@ mod tests {
             "the I/O runtime is still running"
         );
     }
+
+    /// What only a Linux machine can answer. Both names are in the test list on every platform;
+    /// off Linux they print why they are not an answer.
+    #[cfg(target_os = "linux")]
+    mod pinning {
+        use super::*;
+
+        /// The highest core this process is allowed on, or `None` where it is allowed on one
+        /// only, since pinning to the core everything already runs on would assert nothing.
+        /// Read off the affinity mask rather than the core count, because a cgroup can allow
+        /// four cores that are not numbered zero to three.
+        fn highest_allowed_cpu() -> Option<u32> {
+            let allowed = nix::sched::sched_getaffinity(nix::unistd::Pid::from_raw(0)).ok()?;
+            let cpus: Vec<u32> = (0..nix::sched::CpuSet::count())
+                .filter(|cpu| allowed.is_set(*cpu).unwrap_or(false))
+                .map(|cpu| cpu as u32)
+                .collect();
+            match cpus.len() {
+                0 | 1 => None,
+                _ => cpus.last().copied(),
+            }
+        }
+
+        /// The ticket's whole point: the runtime the endpoint runs on is on the core the
+        /// configuration named. `sched_getcpu` is read from inside the closure that binds,
+        /// which the thread calls after setting its own affinity.
+        #[tokio::test(flavor = "multi_thread")]
+        async fn io_thread_runs_on_configured_cpu() {
+            let Some(cpu) = highest_allowed_cpu() else {
+                eprintln!("skipped: this process is allowed on one CPU only");
+                return;
+            };
+            let (seeds, pins) = fleet(&["bn-a"]);
+            let cfg = config("127.0.0.1:0");
+            let server = tls::server_config(pins, &own_key(&seeds, "bn-a")).unwrap();
+            let (running_on, read) = std::sync::mpsc::channel();
+
+            let io = spawn(
+                &IoThread {
+                    pin_cpu: Some(cpu),
+                    ..IoThread::default()
+                },
+                move || {
+                    let _ = running_on.send(nix::sched::sched_getcpu());
+                    endpoint::bind(&cfg, TEST_RECEIVE_WINDOW, server)
+                },
+            )
+            .unwrap();
+
+            assert!(io.pinned());
+            assert_eq!(read.recv().unwrap().unwrap() as u32, cpu);
+            io.shutdown().await;
+        }
+
+        /// The configuration typo an operator makes, and the cpuset a container gives them.
+        /// Losing the pinning is not a reason to leave the fleet: the endpoint comes up on the
+        /// thread it asked for, unpinned, and the warning names the core (§11.1).
+        #[tokio::test(flavor = "multi_thread")]
+        async fn invalid_cpu_warns_and_continues_unpinned() {
+            let mark = LOG.len();
+            let (seeds, pins) = fleet(&["bn-a"]);
+            let cfg = config("127.0.0.1:0");
+            let server = tls::server_config(pins, &own_key(&seeds, "bn-a")).unwrap();
+            // Past CPU_SETSIZE, so no machine and no cgroup can make this core exist.
+            let absent = nix::sched::CpuSet::count() as u32;
+
+            let io = spawn(
+                &IoThread {
+                    pin_cpu: Some(absent),
+                    ..IoThread::default()
+                },
+                move || endpoint::bind(&cfg, TEST_RECEIVE_WINDOW, server),
+            )
+            .unwrap();
+
+            assert!(!io.pinned());
+            assert!(io.endpoint().local_addr().is_ok(), "the endpoint is gone");
+            assert_eq!(
+                LOG.since(mark)
+                    .lines()
+                    .filter(|line| line.contains("overlay I/O thread not pinned"))
+                    .count(),
+                1
+            );
+            io.shutdown().await;
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    mod pinning {
+        #[test]
+        fn io_thread_runs_on_configured_cpu() {
+            eprintln!("skipped: sched_setaffinity and sched_getcpu are Linux only");
+        }
+
+        #[test]
+        fn invalid_cpu_warns_and_continues_unpinned() {
+            eprintln!("skipped: sched_setaffinity is Linux only");
+        }
+    }
 }
