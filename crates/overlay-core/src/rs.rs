@@ -99,4 +99,15 @@ mod tests {
         assert_eq!(params.chunk_bytes, 2048);
         assert_eq!(params.total_len, 200 * 1024);
     }
+
+    #[test]
+    fn params_m_is_ceil_of_ratio_times_k_with_minimum_one() {
+        let one_chunk = Params::for_len(1024, 2048, 0.10).unwrap();
+        let rounded_up = Params::for_len(51 * 2048, 2048, 0.10).unwrap();
+        let no_parity_asked_for = Params::for_len(100 * 2048, 2048, 0.0).unwrap();
+
+        assert_eq!((one_chunk.k, one_chunk.m), (1, 1));
+        assert_eq!((rounded_up.k, rounded_up.m), (51, 6));
+        assert_eq!((no_parity_asked_for.k, no_parity_asked_for.m), (100, 1));
+    }
 }
