@@ -61,6 +61,14 @@ const BEACON_BLOCK_HEADER_LEN: usize = 8 + 8 + 3 * 32;
 const COLUMN_FIXED_MIN: usize = COLUMN_HEADER_AT + BEACON_BLOCK_HEADER_LEN + 96;
 
 /// The slot a block is for and its block root, from the payload the beacon node gossips.
+///
+/// Two things a reader should know about the numbers this produces. The fork variant is found
+/// by trying each in turn, because nothing on the wire names it and the sidecar holds no fork
+/// schedule; a block that decoded as the wrong variant would give a root that resolves to no
+/// column anywhere, which costs a repair request and nothing else. And a tree hash depends on
+/// the preset, through the list lengths it merkleises to, so the root is mainnet's; a network on
+/// another preset would need the preset with it, which is a change to what `SpecSnapshot` carries
+/// rather than to this function.
 pub fn block_header(payload: &[u8]) -> Result<(u64, [u8; 32]), HeaderError> {
     let bytes = decompress(payload)?;
     let block = SignedBeaconBlock::<MainnetEthSpec>::any_from_ssz_bytes(&bytes)
