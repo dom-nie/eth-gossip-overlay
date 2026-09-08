@@ -2757,6 +2757,48 @@ mod tests {
         );
     }
 
+    /// §12: `messages_total` counts messages and a chunk is a piece of one, so a striped block
+    /// must not read as a hundred messages on the panel the rate is watched on, or as a hundred
+    /// against the publish limits `docs/symptoms.md` has an operator compare it with. The bytes
+    /// are still counted at both ends, which is what the two ends agreeing on what crossed the
+    /// connection rests on, and `chunks_received_total` is where the count of chunks lives.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_chunk_moves_the_byte_counter_and_not_the_message_counter() {
+        let (cluster, peer, _) = striping_region(2).await;
+        let (sender, forwarder) = (cluster.hostname(0), cluster.hostname(1));
+
+        send(
+            &peer,
+            &[chunk_frame(MessageId([15; 20]), 0, ChunkFlags::NONE)],
+        )
+        .await;
+
+        eventually(
+            "the chunk to reach the host behind the one it landed on",
+            || !cluster.stats(2).chunks_received(&forwarder).is_empty(),
+        )
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        for (node, from) in [(1, &sender), (2, &forwarder)] {
+            assert_eq!(
+                cluster.stats(node).bytes(Direction::In, from),
+                8,
+                "node {node}"
+            );
+            assert_eq!(
+                cluster.stats(node).messages(Direction::In, from),
+                0,
+                "node {node} counted a chunk as a message"
+            );
+        }
+        assert_eq!(cluster.stats(1).bytes(Direction::Out, &forwarder), 0);
+        assert_eq!(
+            cluster.stats(1).bytes(Direction::Out, &cluster.hostname(2)),
+            8,
+            "the forward is what the sending end counts"
+        );
+    }
+
     /// A chunk is a piece of a message and this release cannot put one back together, so it is
     /// counted, offered to the region and dropped. Nothing is published until T-074 reconstructs.
     #[tokio::test(flavor = "multi_thread")]
