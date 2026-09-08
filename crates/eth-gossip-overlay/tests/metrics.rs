@@ -95,6 +95,7 @@ const SECTION_12: &[&str] = &[
     "overlay_publish_queue_drops_total",
     "overlay_publish_suppressed_total",
     "overlay_rate_limited_total",
+    "overlay_reassembly_evicted_total",
     "overlay_reconstruct_seconds",
     "overlay_relay_same_region_total",
     "overlay_relayed_batches_total",
@@ -168,6 +169,7 @@ const LABELS: &[(&str, &[&str])] = &[
     ("overlay_publish_queue_drops_total", &["class", "reason"]),
     ("overlay_publish_suppressed_total", &["class", "reason"]),
     ("overlay_rate_limited_total", &["class"]),
+    ("overlay_reassembly_evicted_total", &["reason"]),
     ("overlay_reconstruct_seconds", &["class"]),
     ("overlay_relay_same_region_total", &["peer"]),
     ("overlay_relayed_batches_total", &[]),
@@ -288,7 +290,7 @@ async fn unknown_path_returns_404() {
 fn histogram_buckets_cover_1ms_to_2s() {
     let registry = Registry::new();
     let metrics = Metrics::new(&registry).unwrap();
-    metrics.reconstructed(Class::Large, 0.5);
+    metrics.reconstructed(Class::Large, Duration::from_millis(500));
 
     let families = registry.gather();
     let histogram = families
