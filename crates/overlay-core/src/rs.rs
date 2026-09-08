@@ -373,4 +373,16 @@ mod tests {
         assert_eq!(decoded.payload, payload);
         assert!(decoded.used_parity);
     }
+
+    #[test]
+    fn decode_with_fewer_than_k_chunks_is_not_enough_chunks_error() {
+        let len = 5 * 2048 + 100;
+        let params = Params::for_len(len, 2048, 0.10).unwrap();
+        let chunks = encode(&payload(len), params);
+
+        assert_eq!(
+            decode(params, &held(&chunks, [0, 1, 2, 4, 6])),
+            Err(RsError::NotEnoughChunks { have: 5, need: 6 })
+        );
+    }
 }
