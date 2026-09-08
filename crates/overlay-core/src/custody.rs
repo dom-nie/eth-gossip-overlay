@@ -326,4 +326,50 @@ mod tests {
         clock.advance(Duration::from_millis(1));
         assert_eq!(gaps(&mut tracker, &clock).len(), 1);
     }
+
+    /// The ticket's worked example. Sixty columns are here, three more have chunks in flight and
+    /// sixty-five were never seen, so the first three repairs are the three that finish with the
+    /// fewest bytes and the rest go by index. The two groups are built from the highest and the
+    /// lowest indices, so listing them in the order they were declared would not pass.
+    #[test]
+    fn prioritisation_puts_partially_received_columns_first_then_lowest_index() {
+        let clock = FakeClock::new();
+        let all: Vec<u16> = (0..128).collect();
+        let mut tracker = CustodyTracker::new(&SpecSnapshot::MAINNET);
+        let expected = tracker.expected_columns(&column_topics(&all));
+        tracker.on_block(1, ROOT, expected, clock.now());
+
+        let partly_here = [5u16, 17, 90];
+        let never_seen: Vec<u16> = {
+            let mut highest: Vec<u16> = all
+                .iter()
+                .copied()
+                .filter(|index| !partly_here.contains(index))
+                .rev()
+                .take(65)
+                .collect();
+            highest.sort_unstable();
+            highest
+        };
+        for index in all
+            .iter()
+            .filter(|index| !partly_here.contains(index) && !never_seen.contains(index))
+        {
+            tracker.on_column(1, *index, ROOT);
+        }
+        let mut in_flight = BitSet::new(all.len());
+        for index in partly_here {
+            in_flight.insert(index);
+        }
+        clock.advance(DEADLINE);
+
+        let reported = tracker.missing_past_deadline(DEADLINE, clock.now(), &in_flight);
+
+        let [gap] = reported.as_slice() else {
+            panic!("one block is being tracked");
+        };
+        assert_eq!(gap.have_count, 60);
+        assert_eq!(gap.missing[..3], [5, 17, 90]);
+        assert_eq!(gap.missing[3..], never_seen);
+    }
 }
