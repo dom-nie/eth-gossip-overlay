@@ -475,4 +475,27 @@ mod tests {
             vec![Decision::GaveUp(MessageId([9; 20]))]
         );
     }
+
+    /// The deadline is read on every tick rather than held from the first one, so `eth-gossip-
+    /// overlayctl reload` moves it under a running sidecar (T-043, D24).
+    #[test]
+    fn reloaded_deadline_applies_from_the_next_tick() {
+        let clock = FakeClock::new();
+        let reassembler = collecting(4, &[(0, "a", false)], clock.now());
+        let mut scheduler = Scheduler::default();
+        clock.advance(Duration::from_millis(150));
+
+        assert_eq!(
+            scheduler.tick(&reassembler, DEADLINE, reachable, clock.now()),
+            Vec::new()
+        );
+
+        let reloaded = Duration::from_millis(100);
+        assert!(matches!(
+            scheduler
+                .tick(&reassembler, reloaded, reachable, clock.now())
+                .as_slice(),
+            [Decision::Ask(_)]
+        ));
+    }
 }
