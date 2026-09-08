@@ -103,7 +103,7 @@ in its own row, since the table is generated from the same doc comments the code
 | `bn.idontwant_on_publish` | `true` | restart | tell the beacon node IDONTWANT for a message as it is published. |
 | `classes.small.batch_window_ms` | `10` | reload | how long a batch collects entries before it is flushed. |
 | `classes.small.stale_after_ms` | `1000` | reload | a batch older than this is dropped rather than delivered late. |
-| `classes.large.chunk_bytes` | `2048` | restart | the fixed chunk size. A multiple of 64, which the Reed-Solomon shards require. |
+| `classes.large.chunk_bytes` | `2048` | restart | the fixed chunk size. The Reed-Solomon shards need an even length; a multiple of 64 is the stricter rule the sidecar holds them to, so a chunk lands on a cache line and the SIMD paths run at their widest stride. |
 | `classes.large.parity_ratio` | `0.1` | restart | parity chunks as a fraction of data chunks. |
 | `classes.large.repair_deadline_ms` | `250` | reload | how long after the first chunk a receiver waits before asking peers for the missing ones. |
 | `inject` | `true` | reload | whether the sidecar publishes what it receives into the beacon node. `false` is the kill switch: the sidecar keeps observing and reporting but changes nothing. |
