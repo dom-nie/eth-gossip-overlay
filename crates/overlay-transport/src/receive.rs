@@ -59,6 +59,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
 use overlay_core::budget::{Charge, FanoutBudget, FanoutKind};
+use overlay_core::config::LargeClass;
 use overlay_core::events::{self, FirstArrival};
 use overlay_core::msgid::{self, Branch, MessageId};
 use overlay_core::protocol::{MAX_FRAME_BYTES, features};
@@ -66,12 +67,15 @@ use overlay_core::pubqueue::{PublishItem, PublishSink};
 use overlay_core::reassemble::{Outcome, Reason, Reassembler};
 use overlay_core::recent::SharedRecentLarge;
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
+use overlay_core::rs::{self, Params};
 use overlay_core::seen::SharedSeenCache;
 use overlay_core::subs::PeerState;
 use overlay_core::time::Clock;
 use overlay_core::topic::table::TopicId;
 use overlay_core::topic::{Class, SubscriptionSets, Topic};
-use overlay_core::wire::{self, BatchEntry, BatchFlags, Chunk, ChunkFlags, Frame, Read};
+use overlay_core::wire::{
+    self, BatchEntry, BatchFlags, Chunk, ChunkFlags, Frame, Read, RepairReq, RepairResp,
+};
 use quinn::VarInt;
 use tokio::io::AsyncRead;
 use tokio::sync::watch;
@@ -91,6 +95,13 @@ pub const STREAM_READ_TIMEOUT: Duration = Duration::from_secs(2);
 /// What a stalled stream is stopped with. The peer learns nothing from the number, so it is the
 /// unremarkable zero; the connection's own codes are [`CloseCode`](crate::manager::CloseCode).
 const STALLED_STREAM_CODE: u32 = 0;
+
+/// Repair exchanges one peer may have running at once (D24).
+///
+/// The same number as the connection's own `max_concurrent_bidi_streams` (DX-N3), so a peer that
+/// honours the parameters it was given never reaches this and one that ignores them is held to
+/// the same count here, where the work is.
+pub const MAX_REPAIR_STREAMS_PER_PEER: usize = crate::endpoint::MAX_BIDI_STREAMS as usize;
 
 /// Where the receive path counts. Every method is about one peer's traffic, so `source="overlay"`
 /// is implied on the two counters that carry it rather than passed: T-041 binds
@@ -194,6 +205,10 @@ pub struct Deps {
     /// The budget each peer gets a copy of. A bucket that starts full is what a peer that
     /// connects an hour later would have anyway, since a refill saturates at the capacity.
     pub budget: FanoutBudget,
+    /// The split every host of the fleet cuts a large message into, which is how a repair
+    /// answer rebuilds the chunks a peer is asking for from the payload the recent store kept
+    /// (§5.6). The same file on every host, so the chunks come out the same as the origin's.
+    pub large: LargeClass,
     /// What the two second hops are made with.
     pub relaying: Relaying,
 }
@@ -302,6 +317,7 @@ struct Ctx {
 async fn read_peer(connection: quinn::Connection, ctx: Arc<Ctx>) {
     tokio::join!(
         accept(connection.clone(), ctx.clone()),
+        accept_repair(connection.clone(), ctx.clone()),
         datagrams(connection, ctx)
     );
 }
@@ -347,6 +363,63 @@ async fn accept(connection: quinn::Connection, ctx: Arc<Ctx>) {
         }
         while streams.try_join_next().is_some() {}
     }
+}
+
+/// Accepts this peer's bidirectional streams, which after the control stream carry repair
+/// requests and nothing else (§7). Built like [`accept`] above it: one task per stream, finished
+/// ones reaped on the next accept, so a request that is slow to answer holds nothing up.
+///
+/// The control stream is not one of these. It was accepted during HELLO, before this task
+/// existed, and stays open for the life of the connection (T-025).
+///
+/// A peer past [`MAX_REPAIR_STREAMS_PER_PEER`] has its stream dropped, which resets it and lets
+/// the requester move on to another candidate rather than wait out its attempt.
+async fn accept_repair(connection: quinn::Connection, ctx: Arc<Ctx>) {
+    let mut streams = JoinSet::new();
+    loop {
+        match connection.accept_bi().await {
+            Ok((send, recv)) => {
+                while streams.try_join_next().is_some() {}
+                if streams.len() >= MAX_REPAIR_STREAMS_PER_PEER {
+                    tracing::debug!(peer = %ctx.peer, "peer is over its repair stream budget");
+                    continue;
+                }
+                streams.spawn(serve_repair(send, recv, ctx.clone()));
+            }
+            Err(error) => {
+                tracing::debug!(peer = %ctx.peer, %error, "peer opens no more repair streams");
+                return;
+            }
+        }
+    }
+}
+
+/// One repair exchange, from the request the peer wrote to the answer this host finishes the
+/// stream with (§5.6).
+///
+/// The read wears [`STREAM_READ_TIMEOUT`] like every other data-stream read, so a peer that
+/// opens a stream and says nothing costs a slot for two seconds and no longer. What is written
+/// back is decided synchronously by [`Ctx::repair`], which is what keeps the recent store's lock
+/// and the topic table's lock off this function's `await`s.
+async fn serve_repair(mut send: quinn::SendStream, mut recv: quinn::RecvStream, ctx: Arc<Ctx>) {
+    let read = tokio::time::timeout(
+        STREAM_READ_TIMEOUT,
+        wire::read_frame(&mut recv, MAX_FRAME_BYTES),
+    )
+    .await;
+    let request = match read {
+        Ok(Ok(Read::Frame(Frame::RepairReq(request)))) => request,
+        other => {
+            tracing::debug!(peer = %ctx.peer, "a repair stream carried {other:?}");
+            return;
+        }
+    };
+    for frame in ctx.repair(&request) {
+        if wire::write_frame(&mut send, &frame).await.is_err() {
+            return;
+        }
+    }
+    let _ = send.finish();
 }
 
 /// Why a stream stopped being read.
@@ -666,6 +739,83 @@ impl Ctx {
                 chunk.data.len(),
             );
         }
+    }
+
+    /// What to write back to a peer that asked for chunks of a message (§5.6, D24).
+    ///
+    /// The payload is what the recent store kept whole, and the chunks are cut from it again
+    /// here rather than held as chunks: every host runs the same `classes.large` and
+    /// [`Params::for_len`] is a function of the payload's length, so what comes out is what the
+    /// origin sent. A requester whose split disagrees reads a header that contradicts the chunks
+    /// it already holds and drops it, which is [`Outcome::HeaderConflict`] doing its job.
+    ///
+    /// Each chunk goes as its own `CHUNK` frame because a `REPAIR_RESP` body carries no flags
+    /// byte and `FORWARDED` is the point: the requester must not pass a repaired chunk on to a
+    /// region that has already been offered the message (D11, D19). The `REPAIR_RESP` after them
+    /// is the trailer that says the answer is complete, and carries no chunks of its own.
+    ///
+    /// Everything the peer is not owed is [`RepairResp::NotFound`], which is what makes it move
+    /// on to the next candidate rather than wait: a message this host does not hold, a request
+    /// for more indices than the message has data chunks, and a topic this host cannot name to
+    /// this peer yet (MD-04).
+    fn repair(&self, request: &RepairReq) -> Vec<Frame> {
+        let not_found = || vec![Frame::RepairResp(RepairResp::NotFound)];
+        // Column identity is T-083's; nothing here can resolve a block root to a message yet.
+        let RepairReq::Missing { msg_id, missing } = request else {
+            return not_found();
+        };
+        let Some((topic, payload)) = self.deps.recent.get(msg_id) else {
+            return not_found();
+        };
+        let Ok(split) = Params::for_len(
+            payload.len(),
+            self.deps.large.chunk_bytes,
+            self.deps.large.parity_ratio,
+        ) else {
+            return not_found();
+        };
+        if missing.len() > usize::from(split.k) {
+            tracing::debug!(
+                peer = %self.peer,
+                asked = missing.len(),
+                k = split.k,
+                "a repair request for more indices than the message has data chunks"
+            );
+            return not_found();
+        }
+        let Some(topic_id) = self.told_id(&topic) else {
+            return not_found();
+        };
+        let chunks = rs::encode(&payload, split);
+        let mut answer: Vec<Frame> = missing
+            .iter()
+            .filter_map(|index| Some((*index, chunks.get(usize::from(*index))?)))
+            .map(|(index, data)| Frame::Chunk {
+                flags: ChunkFlags::FORWARDED,
+                chunk: Chunk {
+                    msg_id: *msg_id,
+                    topic_id: topic_id.get(),
+                    k: split.k,
+                    m: split.m,
+                    index,
+                    total_len: split.total_len,
+                    data: data.clone(),
+                },
+            })
+            .collect();
+        answer.push(Frame::RepairResp(RepairResp::Chunks(Vec::new())));
+        answer
+    }
+
+    /// The id this host names `topic` by, once this peer has had the `TOPIC_ADD` that binds it
+    /// (MD-04). A peer that has not been told cannot resolve the id, so there is nothing worth
+    /// answering with until the announcement has crossed its control stream.
+    fn told_id(&self, topic: &Topic) -> Option<TopicId> {
+        let id = self.own_id(topic)?;
+        crate::hello::lock(&self.deps.relaying.topics)
+            .announcer
+            .told(&self.peer, id)
+            .then_some(id)
     }
 
     /// One datagram, which carries one `BATCH` or nothing this release will act on. Anything
@@ -2293,6 +2443,7 @@ mod tests {
                 }),
                 clock: Arc::new(SystemClock),
                 budget: FanoutBudget::default_for(2, 2048, 12, Instant::now()),
+                large: config::LargeClass::default(),
                 relaying: Relaying {
                     live: LiveSource::fixed(crate::manager::LiveView::default()),
                     topics: Arc::new(Mutex::new(OwnTopics::default())),

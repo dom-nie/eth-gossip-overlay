@@ -1269,6 +1269,7 @@ impl<A: Admission> TestCluster<A> {
                     Instant::now(),
                 )
             }),
+            large: self.large.clone(),
             relaying: Relaying {
                 live: live.clone(),
                 topics: node.topics.clone(),

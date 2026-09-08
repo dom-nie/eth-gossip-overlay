@@ -38,9 +38,10 @@ const SEND_WINDOW: u64 = 16 * 1024 * 1024;
 /// chunk, so this is what a sibling's whole slot may occupy while the receiver reads it.
 const MAX_UNI_STREAMS: u32 = 64;
 
-/// Bidirectional streams one peer may hold open at once (DX-N3), which is T-082's repair
-/// exchange and nothing else.
-const MAX_BIDI_STREAMS: u32 = 4;
+/// Bidirectional streams one peer may hold open at once (DX-N3): its control stream, and after
+/// that T-082's repair exchanges, which
+/// [`MAX_REPAIR_STREAMS_PER_PEER`](crate::receive::MAX_REPAIR_STREAMS_PER_PEER) is held to.
+pub const MAX_BIDI_STREAMS: u32 = 4;
 
 /// Why the endpoint could not be brought up, or a peer could not be reached.
 #[derive(Debug, thiserror::Error)]
