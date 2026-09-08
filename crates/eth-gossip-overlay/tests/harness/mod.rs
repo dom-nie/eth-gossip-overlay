@@ -74,7 +74,7 @@ use eth_gossip_overlay::logging::{self, LogHandle};
 use eth_gossip_overlay::metrics::{LABEL_DIRECTION, LABEL_PEER, MESSAGES_TOTAL};
 use overlay_bn::node_key::NodeKey;
 use overlay_bn::testutil::{FakeBn, FakeBnEvent};
-use overlay_core::config::{Config, LargeClass, LargeFanout, Log, LogFormat, LogLevel};
+use overlay_core::config::{Config, LargeClass, LargeFanout, Log, LogFormat, LogLevel, Overlay};
 use overlay_core::relay;
 use overlay_core::roster::Hostname;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -140,6 +140,21 @@ pub fn topic(name: &str) -> String {
     format!("/eth2/{FORK_DIGEST}/{name}/ssz_snappy")
 }
 
+/// `bytes` of payload snappy cannot shrink, so what the sidecar splits is the length the test
+/// asked for rather than a tenth of it. A block and a data column are both already compressed
+/// by the time they reach gossip, so this is what one really looks like on the wire.
+pub fn incompressible(seed: u64, bytes: usize) -> Vec<u8> {
+    let mut state = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+    (0..bytes)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 33) as u8
+        })
+        .collect()
+}
+
 /// What every node in a fleet starts with, for the knobs a scenario varies.
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -160,6 +175,10 @@ pub struct Settings {
     /// handful of hosts gives each of them several chunks, so a scenario about losing a host
     /// raises this above the shipped tenth to buy back what that host was carrying.
     pub parity_ratio: f64,
+    /// `overlay.initial_window_bytes`: the congestion window every connection starts with. The
+    /// one tuned transport parameter an operator can move, so it is the one a benchmark can run
+    /// either side of (T-076).
+    pub initial_window_bytes: u64,
 }
 
 impl Default for Settings {
@@ -170,6 +189,7 @@ impl Default for Settings {
             relays_per_remote_region: relay::DEFAULT_RELAYS_PER_REMOTE_REGION,
             stripe_min_recipients: LargeFanout::default().stripe_min_recipients,
             parity_ratio: LargeClass::default().parity_ratio,
+            initial_window_bytes: Overlay::default().initial_window_bytes,
         }
     }
 }
@@ -485,6 +505,7 @@ impl Fleet {
         let yaml = format!(
             "overlay:\n  listen: \"{}\"\n  roster_file: {}\n  fleet_seed_file: {}\n{}\
              \x20 keepalive_ms: 500\n  idle_timeout_ms: 5000\n\
+             \x20 initial_window_bytes: {}\n\
              \x20 fanout:\n    large:\n      stripe_min_recipients: {}\n\
              \x20   small:\n      relay_min_remote_hosts: {}\n\
              \x20     relays_per_remote_region: {}\n\
@@ -497,6 +518,7 @@ impl Fleet {
             path("roster.yaml"),
             self.dir.path().join("seed").display(),
             previous,
+            self.settings.initial_window_bytes,
             self.settings.stripe_min_recipients,
             self.settings.relay_min_remote_hosts,
             self.settings.relays_per_remote_region,
@@ -869,6 +891,13 @@ impl Bn {
     /// Everything this beacon node has received, in order.
     pub fn received(&self) -> Vec<Message> {
         self.received.lock().unwrap().clone()
+    }
+
+    /// How many messages it has received. The cheap half of [`received`](Self::received), which
+    /// copies the whole log: a benchmark polling a slot's worth of columns across a fleet copies
+    /// megabytes a millisecond and ends up timing itself.
+    pub fn received_count(&self) -> usize {
+        self.received.lock().unwrap().len()
     }
 
     /// How many times it received exactly this payload on this topic.

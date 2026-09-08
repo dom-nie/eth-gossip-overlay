@@ -11,7 +11,7 @@ use eth_gossip_overlay::metrics::{
     REPAIR_REQUESTS_TOTAL, SOURCE_OVERLAY, UNANNOUNCED_TOPIC_TOTAL, UNIT_BYTES,
     UNKNOWN_TOPIC_ID_TOTAL, UNWANTED_TOPIC_TOTAL,
 };
-use harness::{Fleet, SETTLE, Scrape, WAIT, topic};
+use harness::{Fleet, SETTLE, Scrape, WAIT, incompressible, topic};
 use overlay_core::protocol::features;
 use overlay_core::relay;
 use overlay_core::roster::Hostname;
@@ -415,19 +415,6 @@ async fn deliver_to_fast_nodes(fleet: &Fleet, topic: &str, payload: &[u8]) -> Du
 fn median(times: &mut [Duration]) -> Duration {
     times.sort_unstable();
     times[times.len() / 2]
-}
-
-/// A payload snappy cannot shrink, so what a beacon node puts on the wire is the size asked for.
-fn incompressible(seed: u64, bytes: usize) -> Vec<u8> {
-    let mut state = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
-    (0..bytes)
-        .map(|_| {
-            state = state
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            (state >> 33) as u8
-        })
-        .collect()
 }
 
 /// DX-N2 and D01: rotating the fleet seed is a rolling operation on the sidecars alone. Every
