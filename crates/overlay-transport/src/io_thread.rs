@@ -402,6 +402,41 @@ mod tests {
         }
     }
 
+    /// The other half of the fallback rule, and the half this platform can hold: a core in the
+    /// configuration is not a core anywhere but Linux, so the endpoint stays where it would
+    /// have been and the thread is never created. An operator developing on a laptop against a
+    /// production configuration gets a working sidecar, not a broken one.
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn pin_cpu_set_off_linux_still_runs_on_the_main_runtime() {
+        let mark = LOG.len();
+        let (seeds, pins) = fleet(&["bn-a"]);
+        let cfg = config("127.0.0.1:0");
+        let server = tls::server_config(pins, &own_key(&seeds, "bn-a")).unwrap();
+
+        let io = spawn(
+            &IoThread {
+                pin_cpu: Some(30),
+                ..IoThread::default()
+            },
+            move || endpoint::bind(&cfg, TEST_RECEIVE_WINDOW, server),
+        )
+        .unwrap();
+
+        assert!(io.worker.is_none(), "an I/O thread was started anyway");
+        assert!(!io.pinned());
+        assert_eq!(
+            LOG.since(mark)
+                .lines()
+                .filter(|line| line.contains("overlay endpoint on the main runtime")
+                    && line.contains("pin_cpu=Some(30)")
+                    && line.contains("linux=false"))
+                .count(),
+            1
+        );
+        io.shutdown().await;
+    }
+
     #[cfg(not(target_os = "linux"))]
     mod pinning {
         #[test]
