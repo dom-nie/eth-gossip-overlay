@@ -265,6 +265,7 @@ pub struct Metrics {
     peer_auth_via_previous_seed: IntCounterVec,
     fanout_suppressed: IntCounterVec,
     relayed_batches: IntCounter,
+    chunks_sent: IntCounter,
     relay_same_region: IntCounterVec,
     unannounced_topic: IntCounter,
     fanout_lane_dropped: IntCounterVec,
@@ -455,10 +456,11 @@ impl Metrics {
             class_reason,
         )?;
 
-        // Registered and then let go of: their producers land in v3 and T-073, and each of those
+        let chunks_sent = b.counter(CHUNKS_SENT_TOTAL, "Chunks written to peers.")?;
+
+        // Registered and then let go of: their producers land in T-074 and v3, and each of those
         // tickets adds the handle it needs. The registry keeps the collector alive, so the name
         // is on the scrape from this release on.
-        b.counter(CHUNKS_SENT_TOTAL, "Chunks written to peers.")?;
         b.counter(CHUNKS_RECEIVED_TOTAL, "Chunks read from peers.")?;
         b.counter(
             PARITY_USED_TOTAL,
@@ -521,6 +523,7 @@ impl Metrics {
             peer_auth_via_previous_seed,
             fanout_suppressed,
             relayed_batches,
+            chunks_sent,
             relay_same_region,
             unannounced_topic,
             fanout_lane_dropped,
@@ -732,6 +735,10 @@ impl TrafficStats for Metrics {
 
     fn unannounced_topic(&self) {
         self.unannounced_topic.inc();
+    }
+
+    fn chunk_sent(&self) {
+        self.chunks_sent.inc();
     }
 }
 

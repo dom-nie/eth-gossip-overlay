@@ -31,28 +31,29 @@
 //! nobody else (D17). The frame is encoded once here and every peer's queue holds the same
 //! bytes, because what goes to one peer is what goes to all of them.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use overlay_core::config;
 use overlay_core::fanout::Outbound;
 use overlay_core::lanes::ClassLanes;
 use overlay_core::progress::PROGRESS_TICK;
 use overlay_core::protocol::features;
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
+use overlay_core::rs::{self, Params};
 use overlay_core::topic::table::TopicId;
 use overlay_core::topic::{Class, Topic};
-use overlay_core::wire::{Frame, MAX_BATCH_ENTRY_BYTES, encode_stream};
+use overlay_core::wire::{Chunk, ChunkFlags, Frame, MAX_BATCH_ENTRY_BYTES, encode_stream};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 use crate::batching::{BatchHandle, Small};
 use crate::hello::{OwnTopics, lock};
 use crate::manager::{LivePeer, LiveSource};
-use crate::router::{RegionPlan, RoutePlan, route};
+use crate::router::{Chunked, RegionPlan, RoutePlan, route};
 
 /// What a whole message costs on the wire besides its payload: the `type` and `flags` bytes and
 /// the chunk header (`msg_id`, `topic_id`, `k`, `m`, `index`, `total_len`, data length). The
@@ -106,11 +107,16 @@ pub trait TrafficStats: Send + Sync {
     /// and an entry a relay will not intern for (MD-04). It should stay at zero; anything else
     /// means a table and the view that named the topic have disagreed.
     fn unannounced_topic(&self);
+
+    /// `chunks_sent_total`: one chunk of a striped message written to a peer, from the origin's
+    /// stripe or from the in-region hop that follows it (§12).
+    fn chunk_sent(&self);
 }
 
 impl TrafficStats for () {
     fn message(&self, _: Direction, _: Class, _: PeerLabels<'_>, _: usize) {}
     fn unannounced_topic(&self) {}
+    fn chunk_sent(&self) {}
 }
 
 /// The task that turns what the beacon node sent into frames on the overlay.
@@ -124,9 +130,14 @@ pub struct Fanout {
     topics: Arc<Mutex<OwnTopics>>,
     batches: BatchHandle,
     stats: Arc<dyn TrafficStats>,
+    /// How a large message is cut up. Both keys need a restart, so this is a value and not a
+    /// `watch` like the fanout beside it (T-043).
+    large: config::LargeClass,
     /// Peers already warned about a frame they would refuse. In v1 both ends run the same limit,
     /// so this is a guard rather than a path, and one line per peer per process is plenty.
     oversize_warned: HashSet<Hostname>,
+    /// Whether the one line about a message this host cannot split has been logged.
+    split_warned: bool,
 }
 
 impl Fanout {
@@ -150,6 +161,7 @@ impl Fanout {
         topics: Arc<Mutex<OwnTopics>>,
         batches: BatchHandle,
         stats: Arc<dyn TrafficStats>,
+        large: config::LargeClass,
         progress: Arc<AtomicU64>,
     ) -> JoinHandle<()> {
         let mut fanout = Self {
@@ -160,7 +172,9 @@ impl Fanout {
             topics,
             batches,
             stats,
+            large,
             oversize_warned: HashSet::new(),
+            split_warned: false,
         };
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(PROGRESS_TICK);
@@ -179,19 +193,21 @@ impl Fanout {
     /// takes a lock and returns.
     fn send(&mut self, outbound: Outbound) {
         let view = self.live.live();
-        let (targets, relays) = match route(
+        let chunked = self.chunked(&outbound);
+        let (targets, relays, striped) = match route(
             &outbound.topic,
             outbound.class,
-            // The split a large message takes is T-073's, along with the chunk send that goes
-            // with it, so this release asks for no stripe and every class travels whole.
-            None,
+            chunked,
             &view,
             &self.self_id,
             &self.cfg.borrow(),
         ) {
-            RoutePlan::Direct(targets) => (targets, Vec::new()),
-            RoutePlan::SmallRelayed { direct, relays } => (direct, relays),
-            RoutePlan::Large(regions) => (whole(regions), Vec::new()),
+            RoutePlan::Direct(targets) => (targets, Vec::new(), BTreeMap::new()),
+            RoutePlan::SmallRelayed { direct, relays } => (direct, relays, BTreeMap::new()),
+            RoutePlan::Large(regions) => {
+                let (whole, striped) = stripes(regions);
+                (whole, Vec::new(), striped)
+            }
             RoutePlan::Nothing => return,
         };
         let Some(topic_id) = self.own_id(&outbound.topic) else {
@@ -261,6 +277,107 @@ impl Fanout {
             self.stats
                 .message(Direction::Out, outbound.class, labels, bytes);
         }
+        if let Some(chunked) = chunked.filter(|_| !striped.is_empty()) {
+            self.send_chunks(&outbound, topic_id, chunked.split, &striped, &view, now);
+        }
+    }
+
+    /// How a large message is cut up, or nothing when it travels whole: every small-class
+    /// message, and a large one no split covers.
+    ///
+    /// [`Params::for_len`] owns every limit the codec and the chunk header have (T-071), and a
+    /// configuration this sidecar started with cannot break any of them: `chunk_bytes` is
+    /// validated at load and a payload past the maximum never reaches the overlay. So a refusal
+    /// here is something an operator should see rather than something to plan around, and the
+    /// message goes out whole on the path v1 sent everything by rather than not at all.
+    fn chunked(&mut self, outbound: &Outbound) -> Option<Chunked> {
+        if outbound.class != Class::Large {
+            return None;
+        }
+        match Params::for_len(
+            outbound.payload.len(),
+            self.large.chunk_bytes,
+            self.large.parity_ratio,
+        ) {
+            Ok(split) => Some(Chunked {
+                id: outbound.id,
+                split,
+            }),
+            Err(error) => {
+                if !std::mem::replace(&mut self.split_warned, true) {
+                    tracing::warn!(
+                        %error,
+                        bytes = outbound.payload.len(),
+                        chunk_bytes = self.large.chunk_bytes,
+                        "cannot split large messages, sending them whole instead"
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    /// Writes each target the chunks the assignment gave it, all of them on one stream, with
+    /// `FORWARDED` clear so the host that receives them hands them to the rest of its region
+    /// (D11, D19). One stream per (message, target) is what keeps a 200 KB block at one stream
+    /// per host rather than one per chunk (D19).
+    ///
+    /// The parity is computed once for the whole message and every target's frames borrow from
+    /// that one buffer (T-071), so what this costs per target is the header bytes and the copy
+    /// into its stream.
+    fn send_chunks(
+        &self,
+        outbound: &Outbound,
+        topic_id: TopicId,
+        split: Params,
+        striped: &BTreeMap<Hostname, Vec<u16>>,
+        view: &crate::manager::LiveView,
+        now: Instant,
+    ) {
+        let chunks = rs::encode(&outbound.payload, split);
+        for (target, indices) in striped {
+            // A peer can leave the live set between the plan and the send, and the send is what
+            // finds out (§5.3).
+            let Some(live) = view.get(target) else {
+                continue;
+            };
+            let mut stream = BytesMut::new();
+            for index in indices {
+                let Some(data) = chunks.get(usize::from(*index)) else {
+                    continue;
+                };
+                stream.extend_from_slice(&encode_stream(&Frame::Chunk {
+                    flags: ChunkFlags::NONE,
+                    chunk: Chunk {
+                        msg_id: outbound.id,
+                        topic_id: topic_id.get(),
+                        k: split.k,
+                        m: split.m,
+                        index: *index,
+                        total_len: split.total_len,
+                        data: data.clone(),
+                    },
+                }));
+            }
+            if live
+                .sender
+                .push(Class::Large, stream.freeze(), now)
+                .is_err()
+            {
+                tracing::debug!(peer = %target, "peer has no sender to queue its chunks on");
+                continue;
+            }
+            let labels = PeerLabels {
+                hostname: target,
+                region: &live.region,
+                site: live.site.as_deref(),
+            };
+            for _ in indices {
+                self.stats.chunk_sent();
+                self.stats
+                    .message(Direction::Out, Class::Large, labels, split.chunk_bytes);
+            }
+        }
     }
 
     /// The datagram a batch for `live` may fill, or nothing when this payload does not travel in
@@ -312,18 +429,32 @@ pub(crate) fn datagram_limit(self_host: &Hostname, live: &LivePeer) -> Option<us
     live.connection.max_datagram_size()
 }
 
-/// The hosts of a large message's plan that take it whole, in region and then hostname order.
-/// T-073 sends the striped regions their chunks; a region that is too small to stripe is on the
-/// path every message took in v1 (§5.4).
-fn whole(regions: Vec<RegionPlan>) -> Vec<Hostname> {
-    regions
-        .into_iter()
-        .filter_map(|region| match region {
-            RegionPlan::Whole { targets } => Some(targets),
-            RegionPlan::Stripe { .. } => None,
-        })
-        .flatten()
-        .collect()
+/// A large message's plan as the send loop wants it: the hosts that take it whole, in the order
+/// the plan lists them, and the chunk indices each striped host is owed.
+///
+/// Both arms travel. A region below `stripe_min_recipients`, and every host of a striped region
+/// that reads whole messages only, are on the path v1 sent everything by; the rest are sent
+/// their chunks (§5.4, D29).
+fn stripes(regions: Vec<RegionPlan>) -> (Vec<Hostname>, BTreeMap<Hostname, Vec<u16>>) {
+    let mut whole = Vec::new();
+    let mut striped: BTreeMap<Hostname, Vec<u16>> = BTreeMap::new();
+    for region in regions {
+        match region {
+            RegionPlan::Whole { targets } => whole.extend(targets),
+            RegionPlan::Stripe {
+                targets_per_chunk, ..
+            } => {
+                for (index, target) in targets_per_chunk.into_iter().enumerate() {
+                    // `Params::for_len` narrows `k + m` into a `u16` already, so there is no
+                    // index here that a chunk header could not carry.
+                    if let Ok(index) = u16::try_from(index) {
+                        striped.entry(target).or_default().push(index);
+                    }
+                }
+            }
+        }
+    }
+    (whole, striped)
 }
 
 /// Whether a whole message of `payload_bytes` is within the frame limit the peer advertised in
@@ -645,7 +776,16 @@ mod tests {
                 region: Region(REGION.to_owned()),
                 site: None,
             },
-            tokio::sync::watch::channel(config::Fanout::default()).1,
+            // Nothing here is striped: this is about a hundred queues moving independently, and
+            // a stripe would leave the peers the assignment missed with nothing to wait for.
+            tokio::sync::watch::channel(config::Fanout {
+                large: config::LargeFanout {
+                    stripe_min_recipients: usize::MAX,
+                    ..config::LargeFanout::default()
+                },
+                ..config::Fanout::default()
+            })
+            .1,
             topics,
             crate::batching::Batching::spawn(
                 tokio::sync::watch::channel(config::SmallClass::default()).1,
@@ -653,6 +793,7 @@ mod tests {
             )
             .0,
             Arc::new(()),
+            config::LargeClass::default(),
             Arc::default(),
         );
 
@@ -738,6 +879,7 @@ mod tests {
             )
             .0,
             Arc::new(()),
+            config::LargeClass::default(),
             Arc::default(),
         );
         (pusher, fanout)
@@ -815,30 +957,34 @@ mod tests {
         }
     }
 
-    /// What a large plan means to this release: the regions too small to stripe are the whole
-    /// answer, in the order the plan lists them, and a striped region waits for the chunk send
-    /// T-073 writes.
+    /// What a large plan means to the send loop: the regions too small to stripe are the whole
+    /// answer, in the order the plan lists them, and a striped region turns into the chunk
+    /// indices each of its hosts is owed.
     #[test]
     fn whole_takes_the_regions_a_stripe_would_not_cover() {
+        let striped_host = Hostname("bn-us-01".to_owned());
         let plan = vec![
             RegionPlan::Whole {
                 targets: vec![Hostname("bn-eu-a".to_owned())],
             },
             RegionPlan::Stripe {
                 region: Region("us".to_owned()),
-                targets_per_chunk: vec![Hostname("bn-us-01".to_owned())],
+                targets_per_chunk: vec![striped_host.clone(), striped_host.clone()],
             },
             RegionPlan::Whole {
                 targets: vec![Hostname("bn-ap-01".to_owned())],
             },
         ];
 
+        let (whole, striped) = stripes(plan);
+
         assert_eq!(
-            whole(plan),
+            whole,
             vec![
                 Hostname("bn-eu-a".to_owned()),
                 Hostname("bn-ap-01".to_owned())
             ]
         );
+        assert_eq!(striped, BTreeMap::from([(striped_host, vec![0, 1])]));
     }
 }

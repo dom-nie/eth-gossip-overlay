@@ -50,7 +50,7 @@ use overlay_core::fanout::Outbound;
 use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
 use overlay_core::lanes::{ClassLanes, LanePusher};
 use overlay_core::msgid;
-use overlay_core::protocol::MAX_FRAME_BYTES;
+use overlay_core::protocol::{MAX_FRAME_BYTES, SUPPORTED_FEATURES};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::seen::{SeenCache, SharedSeenCache};
@@ -168,6 +168,7 @@ pub struct CountingStats {
     fanout_suppressed: Mutex<BTreeMap<(Hostname, FanoutKind), u64>>,
     relayed_batches: AtomicU64,
     unannounced_topics: AtomicU64,
+    chunks_sent: AtomicU64,
     relay_same_region: Mutex<BTreeMap<Hostname, u64>>,
     queue_depths: Mutex<HashMap<(Hostname, Class), (usize, usize)>>,
     queue_drops: Mutex<HashMap<(Hostname, Class, DropReason), u64>>,
@@ -389,6 +390,10 @@ impl TrafficStats for CountingStats {
     fn unannounced_topic(&self) {
         self.unannounced_topics.fetch_add(1, Ordering::Relaxed);
     }
+
+    fn chunk_sent(&self) {
+        self.chunks_sent.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl ReceiveStats for CountingStats {
@@ -464,6 +469,7 @@ pub struct Builder {
     cfg: Overlay,
     roster: Option<Vec<usize>>,
     small: config::SmallClass,
+    large: config::LargeClass,
     fanout: config::Fanout,
     regions: Vec<Region>,
     budget: Option<FanoutBudget>,
@@ -486,6 +492,7 @@ impl Builder {
             },
             roster: None,
             small: config::SmallClass::default(),
+            large: config::LargeClass::default(),
             fanout: config::Fanout::default(),
             regions: vec![Region(REGION.to_owned()); kinds.len()],
             budget: None,
@@ -545,6 +552,14 @@ impl Builder {
     /// HELLO carries it.
     pub fn advertising(mut self, index: usize, features: u64) -> Self {
         self.advertised.insert(index, features);
+        self
+    }
+
+    /// How every sidecar in the cluster cuts a large message up. The shipped defaults
+    /// otherwise; a test that wants a handful of chunks out of a small payload lowers
+    /// `chunk_bytes` rather than sending a block.
+    pub fn large(mut self, large: config::LargeClass) -> Self {
+        self.large = large;
         self
     }
 
@@ -675,6 +690,7 @@ impl Builder {
             admission: Box::new(admission),
             small: watch::channel(self.small).0,
             fanout: watch::channel(self.fanout).0,
+            large: self.large,
             budget: self.budget,
             clock: self.clock,
         };
@@ -800,6 +816,9 @@ pub struct TestCluster<A: Admission = HelloAdmission> {
     /// What every sidecar's router routes under, on the same kind of channel and for the same
     /// reason (D36's threshold reloads).
     fanout: watch::Sender<config::Fanout>,
+    /// How every sidecar cuts a large message up. A value rather than a channel, because both
+    /// its keys need a restart (T-043).
+    large: config::LargeClass,
     /// The fan-out budget a test decided, or the fleet's own share of a slot.
     budget: Option<FanoutBudget>,
     /// The clock every sidecar's receive path reads.
@@ -1158,6 +1177,7 @@ impl<A: Admission> TestCluster<A> {
                 node.topics.clone(),
                 small,
                 stats,
+                self.large.clone(),
                 Arc::default(),
             ),
             batching,
@@ -1538,9 +1558,12 @@ pub fn view(connection: &quinn::Connection, peers: Vec<(Hostname, PeerState)>) -
                         software_version: "test".to_owned(),
                         negotiated: Negotiated {
                             minor: 0,
-                            features: 0,
-                            // What a v1 peer advertises, so a send path reading this view is
-                            // not stopped by a limit no real peer would name.
+                            // A hand-built view stands in for a fleet on this release, so its
+                            // peers read everything this build sends; a test about the fallback
+                            // D29 exists for clears the bits of the peer it is about.
+                            features: SUPPORTED_FEATURES,
+                            // What a peer advertises, so a send path reading this view is not
+                            // stopped by a limit no real peer would name.
                             peer_max_frame_bytes: MAX_FRAME_BYTES,
                             peer_max_batch_entries: 0,
                         },

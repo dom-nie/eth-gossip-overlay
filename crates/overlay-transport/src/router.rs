@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use overlay_core::config::{Fanout, SmallCrossRegion};
 use overlay_core::msgid::MessageId;
+use overlay_core::protocol::features;
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
 use overlay_core::rs::Params;
 use overlay_core::topic::{Class, Topic};
@@ -42,7 +43,9 @@ pub enum RoutePlan {
         /// hostname order. None of them need be subscribed to the topic (D20).
         relays: Vec<Hostname>,
     },
-    /// One plan per region that holds a live subscriber, in region order (§5.4).
+    /// The plans for each region that holds a live subscriber, in region order (§5.4). A region
+    /// striped into produces a second [`RegionPlan::Whole`] beside its stripe when some of its
+    /// subscribers cannot read one.
     Large(Vec<RegionPlan>),
     /// No live peer wants it, so it goes nowhere.
     Nothing,
@@ -63,9 +66,10 @@ pub struct Chunked {
 /// How one region takes a large message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RegionPlan {
-    /// The whole message to each of these hosts, in hostname order. The region holds fewer
-    /// subscribers than `stripe_min_recipients`, and a stripe over a handful of hosts costs
-    /// more in chunk headers and streams than the copies it saves (§5.4).
+    /// The whole message to each of these hosts, in hostname order. Either the region holds
+    /// fewer subscribers that can read a stripe than `stripe_min_recipients`, and a stripe over
+    /// a handful of hosts costs more in chunk headers and streams than the copies it saves
+    /// (§5.4), or these are the hosts of a striped region that advertised no `STRIPING` (D29).
     Whole {
         /// Who takes the message whole.
         targets: Vec<Hostname>,
@@ -142,26 +146,33 @@ pub fn route(
     }
 }
 
-/// One plan per region that holds a live subscriber, in region order: this host's own region
-/// without this host, and every other region striped into directly, because a stripe crosses
-/// the WAN once already and a relay would only add a hop to it (§5.4).
+/// The plans for each region that holds a live subscriber, in region order: this host's own
+/// region without this host, and every other region striped into directly, because a stripe
+/// crosses the WAN once already and a relay would only add a hop to it (§5.4).
 ///
 /// A region takes the message whole below `stripe_min_recipients` and as a stripe at or above
 /// it. The stripe runs over the region's subscribers alone (D18): a chunk sent to a host whose
 /// beacon node discards the topic is a chunk that bought nothing, which is the opposite of the
 /// rule [`pool`] applies to relays, and deliberately so.
+///
+/// Only a subscriber that advertised `STRIPING` is in the pool, and the rest of the region's
+/// subscribers take the message whole beside the stripe, which is why a region can produce two
+/// plans. A host still on a release that reads whole messages only would otherwise be sent
+/// chunks it cannot put together, or, if the assignment happened to miss it, nothing at all
+/// (D29).
 fn striped<'a>(
     chunked: Chunked,
     peers: impl Iterator<Item = (&'a Hostname, &'a LivePeer)>,
     subscribed: &impl Fn(&LivePeer) -> bool,
     stripe_min_recipients: usize,
 ) -> RoutePlan {
-    let mut per_region: BTreeMap<&Region, Vec<Hostname>> = BTreeMap::new();
+    let mut per_region: BTreeMap<&Region, (Vec<Hostname>, Vec<Hostname>)> = BTreeMap::new();
     for (hostname, peer) in peers.filter(|(_, peer)| subscribed(peer)) {
-        per_region
-            .entry(&peer.region)
-            .or_default()
-            .push(hostname.clone());
+        let region = per_region.entry(&peer.region).or_default();
+        match peer.negotiated.allows(features::STRIPING) {
+            true => region.0.push(hostname.clone()),
+            false => region.1.push(hostname.clone()),
+        }
     }
     if per_region.is_empty() {
         return RoutePlan::Nothing;
@@ -170,15 +181,21 @@ fn striped<'a>(
     RoutePlan::Large(
         per_region
             .into_iter()
-            .map(
-                |(region, hosts)| match hosts.len() >= stripe_min_recipients {
-                    true => RegionPlan::Stripe {
-                        region: region.clone(),
-                        targets_per_chunk: stripe::assign(&chunked.id, &hosts, chunks),
-                    },
-                    false => RegionPlan::Whole { targets: hosts },
-                },
-            )
+            .flat_map(|(region, (striping, older))| {
+                if striping.len() < stripe_min_recipients {
+                    let mut targets: Vec<Hostname> = striping.into_iter().chain(older).collect();
+                    targets.sort_unstable();
+                    return vec![RegionPlan::Whole { targets }];
+                }
+                let stripe = RegionPlan::Stripe {
+                    region: region.clone(),
+                    targets_per_chunk: stripe::assign(&chunked.id, &striping, chunks),
+                };
+                match older.is_empty() {
+                    true => vec![stripe],
+                    false => vec![stripe, RegionPlan::Whole { targets: older }],
+                }
+            })
             .collect(),
     )
 }
@@ -616,6 +633,51 @@ mod tests {
                 region: Region("eu".to_owned()),
                 targets_per_chunk: vec![host("bn-eu-b"), host("bn-eu-c"), host("bn-eu-a")],
             }])
+        );
+    }
+
+    /// D29: a host that never advertised `STRIPING` cannot put chunks together, so it is not in
+    /// the pool the assignment runs over and takes the message whole beside the stripe. Leaving
+    /// it in would send it frames it would drop, and leaving it out of the plan altogether would
+    /// lose it the message, because the second hop carries chunks too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_large_sends_a_host_without_the_striping_bit_the_whole_message() {
+        let connection = connection().await;
+        let block = topic("beacon_block");
+        let mut live = view_in(
+            &connection,
+            vec![
+                ("bn-eu-a", "eu", peer_state(&[(1, &block)], &[1])),
+                ("bn-eu-b", "eu", peer_state(&[(1, &block)], &[1])),
+                ("bn-eu-c", "eu", peer_state(&[(1, &block)], &[1])),
+            ],
+        );
+        live.0
+            .get_mut(&host("bn-eu-c"))
+            .expect("the peer this view was built from")
+            .negotiated
+            .features = 0;
+
+        let plan = route(
+            &block,
+            Class::Large,
+            Some(chunked(1, 2, 1)),
+            &live,
+            &me(),
+            &striping(2),
+        );
+
+        assert_eq!(
+            plan,
+            RoutePlan::Large(vec![
+                RegionPlan::Stripe {
+                    region: Region("eu".to_owned()),
+                    targets_per_chunk: vec![host("bn-eu-b"), host("bn-eu-a"), host("bn-eu-b")],
+                },
+                RegionPlan::Whole {
+                    targets: vec![host("bn-eu-c")],
+                },
+            ])
         );
     }
 

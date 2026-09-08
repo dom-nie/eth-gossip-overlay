@@ -395,6 +395,7 @@ impl App {
             topics,
             batches,
             metrics.clone(),
+            cfg.classes.large.clone(),
             progress.fanout.clone(),
         );
         tracing::info!("fanout and overlay receive path started");
