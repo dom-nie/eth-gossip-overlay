@@ -344,4 +344,31 @@ mod tests {
         // The same shortfall with a data index to spare lists no parity at all.
         assert_eq!(wanted(5, 2, &[1, 2, 3, 4, 5, 6]), vec![1, 2, 3]);
     }
+
+    /// D23's order: the peers that forwarded a chunk first, by round trip, and the origin after
+    /// them. A forwarded chunk can only have come from an in-region peer, so the region is the
+    /// flag and not a second lookup. Equal round trips keep arrival order, which is every peer
+    /// on a fleet whose links are the same length.
+    #[test]
+    fn candidates_are_in_region_forwarded_senders_by_rtt_then_the_origin() {
+        let senders = [
+            (host("origin"), false),
+            (host("far"), true),
+            (host("near"), true),
+            (host("near-too"), true),
+            (host("gone"), true),
+        ];
+        let rtt = |peer: &Hostname| match peer.0.as_str() {
+            "origin" => Some(Duration::from_millis(1)),
+            "far" => Some(Duration::from_millis(50)),
+            "near" | "near-too" => Some(Duration::from_millis(10)),
+            // Not live, or live without the `REPAIR` bit: never asked, whatever it sent (D29).
+            _ => None,
+        };
+
+        assert_eq!(
+            candidates(&senders, rtt),
+            vec![host("near"), host("near-too"), host("far"), host("origin")]
+        );
+    }
 }
