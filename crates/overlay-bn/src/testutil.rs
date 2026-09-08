@@ -128,7 +128,8 @@ impl std::io::Write for Log {
 /// parameters copied from its private `gossipsub_config`, in a task of its own, plus a mock of
 /// the HTTP endpoints the link reads. Every peer that connects is made an explicit peer, the
 /// way `--trusted-peers` does it on the real node, and every message received is reported
-/// `Accept` so gossipsub behaves as the beacon node's does.
+/// `Accept` so gossipsub behaves as the beacon node's does, unless a test is holding that
+/// report ([`hold_validation`](Self::hold_validation)).
 pub struct FakeBn {
     task: JoinHandle<()>,
     peer_id: PeerId,
