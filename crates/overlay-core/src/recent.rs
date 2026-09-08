@@ -110,6 +110,10 @@ impl RecentLarge {
         if self.entries.contains_key(&msg_id) {
             return None;
         }
+        let header = self
+            .decoder
+            .as_ref()
+            .and_then(|decoder| decoder.header(&topic, &payload));
         self.bytes += payload.len();
         self.entries.insert(
             msg_id,
@@ -122,7 +126,13 @@ impl RecentLarge {
         );
         self.order.push_back(msg_id);
         while self.bytes > self.max_bytes && self.pop_oldest() {}
-        None
+        if let Some(Header::Column {
+            index, block_root, ..
+        }) = header
+        {
+            self.index_column(block_root, index, msg_id);
+        }
+        header
     }
 
     /// The topic and bytes held for `msg_id`, for a responder about to answer a repair request
