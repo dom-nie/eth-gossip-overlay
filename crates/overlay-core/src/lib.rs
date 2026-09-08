@@ -8,6 +8,7 @@ pub mod config;
 pub mod custody;
 pub mod events;
 pub mod fanout;
+pub mod header;
 pub mod identity;
 pub mod lanes;
 pub mod msgid;

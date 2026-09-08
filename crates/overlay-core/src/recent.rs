@@ -6,8 +6,12 @@
 //! host holds and there is no `HAVE` frame. What is left is the bytes, and the seen cache keeps
 //! only ids, so a large message is kept whole here for as long as a peer can still ask for it.
 //!
-//! Two places insert, both on a large-class first arrival: T-016 as a message arrives from the
-//! beacon node, and T-074's reassembler when a striped message completes.
+//! Three places insert, all on a large-class first arrival: T-016 as a message arrives from the
+//! beacon node, T-074's reassembler when a striped message completes, and T-032's whole-message
+//! delivery. The third is T-083's: chunk repair never asks a whole-delivery host, because it
+//! sent nobody a chunk and is nobody's candidate (D23), but column repair asks in-region live
+//! peers by round trip whatever they sent, so a host that answered `not_found` for a column it
+//! was holding would send the requester on to the next peer for nothing.
 //!
 //! A column is asked for by `(block_root, index)` rather than by message id, because a host that
 //! never saw the column has no id for it (T-083). The index that answers that question is part of
@@ -23,6 +27,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
+use crate::header::{Header, HeaderDecoder};
 use crate::msgid::MessageId;
 use crate::topic::Topic;
 
@@ -54,6 +59,7 @@ struct Entry {
 /// Nothing here refreshes: an entry keeps the arrival time of the insert that created it, so the
 /// queue stays in insertion order and both bounds only ever look at its front.
 pub struct RecentLarge {
+    decoder: Option<Arc<dyn HeaderDecoder>>,
     ttl: Duration,
     max_bytes: usize,
     bytes: usize,
@@ -68,6 +74,7 @@ impl RecentLarge {
     /// passes less so the bound is reachable without a slot's traffic.
     pub fn new(ttl: Duration, max_bytes: usize) -> Self {
         Self {
+            decoder: None,
             ttl,
             max_bytes,
             bytes: 0,
@@ -77,16 +84,31 @@ impl RecentLarge {
         }
     }
 
-    /// Keeps `payload` under `msg_id`. An id already held is left as it arrived, so a second
+    /// Reads the header of every payload stored here, which is what fills the column index and
+    /// what T-044's event names a slot from (T-083). Without one nothing is decoded and the
+    /// store behaves as it did before column repair existed.
+    pub fn with_decoder(mut self, decoder: Arc<dyn HeaderDecoder>) -> Self {
+        self.decoder = Some(decoder);
+        self
+    }
+
+    /// Keeps `payload` under `msg_id` and answers what its header said, which is the one place
+    /// a large payload is decoded (§7). An id already held is left as it arrived, so a second
     /// insert neither charges the bound again nor extends the minute.
     ///
     /// A payload larger than the whole bound takes the store down to itself and then goes too,
     /// which is the bound holding rather than a case to special-case: nothing this host accepts
     /// off the wire is that size.
-    pub fn insert(&mut self, msg_id: MessageId, topic: Topic, payload: Bytes, now: Instant) {
+    pub fn insert(
+        &mut self,
+        msg_id: MessageId,
+        topic: Topic,
+        payload: Bytes,
+        now: Instant,
+    ) -> Option<Header> {
         self.expire(now);
         if self.entries.contains_key(&msg_id) {
-            return;
+            return None;
         }
         self.bytes += payload.len();
         self.entries.insert(
@@ -100,6 +122,7 @@ impl RecentLarge {
         );
         self.order.push_back(msg_id);
         while self.bytes > self.max_bytes && self.pop_oldest() {}
+        None
     }
 
     /// The topic and bytes held for `msg_id`, for a responder about to answer a repair request
@@ -180,8 +203,14 @@ impl SharedRecentLarge {
     }
 
     /// [`RecentLarge::insert`] under the lock.
-    pub fn insert(&self, msg_id: MessageId, topic: Topic, payload: Bytes, now: Instant) {
-        self.lock().insert(msg_id, topic, payload, now);
+    pub fn insert(
+        &self,
+        msg_id: MessageId,
+        topic: Topic,
+        payload: Bytes,
+        now: Instant,
+    ) -> Option<Header> {
+        self.lock().insert(msg_id, topic, payload, now)
     }
 
     /// [`RecentLarge::get`] under the lock.
@@ -214,10 +243,12 @@ impl SharedRecentLarge {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use bytes::Bytes;
 
+    use crate::header::{Header, HeaderDecoder};
     use crate::msgid::MessageId;
     use crate::recent::RecentLarge;
     use crate::time::{Clock, FakeClock};
@@ -314,5 +345,44 @@ mod tests {
 
         assert_eq!(recent.get_by_column(root, 42), None);
         assert_eq!(recent.get(&id(1)), None);
+    }
+
+    const COLUMN_TOPIC: &str = "/eth2/6a95a1a9/data_column_sidecar_5/ssz_snappy";
+
+    /// Stands in for `overlay_bn::decode::Headers`, which is behind a feature this crate cannot
+    /// turn on. What is under test here is the store calling a decoder and filing what it says,
+    /// not what the real one reads out of SSZ; T-083's tests in `overlay-bn` cover that.
+    struct FakeDecoder;
+
+    impl HeaderDecoder for FakeDecoder {
+        fn header(&self, topic: &Topic, _: &[u8]) -> Option<Header> {
+            (topic.to_string() == COLUMN_TOPIC).then_some(Header::Column {
+                slot: 42,
+                index: 5,
+                block_root: [9; 32],
+            })
+        }
+    }
+
+    #[test]
+    fn recent_store_indexes_column_payloads_by_block_root_and_index() {
+        let clock = FakeClock::new();
+        let mut recent = store(1024).with_decoder(Arc::new(FakeDecoder));
+        let column = Topic::parse(COLUMN_TOPIC).expect("a topic the parser takes");
+
+        let header = recent.insert(id(1), column, payload(1, 200), clock.now());
+
+        assert_eq!(
+            header,
+            Some(Header::Column {
+                slot: 42,
+                index: 5,
+                block_root: [9; 32],
+            })
+        );
+        assert_eq!(recent.get_by_column([9; 32], 5), Some(id(1)));
+
+        // A block is not a column and is filed under nothing.
+        assert_eq!(recent.insert(id(2), topic(), payload(2, 200), clock.now()), None);
     }
 }
