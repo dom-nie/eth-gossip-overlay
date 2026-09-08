@@ -68,13 +68,19 @@ const COLUMN_FIXED_LEN: usize = COLUMN_HEADER_AT + BEACON_BLOCK_HEADER_LEN + 96 
 
 /// The slot a block is for and its block root, from the payload the beacon node gossips.
 ///
-/// Two things a reader should know about the numbers this produces. The fork variant is found
-/// by trying each in turn, because nothing on the wire names it and the sidecar holds no fork
-/// schedule; a block that decoded as the wrong variant would give a root that resolves to no
-/// column anywhere, which costs a repair request and nothing else. And a tree hash depends on
-/// the preset, through the list lengths it merkleises to, so the root is mainnet's; a network on
-/// another preset would need the preset with it, which is a change to what `SpecSnapshot` carries
-/// rather than to this function.
+/// This is the compressed-payload form the ticket names and the one the tests here drive; the
+/// receive path holds the payload already decompressed and goes through [`Headers`] to the inner
+/// function, so it decompresses once for the id and the header together (T-006).
+///
+/// Two things a reader should know about the numbers this produces. The fork variant is found by
+/// trying each in turn, because nothing on the wire names it and the sidecar holds no fork
+/// schedule. A block read as the wrong variant gives a root no column belongs to, and that costs
+/// a slot of column repair rather than one request: the block opens a tracker entry under that
+/// root while every real column of it files under the right one, so the entry reports its whole
+/// expected set missing and the scheduler asks for up to the threshold every slot until the
+/// entry ages out. And a tree hash depends on the preset, through the list lengths it merkleises
+/// to, so the root is mainnet's; a network on another preset would need the preset with it,
+/// which is a change to what `SpecSnapshot` carries rather than to this function.
 pub fn block_header(payload: &[u8]) -> Result<(u64, [u8; 32]), HeaderError> {
     block_header_ssz(&decompress(payload)?)
 }
@@ -88,6 +94,8 @@ fn block_header_ssz(ssz: &[u8]) -> Result<(u64, [u8; 32]), HeaderError> {
 
 /// The slot, index and block root of a data column sidecar, from the payload the beacon node
 /// gossips on `data_column_sidecar_{index}`.
+///
+/// The compressed-payload form, as [`block_header`] is, and with the same split behind it.
 ///
 /// The index is read from the payload rather than taken from the topic name, because the two
 /// agreeing is the beacon node's rule to enforce and not this sidecar's: what the responder
@@ -212,7 +220,7 @@ mod tests {
     use overlay_core::custody::{ColumnGap, CustodyTracker};
     use overlay_core::time::{Clock, FakeClock};
     use ssz::{Decode, Encode};
-    use types::{BeaconBlock, ChainSpec, DataColumnSidecarFulu};
+    use types::{BeaconBlock, BeaconBlockFulu, ChainSpec, DataColumnSidecarFulu, EmptyBlock};
 
     use super::*;
 
@@ -229,18 +237,43 @@ mod tests {
         snap::raw::Encoder::new().compress_vec(bytes).unwrap()
     }
 
-    /// A signed block for `slot`, as `types` decodes it: the wire form of `SignedBeaconBlock` is
-    /// the offset of its message, the signature and then the block, so an empty block and an
-    /// infinity signature make one without a signing key anywhere.
-    fn signed_block(slot: u64) -> (SignedBeaconBlock<MainnetEthSpec>, Vec<u8>) {
+    /// A signed block for `slot` of the fork the network runs after Fusaka, which is the one a
+    /// column sidecar belongs to.
+    fn fulu_block(slot: u64) -> (SignedBeaconBlock<MainnetEthSpec>, Vec<u8>) {
         let spec = ChainSpec::mainnet();
-        let mut block = BeaconBlock::<MainnetEthSpec>::empty(&spec);
+        signed_block(BeaconBlock::Fulu(BeaconBlockFulu::empty(&spec)), slot)
+    }
+
+    /// The same for the genesis fork, which has none of Fulu's body and so is the shape the
+    /// decoder is most likely to confuse it with.
+    fn base_block(slot: u64) -> (SignedBeaconBlock<MainnetEthSpec>, Vec<u8>) {
+        let spec = ChainSpec::mainnet();
+        signed_block(BeaconBlock::<MainnetEthSpec>::empty(&spec), slot)
+    }
+
+    /// `block` at `slot`, as `types` decodes it: the wire form of `SignedBeaconBlock` is the
+    /// offset of its message, the signature and then the block, so an empty block and an
+    /// infinity signature make one without a signing key anywhere.
+    ///
+    /// The variant is asserted on the way back, because `block_header` finds the fork by trying
+    /// each in turn and a fixture that took whatever came out could not tell a wrong choice from
+    /// a right one.
+    fn signed_block(
+        mut block: BeaconBlock<MainnetEthSpec>,
+        slot: u64,
+    ) -> (SignedBeaconBlock<MainnetEthSpec>, Vec<u8>) {
+        let fork = block.to_ref().fork_name_unchecked();
         *block.slot_mut() = Slot::new(slot);
         let mut wire = 100u32.to_le_bytes().to_vec();
         wire.extend_from_slice(&infinity_signature());
         wire.extend_from_slice(&block.as_ssz_bytes());
         let decoded = SignedBeaconBlock::<MainnetEthSpec>::any_from_ssz_bytes(&wire)
             .expect("the hand-built wire form is one types reads back");
+        assert_eq!(
+            decoded.fork_name_unchecked(),
+            fork,
+            "the decoder read the block back as a different fork"
+        );
         (decoded, wire)
     }
 
@@ -293,12 +326,12 @@ mod tests {
 
     #[test]
     fn block_header_decodes_slot_and_root_from_compressed_payload() {
-        let (block, wire) = signed_block(4_242);
+        for (block, wire) in [base_block(4_242), fulu_block(4_242)] {
+            let (slot, root) = block_header(&snappy(&wire)).unwrap();
 
-        let (slot, root) = block_header(&snappy(&wire)).unwrap();
-
-        assert_eq!(slot, 4_242);
-        assert_eq!(root, bytes32(block.canonical_root()));
+            assert_eq!(slot, 4_242);
+            assert_eq!(root, bytes32(block.canonical_root()));
+        }
     }
 
     #[test]
@@ -321,7 +354,7 @@ mod tests {
     /// that is not in the bytes.
     #[test]
     fn decoder_rejects_truncated_payload_without_panic() {
-        let (_, block) = signed_block(1);
+        let (_, block) = fulu_block(1);
         let (_, column) = column_sidecar(1, 0);
         let whole_block = block_header(&snappy(&block));
         let whole_column = column_header(&snappy(&column));
@@ -357,7 +390,7 @@ mod tests {
     fn a_real_block_and_column_leave_the_tracker_naming_what_is_missing() {
         let deadline = Duration::from_millis(250);
         let clock = FakeClock::new();
-        let (block, block_wire) = signed_block(4_242);
+        let (block, block_wire) = fulu_block(4_242);
         let (_, column_wire) = column_sidecar_of(block.message().block_header(), 5);
         let mut tracker = CustodyTracker::new(&crate::spec::MAINNET);
         let expected = tracker.expected_columns(&column_topics(&[0, 5]));
