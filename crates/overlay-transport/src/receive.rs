@@ -55,8 +55,9 @@ use bytes::Bytes;
 use overlay_core::budget::{Charge, FanoutBudget, FanoutKind};
 use overlay_core::events::{self, FirstArrival};
 use overlay_core::msgid::{self, Branch, MessageId};
-use overlay_core::protocol::MAX_FRAME_BYTES;
+use overlay_core::protocol::{MAX_FRAME_BYTES, features};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
+use overlay_core::reassemble::{Outcome, Reassembler};
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
 use overlay_core::seen::SharedSeenCache;
 use overlay_core::subs::PeerState;
@@ -150,31 +151,6 @@ enum Delivery {
     Relayed,
 }
 
-/// What to do with a chunk that is a piece of a message rather than a whole one. T-074 puts the
-/// reassembler behind this without touching the dispatch above it.
-pub trait Stripes: Send + Sync {
-    /// One chunk of a striped message, with the flags its frame carried (`FORWARDED` is D19's).
-    fn chunk(&self, peer: &Hostname, flags: ChunkFlags, chunk: Chunk);
-}
-
-/// v1's answer: a stripe is a form this release does not know how to read, so it is counted as
-/// one and dropped (D10). Nothing sends stripes until T-073, and no v1 peer can be talked into
-/// it, because `STRIPING` is a feature bit this release never advertises (D29).
-pub struct NoStripes(Arc<dyn ReceiveStats>);
-
-impl NoStripes {
-    /// Counts what it drops on `stats`.
-    pub fn new(stats: Arc<dyn ReceiveStats>) -> Self {
-        Self(stats)
-    }
-}
-
-impl Stripes for NoStripes {
-    fn chunk(&self, peer: &Hostname, _: ChunkFlags, _: Chunk) {
-        self.0.unknown_frame_type(peer);
-    }
-}
-
 /// What every peer's receiver shares: the caches, the queue and the hooks that belong to the
 /// host rather than to one connection.
 #[derive(Clone)]
@@ -185,8 +161,9 @@ pub struct Deps {
     pub publish: Arc<dyn PublishSink>,
     /// What the mirror says the beacon node is subscribed to, which is the gate (DX-N1).
     pub sets: watch::Receiver<SubscriptionSets>,
-    /// Where a chunk that is not a whole message goes.
-    pub stripes: Arc<dyn Stripes>,
+    /// Where a chunk that is not a whole message goes: the forwarded bitmap and the completed
+    /// set D19 reads, which T-074 grows into the reassembly itself.
+    pub reassembler: Arc<Reassembler>,
     /// Where every counter above lands.
     pub stats: Arc<dyn ReceiveStats>,
     /// Who this host is, which the event log names as the host that saw the message.
@@ -439,7 +416,7 @@ impl Ctx {
                 After::Carry
             }
             Frame::Chunk { flags, chunk } => {
-                self.deps.stripes.chunk(&self.peer, flags, chunk);
+                self.chunk(flags, chunk);
                 After::Carry
             }
             Frame::Batch { flags, entries } => self.batch(flags, entries, arrived),
@@ -451,6 +428,96 @@ impl Ctx {
                 );
                 After::Carry
             }
+        }
+    }
+
+    /// One chunk of a striped message.
+    ///
+    /// Cut-through (§5.4 step 3): the forward is the first thing that happens to a chunk this
+    /// host owes its region, before the chunk is put anywhere or anything is decoded from it,
+    /// because the whole point of striping is that a host passes a piece on the moment it
+    /// arrives rather than after it has the message. Everything T-074 adds goes below the
+    /// forward for the same reason.
+    ///
+    /// What the region is owed is [`Reassembler::on_chunk`]'s answer and not this function's:
+    /// a chunk that arrived with `FORWARDED` is the second hop and there is no third, and an
+    /// index some other origin's copy already carried has been forwarded once (D11, D19).
+    fn chunk(&self, flags: ChunkFlags, chunk: Chunk) {
+        self.deps.stats.chunk_received(&self.peer, flags, &chunk);
+        let Some(topic) = self.topic(chunk.topic_id) else {
+            self.deps.stats.unknown_topic_id(&self.peer);
+            return;
+        };
+        let class = Class::of(topic.kind(), chunk.total_len as usize);
+        self.deps
+            .stats
+            .message(Direction::In, class, self.labels(), chunk.data.len());
+        let outcome = self.deps.reassembler.on_chunk(
+            &chunk,
+            chunk.data.clone(),
+            &self.peer,
+            flags.contains(ChunkFlags::FORWARDED),
+            self.deps.clock.now(),
+        );
+        if outcome == (Outcome::Stored { forward: true }) {
+            self.forward(&topic, &chunk);
+        }
+    }
+
+    /// Hands one chunk to every live in-region peer subscribed to `topic`, with `FORWARDED` set
+    /// and the sender left out: it has the chunk, and sending it back would be the third hop the
+    /// bit exists to prevent (D11, D19).
+    ///
+    /// A peer that advertised no `STRIPING` is left out too. It was sent the whole message by
+    /// the origin instead, because the stripe pool is the subscribers that can read one
+    /// (D29, `router::striped`), so a chunk would be a frame it would drop.
+    ///
+    /// The chunk goes out under this host's own id for the topic, since a frame is named by
+    /// whoever sends it (D13), and only to a peer that has had the `TOPIC_ADD` binding it
+    /// (MD-04). A forwarding host is a stripe target and a stripe runs over subscribers (D18),
+    /// so it holds an id already; the intern is what keeps that true if the pool ever widens.
+    fn forward(&self, topic: &Topic, chunk: &Chunk) {
+        let Some(topic_id) = self.own_id(topic) else {
+            self.deps.stats.unannounced_topic();
+            return;
+        };
+        let frame = wire::encode_stream(&Frame::Chunk {
+            flags: ChunkFlags::FORWARDED,
+            chunk: Chunk {
+                topic_id: topic_id.get(),
+                ..chunk.clone()
+            },
+        });
+        // The lane's own clock, which is the runtime's: the age bound the drain task holds a
+        // frame to is read from that one and not from the injected clock this path reads.
+        let now = Instant::now();
+        let view = self.deps.relaying.live.live();
+        // One lock for the whole region rather than one per peer, the way `refan` takes it.
+        let own = crate::hello::lock(&self.deps.relaying.topics);
+        for (hostname, peer) in view.in_region(&self.deps.node.region) {
+            let wanted = *hostname != self.deps.node.hostname
+                && *hostname != self.peer
+                && peer.negotiated.allows(features::STRIPING)
+                && own.announcer.told(hostname, topic_id)
+                && subs::state(&peer.state).subscribed(topic);
+            if !wanted {
+                continue;
+            }
+            if peer.sender.push(Class::Large, frame.clone(), now).is_err() {
+                tracing::debug!(peer = %hostname, "peer has no sender to queue the chunk on");
+                continue;
+            }
+            self.deps.stats.chunk_sent();
+            self.deps.stats.message(
+                Direction::Out,
+                Class::Large,
+                PeerLabels {
+                    hostname,
+                    region: &peer.region,
+                    site: peer.site.as_deref(),
+                },
+                chunk.data.len(),
+            );
         }
     }
 
@@ -764,6 +831,7 @@ mod tests {
     use bytes::BytesMut;
     use overlay_core::budget::SUSTAINED_VIOLATION;
     use overlay_core::config;
+    use overlay_core::reassemble::{INCOMPLETE_TTL, MAX_IN_FLIGHT};
     use overlay_core::seen::SeenCache;
     use overlay_core::time::{FakeClock, SystemClock};
     use overlay_core::topic::UNKNOWN_LARGE_THRESHOLD_BYTES;
@@ -2027,7 +2095,7 @@ mod tests {
                 )),
                 publish: published.clone(),
                 sets: watching,
-                stripes: Arc::new(NoStripes::new(stats.clone())),
+                reassembler: Arc::new(Reassembler::new(MAX_IN_FLIGHT, INCOMPLETE_TTL)),
                 stats,
                 node: Arc::new(SelfIdentity {
                     hostname: Hostname("stalled-host".to_owned()),
@@ -2198,11 +2266,10 @@ mod tests {
         );
     }
 
-    /// A chunk that is a piece of a message is a form this release cannot put together, so it is
-    /// counted as a frame type it does not know and dropped (D10). T-074 puts the reassembler
-    /// behind the same hook without touching the dispatch.
+    /// A chunk is a piece of a message and this release cannot put one back together, so it is
+    /// counted, offered to the region and dropped. Nothing is published until T-074 reconstructs.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_striped_chunk_is_counted_and_dropped_until_the_reassembler_lands() {
+    async fn a_striped_chunk_is_counted_and_not_published_until_the_reassembler_lands() {
         let block = topic("beacon_block");
         let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
         let striped = encode_datagram(&Frame::Chunk {
@@ -2222,10 +2289,14 @@ mod tests {
 
         let sender = cluster.hostname(0);
         eventually("the chunk to be counted", || {
-            cluster.stats(1).unknown_frame_types(&sender) == 1
+            cluster.stats(1).chunks_received(&sender).len() == 1
         })
         .await;
         tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            cluster.stats(1).chunks_received(&sender),
+            vec![(ChunkFlags::NONE, 0)]
+        );
         assert!(cluster.published(1).is_empty());
     }
 

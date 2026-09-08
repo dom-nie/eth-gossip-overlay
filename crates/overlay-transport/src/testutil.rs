@@ -52,6 +52,7 @@ use overlay_core::lanes::{ClassLanes, LanePusher};
 use overlay_core::msgid;
 use overlay_core::protocol::{MAX_FRAME_BYTES, SUPPORTED_FEATURES};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
+use overlay_core::reassemble::{INCOMPLETE_TTL, MAX_IN_FLIGHT, Reassembler};
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::seen::{SeenCache, SharedSeenCache};
 use overlay_core::subs::{Bitmap, PeerState};
@@ -72,7 +73,7 @@ use crate::manager::{
     Admission, CloseCode, ConnectionManager, Handle, LivePeer, LiveSource, LiveView, Local,
     ManagerStats, PeerCounts, PeerEvent, PeerInfo,
 };
-use crate::receive::{Deps, NoStripes, PeerReceiver, ReceiveStats, Relaying};
+use crate::receive::{Deps, PeerReceiver, ReceiveStats, Relaying};
 use crate::sender::{
     self, DropReason, LARGE_QUEUED_BYTES_MAX, LargeLedger, SenderHandle, SenderStats, StaleReason,
     Transport,
@@ -491,6 +492,8 @@ pub struct Builder {
     small: config::SmallClass,
     large: config::LargeClass,
     fanout: config::Fanout,
+    in_flight: usize,
+    incomplete_ttl: Duration,
     regions: Vec<Region>,
     budget: Option<FanoutBudget>,
     clock: Arc<dyn Clock>,
@@ -514,6 +517,8 @@ impl Builder {
             small: config::SmallClass::default(),
             large: config::LargeClass::default(),
             fanout: config::Fanout::default(),
+            in_flight: MAX_IN_FLIGHT,
+            incomplete_ttl: INCOMPLETE_TTL,
             regions: vec![Region(REGION.to_owned()); kinds.len()],
             budget: None,
             clock: Arc::new(SystemClock),
@@ -572,6 +577,15 @@ impl Builder {
     /// HELLO carries it.
     pub fn advertising(mut self, index: usize, features: u64) -> Self {
         self.advertised.insert(index, features);
+        self
+    }
+
+    /// The bounds every sidecar's reassembler holds its in-flight messages to. The shipped
+    /// constants otherwise; a test about what an entry takes with it when it goes shortens the
+    /// ttl rather than waiting four seconds for it.
+    pub fn reassembly(mut self, max_in_flight: usize, incomplete_ttl: Duration) -> Self {
+        self.in_flight = max_in_flight;
+        self.incomplete_ttl = incomplete_ttl;
         self
     }
 
@@ -711,6 +725,8 @@ impl Builder {
             small: watch::channel(self.small).0,
             fanout: watch::channel(self.fanout).0,
             large: self.large,
+            in_flight: self.in_flight,
+            incomplete_ttl: self.incomplete_ttl,
             budget: self.budget,
             clock: self.clock,
         };
@@ -839,6 +855,9 @@ pub struct TestCluster<A: Admission = HelloAdmission> {
     /// How every sidecar cuts a large message up. A value rather than a channel, because both
     /// its keys need a restart (T-043).
     large: config::LargeClass,
+    /// The bounds every sidecar's reassembler runs under.
+    in_flight: usize,
+    incomplete_ttl: Duration,
     /// The fan-out budget a test decided, or the fleet's own share of a slot.
     budget: Option<FanoutBudget>,
     /// The clock every sidecar's receive path reads.
@@ -1152,6 +1171,7 @@ impl<A: Admission> TestCluster<A> {
             Arc::new(SystemClock),
         ));
         let (subscriptions, watching) = watch::channel(sets);
+        let reassembler = Arc::new(Reassembler::new(self.in_flight, self.incomplete_ttl));
         let identity = SelfIdentity {
             hostname: node.hostname.clone(),
             region: node.self_hello.region.clone(),
@@ -1162,7 +1182,7 @@ impl<A: Admission> TestCluster<A> {
             seen: seen.clone(),
             publish: published.clone(),
             sets: watching.clone(),
-            stripes: Arc::new(NoStripes::new(stats.clone())),
+            reassembler: reassembler.clone(),
             stats: stats.clone(),
             node: Arc::new(identity.clone()),
             clock: self.clock.clone(),
@@ -1204,6 +1224,7 @@ impl<A: Admission> TestCluster<A> {
         ];
         self.nodes[index].sidecar = Some(Sidecar {
             seen,
+            reassembler,
             to_fanout,
             published,
             subscriptions,
@@ -1260,6 +1281,12 @@ impl<A: Admission> TestCluster<A> {
     /// nothing was draining it.
     pub fn publish_drops(&self, index: usize) -> u64 {
         self.sidecar(index).published.dropped()
+    }
+
+    /// Node `index`'s reassembler, which is what holds the forwarded bitmap of every message it
+    /// is collecting chunks for (D19).
+    pub fn reassembler(&self, index: usize) -> &Arc<Reassembler> {
+        &self.sidecar(index).reassembler
     }
 
     /// Node `index`'s receiver for `peer`, while the pair is live.
@@ -1333,6 +1360,8 @@ struct Sidecar {
     /// The cache all three insert sites share, so what the overlay delivered is remembered
     /// when the beacon node echoes it back (§5.5).
     seen: SharedSeenCache,
+    /// What the receive path asks whether a chunk is owed to the region (D19).
+    reassembler: Arc<Reassembler>,
     to_fanout: LanePusher<Outbound>,
     published: Arc<PublishSpy>,
     subscriptions: watch::Sender<SubscriptionSets>,

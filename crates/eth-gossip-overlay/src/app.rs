@@ -39,6 +39,7 @@ use overlay_core::budget::{self, FanoutBudget, MemoryBudget, SendLaneBounds};
 use overlay_core::config::Config;
 use overlay_core::identity::{Seeds, derive_tls_keypair};
 use overlay_core::lanes::ClassLanes;
+use overlay_core::reassemble::{INCOMPLETE_TTL, MAX_IN_FLIGHT, Reassembler};
 use overlay_core::roster::{Hostname, Roster, SelfIdentity, resolve_self};
 use overlay_core::seen::{SEEN_CAPACITY, SEEN_TTL, SeenCache, SharedSeenCache};
 use overlay_core::time::SystemClock;
@@ -48,7 +49,7 @@ use overlay_transport::endpoint;
 use overlay_transport::fanout::Fanout;
 use overlay_transport::hello::{HelloAdmission, OwnTopics, SelfHello};
 use overlay_transport::manager::{ConnectionManager, Handle, Local, PeerEvent};
-use overlay_transport::receive::{Deps as ReceiveDeps, NoStripes, PeerReceiver, Relaying};
+use overlay_transport::receive::{Deps as ReceiveDeps, PeerReceiver, Relaying};
 use overlay_transport::sender::{
     self, LARGE_LANE_BYTES, LARGE_QUEUED_BYTES_MAX, LargeLedger, SMALL_LANE_FRAMES,
 };
@@ -367,7 +368,7 @@ impl App {
                 seen,
                 publish: Arc::new(publish),
                 sets: sets_rx.clone(),
-                stripes: Arc::new(NoStripes::new(metrics.clone())),
+                reassembler: Arc::new(Reassembler::new(MAX_IN_FLIGHT, INCOMPLETE_TTL)),
                 stats: metrics.clone(),
                 node,
                 clock,
