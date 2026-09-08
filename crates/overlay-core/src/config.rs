@@ -684,6 +684,9 @@ log:
         assert!(err.to_string().contains("stripe"), "{err}");
     }
 
+    /// A key this project has dropped fails with its own name in the message, so an operator
+    /// running a file copied from an older `deploy/examples/config.yaml` is told which line to
+    /// take out rather than that something unknown is in there.
     #[test]
     fn removed_keys_are_rejected_with_their_names() {
         for (doc, key) in [
@@ -695,6 +698,10 @@ log:
             (
                 "bn: { publish_rate_limit_per_s: 20000 }",
                 "publish_rate_limit_per_s",
+            ),
+            (
+                "overlay: { fanout: { small: { in_region: direct } } }",
+                "in_region",
             ),
         ] {
             let err = Config::from_yaml(doc).unwrap_err();
