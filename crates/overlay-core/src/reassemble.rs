@@ -122,7 +122,14 @@ pub enum Outcome {
     /// split it declares has no chunk for. Either a bug or a forged chunk (§8).
     HeaderConflict,
     /// The chunk, or the message it completed, is one this host will not publish.
-    Rejected(Reason),
+    Rejected {
+        /// What is wrong with it.
+        reason: Reason,
+        /// Who it is counted against: the origin for a message that came back and turned out to
+        /// be one no beacon node would take, and the sender for a chunk refused on its header
+        /// alone (D03).
+        origin: Hostname,
+    },
 }
 
 impl Outcome {
@@ -255,7 +262,7 @@ impl Reassembler {
         match state.in_flight.get(&chunk.msg_id) {
             Some(entry) if entry.params != params => return Outcome::HeaderConflict,
             Some(_) => {}
-            None if !usable(params) => return Outcome::Rejected(Reason::BadHeader),
+            None if !usable(params) => return rejected(Reason::BadHeader, from),
             None => state.open(chunk.msg_id, chunk.topic_id, params, now),
         }
         state.store(chunk, topic, from, forwarded)
@@ -302,6 +309,14 @@ impl Reassembler {
 
     fn state(&self) -> MutexGuard<'_, State> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// A refusal counted against `origin`.
+fn rejected(reason: Reason, origin: &Hostname) -> Outcome {
+    Outcome::Rejected {
+        reason,
+        origin: origin.clone(),
     }
 }
 
@@ -355,7 +370,7 @@ impl State {
     /// came to. The forward is claimed before the message is decoded (D19).
     fn store(&mut self, chunk: &Chunk, topic: &Topic, from: &Hostname, forwarded: bool) -> Outcome {
         let Some(entry) = self.in_flight.get_mut(&chunk.msg_id) else {
-            return Outcome::Rejected(Reason::BadHeader);
+            return rejected(Reason::BadHeader, from);
         };
         // A forwarded chunk is the second hop and there is no third (D11), so its index is left
         // clear: the copy that arrives clear afterwards is the one this host owes its region.
@@ -395,11 +410,11 @@ impl State {
             used_parity,
         }) = decoded
         else {
-            return Some(Outcome::Rejected(Reason::Undecodable));
+            return Some(rejected(Reason::Undecodable, &origin));
         };
         let computed = msgid::compute(&topic.to_string(), &payload, MAX_PAYLOAD_BYTES);
         if computed.branch != Branch::Valid || computed.id != *msg_id {
-            return Some(Outcome::Rejected(Reason::InvalidPayload));
+            return Some(rejected(Reason::InvalidPayload, &origin));
         }
         Some(Outcome::Completed {
             msg_id: *msg_id,
@@ -969,7 +984,7 @@ mod tests {
 
         let last = feed(&reassembler, msg_id, params, &chunks, &data, now);
 
-        assert_eq!(last, Outcome::Rejected(Reason::InvalidPayload));
+        assert_eq!(last, rejected(Reason::InvalidPayload, &host()));
         assert_eq!(
             on(
                 &reassembler,
@@ -999,7 +1014,7 @@ mod tests {
 
         let last = feed(&reassembler, msg_id, params, &chunks, &data, now);
 
-        assert_eq!(last, Outcome::Rejected(Reason::InvalidPayload));
+        assert_eq!(last, rejected(Reason::InvalidPayload, &host()));
     }
 
     /// `k` of the `k + m` indices in the order `seed` shuffles them into, which is the order a

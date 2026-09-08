@@ -172,6 +172,8 @@ pub struct CountingStats {
     chunks_sent: AtomicU64,
     relay_same_region: Mutex<BTreeMap<Hostname, u64>>,
     chunks_received: Mutex<Vec<(Hostname, ChunkFlags, u16)>>,
+    parity_used: AtomicU64,
+    reconstructed: Mutex<HashMap<Class, Vec<Duration>>>,
     queue_depths: Mutex<HashMap<(Hostname, Class), (usize, usize)>>,
     queue_drops: Mutex<HashMap<(Hostname, Class, DropReason), u64>>,
     stale_dropped: Mutex<HashMap<StaleReason, u64>>,
@@ -299,6 +301,21 @@ impl CountingStats {
             .filter(|(from, _, _)| from == peer)
             .map(|(_, flags, index)| (*flags, *index))
             .collect()
+    }
+
+    /// `parity_used_total`: messages that needed a parity chunk to come back.
+    pub fn parity_used(&self) -> u64 {
+        self.parity_used.load(Ordering::Relaxed)
+    }
+
+    /// What `reconstruct_seconds{class}` was given, in the order the messages completed.
+    pub fn reconstructed(&self, class: Class) -> Vec<Duration> {
+        self.reconstructed
+            .lock()
+            .unwrap()
+            .get(&class)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// `relay_same_region_total{peer}`.
@@ -463,6 +480,19 @@ impl ReceiveStats for CountingStats {
             .lock()
             .unwrap()
             .push((peer.clone(), flags, chunk.index));
+    }
+
+    fn parity_used(&self) {
+        self.parity_used.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn reconstructed(&self, class: Class, took: Duration) {
+        self.reconstructed
+            .lock()
+            .unwrap()
+            .entry(class)
+            .or_default()
+            .push(took);
     }
 
     fn relay_same_region(&self, peer: &Hostname) {
@@ -1189,6 +1219,7 @@ impl<A: Admission> TestCluster<A> {
             SEEN_CAPACITY,
             Arc::new(SystemClock),
         ));
+        published.watching(seen.clone());
         let (subscriptions, watching) = watch::channel(sets);
         let reassembler = Arc::new(Reassembler::new(ReassembleConfig {
             max_in_flight: self.in_flight,
@@ -1298,6 +1329,12 @@ impl<A: Admission> TestCluster<A> {
     /// What node `index` has queued for its beacon node, oldest first.
     pub fn published(&self, index: usize) -> Vec<PublishItem> {
         self.sidecar(index).published.published()
+    }
+
+    /// Whether node `index`'s seen cache already held each published message's id at the moment
+    /// it was queued, in queue order. Every entry reads true when the insert comes first (D08).
+    pub fn held_when_published(&self, index: usize) -> Vec<bool> {
+        self.sidecar(index).published.held_when_enqueued()
     }
 
     /// `publish_queue_drops_total` for node `index`: what its publish queue threw away because
@@ -1438,6 +1475,11 @@ pub struct PublishSpy {
     capacity: usize,
     items: Mutex<VecDeque<PublishItem>>,
     dropped: AtomicU64,
+    /// The seen cache of the node this spy stands in for, read at the moment of each enqueue.
+    /// Every ingress site inserts immediately before it enqueues (D08), so a `false` here is
+    /// that ordering broken.
+    seen: Mutex<Option<SharedSeenCache>>,
+    held_when_enqueued: Mutex<Vec<bool>>,
 }
 
 impl PublishSpy {
@@ -1447,7 +1489,20 @@ impl PublishSpy {
             capacity,
             items: Mutex::new(VecDeque::new()),
             dropped: AtomicU64::new(0),
+            seen: Mutex::new(None),
+            held_when_enqueued: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Reads `seen` on every enqueue from now on, for a test about the order the two happen in.
+    pub fn watching(&self, seen: SharedSeenCache) {
+        *self.seen.lock().unwrap() = Some(seen);
+    }
+
+    /// Whether the seen cache already held each entry's id when it was enqueued, in enqueue
+    /// order.
+    pub fn held_when_enqueued(&self) -> Vec<bool> {
+        self.held_when_enqueued.lock().unwrap().clone()
     }
 
     /// What is queued, oldest first.
@@ -1463,6 +1518,12 @@ impl PublishSpy {
 
 impl PublishSink for PublishSpy {
     fn enqueue(&self, item: PublishItem) {
+        if let Some(seen) = self.seen.lock().unwrap().as_ref() {
+            self.held_when_enqueued
+                .lock()
+                .unwrap()
+                .push(seen.contains(&item.id));
+        }
         let mut items = self.items.lock().unwrap();
         while items.len() >= self.capacity {
             items.pop_front();

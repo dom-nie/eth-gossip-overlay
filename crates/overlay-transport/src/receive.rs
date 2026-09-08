@@ -59,7 +59,7 @@ use overlay_core::events::{self, FirstArrival};
 use overlay_core::msgid::{self, Branch, MessageId};
 use overlay_core::protocol::{MAX_FRAME_BYTES, features};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
-use overlay_core::reassemble::Reassembler;
+use overlay_core::reassemble::{Outcome, Reason, Reassembler};
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
 use overlay_core::seen::SharedSeenCache;
 use overlay_core::subs::PeerState;
@@ -129,6 +129,14 @@ pub trait ReceiveStats: ManagerStats + TrafficStats {
     /// one this host was assigned or the in-region copy of somebody else's (§12). The flags and
     /// the header are what a test reads to tell the two hops apart.
     fn chunk_received(&self, peer: &Hostname, flags: ChunkFlags, chunk: &Chunk);
+
+    /// `parity_used_total`: a message that needed a parity chunk to come back, which means a
+    /// host was down or a chunk was lost on the way (§5.4 step 4).
+    fn parity_used(&self);
+
+    /// `reconstruct_seconds{class}`: how long a message took from its first chunk to the moment
+    /// it was queued for the beacon node.
+    fn reconstructed(&self, class: Class, took: Duration);
 }
 
 impl ReceiveStats for () {
@@ -141,6 +149,8 @@ impl ReceiveStats for () {
     fn relayed_batch(&self) {}
     fn relay_same_region(&self, _: &Hostname) {}
     fn chunk_received(&self, _: &Hostname, _: ChunkFlags, _: &Chunk) {}
+    fn parity_used(&self) {}
+    fn reconstructed(&self, _: Class, _: Duration) {}
 }
 
 /// What a payload's arrival owes.
@@ -433,17 +443,18 @@ impl Ctx {
         }
     }
 
-    /// One chunk of a striped message.
+    /// One chunk of a striped message: offered to the rest of the region, collected, and, on the
+    /// chunk that makes `k` of them, published as the message it was cut from.
     ///
     /// Cut-through (§5.4 step 3): the forward is the first thing that happens to a chunk this
-    /// host owes its region, before the chunk is put anywhere or anything is decoded from it,
-    /// because the whole point of striping is that a host passes a piece on the moment it
-    /// arrives rather than after it has the message. Everything T-074 adds goes below the
-    /// forward for the same reason.
+    /// host owes its region, before anything is decoded from it, because the whole point of
+    /// striping is that a host passes a piece on the moment it arrives rather than after it has
+    /// the message. [`Reassembler::on_chunk`] answers what the region is owed before it looks at
+    /// what it holds, and the completion below runs once the forward has been issued.
     ///
-    /// What the region is owed is [`Reassembler::on_chunk`]'s answer and not this function's:
-    /// a chunk that arrived with `FORWARDED` is the second hop and there is no third, and an
-    /// index some other origin's copy already carried has been forwarded once (D11, D19).
+    /// What the region is owed is that answer and not this function's: a chunk that arrived with
+    /// `FORWARDED` is the second hop and there is no third, and an index some other origin's copy
+    /// already carried has been forwarded once (D11, D19).
     fn chunk(&self, flags: ChunkFlags, chunk: Chunk) -> After {
         self.deps.stats.chunk_received(&self.peer, flags, &chunk);
         let Some(topic) = self.topic(chunk.topic_id) else {
@@ -461,24 +472,97 @@ impl Ctx {
             self.deps.stats.duplicate(class);
             return After::Carry;
         }
+        let now = self.deps.clock.now();
         let outcome = self.deps.reassembler.on_chunk(
             &chunk,
             &topic,
             &self.peer,
             flags.contains(ChunkFlags::FORWARDED),
-            self.deps.clock.now(),
+            now,
         );
-        if !outcome.forward() {
-            return After::Carry;
-        }
-        match self.charge(FanoutKind::Chunk, chunk.data.len(), self.deps.clock.now()) {
-            Charge::Allowed => {
-                self.forward(&topic, &chunk);
-                After::Carry
+        let after = match outcome.forward() {
+            false => After::Carry,
+            true => match self.charge(FanoutKind::Chunk, chunk.data.len(), now) {
+                Charge::Allowed => {
+                    self.forward(&topic, &chunk);
+                    After::Carry
+                }
+                Charge::Suppressed => After::Carry,
+                Charge::CloseRateExceeded => After::Close(FanoutKind::Chunk),
+            },
+        };
+        self.reassembled(&topic, class, outcome, now);
+        after
+    }
+
+    /// What a chunk's arrival came to once the region has been offered it.
+    ///
+    /// A message that came back goes through the same three steps a whole one does, in the same
+    /// order: the advertised gate (DX-N1), the seen cache (D08, site 3 of 3) and the publish
+    /// queue (DX-N4). `reconstruct_seconds` is read from the first chunk's arrival and
+    /// `parity_used_total` says a host or a chunk was lost on the way (§12).
+    ///
+    /// A payload the beacon node would refuse is counted against the origin rather than the peer
+    /// that happened to send the last chunk, because the origin is who cut it up (D03).
+    fn reassembled(&self, topic: &Topic, class: Class, outcome: Outcome, now: Instant) {
+        match outcome {
+            Outcome::Completed {
+                msg_id,
+                payload,
+                used_parity,
+                first_chunk_at,
+                ..
+            } => {
+                if self.publish_reassembled(topic, class, msg_id, payload) {
+                    if used_parity {
+                        self.deps.stats.parity_used();
+                    }
+                    self.deps
+                        .stats
+                        .reconstructed(class, now.saturating_duration_since(first_chunk_at));
+                }
             }
-            Charge::Suppressed => After::Carry,
-            Charge::CloseRateExceeded => After::Close(FanoutKind::Chunk),
+            Outcome::Rejected {
+                reason: Reason::InvalidPayload,
+                origin,
+            } => {
+                self.deps.stats.invalid_payload(&origin);
+                self.warn_invalid(topic, "the reassembled payload is not one its id names");
+            }
+            Outcome::Rejected { reason, origin } => {
+                tracing::debug!(%origin, ?reason, "dropping a chunk this host cannot use");
+            }
+            Outcome::Stored { .. } | Outcome::Duplicate { .. } | Outcome::LateAfterCompletion => {}
+            Outcome::HeaderConflict => {
+                tracing::debug!(peer = %self.peer, "a chunk header that contradicts the first");
+            }
         }
+    }
+
+    /// Gate, remember and queue one reassembled message, answering whether it reached the queue.
+    /// The insert is immediately before the enqueue and there is no other insert on this path.
+    fn publish_reassembled(
+        &self,
+        topic: &Topic,
+        class: Class,
+        id: MessageId,
+        payload: Bytes,
+    ) -> bool {
+        if !self.deps.sets.borrow().advertised.contains(topic) {
+            self.deps.stats.unwanted_topic(&self.peer);
+            return false;
+        }
+        if !self.deps.seen.insert(id) {
+            self.deps.stats.duplicate(class);
+            return false;
+        }
+        self.deps.publish.enqueue(PublishItem {
+            topic: topic.clone(),
+            id,
+            payload,
+            class,
+        });
+        true
     }
 
     /// Hands one chunk to every live in-region peer subscribed to `topic`, with `FORWARDED` set
