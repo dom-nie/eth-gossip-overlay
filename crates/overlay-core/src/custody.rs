@@ -197,6 +197,9 @@ impl CustodyTracker {
         now: Instant,
         in_flight: &BitSet,
     ) -> Vec<ColumnGap> {
+        if !self.conforming {
+            return Vec::new();
+        }
         let mut gaps: Vec<(u64, ColumnGap)> = self
             .slots
             .iter()
