@@ -47,7 +47,7 @@ impl Params {
             return Err(RsError::PayloadTooLarge { total_len });
         }
         let k = total_len.div_ceil(chunk_bytes).max(1);
-        let m = (parity_ratio * k as f64).ceil() as usize;
+        let m = ((parity_ratio * k as f64).ceil() as usize).max(1);
         if !ReedSolomonEncoder::supports(k, m) {
             return Err(RsError::TooManyChunks { k, m });
         }
