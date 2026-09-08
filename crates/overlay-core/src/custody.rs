@@ -438,4 +438,19 @@ mod tests {
             .count();
         assert_eq!(errors, 1);
     }
+
+    /// The bound on what a host keeps: a slot the fleet has moved several past is one no repair
+    /// can still help, so it goes and the newest [`TRACKED_SLOTS`] stay.
+    #[test]
+    fn gaps_are_garbage_collected_after_n_slots() {
+        let clock = FakeClock::new();
+        let mut tracker = CustodyTracker::new(&SpecSnapshot::MAINNET);
+        let expected = tracker.expected_columns(&column_topics(&[0, 3, 7]));
+        for slot in 1..=(TRACKED_SLOTS as u64 + 1) {
+            tracker.on_block(slot, ROOT, expected.clone(), clock.now());
+        }
+        clock.advance(DEADLINE);
+
+        assert_eq!(gaps(&mut tracker, &clock).len(), TRACKED_SLOTS);
+    }
 }
