@@ -247,6 +247,8 @@ pub enum RsError {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     /// Pseudo-random bytes, so a chunk that came back from the wrong offset is visible.
@@ -384,5 +386,45 @@ mod tests {
             decode(params, &held(&chunks, [0, 1, 2, 4, 6])),
             Err(RsError::NotEnoughChunks { have: 5, need: 6 })
         );
+    }
+
+    /// `k` of the `k + m` indices, sorted, picked by shuffling with `seed`.
+    fn subset(params: Params, seed: u64) -> Vec<u16> {
+        let mut indices: Vec<u16> = (0..params.k + params.m).collect();
+        let mut state = seed | 1;
+        for position in (1..indices.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            indices.swap(position, (state % (position as u64 + 1)) as usize);
+        }
+        indices.truncate(usize::from(params.k));
+        indices.sort_unstable();
+        indices
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        /// Any k of the k + m chunks are enough, whichever they are, and `used_parity` says
+        /// whether the codec was needed. This is what T-072's assignment and T-074's
+        /// reassembler rest on: neither knows which chunks a receiver will end up holding.
+        #[test]
+        fn property_any_k_of_k_plus_m_reconstructs_the_payload(
+            // Split so a single chunk and a hundred of them both come up; a flat range over
+            // the whole span would almost never reach the small end.
+            len in prop_oneof![1usize..=4096, 4097usize..=1024 * 1024],
+            seed in any::<u64>(),
+        ) {
+            let params = Params::for_len(len, 2048, 0.10).unwrap();
+            let payload = payload(len);
+            let chunks = encode(&payload, params);
+            let subset = subset(params, seed);
+
+            let decoded = decode(params, &held(&chunks, subset.iter().copied())).unwrap();
+
+            prop_assert_eq!(&decoded.payload[..], &payload[..]);
+            prop_assert_eq!(decoded.used_parity, subset.iter().any(|i| *i >= params.k));
+        }
     }
 }
