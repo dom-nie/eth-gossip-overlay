@@ -16,6 +16,7 @@ pub mod pubqueue;
 pub mod ratelimit;
 pub mod relay;
 pub mod roster;
+pub mod rs;
 pub mod seen;
 pub mod subs;
 #[cfg(test)]
