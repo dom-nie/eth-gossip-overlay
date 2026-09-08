@@ -118,6 +118,55 @@ fn write_parity(buf: &mut BytesMut, params: Params) {
     }
 }
 
+/// A message put back together.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Decoded {
+    /// The payload, padding removed.
+    pub payload: Bytes,
+    /// Whether parity had to be used, which means a chunk was lost on the way (§5.4 step 4).
+    pub used_parity: bool,
+}
+
+/// Rebuilds the message from the chunks in `have`, each paired with the index its header
+/// carried. Any `params.k` of the `k + m` are enough.
+pub fn decode(params: Params, have: &[(u16, Bytes)]) -> Result<Decoded, RsError> {
+    let held = place(params, have);
+
+    if let Some(payload) = concatenate(params, &held) {
+        return Ok(Decoded {
+            payload,
+            used_parity: false,
+        });
+    }
+
+    Err(RsError::NotEnoughChunks {
+        have: have.len(),
+        need: usize::from(params.k),
+    })
+}
+
+/// The chunks laid out by index, `None` where one did not arrive.
+fn place(params: Params, have: &[(u16, Bytes)]) -> Vec<Option<&Bytes>> {
+    let mut held = vec![None; usize::from(params.k) + usize::from(params.m)];
+    for (index, chunk) in have {
+        held[usize::from(*index)] = Some(chunk);
+    }
+    held
+}
+
+/// The payload when every data chunk is here, which is the normal case and the reason the split
+/// is systematic: the message is the first `k` chunks joined and cut back to `total_len`, and
+/// the codec is never called (§5.4 step 4, D33).
+fn concatenate(params: Params, held: &[Option<&Bytes>]) -> Option<Bytes> {
+    let k = usize::from(params.k);
+    let mut payload = BytesMut::with_capacity(k * params.chunk_bytes);
+    for chunk in &held[..k] {
+        payload.extend_from_slice((*chunk)?);
+    }
+    payload.truncate(params.total_len as usize);
+    Some(payload.freeze())
+}
+
 /// Why a message could not be split or put back together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum RsError {
@@ -141,6 +190,15 @@ pub enum RsError {
         k: usize,
         /// The parity chunks that go with them.
         m: usize,
+    },
+    /// Fewer distinct chunks arrived than the message needs. The reassembler (T-074) waits for
+    /// more or asks for them.
+    #[error("{have} chunks, {need} needed")]
+    NotEnoughChunks {
+        /// How many arrived.
+        have: usize,
+        /// How many any combination of data and parity has to add up to.
+        need: usize,
     },
 }
 
