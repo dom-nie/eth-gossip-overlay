@@ -293,10 +293,8 @@ impl App {
         // reassembler and by a whole delivery, which is why all three are handed the one handle
         // (§5.6). The decoder is what fills its column index and what tells the custody tracker
         // which column arrived (T-083).
-        let recent = SharedRecentLarge::new(
-            RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)
-                .with_decoder(Arc::new(overlay_bn::decode::Headers)),
-        );
+        let recent = SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES))
+            .with_decoder(Arc::new(overlay_bn::decode::Headers));
 
         let progress = Progress::default();
         let (spec_tx, spec_rx) = spec_watch();

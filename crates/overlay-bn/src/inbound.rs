@@ -20,12 +20,13 @@ use overlay_core::custody::SharedCustody;
 use overlay_core::events::{self, FirstArrival};
 use overlay_core::fanout::Outbound;
 use overlay_core::lanes::{ClassLanes, LanePusher};
-use overlay_core::msgid::MessageId;
+use overlay_core::msgid::{self, MessageId};
 use overlay_core::recent::SharedRecentLarge;
 use overlay_core::roster::SelfIdentity;
 use overlay_core::seen::SharedSeenCache;
 use overlay_core::time::Clock;
 use overlay_core::topic::{Class, Topic, TopicKind};
+use overlay_core::wire::MAX_PAYLOAD_BYTES;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::task::JoinHandle;
@@ -177,22 +178,30 @@ impl Inbound {
         }
         self.stats.first_seen(class);
         let outbound = Outbound {
-            topic,
+            topic: topic.clone(),
             class,
             id,
             payload: msg.data.into(),
             received_at,
         };
+        let payload = outbound.payload.clone();
+        // The fleet first, and everything this host wants to know about the message after it:
+        // reading a block's header is milliseconds of SSZ and nothing waiting on the fan-out is
+        // owed it (T-083). The pusher has already counted the drop on its own LaneStats, and for
+        // the large lane logged it; this is the series T-041 reads under the inbound path's name.
+        if self.out.push(class, outbound).is_err() {
+            self.stats.dropped_full(class);
+        }
         // Insert site 1 of 3 for the recent store (§5.6); T-074's completion and T-032's whole
         // delivery are the others. Only the large class is ever repaired, so only the large
-        // class is worth the bytes, and the insert is where the payload's header is read.
+        // class is worth the bytes or the decode. The beacon node validated this payload before
+        // it forwarded it, so the decompression is what its own gossipsub already did.
         let header = match class {
-            Class::Large => self.recent.insert(
-                id,
-                outbound.topic.clone(),
-                outbound.payload.clone(),
-                received_at,
-            ),
+            Class::Large => {
+                let ssz = msgid::decompressed(&payload, MAX_PAYLOAD_BYTES);
+                self.recent
+                    .insert(id, topic.clone(), payload, ssz.as_deref(), received_at)
+            }
             Class::Small => None,
         };
         if let Some(header) = header {
@@ -201,17 +210,12 @@ impl Inbound {
         events::emit_first_arrival(&FirstArrival {
             id,
             class,
-            topic: &outbound.topic,
+            topic: &topic,
             node: &self.node,
             at: arrived,
             source: events::Source::Bn,
             header,
         });
-        // The pusher has already counted the drop on its own LaneStats, and for the large
-        // lane logged it; this is the series T-041 reads under the inbound path's name.
-        if self.out.push(class, outbound).is_err() {
-            self.stats.dropped_full(class);
-        }
     }
 }
 

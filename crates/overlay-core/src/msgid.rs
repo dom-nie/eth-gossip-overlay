@@ -70,6 +70,19 @@ pub struct Computed {
 /// a Lighthouse constant. The declared length is read from the snappy header and compared with
 /// the limit before any buffer is allocated, so a hostile header cannot reserve gigabytes.
 pub fn compute(topic: &str, compressed: &[u8], max_decompressed: usize) -> Computed {
+    compute_with_bytes(topic, compressed, max_decompressed).0
+}
+
+/// The same, and the decompressed bytes it was computed over when there were any.
+///
+/// A caller that needs both gets them from one decompression: T-083's header decoder reads the
+/// same bytes the id covers, and on the overlay receive path the id is computed a line before
+/// the header is (§7).
+pub fn compute_with_bytes(
+    topic: &str,
+    compressed: &[u8],
+    max_decompressed: usize,
+) -> (Computed, Option<Vec<u8>>) {
     let decompressed = decompress(compressed, max_decompressed);
     let (branch, domain, data): (Branch, [u8; 4], &[u8]) = match &decompressed {
         Ok(data) => (Branch::Valid, MESSAGE_DOMAIN_VALID_SNAPPY, data),
@@ -82,10 +95,20 @@ pub fn compute(topic: &str, compressed: &[u8], max_decompressed: usize) -> Compu
         .finalize();
     let mut id = [0; 20];
     id.copy_from_slice(&digest[..20]);
-    Computed {
-        id: MessageId(id),
-        branch,
-    }
+    (
+        Computed {
+            id: MessageId(id),
+            branch,
+        },
+        decompressed.ok(),
+    )
+}
+
+/// The decompressed bytes of a gossipsub payload, for a caller that has no id to compute over
+/// them: T-016's inbound path takes its id from gossipsub, and a reassembled message had its
+/// checked when it completed (T-074).
+pub fn decompressed(compressed: &[u8], max_decompressed: usize) -> Option<Vec<u8>> {
+    decompress(compressed, max_decompressed).ok()
 }
 
 fn decompress(compressed: &[u8], max_decompressed: usize) -> Result<Vec<u8>, Branch> {

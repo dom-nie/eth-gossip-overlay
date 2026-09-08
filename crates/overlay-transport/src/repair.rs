@@ -461,6 +461,7 @@ mod tests {
                 missing_id,
                 columns[2].clone(),
                 missing.clone(),
+                Some(&missing),
                 Instant::now(),
             )
             .expect("the decoder reads a column topic");

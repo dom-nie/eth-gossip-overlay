@@ -70,8 +70,12 @@ const COLUMN_FIXED_MIN: usize = COLUMN_HEADER_AT + BEACON_BLOCK_HEADER_LEN + 96;
 /// another preset would need the preset with it, which is a change to what `SpecSnapshot` carries
 /// rather than to this function.
 pub fn block_header(payload: &[u8]) -> Result<(u64, [u8; 32]), HeaderError> {
-    let bytes = decompress(payload)?;
-    let block = SignedBeaconBlock::<MainnetEthSpec>::any_from_ssz_bytes(&bytes)
+    block_header_ssz(&decompress(payload)?)
+}
+
+/// The same from bytes already decompressed, which is what the receive path holds (T-006).
+fn block_header_ssz(ssz: &[u8]) -> Result<(u64, [u8; 32]), HeaderError> {
+    let block = SignedBeaconBlock::<MainnetEthSpec>::any_from_ssz_bytes(ssz)
         .map_err(|_| HeaderError::Ssz)?;
     Ok((block.slot().as_u64(), bytes32(block.canonical_root())))
 }
@@ -83,7 +87,11 @@ pub fn block_header(payload: &[u8]) -> Result<(u64, [u8; 32]), HeaderError> {
 /// agreeing is the beacon node's rule to enforce and not this sidecar's: what the responder
 /// indexes and what a requester asks for both have to be what the object says it is.
 pub fn column_header(payload: &[u8]) -> Result<(u64, u8, [u8; 32]), HeaderError> {
-    let bytes = decompress(payload)?;
+    column_header_ssz(&decompress(payload)?)
+}
+
+/// The same from bytes already decompressed, which is what the receive path holds (T-006).
+fn column_header_ssz(bytes: &[u8]) -> Result<(u64, u8, [u8; 32]), HeaderError> {
     let fixed = bytes
         .get(..COLUMN_FIXED_MIN)
         .ok_or(HeaderError::Truncated)?;
@@ -119,16 +127,16 @@ pub fn column_header(payload: &[u8]) -> Result<(u64, u8, [u8; 32]), HeaderError>
 pub struct Headers;
 
 impl HeaderDecoder for Headers {
-    fn header(&self, topic: &Topic, payload: &[u8]) -> Option<Header> {
+    fn header(&self, topic: &Topic, ssz: &[u8]) -> Option<Header> {
         match topic.kind() {
-            TopicKind::BeaconBlock => match block_header(payload) {
+            TopicKind::BeaconBlock => match block_header_ssz(ssz) {
                 Ok((slot, root)) => Some(Header::Block { slot, root }),
                 Err(error) => {
                     tracing::debug!(%topic, %error, "a block payload carries no header");
                     None
                 }
             },
-            TopicKind::DataColumnSidecar(_) => match column_header(payload) {
+            TopicKind::DataColumnSidecar(_) => match column_header_ssz(ssz) {
                 Ok((slot, index, block_root)) => Some(Header::Column {
                     slot,
                     index,

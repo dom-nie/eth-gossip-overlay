@@ -6,6 +6,11 @@
 //! slot and root so an operator can follow one block across the fleet. Both sit on the receive
 //! path, so the payload is read once, where it is stored, and the answer is handed on.
 //!
+//! The bytes handed over are already decompressed. The receive path decompresses to compute the
+//! message id (T-006) and the beacon node's own path has the payload validated, so a decoder
+//! that took the wire form would decompress a second time, once per large message, on the path
+//! this project exists to shorten.
+//!
 //! The decoder itself is `overlay_bn::decode::Headers` behind the `column-repair` feature, and
 //! the binary is what installs it. Nothing here requires one: without a decoder every payload is
 //! stored and forwarded exactly as before, no column is indexed by identity and no event carries
@@ -53,8 +58,8 @@ impl Header {
 
 /// Reads the header of a gossip payload.
 pub trait HeaderDecoder: Send + Sync {
-    /// The header `payload` carries on `topic`. `None` for a topic with no header worth reading
-    /// and for a payload that is not the object its topic names, which is every byte a peer can
-    /// make up.
-    fn header(&self, topic: &Topic, payload: &[u8]) -> Option<Header>;
+    /// The header the decompressed `ssz` carries on `topic`. `None` for a topic with no header
+    /// worth reading and for bytes that are not the object its topic names, which is every byte
+    /// a peer can make up.
+    fn header(&self, topic: &Topic, ssz: &[u8]) -> Option<Header>;
 }

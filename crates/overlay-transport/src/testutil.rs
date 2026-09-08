@@ -1297,11 +1297,11 @@ impl<A: Admission> TestCluster<A> {
             Arc::new(SystemClock),
         ));
         published.watching(seen.clone());
-        let store = RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES);
-        let recent = SharedRecentLarge::new(match self.decoder.clone() {
+        let store = SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES));
+        let recent = match self.decoder.clone() {
             Some(decoder) => store.with_decoder(decoder),
             None => store,
-        });
+        };
         let custody = SharedCustody::new(&mainnet_spec());
         let (subscriptions, watching) = watch::channel(sets);
         let reassembler = Arc::new(Reassembler::new(ReassembleConfig {
@@ -1401,9 +1401,11 @@ impl<A: Admission> TestCluster<A> {
         // message the beacon node handed this host is one a peer can still ask it for (§5.6).
         if class == Class::Large {
             let now = Instant::now();
-            let header = sidecar
-                .recent
-                .insert(id, topic.clone(), payload.clone(), now);
+            let ssz = msgid::decompressed(&payload, MAX_PAYLOAD_BYTES);
+            let header =
+                sidecar
+                    .recent
+                    .insert(id, topic.clone(), payload.clone(), ssz.as_deref(), now);
             if let Some(header) = header {
                 sidecar.custody.observe(header, now);
             }

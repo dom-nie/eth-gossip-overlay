@@ -59,7 +59,6 @@ struct Entry {
 /// Nothing here refreshes: an entry keeps the arrival time of the insert that created it, so the
 /// queue stays in insertion order and both bounds only ever look at its front.
 pub struct RecentLarge {
-    decoder: Option<Arc<dyn HeaderDecoder>>,
     ttl: Duration,
     max_bytes: usize,
     bytes: usize,
@@ -74,7 +73,6 @@ impl RecentLarge {
     /// passes less so the bound is reachable without a slot's traffic.
     pub fn new(ttl: Duration, max_bytes: usize) -> Self {
         Self {
-            decoder: None,
             ttl,
             max_bytes,
             bytes: 0,
@@ -84,17 +82,13 @@ impl RecentLarge {
         }
     }
 
-    /// Reads the header of every payload stored here, which is what fills the column index and
-    /// what T-044's event names a slot from (T-083). Without one nothing is decoded and the
-    /// store behaves as it did before column repair existed.
-    pub fn with_decoder(mut self, decoder: Arc<dyn HeaderDecoder>) -> Self {
-        self.decoder = Some(decoder);
-        self
-    }
-
-    /// Keeps `payload` under `msg_id` and answers what its header said, which is the one place
-    /// a large payload is decoded (§7). An id already held is left as it arrived, so a second
-    /// insert neither charges the bound again nor extends the minute.
+    /// Keeps `payload` under `msg_id`, answering whether it stored it. An id already held is
+    /// left as it arrived, so a second insert neither charges the bound again nor extends the
+    /// minute, and the caller knows not to decode it twice.
+    ///
+    /// Nothing is decoded here. The header is read by [`SharedRecentLarge::insert`] once this
+    /// lock is back, because a block's SSZ is milliseconds of work and the responder and the
+    /// other two insert sites are waiting on the same mutex (§7, T-083).
     ///
     /// A payload larger than the whole bound takes the store down to itself and then goes too,
     /// which is the bound holding rather than a case to special-case: nothing this host accepts
@@ -105,15 +99,11 @@ impl RecentLarge {
         topic: Topic,
         payload: Bytes,
         now: Instant,
-    ) -> Option<Header> {
+    ) -> bool {
         self.expire(now);
         if self.entries.contains_key(&msg_id) {
-            return None;
+            return false;
         }
-        let header = self
-            .decoder
-            .as_ref()
-            .and_then(|decoder| decoder.header(&topic, &payload));
         self.bytes += payload.len();
         self.entries.insert(
             msg_id,
@@ -126,13 +116,7 @@ impl RecentLarge {
         );
         self.order.push_back(msg_id);
         while self.bytes > self.max_bytes && self.pop_oldest() {}
-        if let Some(Header::Column {
-            index, block_root, ..
-        }) = header
-        {
-            self.index_column(block_root, index, msg_id);
-        }
-        header
+        true
     }
 
     /// The topic and bytes held for `msg_id`, for a responder about to answer a repair request
@@ -204,23 +188,54 @@ impl RecentLarge {
 /// the lock for that one call and releases it before returning, so the store is never held across
 /// an `await`.
 #[derive(Clone)]
-pub struct SharedRecentLarge(Arc<Mutex<RecentLarge>>);
+pub struct SharedRecentLarge {
+    store: Arc<Mutex<RecentLarge>>,
+    /// Beside the mutex rather than inside it, so a decode never runs under the lock (T-083).
+    decoder: Option<Arc<dyn HeaderDecoder>>,
+}
 
 impl SharedRecentLarge {
     /// Wraps `store` so clones of the handle share it.
     pub fn new(store: RecentLarge) -> Self {
-        Self(Arc::new(Mutex::new(store)))
+        Self {
+            store: Arc::new(Mutex::new(store)),
+            decoder: None,
+        }
     }
 
-    /// [`RecentLarge::insert`] under the lock.
+    /// Reads the header of every payload stored through this handle, which is what fills the
+    /// column index and what T-044's event names a slot from (T-083). Without one nothing is
+    /// decoded and the store behaves as it did before column repair existed.
+    pub fn with_decoder(mut self, decoder: Arc<dyn HeaderDecoder>) -> Self {
+        self.decoder = Some(decoder);
+        self
+    }
+
+    /// [`RecentLarge::insert`] under the lock, then the header of `ssz` outside it.
+    ///
+    /// `ssz` is the decompressed payload, which every caller already has: the overlay receive
+    /// path decompressed it to compute the message id and the beacon node's path had it
+    /// validated. The decode runs after the lock is back, so the only thing held across it is
+    /// a `HashMap` insert.
     pub fn insert(
         &self,
         msg_id: MessageId,
         topic: Topic,
         payload: Bytes,
+        ssz: Option<&[u8]>,
         now: Instant,
     ) -> Option<Header> {
-        self.lock().insert(msg_id, topic, payload, now)
+        if !self.lock().insert(msg_id, topic.clone(), payload, now) {
+            return None;
+        }
+        let header = self.decoder.as_ref()?.header(&topic, ssz?)?;
+        if let Header::Column {
+            index, block_root, ..
+        } = header
+        {
+            self.lock().index_column(block_root, index, msg_id);
+        }
+        Some(header)
     }
 
     /// [`RecentLarge::get`] under the lock.
@@ -247,7 +262,7 @@ impl SharedRecentLarge {
         // Nothing that runs under this lock can panic, so a poisoned store cannot happen; if one
         // ever did, its containers would still be consistent and losing every repair answer
         // would be the worse failure.
-        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+        self.store.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -260,7 +275,7 @@ mod tests {
 
     use crate::header::{Header, HeaderDecoder};
     use crate::msgid::MessageId;
-    use crate::recent::RecentLarge;
+    use crate::recent::{RecentLarge, SharedRecentLarge};
     use crate::time::{Clock, FakeClock};
     use crate::topic::Topic;
 
@@ -377,10 +392,11 @@ mod tests {
     #[test]
     fn recent_store_indexes_column_payloads_by_block_root_and_index() {
         let clock = FakeClock::new();
-        let mut recent = store(1024).with_decoder(Arc::new(FakeDecoder));
+        let recent = SharedRecentLarge::new(store(1024)).with_decoder(Arc::new(FakeDecoder));
         let column = Topic::parse(COLUMN_TOPIC).expect("a topic the parser takes");
+        let ssz = payload(1, 200);
 
-        let header = recent.insert(id(1), column, payload(1, 200), clock.now());
+        let header = recent.insert(id(1), column, ssz.clone(), Some(&ssz), clock.now());
 
         assert_eq!(
             header,
@@ -392,9 +408,14 @@ mod tests {
         );
         assert_eq!(recent.get_by_column([9; 32], 5), Some(id(1)));
 
-        // A block is not a column and is filed under nothing.
+        // A block is not a column and is filed under nothing, and neither is a second insert of
+        // an id the store already holds.
         assert_eq!(
-            recent.insert(id(2), topic(), payload(2, 200), clock.now()),
+            recent.insert(id(2), topic(), payload(2, 200), Some(&ssz), clock.now()),
+            None
+        );
+        assert_eq!(
+            recent.insert(id(1), topic(), payload(1, 200), Some(&ssz), clock.now()),
             None
         );
     }

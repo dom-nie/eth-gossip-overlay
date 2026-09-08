@@ -62,6 +62,7 @@ use overlay_core::budget::{Charge, FanoutBudget, FanoutKind};
 use overlay_core::config::LargeClass;
 use overlay_core::custody::SharedCustody;
 use overlay_core::events::{self, FirstArrival};
+use overlay_core::header::Header;
 use overlay_core::msgid::{self, Branch, MessageId};
 use overlay_core::protocol::{MAX_FRAME_BYTES, features};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
@@ -733,16 +734,19 @@ impl Ctx {
             return false;
         }
         self.deps.stats.first_seen(class);
-        // Insert site 2 of 2 for the recent store (§5.6); T-016's inbound path is the other. A
-        // reassembled message is always large class, and the peers that sent its chunks are the
-        // ones that may still be missing some of them.
-        let header = self
-            .deps
-            .recent
-            .insert(id, topic.clone(), payload.clone(), now);
-        if let Some(header) = header {
-            self.deps.custody.observe(header, now);
-        }
+        self.deps.publish.enqueue(PublishItem {
+            topic: topic.clone(),
+            id,
+            payload: payload.clone(),
+            class,
+        });
+        // Insert site 2 of 3 for the recent store (§5.6); T-016's inbound path and T-032's whole
+        // delivery are the others. A reassembled message is always large class, and the peers
+        // that sent its chunks are the ones that may still be missing some of them. The
+        // reassembler checked this payload against its id when it completed, so the
+        // decompression cannot fail on anything it accepted (T-074).
+        let ssz = msgid::decompressed(&payload, wire::MAX_PAYLOAD_BYTES);
+        let header = self.remember(id, topic, payload, ssz.as_deref(), class, now);
         events::emit_first_arrival(&FirstArrival {
             id,
             class,
@@ -751,12 +755,6 @@ impl Ctx {
             at: arrived,
             source: events::Source::Overlay { origin },
             header,
-        });
-        self.deps.publish.enqueue(PublishItem {
-            topic: topic.clone(),
-            id,
-            payload,
-            class,
         });
         true
     }
@@ -1140,7 +1138,9 @@ impl Ctx {
                 return None;
             }
         }
-        let computed = msgid::compute(&topic.to_string(), &payload, wire::MAX_PAYLOAD_BYTES);
+        // One decompression for both the id and, below, the payload's header (T-006, T-083).
+        let (computed, ssz) =
+            msgid::compute_with_bytes(&topic.to_string(), &payload, wire::MAX_PAYLOAD_BYTES);
         let refused = match (computed.branch, header_id) {
             (Branch::Valid, Some(claimed)) if claimed != computed.id => {
                 Some("the id does not match the payload")
@@ -1167,22 +1167,20 @@ impl Ctx {
         };
         if wanted {
             self.deps.stats.first_seen(class);
+            // The beacon node first, and everything the sidecar wants to know about the message
+            // after it: the SSZ decode below is milliseconds on a block, and nothing it produces
+            // is owed to the node.
+            self.deps.publish.enqueue(PublishItem {
+                topic: topic.clone(),
+                id: computed.id,
+                payload: payload.clone(),
+                class,
+            });
             // Insert site 3 of 3 for the recent store (§5.6), and the one T-081 left open: a
             // message that arrived whole is one this host holds, and column repair asks
-            // in-region peers by round trip whatever they sent it (D23). The insert is also
-            // where the payload is decoded, so the event below has the block it names.
+            // in-region peers by round trip whatever they sent it (D23).
             let now = self.deps.clock.now();
-            let header = match class {
-                Class::Large => {
-                    self.deps
-                        .recent
-                        .insert(computed.id, topic.clone(), payload.clone(), now)
-                }
-                Class::Small => None,
-            };
-            if let Some(header) = header {
-                self.deps.custody.observe(header, now);
-            }
+            let header = self.remember(computed.id, &topic, payload, ssz.as_deref(), class, now);
             events::emit_first_arrival(&FirstArrival {
                 id: computed.id,
                 class,
@@ -1192,14 +1190,34 @@ impl Ctx {
                 source: events::Source::Overlay { origin: &self.peer },
                 header,
             });
-            self.deps.publish.enqueue(PublishItem {
-                topic,
-                id: computed.id,
-                payload,
-                class,
-            });
         }
         owed
+    }
+
+    /// Keeps a large payload for repair and tells the custody tracker what its header said
+    /// (§5.6, §6.4). Small-class messages are never repaired, so they are never decoded either.
+    ///
+    /// The decode runs here, outside the recent store's lock and after whatever the caller owed
+    /// the beacon node, because it is the one place in the sidecar that reads a consensus object
+    /// and a block costs milliseconds (T-083).
+    fn remember(
+        &self,
+        id: MessageId,
+        topic: &Topic,
+        payload: Bytes,
+        ssz: Option<&[u8]>,
+        class: Class,
+        now: Instant,
+    ) -> Option<Header> {
+        if class != Class::Large {
+            return None;
+        }
+        let header = self
+            .deps
+            .recent
+            .insert(id, topic.clone(), payload, ssz, now)?;
+        self.deps.custody.observe(header, now);
+        Some(header)
     }
 
     /// One line per connection about payloads the beacon node would refuse. A peer sending a
@@ -3676,6 +3694,7 @@ mod tests {
             id,
             topic.clone(),
             Bytes::copy_from_slice(body),
+            None,
             Instant::now(),
         );
         id
