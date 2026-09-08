@@ -1192,6 +1192,62 @@ mod tests {
         assert_eq!(bn_id, id);
     }
 
+    /// Bytes snappy cannot shrink, so what a test asks for is what crosses the wire. A
+    /// xorshift rather than a counter: snappy finds the repeats in anything more regular.
+    fn incompressible(len: usize) -> Vec<u8> {
+        let mut state = 0x2545_f491_4f6c_dd1du64;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state as u8
+            })
+            .collect()
+    }
+
+    fn compress(payload: &[u8]) -> Vec<u8> {
+        snap::raw::Encoder::new().compress_vec(payload).unwrap()
+    }
+
+    /// Subscribes the beacon node to `topic` and waits until the link has seen it, so a
+    /// publish from the link right after has a recipient.
+    async fn subscribe_bn(harness: &mut Harness, bn: &FakeBn, topic: &str) {
+        bn.subscribe(topic).await;
+        wait_for(
+            &mut harness.link.events,
+            |event| matches!(event, BnEvent::Subscribed { topic: t, .. } if t == topic),
+        )
+        .await;
+    }
+
+    /// T-075 (1). `idontwant_on_publish` puts an IDONTWANT for the id ahead of every message
+    /// above the threshold. The fake counts the control message the fork's own metric counts,
+    /// and the count is already there when the message arrives, which is what "ahead of"
+    /// means on a stream both travel down.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn publish_of_message_above_threshold_is_preceded_by_idontwant() {
+        let mut bn = FakeBn::start_with_metrics().await;
+        let mut received = bn.received();
+        let mut harness = spawn(link_config(&bn), &bn);
+        subscribe_bn(&mut harness, &bn, BLOCK_TOPIC).await;
+        let payload = incompressible(4096);
+        let compressed = compress(&payload);
+        assert!(compressed.len() > crate::gossip::IDONTWANT_MESSAGE_SIZE_THRESHOLD);
+        assert_eq!(bn.idontwant_msgs(), 0);
+
+        let id = publish(&harness.commands, BLOCK_TOPIC, &compressed)
+            .await
+            .unwrap();
+
+        let (topic, data, bn_id) = tokio::time::timeout(WAIT, received.recv())
+            .await
+            .expect("the fake never received the publish")
+            .unwrap();
+        assert_eq!((topic.as_str(), data, bn_id), (BLOCK_TOPIC, payload, id));
+        assert_eq!(bn.idontwant_msgs(), 1, "{}", bn.metrics_text());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn link_reconnects_after_fake_bn_restart_with_new_peer_id() {
         let bn = FakeBn::start().await;
