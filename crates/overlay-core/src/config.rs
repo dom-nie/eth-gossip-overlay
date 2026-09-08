@@ -662,6 +662,18 @@ log:
         assert!(err.to_string().contains("keepalive_sm"), "{err}");
     }
 
+    /// `stripe` is the large class's answer to another region and means nothing for the small
+    /// one, which has no chunks to spread. It parsed and was silently read as `direct` while
+    /// the generated reference offered it as a value an operator could set.
+    #[test]
+    fn small_cross_region_has_no_stripe() {
+        let err = Config::from_yaml("overlay: { fanout: { small: { cross_region: stripe } } }")
+            .unwrap_err();
+
+        assert!(err.to_string().contains("cross_region"), "{err}");
+        assert!(err.to_string().contains("stripe"), "{err}");
+    }
+
     #[test]
     fn removed_keys_are_rejected_with_their_names() {
         for (doc, key) in [
