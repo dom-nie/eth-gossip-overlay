@@ -57,6 +57,8 @@ fn rotation(msg_id: &MessageId) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use crate::msgid::MessageId;
     use crate::roster::Hostname;
@@ -76,6 +78,29 @@ mod tests {
         let mut id = [0u8; 20];
         id[..8].copy_from_slice(&rotation.to_le_bytes());
         MessageId(id)
+    }
+
+    /// Two origins that took the same message off public gossip and see the same live hosts
+    /// make the same assignment, which is what lets their chunks deduplicate on arrival rather
+    /// than costing every host in the region a second copy (§5.4).
+    #[test]
+    fn same_msg_id_and_hosts_give_same_assignment() {
+        let id = msg_id(0x0102_0304_0506_0708);
+
+        assert_eq!(assign(&id, &hosts(9), 11), assign(&id, &hosts(9), 11));
+    }
+
+    /// What the rotation is for: the host that takes chunk 0 moves with the message, so a region
+    /// carries the first chunk of every message evenly instead of one host carrying all of them.
+    #[test]
+    fn different_msg_ids_give_different_rotations() {
+        let hosts = hosts(5);
+
+        let first: BTreeSet<Hostname> = (0..20)
+            .filter_map(|id| assign(&msg_id(id), &hosts, 1).pop())
+            .collect();
+
+        assert_eq!(first.len(), hosts.len());
     }
 
     /// The worked example in [`assign`]'s own doc comment: five hosts, seven chunks, and an id
