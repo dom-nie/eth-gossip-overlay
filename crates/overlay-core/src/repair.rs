@@ -7,7 +7,7 @@
 //! [`Reassembler::incomplete_older_than`], and [`Scheduler::tick`] is not `async`, so a caller
 //! cannot hold it across an `await` even by accident.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::msgid::MessageId;
@@ -193,8 +193,11 @@ impl Scheduler {
         R: Fn(&Hostname) -> Option<Duration>,
     {
         let incomplete = reassembler.incomplete_older_than(deadline, now);
-        self.0
-            .retain(|msg_id, _| incomplete.iter().any(|msg| msg.msg_id == *msg_id));
+        // A message that is no longer late is one that came back or was evicted, and either way
+        // this host is done asking about it. The set is built once rather than scanned per
+        // entry, because both sides of that comparison are bounded by `MAX_IN_FLIGHT`.
+        let still_late: HashSet<MessageId> = incomplete.iter().map(|msg| msg.msg_id).collect();
+        self.0.retain(|msg_id, _| still_late.contains(msg_id));
         incomplete
             .iter()
             .filter_map(|msg| self.decide(msg, &rtt, now))
