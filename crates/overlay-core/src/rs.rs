@@ -161,6 +161,14 @@ mod tests {
             .collect()
     }
 
+    /// The chunks at `indices`, in the shape [`decode`] takes them.
+    fn held(chunks: &[Bytes], indices: impl IntoIterator<Item = u16>) -> Vec<(u16, Bytes)> {
+        indices
+            .into_iter()
+            .map(|index| (index, chunks[usize::from(index)].clone()))
+            .collect()
+    }
+
     #[test]
     fn params_for_200kb_and_2kb_chunks_gives_k_100_m_10() {
         let params = Params::for_len(200 * 1024, 2048, 0.10).unwrap();
@@ -236,5 +244,18 @@ mod tests {
             .collect();
         assert_eq!(data[..len], payload[..]);
         assert!(data[len..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn decode_with_all_data_chunks_returns_payload_and_used_parity_false() {
+        let len = 5 * 2048 + 100;
+        let payload = payload(len);
+        let params = Params::for_len(len, 2048, 0.10).unwrap();
+        let chunks = encode(&payload, params);
+
+        let decoded = decode(params, &held(&chunks, 0..params.k)).unwrap();
+
+        assert_eq!(decoded.payload, payload);
+        assert!(!decoded.used_parity);
     }
 }
