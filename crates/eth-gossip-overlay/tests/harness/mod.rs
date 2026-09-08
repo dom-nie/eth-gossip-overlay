@@ -51,14 +51,16 @@
 //! | 12 | single-host and two-host regions use whole delivery and the direct small path | T-072, written |
 //! | 13 | an unsubscribed relay re-fans but does not publish | T-063, written |
 //! | 15 | a wedged beacon node on one host does not delay the second hop to its region | T-063 for the relay hop, T-073 for the chunk one, both written |
-//! | 16 | one third of a region lost mid-slot completes via parity or repair before the deadline | T-074 for the parity half, written; T-082 for the repair half |
+//! | 16 | one third of a region lost mid-slot completes via parity or repair before the deadline | T-074 for the parity half, T-082 for the repair half, both written |
 //!
 //! T-073 also left the egress figure §5.4 is built around in
 //! `striped_block_costs_the_origin_two_block_equivalents_and_each_host_one`, which is not one of
 //! DX-N5's scenarios but is the number the whole large class exists for. T-074 left two more
 //! that are not DX-N5's either, `block_striped_across_region_is_published_once_on_every_node`
 //! and `block_still_completes_when_one_stripe_host_is_down`: the first is striping delivering at
-//! all, and the second is what the parity chunks are for.
+//! all, and the second is what the parity chunks are for. T-082 left a third,
+//! `block_completes_via_repair_when_a_stripe_host_dies_mid_transfer`, which is what happens when
+//! the parity chunks are not enough.
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 

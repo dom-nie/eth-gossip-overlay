@@ -1197,11 +1197,14 @@ async fn two_origins_with_divergent_live_views_publish_once_with_at_most_2k_plus
     }
 }
 
-/// DX-N5 scenario 16, the parity half: a third of a region goes away in the middle of a slot,
-/// taking the chunks the origin striped to it with them, and the hosts that are left put the
-/// block together from parity without asking anyone for anything. The repair half of this
-/// scenario, where parity alone is not enough, arrives with T-082; `repair_requests_total`
-/// reading zero here is what says parity did the work on its own.
+/// DX-N5 scenario 16, both halves. A third of a region goes away in the middle of a slot,
+/// taking the chunks the origin striped to it with them.
+///
+/// The two thirds that are left put the block together from parity and ask nobody for anything,
+/// which is what `repair_requests_total` reading zero for them says. The third that went away
+/// keeps its link to the origin, so it holds the chunks it was assigned and nothing else, and
+/// that is nowhere near `k`: it asks, and the origin answers from what its own beacon node
+/// handed it. Both arms finish inside the slot.
 #[tokio::test(flavor = "multi_thread")]
 async fn one_third_of_a_region_lost_mid_slot_completes_via_parity_or_repair_before_the_deadline() {
     let block = topic("beacon_block");
@@ -1228,6 +1231,11 @@ async fn one_third_of_a_region_lost_mid_slot_completes_via_parity_or_repair_befo
             (1..4).all(|node| fleet.node(node).bn().count(&block, &payload) == 1)
         })
         .await;
+    fleet
+        .wait_for("the lost third to import it as well", WAIT, |fleet| {
+            (4..hosts).all(|node| fleet.node(node).bn().count(&block, &payload) == 1)
+        })
+        .await;
     fleet.settle().await;
     let now = fleet.metrics().await;
     for (node, scrape) in now.iter().enumerate().take(4).skip(1) {
@@ -1239,6 +1247,12 @@ async fn one_third_of_a_region_lost_mid_slot_completes_via_parity_or_repair_befo
             scrape.sum(REPAIR_REQUESTS_TOTAL, &[]),
             0.0,
             "node {node} asked for chunks parity had already covered"
+        );
+    }
+    for (node, scrape) in now.iter().enumerate().skip(4) {
+        assert!(
+            scrape.sum(REPAIR_REQUESTS_TOTAL, &[(LABEL_OUTCOME, "completed")]) > 0.0,
+            "node {node} finished a block it only held its own share of"
         );
     }
 }
