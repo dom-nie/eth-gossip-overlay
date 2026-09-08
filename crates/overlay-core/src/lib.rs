@@ -16,6 +16,7 @@ pub mod pubqueue;
 pub mod ratelimit;
 pub mod reassemble;
 pub mod recent;
+pub mod repair;
 pub mod relay;
 pub mod roster;
 pub mod rs;
