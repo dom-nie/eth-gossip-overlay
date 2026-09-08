@@ -1399,6 +1399,45 @@ mod tests {
         assert_eq!(recv_counts(&harness, BLOCK_TOPIC), (0, 0));
     }
 
+    /// T-075 (5). The same race with the flag off, which is what says the flag is what
+    /// withholds the copy in the test above: here the megabytes cross the socket, and what
+    /// drops them is the sidecar's own duplicate cache, primed by its publish. Gossipsub keeps
+    /// no duplicate counter, so what counts the drop is its unfiltered receive counter against
+    /// the filtered one. Neither T-016's lane nor the seen cache behind it is handed anything.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flag_off_racing_public_copy_is_dropped_by_gossipsubs_duplicate_cache_and_counted() {
+        let (bn, mut harness, public, mut received) = staged_race(false).await;
+        let payload = incompressible(RACING_PAYLOAD_BYTES);
+        let public_id = public.publish(BLOCK_TOPIC, &payload).await;
+        tokio::time::timeout(WAIT, received.recv())
+            .await
+            .expect("the fake never took the public copy")
+            .unwrap();
+
+        let id = publish(&harness.commands, BLOCK_TOPIC, &compress(&payload))
+            .await
+            .unwrap();
+        assert_eq!(
+            bn.msgs_received_unfiltered(BLOCK_TOPIC),
+            1,
+            "the sidecar's own copy landed before the forward, so the race was not staged"
+        );
+        bn.release_validation().await;
+
+        until("the withheld copy never reached the sidecar", || {
+            recv_counts(&harness, BLOCK_TOPIC).0 > 0
+        })
+        .await;
+        assert_eq!(id, public_id);
+        assert_eq!(bn.idontwant_msgs(), 0, "{}", bn.metrics_text());
+        assert_eq!(
+            recv_counts(&harness, BLOCK_TOPIC),
+            (1, 0),
+            "one copy off the socket and none of it new: one duplicate"
+        );
+        assert!(nothing_large_within_a_second(&mut harness.lanes).await);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn link_reconnects_after_fake_bn_restart_with_new_peer_id() {
         let bn = FakeBn::start().await;
