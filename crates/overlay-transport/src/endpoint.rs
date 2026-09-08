@@ -281,7 +281,7 @@ pub(crate) mod tests {
         }
     }
 
-    fn endpoint(
+    pub(crate) fn endpoint(
         cfg: &Overlay,
         pins: &Arc<ArcSwap<PinTable>>,
         seeds: &Seeds,
@@ -295,7 +295,7 @@ pub(crate) mod tests {
         .unwrap()
     }
 
-    fn dial_config(
+    pub(crate) fn dial_config(
         pins: &Arc<ArcSwap<PinTable>>,
         seeds: &Seeds,
         from: &str,

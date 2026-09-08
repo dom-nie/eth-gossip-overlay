@@ -54,7 +54,7 @@ mod tests {
     use overlay_core::config::IoThread;
 
     use super::*;
-    use crate::endpoint::{self, tests::*};
+    use crate::endpoint::{self, connect, tests::*};
     use crate::testlog::LOG;
     use crate::tls;
 
@@ -82,6 +82,72 @@ mod tests {
                 .count(),
             1
         );
+        io.shutdown().await;
+    }
+
+    /// The handoff §5.1 draws: the QUIC endpoint on a runtime of its own, the accept loop and
+    /// everything above it on the main one. Nothing above the transport changes shape, so what
+    /// has to hold is that bytes still cross in both directions with the socket and its reader
+    /// on different runtimes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn frames_cross_between_runtimes() {
+        let (seeds, pins) = fleet(&["bn-a", "bn-b"]);
+        let cfg = config("127.0.0.1:0");
+        let server = tls::server_config(pins.clone(), &own_key(&seeds, "bn-a")).unwrap();
+        let listen = cfg.clone();
+
+        let io = dedicated(None, move || {
+            endpoint::bind(&listen, TEST_RECEIVE_WINDOW, server)
+        })
+        .unwrap();
+        let addr = io.endpoint().local_addr().unwrap();
+        // The accept loop is the connection manager's, on this runtime, as T-045 runs it.
+        let acceptor = io.endpoint();
+        let echo = tokio::spawn(async move {
+            let connection = acceptor
+                .accept()
+                .await
+                .expect("the endpoint is still open")
+                .await
+                .unwrap();
+            let read = connection
+                .accept_uni()
+                .await
+                .unwrap()
+                .read_to_end(64)
+                .await
+                .unwrap();
+            let mut back = connection.open_uni().await.unwrap();
+            back.write_all(&read).await.unwrap();
+            back.finish().unwrap();
+            // Held until the dialler has read it: a dropped connection closes at once, and
+            // whatever has not left the buffer goes with it.
+            connection
+        });
+
+        let dialler = endpoint(&cfg, &pins, &seeds, "bn-b");
+        let connection = connect(
+            &cfg,
+            TEST_RECEIVE_WINDOW,
+            &dialler,
+            addr,
+            dial_config(&pins, &seeds, "bn-b", "bn-a"),
+        )
+        .await
+        .unwrap();
+        let mut out = connection.open_uni().await.unwrap();
+        out.write_all(b"a chunk").await.unwrap();
+        out.finish().unwrap();
+        let back = connection
+            .accept_uni()
+            .await
+            .unwrap()
+            .read_to_end(64)
+            .await
+            .unwrap();
+
+        assert_eq!(back, b"a chunk");
+        drop(echo.await.unwrap());
         io.shutdown().await;
     }
 }
