@@ -39,6 +39,11 @@ impl Params {
     /// `chunk_bytes` is a positive multiple of 64, which T-002 already refuses to start without.
     /// It is checked again here because this is where a bad value would divide by zero or reach
     /// the codec.
+    ///
+    /// `k` and `m` narrow through `try_from` rather than a cast. The codec's own limit happens to
+    /// keep both inside a `u16` today, but that inequality lives in someone else's crate, and a
+    /// release that loosened it would otherwise turn `k = 65536` into a chunk header saying
+    /// `k = 0`.
     pub fn for_len(
         total_len: usize,
         chunk_bytes: usize,
@@ -55,9 +60,10 @@ impl Params {
         if !ReedSolomonEncoder::supports(k, m) {
             return Err(RsError::TooManyChunks { k, m });
         }
+        let too_many = |_| RsError::TooManyChunks { k, m };
         Ok(Self {
-            k: k as u16,
-            m: m as u16,
+            k: u16::try_from(k).map_err(too_many)?,
+            m: u16::try_from(m).map_err(too_many)?,
             chunk_bytes,
             total_len: total_len as u32,
         })
