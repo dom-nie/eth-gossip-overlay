@@ -68,8 +68,8 @@ on an Apple M5 Pro, 18 cores, 64 GB, macOS 26.6.2, rustc 1.98.1, on 2026-09-08.
 
 | Benchmark | Default | Tuned |
 |---|---:|---:|
-| 200 kB block, 20 nodes | 15.7 ms | 15.9 ms |
-| 128 columns of 40 kB, 20 nodes | 269.2 ms | 274.6 ms |
+| 200 kB block, 20 nodes | 14.6 ms | 15.4 ms |
+| 128 columns of 40 kB, 20 nodes | 268.7 ms | 280.3 ms |
 
 "Default" is quinn's own 14,720-byte initial congestion window, which is what the overlay ran
 with before it was tuned; "tuned" is the shipped `overlay.initial_window_bytes` of 4 MB. It is
@@ -79,10 +79,11 @@ roster, so there is no configuration that turns them off to measure against.
 
 ### What the numbers do and do not say
 
-The two columns are the same within the run-to-run spread, and across four repeats the tuned
-side of the column benchmark ranged from 275 ms to 351 ms against a default that stayed near
-265 ms. Raising the initial congestion window costs nothing on a 200 kB block and can cost a
-little on a slot of columns.
+The two columns are the same within the run-to-run spread. Over six repeats the block benchmark
+landed either side of the default by a few tenths of a millisecond, and the tuned side of the
+column benchmark ran between 275 ms and 351 ms against a default that stayed near 265 ms.
+Raising the initial congestion window costs nothing on a 200 kB block and can cost a little on a
+slot of columns.
 
 That is what loopback should show. The window exists for a path with a round trip: a connection
 carrying one block every 12 s never leaves slow start on a real link, and pays several round
