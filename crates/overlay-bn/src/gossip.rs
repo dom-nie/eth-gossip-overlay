@@ -163,6 +163,9 @@ pub fn build_behaviour(cfg: &BnLinkConfig, registry: &mut Registry) -> GossipBeh
 mod tests {
     use libp2p::gossipsub::TopicHash;
 
+    use overlay_core::budget::{GOSSIPSUB_DUPLICATE_CACHE_MULTIPLE, GOSSIPSUB_HISTORY_SECS};
+    use overlay_core::seen::SEEN_TTL;
+
     use super::*;
     use crate::testutil;
 
@@ -256,6 +259,22 @@ mod tests {
             Duration::from_secs(120),
             "twice the seen cache; Lighthouse's own is two epochs (768 s on mainnet) and is the backstop"
         );
+    }
+
+    /// The memory budget's `gossipsub` row is written against these two parameters and cannot
+    /// read them, because `overlay-core` links no libp2p (OPS-N4, T-076). This is the drift
+    /// test: a heartbeat, a history length or a cache time that moves has to move the row's
+    /// constants with it.
+    #[test]
+    fn cache_parameters_are_what_the_memory_budget_is_written_against() {
+        let config = config(&cfg());
+
+        assert_eq!(
+            config.duplicate_cache_time(),
+            SEEN_TTL * GOSSIPSUB_DUPLICATE_CACHE_MULTIPLE as u32
+        );
+        assert_eq!(config.heartbeat_interval(), Duration::from_secs(1));
+        assert_eq!(config.history_length() as u64, GOSSIPSUB_HISTORY_SECS);
     }
 
     /// One explicit peer that is never in the mesh: nothing to gossip to, nothing to graft,

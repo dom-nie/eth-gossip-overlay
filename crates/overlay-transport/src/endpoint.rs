@@ -471,6 +471,17 @@ mod tests {
         assert!(upper > 1200, "discovery probes down from {upper}, not up");
     }
 
+    /// §5.3 and §11 ask for GSO and GRO on. quinn-udp turns them on where the kernel has them,
+    /// which is Linux, and disables them itself where it finds they do not work; what a
+    /// transport config decides is only whether they are allowed at all. That switch is what
+    /// this holds, because it is the only half of the answer a test on any platform can give.
+    #[test]
+    fn segmentation_offload_is_left_enabled() {
+        let transport = transport_config(&Overlay::default(), TEST_RECEIVE_WINDOW);
+
+        assert_eq!(field(&transport, "enable_segmentation_offload"), "true");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn two_endpoints_on_loopback_handshake_with_pinned_keys_and_exchange_a_stream() {
         let (seeds, pins) = fleet(&["bn-a", "bn-b"]);
