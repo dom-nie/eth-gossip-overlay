@@ -452,6 +452,13 @@ impl Ctx {
         self.deps
             .stats
             .message(Direction::In, class, self.labels(), chunk.data.len());
+        // Forward only what this host does not hold (D19). A message in the seen cache reached
+        // it whole, or from its own beacon node, and its region was offered the message then;
+        // the chunks still arriving are the stripe finishing and there is nothing owed for them.
+        if self.deps.seen.contains(&chunk.msg_id) {
+            self.deps.stats.duplicate(class);
+            return;
+        }
         let outcome = self.deps.reassembler.on_chunk(
             &chunk,
             chunk.data.clone(),
