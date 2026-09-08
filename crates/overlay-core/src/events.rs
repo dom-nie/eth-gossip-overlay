@@ -10,6 +10,7 @@
 //! `tracing`, so the two callsites in `overlay-bn` and `overlay-transport` reach it without
 //! either of them depending on the binary crate.
 
+use std::fmt::Write;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::header::Header;
@@ -78,33 +79,52 @@ pub fn emit_first_arrival(arrival: &FirstArrival<'_>) {
     let node = arrival.node;
     let site = node.site.as_deref().unwrap_or(ABSENT_SITE);
     let first_arrival_ns = epoch_nanos(arrival.at);
-    match arrival.source {
-        Source::Bn => tracing::info!(
-            target: TARGET,
-            event = FIRST_ARRIVAL,
-            msg_id = %arrival.id,
-            class,
-            topic = %arrival.topic,
-            node = %node.hostname,
-            region = %node.region,
-            site,
-            first_arrival_ns,
+    // One arm per combination of what the line carries, rather than one call with `Option`
+    // fields: a line from the beacon node has no `origin_peer` key at all instead of a null one
+    // every query would have to filter, and a payload with no header carries no `slot` key.
+    macro_rules! arrival {
+        ($($rest:tt)*) => {
+            tracing::info!(
+                target: TARGET,
+                event = FIRST_ARRIVAL,
+                msg_id = %arrival.id,
+                class,
+                topic = %arrival.topic,
+                node = %node.hostname,
+                region = %node.region,
+                site,
+                first_arrival_ns,
+                $($rest)*
+            )
+        };
+    }
+    match (&arrival.source, arrival.header) {
+        (Source::Bn, None) => arrival!(source = "bn"),
+        (Source::Bn, Some(header)) => arrival!(
             source = "bn",
+            slot = header.slot(),
+            block_root = %hex(header.block_root()),
         ),
-        Source::Overlay { origin } => tracing::info!(
-            target: TARGET,
-            event = FIRST_ARRIVAL,
-            msg_id = %arrival.id,
-            class,
-            topic = %arrival.topic,
-            node = %node.hostname,
-            region = %node.region,
-            site,
-            first_arrival_ns,
+        (Source::Overlay { origin }, None) => arrival!(
             source = "overlay",
             origin_peer = %origin,
         ),
+        (Source::Overlay { origin }, Some(header)) => arrival!(
+            source = "overlay",
+            origin_peer = %origin,
+            slot = header.slot(),
+            block_root = %hex(header.block_root()),
+        ),
     }
+}
+
+/// A root as the 64 hex characters every other tool prints it as, without the `0x` the log's
+/// other identifiers do not carry either.
+fn hex(root: [u8; 32]) -> String {
+    root.iter().fold(String::with_capacity(64), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
 }
 
 /// Nanoseconds since the Unix epoch, the one form of a timestamp that compares across hosts.
