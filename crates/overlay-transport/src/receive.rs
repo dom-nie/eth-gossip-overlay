@@ -2393,6 +2393,33 @@ mod tests {
         );
     }
 
+    /// D19: forward only what this host does not already hold. A chunk of a message in the seen
+    /// cache is late, because this host had the message from the beacon node or from another
+    /// sidecar and its region has been offered it already; forwarding would replay the second
+    /// hop for a message every neighbour has.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clear_chunk_for_a_message_in_the_seen_cache_is_not_forwarded() {
+        let (cluster, peer, _) = striping_region(3).await;
+        let held = MessageId([9; 20]);
+        let forwarder = cluster.hostname(1);
+        assert!(cluster.seen(1).insert(held));
+
+        send(&peer, &[chunk_frame(held, 0, ChunkFlags::NONE)]).await;
+
+        eventually("the host it was sent to to count it", || {
+            cluster.stats(1).chunks_received(&cluster.hostname(0)).len() == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        for node in [2, 3] {
+            assert!(
+                cluster.stats(node).chunks_received(&forwarder).is_empty(),
+                "node {node}"
+            );
+        }
+        assert_eq!(cluster.stats(1).duplicates(Class::Large), 1);
+    }
+
     /// A chunk is a piece of a message and this release cannot put one back together, so it is
     /// counted, offered to the region and dropped. Nothing is published until T-074 reconstructs.
     #[tokio::test(flavor = "multi_thread")]
