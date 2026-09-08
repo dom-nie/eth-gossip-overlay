@@ -56,9 +56,15 @@ const COLUMN_HEADER_AT: usize = 8 + 3 * 4;
 /// A `BeaconBlockHeader`: slot, proposer index and three roots.
 const BEACON_BLOCK_HEADER_LEN: usize = 8 + 8 + 3 * 32;
 
-/// The fixed part up to the end of `signed_block_header`, which is the header plus a signature.
-/// What follows it, the inclusion proof, is sized by a preset and is not read here.
-const COLUMN_FIXED_MIN: usize = COLUMN_HEADER_AT + BEACON_BLOCK_HEADER_LEN + 96;
+/// `kzg_commitments_inclusion_proof`, which closes the fixed part. Its depth is four under every
+/// preset Lighthouse ships, mainnet, minimal and gnosis alike, so the fixed part of a Fulu column
+/// sidecar is one length on every network.
+const PROOF_BYTES: usize = 4 * 32;
+
+/// The whole fixed part: the index, the three offsets, `signed_block_header` and the inclusion
+/// proof. Only the first 132 bytes of it are read, but a sidecar's first offset is exactly this,
+/// which is what a payload is checked against before anything is read out of it.
+const COLUMN_FIXED_LEN: usize = COLUMN_HEADER_AT + BEACON_BLOCK_HEADER_LEN + 96 + PROOF_BYTES;
 
 /// The slot a block is for and its block root, from the payload the beacon node gossips.
 ///
@@ -93,13 +99,22 @@ pub fn column_header(payload: &[u8]) -> Result<(u64, u8, [u8; 32]), HeaderError>
 /// The same from bytes already decompressed, which is what the receive path holds (T-006).
 fn column_header_ssz(bytes: &[u8]) -> Result<(u64, u8, [u8; 32]), HeaderError> {
     let fixed = bytes
-        .get(..COLUMN_FIXED_MIN)
+        .get(..COLUMN_FIXED_LEN)
         .ok_or(HeaderError::Truncated)?;
-    // The first offset of an SSZ container is the length of its fixed part, so a payload whose
-    // variable section starts inside the header is not a Fulu column sidecar at all. A Gloas one,
-    // whose fixed part is 56 bytes, is refused here rather than read as if it were.
-    let column_at = u32_at(fixed, 8) as usize;
-    if column_at < COLUMN_FIXED_MIN || column_at > bytes.len() {
+    // The first offset of an SSZ container is the length of its fixed part, and a Fulu column
+    // sidecar's is [`COLUMN_FIXED_LEN`] on every preset. Anything else is not one: a Gloas
+    // sidecar, whose fixed part is 56 bytes, and every payload a peer made up, both refused here
+    // rather than read as if the header were where this expects it. The other two offsets are
+    // read for their bounds only, which is what tells a sidecar cut short from a whole one; the
+    // bytes they point at are the cells and the commitments, and nothing here looks at those.
+    let bounds = [
+        COLUMN_FIXED_LEN,
+        u32_at(fixed, 8) as usize,
+        u32_at(fixed, 12) as usize,
+        u32_at(fixed, 16) as usize,
+        bytes.len(),
+    ];
+    if !bounds.is_sorted() || bounds[1] != COLUMN_FIXED_LEN {
         return Err(HeaderError::Ssz);
     }
     let index = u8::try_from(u64_at(fixed, 0)).map_err(|_| HeaderError::Index)?;
@@ -224,12 +239,15 @@ mod tests {
         (decoded, wire)
     }
 
-    /// A column sidecar for `slot` carrying `index`, as `types` decodes it. The variable
-    /// lists are empty, so all three offsets are the length of the fixed part and the wire
-    /// form ends where the fixed part does: what the decoder reads is exactly what is here.
+    /// A column sidecar for `slot` carrying `index`, as `types` decodes it.
+    ///
+    /// It carries one real cell, one commitment and one proof, so the body behind the fixed part
+    /// is the 2 KB shape a mainnet sidecar has rather than nothing: the whole point of the
+    /// decoder is that it stops at the fixed part, and a fixture with an empty body would let a
+    /// decoder that read the lot pass.
     fn column_sidecar(slot: u64, index: u64) -> (DataColumnSidecarFulu<MainnetEthSpec>, Vec<u8>) {
-        const PROOF_BYTES: usize = 4 * 32;
-        let fixed = COLUMN_FIXED_MIN + PROOF_BYTES;
+        const CELL_BYTES: usize = 2048;
+        const KZG_BYTES: usize = 48;
         let header = BeaconBlockHeader {
             slot: Slot::new(slot),
             proposer_index: 11,
@@ -237,13 +255,21 @@ mod tests {
             state_root: Hash256::repeat_byte(2),
             body_root: Hash256::repeat_byte(3),
         };
+        let offsets = [
+            COLUMN_FIXED_LEN,
+            COLUMN_FIXED_LEN + CELL_BYTES,
+            COLUMN_FIXED_LEN + CELL_BYTES + KZG_BYTES,
+        ];
         let mut wire = index.to_le_bytes().to_vec();
-        for _ in 0..3 {
-            wire.extend_from_slice(&(fixed as u32).to_le_bytes());
+        for offset in offsets {
+            wire.extend_from_slice(&(offset as u32).to_le_bytes());
         }
         wire.extend_from_slice(&header.as_ssz_bytes());
         wire.extend_from_slice(&infinity_signature());
         wire.extend_from_slice(&[0; PROOF_BYTES]);
+        wire.extend_from_slice(&[7; CELL_BYTES]);
+        wire.extend_from_slice(&[0xc0; KZG_BYTES]);
+        wire.extend_from_slice(&[0xc0; KZG_BYTES]);
         let decoded = DataColumnSidecarFulu::<MainnetEthSpec>::from_ssz_bytes(&wire)
             .expect("the hand-built wire form is one types reads back");
         (decoded, wire)
@@ -271,25 +297,37 @@ mod tests {
     }
 
     /// Test 3 of the ticket: nothing a peer or a beacon node can send takes the process down.
-    /// Every prefix of a real payload is tried twice, once as the truncated object and once as
-    /// a truncated snappy frame, and each has to come back as an error.
+    ///
+    /// Every prefix of a real payload is tried twice, once as the truncated object and once as a
+    /// truncated snappy frame. A prefix is either an error or a shorter object of the same shape
+    /// whose header is the one the whole payload carries, which is what a column cut at one of
+    /// its own offsets is. What none of them may do is panic, or answer with a slot or a root
+    /// that is not in the bytes.
     #[test]
     fn decoder_rejects_truncated_payload_without_panic() {
         let (_, block) = signed_block(1);
         let (_, column) = column_sidecar(1, 0);
+        let whole_block = block_header(&snappy(&block));
+        let whole_column = column_header(&snappy(&column));
 
         for wire in [&block, &column] {
-            let whole = snappy(wire);
+            let frame = snappy(wire);
             for cut in 0..wire.len() {
-                assert!(block_header(&snappy(&wire[..cut])).is_err(), "block {cut}");
+                let short = snappy(&wire[..cut]);
+                let block_read = block_header(&short);
+                let column_read = column_header(&short);
                 assert!(
-                    column_header(&snappy(&wire[..cut])).is_err(),
+                    block_read.is_err() || block_read == whole_block,
+                    "block {cut}"
+                );
+                assert!(
+                    column_read.is_err() || column_read == whole_column,
                     "column {cut}"
                 );
             }
-            for cut in 0..whole.len() {
-                assert!(block_header(&whole[..cut]).is_err(), "block frame {cut}");
-                assert!(column_header(&whole[..cut]).is_err(), "column frame {cut}");
+            for cut in 0..frame.len() {
+                assert!(block_header(&frame[..cut]).is_err(), "block frame {cut}");
+                assert!(column_header(&frame[..cut]).is_err(), "column frame {cut}");
             }
         }
     }
