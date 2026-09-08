@@ -294,8 +294,8 @@ async fn datagrams(connection: quinn::Connection, ctx: Arc<Ctx>) {
     loop {
         match connection.read_datagram().await {
             Ok(datagram) => {
-                if ctx.datagram(datagram) == After::Close {
-                    close_rate_exceeded(&ctx.peer, FanoutKind::Relay, &connection);
+                if let After::Close(kind) = ctx.datagram(datagram) {
+                    close_rate_exceeded(&ctx.peer, kind, &connection);
                     return;
                 }
             }
@@ -335,17 +335,18 @@ enum StreamEnd {
     Timeout,
     /// The peer has been asking for more second-hop work than its budget covers for longer than
     /// the connection is given (DX-N3).
-    RateExceeded,
+    RateExceeded(FanoutKind),
 }
 
-/// Whether the connection a frame arrived on carries on. A `RELAY` batch from a peer that has
-/// been over its fan-out budget for too long is the one thing on this path that ends it.
+/// Whether the connection a frame arrived on carries on. A peer that has been over its fan-out
+/// budget for too long is the one thing on this path that ends it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum After {
     /// Keep reading.
     Carry,
-    /// Close with [`CloseCode::RateExceeded`].
-    Close,
+    /// Close with [`CloseCode::RateExceeded`], naming the second hop the peer asked for too
+    /// much of.
+    Close(FanoutKind),
 }
 
 /// One stream from the peer's first byte to whatever ends it, and the one place a stalled
@@ -356,7 +357,7 @@ async fn read_stream(mut stream: quinn::RecvStream, ctx: Arc<Ctx>, connection: q
             tracing::debug!(peer = %ctx.peer, "closing a stream that stalled mid-frame");
             let _ = stream.stop(VarInt::from_u32(STALLED_STREAM_CODE));
         }
-        StreamEnd::RateExceeded => close_rate_exceeded(&ctx.peer, FanoutKind::Relay, &connection),
+        StreamEnd::RateExceeded(kind) => close_rate_exceeded(&ctx.peer, kind, &connection),
         // A stream that ended has nothing left to stop, and the peer that finished it knows.
         StreamEnd::Ended => {}
     }
@@ -380,8 +381,8 @@ async fn read_frames<R: AsyncRead + Unpin>(stream: &mut R, ctx: &Ctx) -> StreamE
         match read {
             Err(_) => return StreamEnd::Timeout,
             Ok(Ok(Read::Frame(frame))) => {
-                if ctx.frame(frame) == After::Close {
-                    return StreamEnd::RateExceeded;
+                if let After::Close(kind) = ctx.frame(frame) {
+                    return StreamEnd::RateExceeded(kind);
                 }
             }
             Ok(Ok(Read::Unknown(frame_type))) => {
@@ -415,10 +416,7 @@ impl Ctx {
                 );
                 After::Carry
             }
-            Frame::Chunk { flags, chunk } => {
-                self.chunk(flags, chunk);
-                After::Carry
-            }
+            Frame::Chunk { flags, chunk } => self.chunk(flags, chunk),
             Frame::Batch { flags, entries } => self.batch(flags, entries, arrived),
             other => {
                 tracing::debug!(
@@ -442,11 +440,11 @@ impl Ctx {
     /// What the region is owed is [`Reassembler::on_chunk`]'s answer and not this function's:
     /// a chunk that arrived with `FORWARDED` is the second hop and there is no third, and an
     /// index some other origin's copy already carried has been forwarded once (D11, D19).
-    fn chunk(&self, flags: ChunkFlags, chunk: Chunk) {
+    fn chunk(&self, flags: ChunkFlags, chunk: Chunk) -> After {
         self.deps.stats.chunk_received(&self.peer, flags, &chunk);
         let Some(topic) = self.topic(chunk.topic_id) else {
             self.deps.stats.unknown_topic_id(&self.peer);
-            return;
+            return After::Carry;
         };
         let class = Class::of(topic.kind(), chunk.total_len as usize);
         self.deps
@@ -457,7 +455,7 @@ impl Ctx {
         // the chunks still arriving are the stripe finishing and there is nothing owed for them.
         if self.deps.seen.contains(&chunk.msg_id) {
             self.deps.stats.duplicate(class);
-            return;
+            return After::Carry;
         }
         let outcome = self.deps.reassembler.on_chunk(
             &chunk,
@@ -466,8 +464,16 @@ impl Ctx {
             flags.contains(ChunkFlags::FORWARDED),
             self.deps.clock.now(),
         );
-        if outcome == (Outcome::Stored { forward: true }) {
-            self.forward(&topic, &chunk);
+        if outcome != (Outcome::Stored { forward: true }) {
+            return After::Carry;
+        }
+        match self.charge(FanoutKind::Chunk, chunk.data.len(), self.deps.clock.now()) {
+            Charge::Allowed => {
+                self.forward(&topic, &chunk);
+                After::Carry
+            }
+            Charge::Suppressed => After::Carry,
+            Charge::CloseRateExceeded => After::Close(FanoutKind::Chunk),
         }
     }
 
@@ -581,7 +587,7 @@ impl Ctx {
         if charge != Charge::Allowed {
             self.deliver_all(entries, arrived);
             return match charge {
-                Charge::CloseRateExceeded => After::Close,
+                Charge::CloseRateExceeded => After::Close(FanoutKind::Relay),
                 _ => After::Carry,
             };
         }
