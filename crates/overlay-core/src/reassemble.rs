@@ -318,7 +318,15 @@ impl Reassembler {
     /// A column with chunks already here completes with the fewest bytes, so the custody tracker
     /// lists these first and T-082's chunk path, not column identity, is what finishes them.
     pub fn in_flight_columns(&self) -> Vec<u16> {
-        Vec::new()
+        let mut columns: Vec<u16> = self
+            .state()
+            .in_flight
+            .values()
+            .filter_map(|entry| entry.column.map(u16::from))
+            .collect();
+        columns.sort_unstable();
+        columns.dedup();
+        columns
     }
 
     /// How many messages are in flight, which is the only thing that grows as chunks arrive.
