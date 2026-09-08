@@ -50,10 +50,12 @@ pub mod features {
     }
 }
 
-/// What this build puts in HELLO. `DATAGRAM_BATCHES` is the one bit it sets: it coalesces the
-/// small class into `BATCH` datagrams for a peer that advertises the bit too, and falls back to
-/// whole messages on streams for every other peer, which is what an older release reads (T-062).
-pub const SUPPORTED_FEATURES: u64 = features::DATAGRAM_BATCHES;
+/// What this build puts in HELLO. Toward a peer that advertises `DATAGRAM_BATCHES` the small
+/// class is coalesced into `BATCH` datagrams (T-062), and toward one that advertises `STRIPING`
+/// a large message is cut into chunks and spread over the peer's region (T-073). A peer that
+/// advertises neither is sent whole messages on streams, which is what every release can read
+/// and what makes an upgrade a rolling one.
+pub const SUPPORTED_FEATURES: u64 = features::DATAGRAM_BATCHES | features::STRIPING;
 
 /// The largest frame this build accepts on a stream, which is what it advertises in HELLO. A
 /// whole message plus the chunk header and the room a `REPAIR_RESP` needs around it.

@@ -6,7 +6,7 @@ Every section also carries a `Protocol:` line, because the number that decides h
 
 ## [Unreleased]
 
-Protocol: major unchanged (1); features added: DATAGRAM_BATCHES (bit 0)
+Protocol: major unchanged (1); features added: DATAGRAM_BATCHES (bit 0), STRIPING (bit 1)
 
 The first release, so all of it is new.
 
