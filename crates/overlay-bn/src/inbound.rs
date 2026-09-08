@@ -195,6 +195,7 @@ mod tests {
     use overlay_core::fanout::Outbound;
     use overlay_core::lanes::{ClassLanes, LARGE_LANE_CAPACITY, LanePusher};
     use overlay_core::msgid::{self, MessageId};
+    use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
     use overlay_core::roster::{Hostname, Region};
     use overlay_core::seen::{SeenCache, SharedSeenCache};
     use overlay_core::time::FakeClock;
@@ -305,6 +306,7 @@ mod tests {
         command_tx: mpsc::Sender<BnCommand>,
         commands: mpsc::Receiver<BnCommand>,
         seen: SharedSeenCache,
+        recent: SharedRecentLarge,
         out: ClassLanes<Outbound>,
         clock: FakeClock,
         stats: Arc<Recorded>,
@@ -330,6 +332,7 @@ mod tests {
                 command_tx,
                 commands,
                 seen,
+                recent: SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)),
                 out,
                 clock,
                 stats: Arc::new(Recorded::default()),
@@ -345,6 +348,7 @@ mod tests {
                 self.lanes.take().expect("start() is called once"),
                 self.command_tx.clone(),
                 self.seen.clone(),
+                self.recent.clone(),
                 self.out.pusher(),
                 Arc::new(node()),
                 Arc::new(self.clock.clone()),
@@ -434,6 +438,37 @@ mod tests {
             .filter(|line| line.contains("first_arrival") && line.contains(&id))
             .count();
         assert_eq!(events, 1);
+    }
+
+    /// The responder's half of gap repair (§5.6): a large message the beacon node hands over is
+    /// kept whole, so a peer that lost a chunk of it can be answered from here. This is the
+    /// first of the store's two insert sites; T-074's completion is the other. Small-class
+    /// messages are never repaired and never stored.
+    #[tokio::test(start_paused = true)]
+    async fn bn_first_arrival_inserts_into_the_recent_store() {
+        let mut h = Harness::new();
+        let block = message(BLOCK, b"a block a peer may still ask this host for");
+        let attestation = message(ATTESTATION_3, b"an attestation nobody repairs");
+        h.push(Class::Large, block.clone());
+        h.push(Class::Small, attestation.clone());
+        h.start();
+
+        for _ in 0..2 {
+            tokio::time::timeout(WAIT, h.out.recv())
+                .await
+                .expect("both messages reach the fanout lanes");
+        }
+
+        let (topic, payload) = h
+            .recent
+            .get(&core_id(&block))
+            .expect("the block is held for repair");
+        assert_eq!(
+            topic,
+            Topic::parse(BLOCK).expect("a topic the parser takes")
+        );
+        assert_eq!(&payload[..], &block.data[..]);
+        assert_eq!(h.recent.get(&core_id(&attestation)), None);
     }
 
     /// The id got into the cache from the overlay side, and the beacon node is now echoing
