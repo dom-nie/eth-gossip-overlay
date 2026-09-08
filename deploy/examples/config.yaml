@@ -12,7 +12,6 @@ overlay:
       cross_region: stripe      # second independent stripe over the other region, no relay
       stripe_min_recipients: 16 # below this, send whole messages directly
     small:
-      in_region: direct
       cross_region: relays      # or direct
       relays_per_remote_region: 3
       relay_min_remote_hosts: 12  # fewer live subscribed hosts in a remote region: send to them directly

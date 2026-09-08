@@ -584,7 +584,7 @@ async fn rolling_upgrade_adding_a_feature_bit_keeps_pairing_and_serves_older_pee
 
     assert_eq!(
         fleet.node(0).negotiated_features(&upgraded).await,
-        features::DATAGRAM_BATCHES,
+        features::DATAGRAM_BATCHES | features::STRIPING,
         "two hosts on this release should have negotiated the bit"
     );
     assert_eq!(
@@ -614,7 +614,7 @@ async fn rolling_upgrade_adding_a_feature_bit_keeps_pairing_and_serves_older_pee
     fleet.wait_full_mesh(WAIT).await;
     assert_eq!(
         fleet.node(0).negotiated_features(&older).await,
-        features::DATAGRAM_BATCHES,
+        features::DATAGRAM_BATCHES | features::STRIPING,
         "the upgraded host should have negotiated the bit"
     );
 }

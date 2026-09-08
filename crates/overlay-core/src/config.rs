@@ -90,8 +90,6 @@ pub struct LargeFanout {
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SmallFanout {
-    /// `in_region`: how a batch reaches the origin's own region.
-    pub in_region: InRegion,
     /// `cross_region`: how it reaches each other region.
     pub cross_region: SmallCrossRegion,
     /// `relays_per_remote_region`: how many hosts in a remote region receive a batch and re-fan
@@ -102,7 +100,9 @@ pub struct SmallFanout {
     pub relay_min_remote_hosts: usize,
 }
 
-/// How a message reaches hosts in the origin's own region.
+/// How a large message reaches hosts in the origin's own region. The small class has no key of
+/// its own for this: striping cuts one message into chunks, so `stripe` means nothing for whole
+/// payloads batched together, and `direct` would be the only value an operator could set.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum InRegion {
@@ -330,7 +330,6 @@ impl Default for LargeFanout {
 impl Default for SmallFanout {
     fn default() -> Self {
         Self {
-            in_region: InRegion::Direct,
             cross_region: SmallCrossRegion::Relays,
             relays_per_remote_region: relay::DEFAULT_RELAYS_PER_REMOTE_REGION,
             relay_min_remote_hosts: relay::DEFAULT_RELAY_MIN_REMOTE_HOSTS,
@@ -594,7 +593,6 @@ overlay:
       cross_region: stripe      # second independent stripe over the other region, no relay
       stripe_min_recipients: 16 # below this, send whole messages directly
     small:
-      in_region: direct
       cross_region: relays      # or direct
       relays_per_remote_region: 3
       relay_min_remote_hosts: 12  # fewer live subscribed hosts in a remote region: send to them directly
