@@ -13,7 +13,8 @@
 //! 5. the seen cache, the beacon node link and the publisher;
 //! 6. the overlay endpoint and the connection manager, which are the two binds that can fail;
 //! 7. the fanout task and the per-peer receivers;
-//! 8. the reload task and the admin socket, which is what readiness means (OPS-N5).
+//! 8. the reload task, the roster file watcher and the admin socket, which is what readiness
+//!    means (OPS-N5).
 //!
 //! `App::run` then waits for its shutdown future, tells systemd it is stopping, cancels every
 //! task and joins them under a deadline. What a task holds is a connection that is already
@@ -64,7 +65,7 @@ use crate::admin;
 use crate::lifecycle::{Notify, Progress, TrustedPeerEnv, Watchdog};
 use crate::logging::LogHandle;
 use crate::metrics::{self, BnInbound, Metrics};
-use crate::reload::{self, Reloader};
+use crate::reload::{self, Reloader, RosterWatcher};
 
 /// How long the beacon node's HTTP API has to answer. On localhost this is generous, and a
 /// beacon node slower than this is one the link should give up on and come back to.
@@ -457,6 +458,8 @@ impl App {
                 source,
             }
         })?);
+        let roster_watcher =
+            tokio::spawn(RosterWatcher::new(cfg.overlay.roster_file.clone(), reload.clone()).run());
         let admin = admin::serve(
             &cfg.admin_socket,
             admin::State {
@@ -496,6 +499,7 @@ impl App {
                 pin_table,
                 reload_task,
                 hangups,
+                roster_watcher,
                 admin,
             ],
             commands,

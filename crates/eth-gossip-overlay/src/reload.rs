@@ -55,7 +55,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use arc_swap::ArcSwap;
 use overlay_core::config::{Config, Fanout, LargeFanout, PublishRateLimit, SmallClass};
@@ -241,6 +241,74 @@ pub fn sighup_loop(handle: ReloadHandle) -> std::io::Result<impl Future<Output =
             }
         }
     })
+}
+
+/// How often the roster file's modification time is read (D26). Ten seconds is the bound
+/// `docs/configuration.md` promises a discovery tool, and a constant rather than a key because
+/// no fleet has a reason to want another number: inotify would notice sooner, at the cost of a
+/// Linux-only dependency for a saving a membership change does not need.
+pub const ROSTER_POLL_INTERVAL: Duration = Duration::from_secs(10);
+
+/// The task that notices a discovery tool rewriting `roster.yaml`, beside the signal loop
+/// (T-086, D26).
+///
+/// It is the only [`Trigger::Automatic`] caller, which is what puts the shrink guard between a
+/// tool that wrote half a file and a fleet that loses half its hosts. The reload it runs is the
+/// one SIGHUP runs, so a roster picked up here drops no connection either.
+///
+/// The modification time is remembered before the file is read rather than after, so a writer
+/// that is not finished cannot be applied and then forgotten: a half-written file fails to parse
+/// and leaves the roster alone, and the write that finishes it moves the time again, so the next
+/// poll reads the whole file. Writing to a temp file and renaming it, which
+/// `docs/configuration.md` asks for, spares that poll.
+pub struct RosterWatcher {
+    path: PathBuf,
+    handle: ReloadHandle,
+    seen: Option<SystemTime>,
+}
+
+impl RosterWatcher {
+    /// Watches `path`, taking what it says now as the roster already in force.
+    pub fn new(path: PathBuf, handle: ReloadHandle) -> Self {
+        let seen = mtime(&path);
+        Self { path, handle, seen }
+    }
+
+    /// Polls until the reloader ends, which is the process shutting down.
+    pub async fn run(mut self) {
+        let mut tick = tokio::time::interval(ROSTER_POLL_INTERVAL);
+        loop {
+            tick.tick().await;
+            if !self.poll().await {
+                return;
+            }
+        }
+    }
+
+    /// One poll, and whether there is any point in another.
+    async fn poll(&mut self) -> bool {
+        let Some(mtime) = mtime(&self.path) else {
+            return true;
+        };
+        if self.seen == Some(mtime) {
+            return true;
+        }
+        self.seen = Some(mtime);
+        self.handle.reload(Trigger::Automatic).await.is_some()
+    }
+}
+
+/// The file's modification time, or nothing when it cannot be read. A roster that is missing for
+/// a moment is one the sidecar keeps running on, so the failure is a line an operator can find
+/// afterwards and the next poll tries again.
+fn mtime(path: &Path) -> Option<SystemTime> {
+    match std::fs::metadata(path).and_then(|meta| meta.modified()) {
+        Ok(mtime) => Some(mtime),
+        Err(err) => {
+            tracing::warn!(%err, path = %path.display(), "cannot stat the roster file");
+            None
+        }
+    }
 }
 
 /// Keeps T-021's pin table in step with the two channels a reload writes (DX-N2).
