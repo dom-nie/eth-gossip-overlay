@@ -173,7 +173,7 @@ const LABELS: &[(&str, &[&str])] = &[
     ("overlay_reconstruct_seconds", &["class"]),
     ("overlay_relay_same_region_total", &["peer"]),
     ("overlay_relayed_batches_total", &[]),
-    ("overlay_repair_requests_total", &[]),
+    ("overlay_repair_requests_total", &["outcome"]),
     ("overlay_roster_region_mismatch_total", &["peer"]),
     ("overlay_roster_reload_rejected_total", &[]),
     ("overlay_seen_cache_evicted_total", &["reason"]),
