@@ -574,9 +574,18 @@ mod tests {
 
     /// A gossipsub payload of about `bytes`, the split a sender would give it, and the chunks
     /// that come out of it. The id is the one the payload hashes to, because the reassembler
-    /// checks its work against it.
+    /// checks its work against it. The bytes are pseudo-random so snappy leaves them roughly the
+    /// length they started, which is what makes the split more than one chunk.
     fn striped(bytes: usize, chunk_bytes: usize) -> (MessageId, Params, Vec<Bytes>, Bytes) {
-        let raw: Vec<u8> = (0..bytes).map(|i| (i * 31 % 251) as u8).collect();
+        let mut state = 0x9E37_79B1u32;
+        let raw: Vec<u8> = (0..bytes)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect();
         let payload = Bytes::from(
             snap::raw::Encoder::new()
                 .compress_vec(&raw)
@@ -585,6 +594,25 @@ mod tests {
         let params = Params::for_len(payload.len(), chunk_bytes, 0.25).expect("a split");
         let id = msgid::compute(TOPIC, &payload, MAX_PAYLOAD_BYTES).id;
         (id, params, rs::encode(&payload, params), payload)
+    }
+
+    /// The same for bytes that are not a gossipsub payload at all, so the id comes out of the
+    /// spec's invalid branch and the completion check has something to refuse.
+    fn raw_message(payload: &[u8], chunk_bytes: usize) -> (MessageId, Params, Vec<Bytes>) {
+        let params = Params::for_len(payload.len(), chunk_bytes, 0.25).expect("a split");
+        let id = msgid::compute(TOPIC, payload, MAX_PAYLOAD_BYTES).id;
+        (id, params, rs::encode(payload, params))
+    }
+
+    /// A snappy declared length, which is the varint every raw snappy block starts with.
+    fn varint(mut value: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        while value >= 0x80 {
+            out.push((value as u8) | 0x80);
+            value >>= 7;
+        }
+        out.push(value as u8);
+        out
     }
 
     /// One chunk of `params`' split as it would arrive off a peer's stream.
@@ -812,6 +840,164 @@ mod tests {
             on(&reassembler, &chunk(1, 5, 4, 1), false, now),
             Outcome::HeaderConflict
         );
+    }
+
+    /// A second copy of an index is stored nowhere: the chunks are what the message is decoded
+    /// from, so a peer that sent the same index twice must not be able to make this host think
+    /// it has `k` of them.
+    #[test]
+    fn duplicate_index_is_reported_and_ignored() {
+        let (msg_id, params, chunks, _) = striped(4096, 512);
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        let repeated: Vec<u16> = std::iter::repeat_n(0, usize::from(params.k)).collect();
+
+        let last = feed(&reassembler, msg_id, params, &chunks, &repeated, now);
+
+        assert_eq!(last, Outcome::Duplicate { forward: false });
+        assert_eq!(reassembler.in_flight(), 1, "still collecting the message");
+    }
+
+    /// The second hop delivers copies of a message this host has already put together, so late
+    /// chunks are the ordinary case and must cost one lookup: no entry is opened for them, which
+    /// is what the in-flight count says.
+    #[test]
+    fn chunk_after_completion_is_late_and_ignored_cheaply() {
+        let (msg_id, params, chunks, _) = striped(4096, 512);
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        let data: Vec<u16> = (0..params.k).collect();
+        completed(feed(&reassembler, msg_id, params, &chunks, &data, now));
+        assert_eq!(reassembler.in_flight(), 0);
+
+        for index in params.k..params.k + params.m {
+            let chunk = header(msg_id, params, index, chunks[usize::from(index)].clone());
+            assert_eq!(
+                on(&reassembler, &chunk, false, now),
+                Outcome::LateAfterCompletion
+            );
+        }
+
+        assert_eq!(reassembler.in_flight(), 0, "a late chunk opened an entry");
+    }
+
+    /// The first chunk fixes the split, so a later one describing a different one is refused
+    /// rather than mixed in: a forged chunk must not be able to change what this host thinks it
+    /// is collecting, and the message still completes from the chunks that agree (§8).
+    #[test]
+    fn conflicting_header_is_rejected_and_does_not_corrupt_state() {
+        let (msg_id, params, chunks, payload) = striped(4096, 512);
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        let mut forged = header(msg_id, params, 1, chunks[1].clone());
+        forged.k += 1;
+
+        feed(&reassembler, msg_id, params, &chunks, &[0], now);
+        assert_eq!(
+            on(&reassembler, &forged, false, now),
+            Outcome::HeaderConflict
+        );
+        let rest: Vec<u16> = (1..params.k).collect();
+        let last = feed(&reassembler, msg_id, params, &chunks, &rest, now);
+
+        assert_eq!(completed(last).0, payload);
+    }
+
+    /// The byte bound, for a host holding more chunks than it has room for. A slot brings one
+    /// block and 128 columns, so the count bound alone would let a burst of large messages take
+    /// far more memory than the sum of the bounds allows (§10).
+    #[test]
+    fn max_bytes_evicts_when_buffered_bytes_exceed_the_bound() {
+        let reassembler = Reassembler::new(ReassembleConfig {
+            max_bytes: 16,
+            ..ReassembleConfig::default()
+        });
+        let now = Instant::now();
+        for msg_id in 1..=2 {
+            on(&reassembler, &chunk(msg_id, 0, 4, 1), false, now);
+        }
+        assert_eq!(reassembler.in_flight(), 2);
+
+        on(&reassembler, &chunk(3, 0, 4, 1), false, now);
+
+        assert_eq!(reassembler.in_flight(), 2);
+        assert_eq!(
+            on(&reassembler, &chunk(1, 0, 4, 1), false, now),
+            Outcome::Stored { forward: true },
+            "the oldest entry should have gone"
+        );
+    }
+
+    /// What T-082 asks for when a message has not finished in time (D23, D24): the indices no
+    /// chunk arrived for, ascending so the data ones come first, and every peer that sent one
+    /// with the flag its chunk carried, in arrival order.
+    #[test]
+    fn incomplete_older_than_lists_missing_indices_and_senders_with_their_forwarded_flag() {
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        let origin = Hostname("bn-01".to_owned());
+        let sibling = Hostname("bn-02".to_owned());
+        reassembler.on_chunk(&chunk(1, 2, 4, 1), &block(), &origin, false, now);
+        reassembler.on_chunk(&chunk(1, 0, 4, 1), &block(), &sibling, true, now);
+
+        let deadline = Duration::from_millis(250);
+        assert!(reassembler.incomplete_older_than(deadline, now).is_empty());
+        let late = reassembler.incomplete_older_than(deadline, now + deadline);
+
+        assert_eq!(
+            late,
+            vec![Incomplete {
+                msg_id: MessageId([1; 20]),
+                missing: vec![1, 3, 4],
+                senders: vec![(origin, false), (sibling, true)],
+            }]
+        );
+    }
+
+    /// D03: Lighthouse refuses a payload that does not decompress before it computes an id for
+    /// it, so a message this host reassembles into one is dropped rather than published. The id
+    /// still moves to the completed set, because the chunks of it that keep arriving are as late
+    /// as any others and must stay as cheap.
+    #[test]
+    fn completed_payload_on_the_invalid_snappy_branch_is_rejected_counted_and_stays_completed() {
+        let (msg_id, params, chunks) = raw_message(b"a payload that is not snappy at all", 64);
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        let data: Vec<u16> = (0..params.k).collect();
+
+        let last = feed(&reassembler, msg_id, params, &chunks, &data, now);
+
+        assert_eq!(last, Outcome::Rejected(Reason::InvalidPayload));
+        assert_eq!(
+            on(
+                &reassembler,
+                &header(
+                    msg_id,
+                    params,
+                    params.k,
+                    chunks[usize::from(params.k)].clone()
+                ),
+                false,
+                now
+            ),
+            Outcome::LateAfterCompletion
+        );
+    }
+
+    /// The other half of D03: a payload whose snappy header declares more than the beacon node's
+    /// maximum is refused on the header alone, before anything is decompressed.
+    #[test]
+    fn completed_payload_over_max_decompressed_length_is_rejected() {
+        let mut declared = varint(MAX_PAYLOAD_BYTES as u64 + 1);
+        declared.extend_from_slice(&[0; 32]);
+        let (msg_id, params, chunks) = raw_message(&declared, 64);
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        let data: Vec<u16> = (0..params.k).collect();
+
+        let last = feed(&reassembler, msg_id, params, &chunks, &data, now);
+
+        assert_eq!(last, Outcome::Rejected(Reason::InvalidPayload));
     }
 
     /// Completion frees the entry as well as recording the id, so nothing stays in flight for a
