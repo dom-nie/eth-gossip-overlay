@@ -571,4 +571,41 @@ mod tests {
 
         assert_eq!(gaps(&mut tracker, &clock).len(), TRACKED_SLOTS);
     }
+
+    /// Two blocks can exist for one slot, from a reorg or an equivocating proposer. The columns
+    /// of one must not clear what the other is owed, or repair asks for columns of a block this
+    /// host is not tracking and gets `not_found` from every peer that holds the other.
+    #[test]
+    fn columns_of_another_block_leave_this_block_owed() {
+        let clock = FakeClock::new();
+        let mut tracker = tracking(&clock, &[0, 3, 7]);
+        clock.advance(DEADLINE);
+
+        tracker.on_column(1, 3, [9; 32]);
+
+        assert_eq!(
+            gaps(&mut tracker, &clock),
+            vec![ColumnGap {
+                block_root: ROOT,
+                missing: vec![0, 3, 7],
+                have_count: 0,
+            }]
+        );
+    }
+
+    /// A column header is bytes off the wire and its slot is whatever those bytes claim. One
+    /// naming a slot far past anything real must not evict the blocks this host is repairing,
+    /// which is the whole of column repair for as long as the claims keep coming.
+    #[test]
+    fn a_slot_far_ahead_of_the_newest_does_not_evict_what_is_tracked() {
+        let clock = FakeClock::new();
+        let mut tracker = tracking(&clock, &[0, 3, 7]);
+        clock.advance(DEADLINE);
+
+        for slot in [u64::MAX, u64::MAX - 1, u64::MAX - 2, 1_000_000, 999_999] {
+            tracker.on_column(slot, 0, [9; 32]);
+        }
+
+        assert_eq!(gaps(&mut tracker, &clock).len(), 1);
+    }
 }
