@@ -394,4 +394,22 @@ mod tests {
             Vec::new()
         );
     }
+
+    /// D24 scales the wait to the peer rather than to a number: four round trips, but never so
+    /// short that a healthy peer is given up on nor so long that three attempts miss the budget.
+    #[test]
+    fn attempt_timeout_is_four_rtt_clamped_to_100_and_500_ms() {
+        assert_eq!(
+            attempt_timeout(Duration::from_millis(10)),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            attempt_timeout(Duration::from_millis(60)),
+            Duration::from_millis(240)
+        );
+        assert_eq!(
+            attempt_timeout(Duration::from_millis(200)),
+            Duration::from_millis(500)
+        );
+    }
 }
