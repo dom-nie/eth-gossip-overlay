@@ -316,4 +316,18 @@ mod tests {
         assert_eq!(decoded.payload, payload);
         assert!(!decoded.used_parity);
     }
+
+    #[test]
+    fn decode_with_one_data_chunk_missing_uses_parity_and_returns_exact_payload() {
+        let len = 5 * 2048 + 100;
+        let payload = payload(len);
+        let params = Params::for_len(len, 2048, 0.10).unwrap();
+        let chunks = encode(&payload, params);
+        assert_eq!((params.k, params.m), (6, 1));
+
+        let decoded = decode(params, &held(&chunks, [0, 1, 2, 4, 5, 6])).unwrap();
+
+        assert_eq!(decoded.payload, payload);
+        assert!(decoded.used_parity);
+    }
 }
