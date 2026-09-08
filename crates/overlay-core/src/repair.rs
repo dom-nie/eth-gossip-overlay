@@ -331,4 +331,17 @@ mod tests {
         };
         assert_eq!(request.missing, vec![1, 2]);
     }
+
+    /// Against [`wanted`] rather than through the reassembler, because the reassembler cannot
+    /// produce the shortfall: every parity chunk it holds takes one off `k - held` and one off
+    /// the missing data indices at the same time. The rule is D24's and this is where it lives.
+    #[test]
+    fn parity_indices_are_listed_only_when_missing_data_indices_cannot_reach_k() {
+        // Three short of five data chunks with two data indices left to ask for, so one parity
+        // index makes up the difference.
+        assert_eq!(wanted(5, 2, &[3, 4, 5, 6]), vec![3, 4, 5]);
+
+        // The same shortfall with a data index to spare lists no parity at all.
+        assert_eq!(wanted(5, 2, &[1, 2, 3, 4, 5, 6]), vec![1, 2, 3]);
+    }
 }
