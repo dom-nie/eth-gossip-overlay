@@ -116,12 +116,26 @@ pub trait TrafficStats: Send + Sync {
     /// `chunks_sent_total`: one chunk of a striped message written to a peer, from the origin's
     /// stripe or from the in-region hop that follows it (§12).
     fn chunk_sent(&self);
+
+    /// `bytes_total{direction, class, peer, region, site}` for one chunk, and nothing on
+    /// `messages_total`.
+    ///
+    /// The two counters part company here because a chunk is a piece of a message and not one:
+    /// counting each as a message would put a 200 KB block on the wire as a hundred and ten of
+    /// them, which is what `messages_total`'s help text, §12's dashboard panel and the rate
+    /// `docs/symptoms.md` has an operator hold against the publish limits would then be reading.
+    /// How many chunks crossed is [`chunk_sent`](Self::chunk_sent) and
+    /// [`ReceiveStats::chunk_received`](crate::receive::ReceiveStats::chunk_received). The bytes
+    /// are counted at both ends all the same, which is what "both ends agree on what crossed the
+    /// connection" rests on and what the egress figure in §5.4 is measured in.
+    fn chunk_bytes(&self, direction: Direction, class: Class, peer: PeerLabels<'_>, bytes: usize);
 }
 
 impl TrafficStats for () {
     fn message(&self, _: Direction, _: Class, _: PeerLabels<'_>, _: usize) {}
     fn unannounced_topic(&self) {}
     fn chunk_sent(&self) {}
+    fn chunk_bytes(&self, _: Direction, _: Class, _: PeerLabels<'_>, _: usize) {}
 }
 
 /// The task that turns what the beacon node sent into frames on the overlay.
@@ -380,7 +394,7 @@ impl Fanout {
             for _ in indices {
                 self.stats.chunk_sent();
                 self.stats
-                    .message(Direction::Out, Class::Large, labels, split.chunk_bytes);
+                    .chunk_bytes(Direction::Out, Class::Large, labels, split.chunk_bytes);
             }
         }
     }

@@ -453,7 +453,7 @@ impl Ctx {
         let class = Class::of(topic.kind(), chunk.total_len as usize);
         self.deps
             .stats
-            .message(Direction::In, class, self.labels(), chunk.data.len());
+            .chunk_bytes(Direction::In, class, self.labels(), chunk.data.len());
         // Forward only what this host does not hold (D19). A message in the seen cache reached
         // it whole, or from its own beacon node, and its region was offered the message then;
         // the chunks still arriving are the stripe finishing and there is nothing owed for them.
@@ -525,7 +525,7 @@ impl Ctx {
                 continue;
             }
             self.deps.stats.chunk_sent();
-            self.deps.stats.message(
+            self.deps.stats.chunk_bytes(
                 Direction::Out,
                 Class::Large,
                 PeerLabels {
@@ -2287,7 +2287,7 @@ mod tests {
         }
         tokio::time::sleep(SETTLE).await;
         assert_eq!(
-            cluster.stats(1).messages(Direction::Out, &sender),
+            cluster.stats(1).bytes(Direction::Out, &sender),
             0,
             "the chunk went back to the host it came from"
         );
@@ -2659,7 +2659,7 @@ mod tests {
                 assert_eq!(
                     cluster
                         .stats(remote)
-                        .messages(Direction::Out, &cluster.hostname(home)),
+                        .bytes(Direction::Out, &cluster.hostname(home)),
                     0,
                     "node {remote} sent node {home} something"
                 );

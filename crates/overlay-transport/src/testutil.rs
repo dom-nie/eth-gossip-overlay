@@ -391,14 +391,29 @@ impl ManagerStats for CountingStats {
     }
 }
 
-impl TrafficStats for CountingStats {
-    fn message(&self, direction: Direction, class: Class, peer: PeerLabels<'_>, bytes: usize) {
+impl CountingStats {
+    /// One traffic entry, `messages` of them and `bytes` between them. A chunk adds no message,
+    /// because it is a piece of one (§12).
+    fn count(
+        &self,
+        direction: Direction,
+        class: Class,
+        peer: PeerLabels<'_>,
+        messages: u64,
+        bytes: usize,
+    ) {
         let mut traffic = self.traffic.lock().unwrap();
         let counted = traffic
             .entry((direction, class, peer.hostname.clone()))
             .or_default();
-        counted.0 += 1;
+        counted.0 += messages;
         counted.1 += bytes as u64;
+    }
+}
+
+impl TrafficStats for CountingStats {
+    fn message(&self, direction: Direction, class: Class, peer: PeerLabels<'_>, bytes: usize) {
+        self.count(direction, class, peer, 1, bytes);
     }
 
     fn unannounced_topic(&self) {
@@ -407,6 +422,10 @@ impl TrafficStats for CountingStats {
 
     fn chunk_sent(&self) {
         self.chunks_sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn chunk_bytes(&self, direction: Direction, class: Class, peer: PeerLabels<'_>, bytes: usize) {
+        self.count(direction, class, peer, 0, bytes);
     }
 }
 

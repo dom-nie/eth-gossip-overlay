@@ -723,17 +723,10 @@ impl SubsStats for Metrics {
 
 impl TrafficStats for Metrics {
     fn message(&self, direction: Direction, class: Class, peer: PeerLabels<'_>, bytes: usize) {
-        let labels = &[
-            direction.as_str(),
-            class_label(class),
-            &peer.hostname.0,
-            &peer.region.0,
-            peer.site.unwrap_or(ABSENT),
-        ];
-        self.messages.with_label_values(labels).inc();
-        self.bytes
-            .with_label_values(labels)
-            .inc_by(bytes.try_into().unwrap_or(u64::MAX));
+        self.messages
+            .with_label_values(&traffic_labels(direction, class, peer))
+            .inc();
+        self.chunk_bytes(direction, class, peer, bytes);
     }
 
     fn unannounced_topic(&self) {
@@ -743,6 +736,23 @@ impl TrafficStats for Metrics {
     fn chunk_sent(&self) {
         self.chunks_sent.inc();
     }
+
+    fn chunk_bytes(&self, direction: Direction, class: Class, peer: PeerLabels<'_>, bytes: usize) {
+        self.bytes
+            .with_label_values(&traffic_labels(direction, class, peer))
+            .inc_by(bytes.try_into().unwrap_or(u64::MAX));
+    }
+}
+
+/// The `{direction, class, peer, region, site}` both traffic counters carry (§12).
+fn traffic_labels<'a>(direction: Direction, class: Class, peer: PeerLabels<'a>) -> [&'a str; 5] {
+    [
+        direction.as_str(),
+        class_label(class),
+        &peer.hostname.0,
+        &peer.region.0,
+        peer.site.unwrap_or(ABSENT),
+    ]
 }
 
 impl ReceiveStats for Metrics {

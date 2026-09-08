@@ -948,8 +948,8 @@ async fn chunk_arriving_before_topic_add_is_counted_not_crashed_and_zero_in_stea
     for node in [1, 2] {
         fleet
             .wait_for_metrics("both hosts to read the second one's chunks", WAIT, |now| {
-                now[node].sum(MESSAGES_TOTAL, &[(LABEL_DIRECTION, "in")])
-                    > before[node].sum(MESSAGES_TOTAL, &[(LABEL_DIRECTION, "in")])
+                now[node].sum(BYTES_TOTAL, &[(LABEL_DIRECTION, "in")])
+                    > before[node].sum(BYTES_TOTAL, &[(LABEL_DIRECTION, "in")])
             })
             .await;
     }
