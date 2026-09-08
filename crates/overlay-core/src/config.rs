@@ -93,7 +93,7 @@ pub struct SmallFanout {
     /// `in_region`: how a batch reaches the origin's own region.
     pub in_region: InRegion,
     /// `cross_region`: how it reaches each other region.
-    pub cross_region: CrossRegion,
+    pub cross_region: SmallCrossRegion,
     /// `relays_per_remote_region`: how many hosts in a remote region receive a batch and re-fan
     /// it locally.
     pub relays_per_remote_region: usize,
@@ -112,13 +112,24 @@ pub enum InRegion {
     Direct,
 }
 
-/// How a message reaches hosts in another region.
+/// How a large message reaches hosts in another region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CrossRegion {
     /// An independent stripe over the remote region's subscribed hosts.
     Stripe,
     /// Whole messages to every subscribed host over the WAN.
+    Direct,
+    /// A few hosts in the remote region receive the batch and re-fan it in-region.
+    Relays,
+}
+
+/// How a small-class batch reaches hosts in another region. It has no `stripe`: striping splits
+/// one message into chunks, and the small class is whole payloads batched together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SmallCrossRegion {
+    /// One batch per subscribed host over the WAN.
     Direct,
     /// A few hosts in the remote region receive the batch and re-fan it in-region.
     Relays,
@@ -319,7 +330,7 @@ impl Default for SmallFanout {
     fn default() -> Self {
         Self {
             in_region: InRegion::Direct,
-            cross_region: CrossRegion::Relays,
+            cross_region: SmallCrossRegion::Relays,
             relays_per_remote_region: relay::DEFAULT_RELAYS_PER_REMOTE_REGION,
             relay_min_remote_hosts: relay::DEFAULT_RELAY_MIN_REMOTE_HOSTS,
         }

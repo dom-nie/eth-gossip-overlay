@@ -85,7 +85,7 @@ in its own row, since the table is generated from the same doc comments the code
 | `overlay.fanout.large.cross_region` | `stripe` | restart | how it reaches each other region. One of `stripe`, `direct`, `relays`. |
 | `overlay.fanout.large.stripe_min_recipients` | `16` | restart | with fewer subscribed recipients than this the message goes out whole; a stripe over a handful of hosts saves nothing. |
 | `overlay.fanout.small.in_region` | `direct` | restart | how a batch reaches the origin's own region. One of `stripe`, `direct`. |
-| `overlay.fanout.small.cross_region` | `relays` | reload | how it reaches each other region. One of `stripe`, `direct`, `relays`. |
+| `overlay.fanout.small.cross_region` | `relays` | reload | how it reaches each other region. One of `direct`, `relays`. |
 | `overlay.fanout.small.relays_per_remote_region` | `3` | reload | how many hosts in a remote region receive a batch and re-fan it locally. |
 | `overlay.fanout.small.relay_min_remote_hosts` | `12` | reload | a remote region with fewer live subscribed hosts than this is sent to directly; relaying would not save enough WAN traffic to pay for the extra hop. |
 | `overlay.io_thread.pin_cpu` | `none` | restart | a reserved core to pin the overlay I/O thread to. `null` leaves it unpinned. |

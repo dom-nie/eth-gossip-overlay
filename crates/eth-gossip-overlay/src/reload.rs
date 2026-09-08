@@ -609,7 +609,7 @@ mod tests {
 
     use arc_swap::ArcSwap;
     use overlay_core::config::{
-        CrossRegion, LargeFanout, Log, LogFormat, LogLevel, PublishRateLimit,
+        LargeFanout, Log, LogFormat, LogLevel, PublishRateLimit, SmallCrossRegion,
     };
     use overlay_core::identity::{FleetSeed, Seeds, expected_tls_public_key, write_secret_file};
     use overlay_core::roster::{Hostname, Roster};
@@ -1164,7 +1164,7 @@ mod tests {
         );
         assert!(report.error.is_none(), "{report:?}");
         let fanout = h.fanout.borrow_and_update();
-        assert_eq!(fanout.small.cross_region, CrossRegion::Direct);
+        assert_eq!(fanout.small.cross_region, SmallCrossRegion::Direct);
         assert_eq!(fanout.small.relays_per_remote_region, 5);
         assert_eq!(fanout.small.relay_min_remote_hosts, 6);
         assert_eq!(fanout.large, LargeFanout::default());

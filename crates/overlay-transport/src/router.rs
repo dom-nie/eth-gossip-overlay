@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use overlay_core::config::{CrossRegion, Fanout};
+use overlay_core::config::{Fanout, SmallCrossRegion};
 use overlay_core::relay;
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
 use overlay_core::topic::{Class, Topic};
@@ -63,7 +63,7 @@ pub fn route(
             .filter(|(hostname, _)| **hostname != self_id.hostname)
     };
     let relaying: BTreeSet<&Region> =
-        match class == Class::Small && cfg.small.cross_region == CrossRegion::Relays {
+        match class == Class::Small && cfg.small.cross_region == SmallCrossRegion::Relays {
             true => relaying_regions(view, self_id, &subscribed, cfg.small.relay_min_remote_hosts),
             false => BTreeSet::new(),
         };
@@ -126,7 +126,7 @@ fn pool(view: &LiveView, self_id: &SelfIdentity, region: &Region) -> Vec<Hostnam
 
 #[cfg(test)]
 mod tests {
-    use overlay_core::config::{CrossRegion, Fanout, SmallFanout};
+    use overlay_core::config::{Fanout, SmallCrossRegion, SmallFanout};
     use overlay_core::roster::{Hostname, Region, SelfIdentity};
     use overlay_core::subs::PeerState;
     use overlay_core::topic::{Class, Topic};
@@ -412,7 +412,7 @@ mod tests {
         );
         let direct = Fanout {
             small: SmallFanout {
-                cross_region: CrossRegion::Direct,
+                cross_region: SmallCrossRegion::Direct,
                 ..relaying(3, 2).small
             },
             ..Fanout::default()
