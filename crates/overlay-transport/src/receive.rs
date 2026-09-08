@@ -4,7 +4,7 @@
 //! frames off each, and it reads the peer's datagrams, which is where the small class arrives
 //! (§5.3). A whole message is a `CHUNK` with `k = 1, m = 0`; any other chunk is one piece of a
 //! striped message, which this host offers to the rest of its region and hands to the
-//! [`Reassembler`] that T-074 will put the message back together in. A `BATCH` feeds each entry
+//! [`Reassembler`] the message is put back together in. A `BATCH` feeds each entry
 //! through the same path on either carrier, because an entry names its own topic and an id this
 //! host cannot resolve costs that entry alone (D21).
 //!
@@ -22,6 +22,10 @@
 //! | compute the message id and check the snappy branch (D03) | `invalid_payload_total{peer}` and a warn once per connection |
 //! | insert into the seen cache, site 2 of 3 (D08) | `duplicates_dropped_total{source="overlay"}` |
 //! | queue it for publish (DX-N4) | `first_seen_total{source="overlay"}` on the way in |
+//!
+//! A message reassembled from chunks takes the last three of those steps in the same order, at
+//! its own site (D08 site 3 of 3), with the id already computed by the reassembler as part of
+//! deciding the message is the one its chunks claimed.
 //!
 //! `messages_total` and `bytes_total` count everything that resolved to a topic, whether or not
 //! it is published, so the two ends of a connection agree on what crossed it.
@@ -173,8 +177,9 @@ pub struct Deps {
     pub publish: Arc<dyn PublishSink>,
     /// What the mirror says the beacon node is subscribed to, which is the gate (DX-N1).
     pub sets: watch::Receiver<SubscriptionSets>,
-    /// Where a chunk that is not a whole message goes: the forwarded bitmap and the completed
-    /// set D19 reads, which T-074 grows into the reassembly itself.
+    /// Where a chunk that is not a whole message goes: the chunks are collected here, the
+    /// forwarded bitmap and the completed set D19 reads live here, and this is what answers with
+    /// the message once k of them have arrived.
     pub reassembler: Arc<Reassembler>,
     /// Where every counter above lands.
     pub stats: Arc<dyn ReceiveStats>,
@@ -3064,10 +3069,10 @@ mod tests {
         );
     }
 
-    /// A chunk is a piece of a message and this release cannot put one back together, so it is
-    /// counted, offered to the region and dropped. Nothing is published until T-074 reconstructs.
+    /// A chunk is a piece of a message, so one chunk of a message that needs two is counted,
+    /// offered to the region and held. Nothing reaches the beacon node until the rest arrive.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_striped_chunk_is_counted_and_not_published_until_the_reassembler_lands() {
+    async fn a_chunk_of_a_message_still_missing_chunks_publishes_nothing() {
         let block = topic("beacon_block");
         let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
         let striped = encode_datagram(&Frame::Chunk {
