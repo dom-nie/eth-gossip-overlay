@@ -179,6 +179,7 @@ impl Inbound {
             node: &self.node,
             at: arrived,
             source: events::Source::Bn,
+            header: None,
         });
         let outbound = Outbound {
             topic,

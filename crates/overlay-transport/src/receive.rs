@@ -742,6 +742,7 @@ impl Ctx {
             node: &self.deps.node,
             at: arrived,
             source: events::Source::Overlay { origin },
+            header: None,
         });
         self.deps.publish.enqueue(PublishItem {
             topic: topic.clone(),
@@ -1148,6 +1149,7 @@ impl Ctx {
                 node: &self.deps.node,
                 at: arrived,
                 source: events::Source::Overlay { origin: &self.peer },
+                header: None,
             });
             self.deps.publish.enqueue(PublishItem {
                 topic,
@@ -3252,6 +3254,33 @@ mod tests {
             cluster.held_when_published(1),
             vec![true],
             "the enqueue ran before the seen cache knew the id"
+        );
+    }
+
+    /// The third of the recent store's insert sites (§5.6), and the gap T-081 left open.
+    ///
+    /// A large message that arrives whole rather than striped is one this host is holding and
+    /// can answer for. Chunk repair would never ask such a host, because it sent nobody a chunk
+    /// and is nobody's candidate (D23); column repair asks in-region live peers by round trip
+    /// whatever they sent, so without this insert a host that took the whole message answers
+    /// `not_found` for a column it has, and the requester spends an attempt finding that out.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn whole_delivery_inserts_into_the_recent_store() {
+        let block = topic("beacon_block");
+        let payload = Bytes::from(incompressible(4096));
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        let msg_id = msgid::compute(&block.to_string(), &payload, wire::MAX_PAYLOAD_BYTES).id;
+
+        send(&peer, &[whole(0, &block, &payload)]).await;
+
+        eventually("the message to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert_eq!(
+            cluster.recent(1).get(&msg_id),
+            Some((block, payload)),
+            "a whole delivery is held for repair like a reassembled one"
         );
     }
 
