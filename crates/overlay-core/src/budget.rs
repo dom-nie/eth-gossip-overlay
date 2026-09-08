@@ -402,6 +402,52 @@ mod tests {
         assert_eq!(read_memory_max(&numeric), Some(536_870_912));
     }
 
+    /// What every bounded structure holds at the shipped defaults for the fleet §2 describes,
+    /// row by row, so a default that moves fails here naming itself rather than only moving the
+    /// total. The numbers are the ones `docs/performance.md` prints.
+    const AT_TWO_HUNDRED_HOSTS: &[(&str, u64)] = &[
+        ("seen_cache", 12_800_000),
+        ("recent_store", 0),
+        ("publish_queue", 35_651_584),
+        ("reassembler", 35_651_584),
+        ("peer_send_lanes", 128_241_664),
+        ("gossipsub", 34_132_480),
+        ("by_root_cache", 0),
+        ("quic_receive_windows", 208_666_624),
+    ];
+
+    /// OPS-N4's whole point: every bounded structure at its worst case, summed, fits under the
+    /// ceiling with the headroom the design asks for. This test failing is the signal that a
+    /// default somewhere grew, which is why it names the row and the difference rather than
+    /// only the total.
+    #[test]
+    fn memory_budget_at_defaults_fits_under_eighty_percent_of_memory_max() {
+        let budget = budget();
+
+        let names: Vec<&str> = budget.rows.iter().map(|(name, _)| *name).collect();
+        let wanted: Vec<&str> = AT_TWO_HUNDRED_HOSTS.iter().map(|(name, _)| *name).collect();
+        assert_eq!(names, wanted, "the table is missing a row or has a new one");
+        for ((name, bytes), (_, was)) in budget.rows.iter().zip(AT_TWO_HUNDRED_HOSTS) {
+            assert_eq!(
+                bytes,
+                was,
+                "{name} is {bytes} bytes, was {was}: {} by {}",
+                if bytes > was { "grew" } else { "shrank" },
+                bytes.abs_diff(*was)
+            );
+        }
+
+        let usable = usable(MEMORY_MAX_DEFAULT);
+        assert!(
+            budget.bounded_bytes <= usable,
+            "the rows come to {} bytes, {} over the {usable} the {} MiB limit leaves after \
+             {HEADROOM_PERCENT}% headroom",
+            budget.bounded_bytes,
+            budget.bounded_bytes - usable,
+            MEMORY_MAX_DEFAULT / (1024 * 1024),
+        );
+    }
+
     /// The rows are what T-076's table grows from, so the sum has to be the rows and the total
     /// has to be the sum plus exactly the headroom OPS-N4 asks for.
     #[test]
