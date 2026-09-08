@@ -84,6 +84,7 @@ const SECTION_12: &[&str] = &[
     "overlay_first_seen_total",
     "overlay_handshake_failures_total",
     "overlay_invalid_payload_total",
+    "overlay_io_thread_pinned",
     "overlay_messages_total",
     "overlay_parity_used_total",
     "overlay_peer_auth_via_previous_seed_total",
@@ -152,6 +153,7 @@ const LABELS: &[(&str, &[&str])] = &[
     ("overlay_first_seen_total", &["class", "source"]),
     ("overlay_handshake_failures_total", &["reason", "role"]),
     ("overlay_invalid_payload_total", &["peer"]),
+    ("overlay_io_thread_pinned", &[]),
     (
         "overlay_messages_total",
         &["class", "direction", "peer", "region", "site"],

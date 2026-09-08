@@ -4,12 +4,12 @@
 use std::time::{Duration, Instant};
 
 use eth_gossip_overlay::metrics::{
-    BN_SUBSCRIPTIONS, BYTES_TOTAL, CHUNKS_RECEIVED_TOTAL, FIRST_SEEN_TOTAL, LABEL_CLASS,
-    LABEL_DIRECTION, LABEL_OUTCOME, LABEL_PEER, LABEL_REASON, LABEL_SOURCE, LABEL_UNIT,
-    MESSAGES_TOTAL, PARITY_USED_TOTAL, PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL, PEER_QUEUE_DEPTH,
-    PEER_QUEUE_DROPS_TOTAL, PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF, RECONSTRUCT_SECONDS,
-    RELAYED_BATCHES_TOTAL, REPAIR_REQUESTS_TOTAL, SOURCE_OVERLAY, UNANNOUNCED_TOPIC_TOTAL,
-    UNIT_BYTES, UNKNOWN_TOPIC_ID_TOTAL, UNWANTED_TOPIC_TOTAL,
+    BN_SUBSCRIPTIONS, BYTES_TOTAL, CHUNKS_RECEIVED_TOTAL, FIRST_SEEN_TOTAL, IO_THREAD_PINNED,
+    LABEL_CLASS, LABEL_DIRECTION, LABEL_OUTCOME, LABEL_PEER, LABEL_REASON, LABEL_SOURCE,
+    LABEL_UNIT, MESSAGES_TOTAL, PARITY_USED_TOTAL, PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL,
+    PEER_QUEUE_DEPTH, PEER_QUEUE_DROPS_TOTAL, PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF,
+    RECONSTRUCT_SECONDS, RELAYED_BATCHES_TOTAL, REPAIR_REQUESTS_TOTAL, SOURCE_OVERLAY,
+    UNANNOUNCED_TOPIC_TOTAL, UNIT_BYTES, UNKNOWN_TOPIC_ID_TOTAL, UNWANTED_TOPIC_TOTAL,
 };
 use harness::{Fleet, SETTLE, Scrape, WAIT, incompressible, topic};
 use overlay_core::protocol::features;
@@ -46,6 +46,45 @@ async fn block_from_one_bn_reaches_every_other_bn_exactly_once() {
     fleet.settle().await;
     for i in 1..5 {
         assert_eq!(fleet.node(i).bn().count(&block, &payload), 1, "node {i}");
+    }
+}
+
+/// Scenario 1 again with E9's I/O thread configured (T-091). Frames cross between the two
+/// runtimes through the channels that were already there, so a fleet with a core reserved has
+/// to deliver exactly what a fleet without one delivers.
+///
+/// Off Linux this is the fallback: every node parses the key, takes the main runtime and
+/// reports the gauge at zero. That the endpoint really lands on the reserved core is the half
+/// of the answer only a Linux machine can give.
+#[tokio::test(flavor = "multi_thread")]
+async fn fleet_scenario_one_passes_with_the_io_thread_configured() {
+    let block = topic("beacon_block");
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", 5)])
+        .config(|settings| settings.pin_cpu = Some(0))
+        .start()
+        .await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+
+    let payload = b"a block from a reserved core".to_vec();
+    fleet.node(0).bn().publish(&block, &payload).await;
+
+    fleet
+        .wait_for(
+            "every other beacon node to import the block",
+            WAIT,
+            |fleet| (1..5).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
+        )
+        .await;
+    fleet.settle().await;
+    for i in 1..5 {
+        assert_eq!(fleet.node(i).bn().count(&block, &payload), 1, "node {i}");
+    }
+    for (i, scrape) in fleet.metrics().await.iter().enumerate() {
+        assert!(scrape.has(IO_THREAD_PINNED, &[]), "node {i}");
     }
 }
 

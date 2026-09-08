@@ -181,6 +181,9 @@ pub struct Settings {
     /// one tuned transport parameter an operator can move, so it is the one a benchmark can run
     /// either side of (T-076).
     pub initial_window_bytes: u64,
+    /// `overlay.io_thread.pin_cpu`: the core every node reserves for its overlay endpoint
+    /// (T-091). Off, as the shipped defaults have it, unless a scenario asks.
+    pub pin_cpu: Option<u32>,
 }
 
 impl Default for Settings {
@@ -192,6 +195,7 @@ impl Default for Settings {
             stripe_min_recipients: LargeFanout::default().stripe_min_recipients,
             parity_ratio: LargeClass::default().parity_ratio,
             initial_window_bytes: Overlay::default().initial_window_bytes,
+            pin_cpu: None,
         }
     }
 }
@@ -504,9 +508,13 @@ impl Fleet {
             true => format!("  fleet_seed_previous_file: {}\n", path("seed.previous")),
             false => String::new(),
         };
+        let io_thread = match self.settings.pin_cpu {
+            Some(cpu) => format!("  io_thread:\n    pin_cpu: {cpu}\n"),
+            None => String::new(),
+        };
         let yaml = format!(
             "overlay:\n  listen: \"{}\"\n  roster_file: {}\n  fleet_seed_file: {}\n{}\
-             \x20 keepalive_ms: 500\n  idle_timeout_ms: 5000\n\
+             \x20 keepalive_ms: 500\n  idle_timeout_ms: 5000\n{}\
              \x20 initial_window_bytes: {}\n\
              \x20 fanout:\n    large:\n      stripe_min_recipients: {}\n\
              \x20   small:\n      relay_min_remote_hosts: {}\n\
@@ -520,6 +528,7 @@ impl Fleet {
             path("roster.yaml"),
             self.dir.path().join("seed").display(),
             previous,
+            io_thread,
             self.settings.initial_window_bytes,
             self.settings.stripe_min_recipients,
             self.settings.relay_min_remote_hosts,
