@@ -296,6 +296,18 @@ mod tests {
         assert!(initial_congestion_window(30_000).await < 3_000_000);
     }
 
+    /// DX-N3's inbound bounds, which are what stops one peer from holding more of this host's
+    /// memory than the budget gave it. They are constants rather than keys because an operator
+    /// who lowers them starves the fleet and one who raises them breaks the budget's arithmetic.
+    #[test]
+    fn inbound_stream_limits_are_the_named_constants() {
+        let transport = transport_config(&Overlay::default());
+
+        assert_eq!(field(&transport, "max_concurrent_uni_streams"), "64");
+        assert_eq!(field(&transport, "max_concurrent_bidi_streams"), "4");
+        assert_eq!(field(&transport, "stream_receive_window"), "1048576");
+    }
+
     #[test]
     fn transport_config_uses_keepalive_and_idle_from_config() {
         let cfg = Overlay {
