@@ -18,6 +18,7 @@ pub mod relay;
 pub mod roster;
 pub mod rs;
 pub mod seen;
+pub mod stripe;
 pub mod subs;
 #[cfg(test)]
 mod testlog;
