@@ -4,10 +4,11 @@
 use std::time::{Duration, Instant};
 
 use eth_gossip_overlay::metrics::{
-    BN_SUBSCRIPTIONS, FIRST_SEEN_TOTAL, LABEL_CLASS, LABEL_DIRECTION, LABEL_PEER, LABEL_REASON,
-    LABEL_SOURCE, LABEL_UNIT, MESSAGES_TOTAL, PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL, PEER_QUEUE_DEPTH,
-    PEER_QUEUE_DROPS_TOTAL, PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF, RELAYED_BATCHES_TOTAL,
-    SOURCE_OVERLAY, UNANNOUNCED_TOPIC_TOTAL, UNIT_BYTES, UNWANTED_TOPIC_TOTAL,
+    BN_SUBSCRIPTIONS, BYTES_TOTAL, FIRST_SEEN_TOTAL, LABEL_CLASS, LABEL_DIRECTION, LABEL_PEER,
+    LABEL_REASON, LABEL_SOURCE, LABEL_UNIT, MESSAGES_TOTAL, PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL,
+    PEER_QUEUE_DEPTH, PEER_QUEUE_DROPS_TOTAL, PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF,
+    RELAYED_BATCHES_TOTAL, SOURCE_OVERLAY, UNANNOUNCED_TOPIC_TOTAL, UNIT_BYTES,
+    UNKNOWN_TOPIC_ID_TOTAL, UNWANTED_TOPIC_TOTAL,
 };
 use harness::{Fleet, SETTLE, Scrape, WAIT, topic};
 use overlay_core::protocol::features;
@@ -859,5 +860,160 @@ async fn single_and_two_host_regions_use_whole_delivery_and_the_direct_small_pat
     fleet.settle().await;
     for (node, scrape) in fleet.metrics().await.iter().enumerate() {
         assert_eq!(scrape.sum(RELAYED_BATCHES_TOTAL, &[]), 0.0, "node {node}");
+    }
+}
+
+/// DX-N5 scenario 15 for the chunk half, and DX-N4: cut-through does not wait for a beacon
+/// node. The host a chunk lands on has a beacon node that has stopped reading its socket, and
+/// the rest of its region is given that chunk all the same, because the forward is issued from
+/// the chunk's arrival and nothing on that path consults the node.
+#[tokio::test(flavor = "multi_thread")]
+async fn wedged_bn_on_one_host_does_not_delay_the_chunk_second_hop_to_its_region() {
+    let block = topic("beacon_block");
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", 4)])
+        .config(|settings| settings.stripe_min_recipients = 2)
+        .start()
+        .await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    fleet.node(1).wedge_bn().await;
+    let wedged = fleet.node(1).hostname().0.clone();
+
+    fleet
+        .node(0)
+        .bn()
+        .publish(&block, &incompressible(7, 200 * 1024))
+        .await;
+
+    for node in [2, 3] {
+        fleet
+            .wait_for_metrics(
+                "the region behind the wedged host to be given chunks",
+                WAIT,
+                |now| {
+                    now[node].sum(
+                        MESSAGES_TOTAL,
+                        &[(LABEL_DIRECTION, "in"), (LABEL_PEER, &wedged)],
+                    ) > 0.0
+                },
+            )
+            .await;
+    }
+}
+
+/// DX-N5 scenario 11 and D12: an id reaches a peer over the control stream and a chunk naming
+/// it travels on a stream of its own, so a topic the origin has only just subscribed to can be
+/// named on the wire before the peer has been told what the name means. This drives the race a
+/// fleet really runs, subscribing the origin last and publishing at once, and asserts what it is
+/// meant to leave behind: a fleet that carried the message anyway and a counter that stops
+/// moving once the announcement has landed, which is what makes a non-zero rate in the canary
+/// worth looking at. The announcement wins every time here, so the drop itself is asserted where
+/// it can be forced, in `receive`'s `chunk_under_an_unannounced_topic_id_is_counted_and_dropped`.
+#[tokio::test(flavor = "multi_thread")]
+async fn chunk_arriving_before_topic_add_is_counted_not_crashed_and_zero_in_steady_state() {
+    let column = topic("data_column_sidecar_5");
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", 3)])
+        .config(|settings| settings.stripe_min_recipients = 2)
+        .start()
+        .await;
+    fleet.wait_full_mesh(WAIT).await;
+    // The subscribers first, so the origin's stripe has somewhere to go, and the origin last, so
+    // the only announcement still in flight when it publishes is its own.
+    for node in [1, 2] {
+        fleet.node(node).subscribe(&column).await;
+    }
+    fleet.settle().await;
+    fleet.node(0).subscribe(&column).await;
+
+    let racing = incompressible(11, 200 * 1024);
+    fleet.node(0).bn().publish(&column, &racing).await;
+    for node in [1, 2] {
+        fleet
+            .wait_for_metrics(
+                "both hosts to be reading the column's chunks",
+                WAIT,
+                |now| now[node].sum(MESSAGES_TOTAL, &[(LABEL_DIRECTION, "in")]) > 0.0,
+            )
+            .await;
+    }
+    fleet.settle().await;
+
+    let before = fleet.metrics().await;
+    let settled = incompressible(12, 200 * 1024);
+    fleet.node(0).bn().publish(&column, &settled).await;
+    for node in [1, 2] {
+        fleet
+            .wait_for_metrics("both hosts to read the second one's chunks", WAIT, |now| {
+                now[node].sum(MESSAGES_TOTAL, &[(LABEL_DIRECTION, "in")])
+                    > before[node].sum(MESSAGES_TOTAL, &[(LABEL_DIRECTION, "in")])
+            })
+            .await;
+    }
+    fleet.settle().await;
+
+    for (node, now) in fleet.metrics().await.iter().enumerate() {
+        assert_eq!(
+            now.sum(UNKNOWN_TOPIC_ID_TOTAL, &[]) - before[node].sum(UNKNOWN_TOPIC_ID_TOTAL, &[]),
+            0.0,
+            "node {node} is still naming an id its peers do not know"
+        );
+    }
+}
+
+/// §5.4's whole reason for existing, measured: a 200 KB block leaves the origin as about two
+/// block-equivalents, one stripe per region, however many hosts are in them, and each host of
+/// the striped region passes on about one block-equivalent. Fanning the block out whole would
+/// have cost the origin one copy per host, which is the eleven this fleet has and the two
+/// hundred the deployment §2 describes does.
+#[tokio::test(flavor = "multi_thread")]
+async fn striped_block_costs_the_origin_two_block_equivalents_and_each_host_one() {
+    let block = topic("beacon_block");
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", 10), ("us", 2)])
+        .config(|settings| settings.stripe_min_recipients = 2)
+        .start()
+        .await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    fleet.settle().await;
+    let out = |scrape: &Scrape| scrape.sum(BYTES_TOTAL, &[(LABEL_DIRECTION, "out")]);
+    let before = fleet.metrics().await;
+
+    let payload = incompressible(13, 200 * 1024);
+    fleet.node(0).bn().publish(&block, &payload).await;
+
+    for node in 1..10 {
+        fleet
+            .wait_for_metrics(
+                "every host of the origin's region to pass its chunks on",
+                WAIT,
+                |now| out(&now[node]) - out(&before[node]) > 0.0,
+            )
+            .await;
+    }
+    fleet.settle().await;
+
+    // The gossipsub wire form is what the sidecar splits, and snappy leaves an incompressible
+    // payload about as long as it started, so the block-equivalent this is measured in is the
+    // published length give or take the framing.
+    let block_bytes = payload.len() as f64;
+    let now = fleet.metrics().await;
+    let origin = (out(&now[0]) - out(&before[0])) / block_bytes;
+    assert!(
+        (2.0..2.4).contains(&origin),
+        "the origin sent {origin} block-equivalents"
+    );
+    for node in 1..10 {
+        let host = (out(&now[node]) - out(&before[node])) / block_bytes;
+        assert!(
+            (0.8..1.2).contains(&host),
+            "node {node} sent {host} block-equivalents"
+        );
     }
 }

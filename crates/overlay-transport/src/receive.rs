@@ -2708,6 +2708,51 @@ mod tests {
         );
     }
 
+    /// D12's residual race, from the receiving end: an id travels on the control stream and a
+    /// chunk naming it on a stream of its own, so a chunk can arrive first. It costs that chunk
+    /// and nothing else, and the connection carries on with the next one.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn chunk_under_an_unannounced_topic_id_is_counted_and_dropped() {
+        let (cluster, peer, _) = striping_region(2).await;
+        let sender = cluster.hostname(0);
+        let mut unannounced = chunk_frame(MessageId([13; 20]), 0, ChunkFlags::NONE);
+        // The same chunk under an id this peer never put in its HELLO or a `TOPIC_ADD`.
+        unannounced = encode_datagram(&Frame::Chunk {
+            flags: ChunkFlags::NONE,
+            chunk: Chunk {
+                topic_id: 31,
+                ..match wire::decode_datagram(unannounced) {
+                    Ok(Frame::Chunk { chunk, .. }) => chunk,
+                    other => panic!("a chunk frame, not {other:?}"),
+                }
+            },
+        });
+
+        send(
+            &peer,
+            &[
+                unannounced,
+                chunk_frame(MessageId([14; 20]), 1, ChunkFlags::NONE),
+            ],
+        )
+        .await;
+
+        eventually("the readable chunk to be forwarded", || {
+            !cluster
+                .stats(2)
+                .chunks_received(&cluster.hostname(1))
+                .is_empty()
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(cluster.stats(1).unknown_topic_ids(&sender), 1);
+        assert_eq!(
+            cluster.stats(2).chunks_received(&cluster.hostname(1)),
+            vec![(ChunkFlags::FORWARDED, 1)],
+            "the chunk under the unknown id was forwarded"
+        );
+    }
+
     /// A chunk is a piece of a message and this release cannot put one back together, so it is
     /// counted, offered to the region and dropped. Nothing is published until T-074 reconstructs.
     #[tokio::test(flavor = "multi_thread")]

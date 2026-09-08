@@ -40,18 +40,22 @@
 //!
 //! # Scenarios
 //!
-//! The nine v1 scenarios and DX-N5's review scenarios live in `tests/fleet_v1.rs`. The six that
+//! The nine v1 scenarios and DX-N5's review scenarios live in `tests/fleet_v1.rs`. The ones that
 //! need a feature no release has shipped yet are written by the ticket that ships it, in this
 //! harness, with the hooks only they need:
 //!
 //! | # | Scenario | Written by |
 //! |---|---|---|
 //! | 10 | two origins with divergent live views publish once, at most 2(k+m) chunks received | T-074 |
-//! | 11 | a chunk arriving before its `TOPIC_ADD` is counted, not crashed, and zero in steady state | T-073 |
+//! | 11 | a chunk arriving before its `TOPIC_ADD` is counted, not crashed, and zero in steady state | T-073, written |
 //! | 12 | single-host and two-host regions use whole delivery and the direct small path | T-072, written |
 //! | 13 | an unsubscribed relay re-fans but does not publish | T-063, written |
-//! | 15 | a wedged beacon node on one host does not delay the second hop to its region | T-063, written for the relay hop; T-073 for the chunk one |
+//! | 15 | a wedged beacon node on one host does not delay the second hop to its region | T-063 for the relay hop, T-073 for the chunk one, both written |
 //! | 16 | one third of a region lost mid-slot completes via parity or repair before the deadline | T-074, T-082 |
+//!
+//! T-073 also left the egress figure §5.4 is built around in
+//! `striped_block_costs_the_origin_two_block_equivalents_and_each_host_one`, which is not one of
+//! DX-N5's scenarios but is the number the whole large class exists for.
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
@@ -67,7 +71,7 @@ use eth_gossip_overlay::logging::{self, LogHandle};
 use eth_gossip_overlay::metrics::{LABEL_DIRECTION, LABEL_PEER, MESSAGES_TOTAL};
 use overlay_bn::node_key::NodeKey;
 use overlay_bn::testutil::{FakeBn, FakeBnEvent};
-use overlay_core::config::{Config, Log, LogFormat, LogLevel};
+use overlay_core::config::{Config, LargeFanout, Log, LogFormat, LogLevel};
 use overlay_core::relay;
 use overlay_core::roster::Hostname;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -145,6 +149,10 @@ pub struct Settings {
     /// `overlay.fanout.small.relays_per_remote_region`: how many of a remote region's hosts
     /// carry a batch for it.
     pub relays_per_remote_region: usize,
+    /// `overlay.fanout.large.stripe_min_recipients`: the subscribers a region needs before a
+    /// large message is striped across it rather than sent whole (§5.4). A harness fleet is
+    /// below the shipped sixteen, so a scenario about striping lowers it.
+    pub stripe_min_recipients: usize,
 }
 
 impl Default for Settings {
@@ -153,6 +161,7 @@ impl Default for Settings {
             inject: true,
             relay_min_remote_hosts: relay::DEFAULT_RELAY_MIN_REMOTE_HOSTS,
             relays_per_remote_region: relay::DEFAULT_RELAYS_PER_REMOTE_REGION,
+            stripe_min_recipients: LargeFanout::default().stripe_min_recipients,
         }
     }
 }
@@ -468,7 +477,8 @@ impl Fleet {
         let yaml = format!(
             "overlay:\n  listen: \"{}\"\n  roster_file: {}\n  fleet_seed_file: {}\n{}\
              \x20 keepalive_ms: 500\n  idle_timeout_ms: 5000\n\
-             \x20 fanout:\n    small:\n      relay_min_remote_hosts: {}\n\
+             \x20 fanout:\n    large:\n      stripe_min_recipients: {}\n\
+             \x20   small:\n      relay_min_remote_hosts: {}\n\
              \x20     relays_per_remote_region: {}\n\
              bn:\n  node_key_file: {}\n  identity_url: \"{}\"\n  libp2p_addr: \"{}\"\n\
              \x20 listen_addr: \"/ip4/127.0.0.1/tcp/0\"\n\
@@ -478,6 +488,7 @@ impl Fleet {
             path("roster.yaml"),
             self.dir.path().join("seed").display(),
             previous,
+            self.settings.stripe_min_recipients,
             self.settings.relay_min_remote_hosts,
             self.settings.relays_per_remote_region,
             path("node.key"),
