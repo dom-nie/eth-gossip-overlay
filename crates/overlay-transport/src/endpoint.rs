@@ -22,6 +22,10 @@ use crate::tls::PLACEHOLDER_NAME;
 /// (T-046), not here: a key would only let a host ask for less than the design needs.
 const SOCKET_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
+/// What the kernel reports back for a buffer it stored `n` bytes in: Linux doubles it, every
+/// other platform returns it.
+const REPORTED_BUFFER_MULTIPLE: usize = if cfg!(target_os = "linux") { 2 } else { 1 };
+
 /// Bytes one connection may have in flight before it waits for acknowledgements (§5.3).
 const SEND_WINDOW: u64 = 16 * 1024 * 1024;
 
@@ -121,6 +125,7 @@ fn bind_socket(listen: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
     socket.bind(&listen.into())?;
 
     let (recv, send) = (socket.recv_buffer_size()?, socket.send_buffer_size()?);
+    warn_if_socket_buffers_capped(recv, send);
     let socket = std::net::UdpSocket::from(socket);
     tracing::info!(
         listen = %socket.local_addr()?,
@@ -168,7 +173,23 @@ pub fn transport_config(cfg: &Overlay, receive_window: u64) -> quinn::TransportC
 }
 
 /// Warns when the kernel gave the socket less than §5.3's floor, naming the sysctl that caps it.
-fn warn_if_socket_buffers_capped(_recv: usize, _send: usize) {}
+///
+/// The report is halved on Linux, which returns twice what it stored for a socket buffer
+/// (`socket(7)`, `SO_RCVBUF`). A host under the floor is one where T-046's `sysctl.d` file never
+/// landed, and what it shows is datagrams dropped under a burst, which names nothing.
+fn warn_if_socket_buffers_capped(recv: usize, send: usize) {
+    for (reported, sysctl) in [(recv, "net.core.rmem_max"), (send, "net.core.wmem_max")] {
+        let effective = reported / REPORTED_BUFFER_MULTIPLE;
+        if effective < SOCKET_BUFFER_BYTES {
+            tracing::warn!(
+                requested_bytes = SOCKET_BUFFER_BYTES,
+                effective_bytes = effective,
+                sysctl,
+                "the kernel capped the overlay socket buffer; raise this sysctl"
+            );
+        }
+    }
+}
 
 /// `idle_timeout_ms` as the variable-length integer QUIC carries it in. A value too large to
 /// encode saturates rather than failing the bind: an operator who asks for a timeout of 146
