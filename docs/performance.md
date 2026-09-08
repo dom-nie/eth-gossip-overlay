@@ -8,9 +8,9 @@ the second is arithmetic over the code's own constants.
 
 `MemoryMax=1G` in the shipped unit is the ceiling this table is written against (OPS-N4). Every
 row is a structure with a bound in code, so the sum is a worst case and not a measurement:
-nothing in it grows with traffic, and a real fleet sits far below it. Two rows read zero because
-the structure they name has not been built yet, `recent_store` (T-081) and `by_root_cache`
-(T-085); each ticket fills its own row in.
+nothing in it grows with traffic, and a real fleet sits far below it. One row reads zero because
+the structure it names has not been built yet, `by_root_cache` (T-085); that ticket fills its own
+row in.
 
 `quic_receive_windows` is the one row that is not a constant. It is whatever the other rows
 leave under the ceiling, shared out over the roster and floored at the 1 MiB stream window
@@ -19,20 +19,20 @@ Once the floor binds, it cannot shrink further and the sidecar warns at startup.
 
 <!-- generated from crates/overlay-core/src/budget.rs, do not edit by hand -->
 
-At the shipped defaults, a roster of 200 hosts and the unit's `MemoryMax=1G`, which gives every connection a receive window of 2.9 MiB.
+At the shipped defaults, a roster of 200 hosts and the unit's `MemoryMax=1G`, which gives every connection a receive window of 2.8 MiB.
 
 | Structure | Bytes | MiB |
 |---|---:|---:|
 | `seen_cache` | 12800000 | 12.2 |
-| `recent_store` | 0 | 0.0 |
+| `recent_store` | 27238400 | 26.0 |
 | `publish_queue` | 35651584 | 34.0 |
 | `reassembler` | 35651584 | 34.0 |
 | `peer_send_lanes` | 128241664 | 122.3 |
 | `gossipsub` | 34132480 | 32.6 |
 | `by_root_cache` | 0 | 0.0 |
-| `quic_receive_windows` | 609453420 | 581.2 |
-| **Sum of the bounds** | 855930732 | 816.3 |
-| **Plus 25% headroom** | 1069913415 | 1020.3 |
+| `quic_receive_windows` | 582351212 | 555.4 |
+| **Sum of the bounds** | 856066924 | 816.4 |
+| **Plus 25% headroom** | 1070083655 | 1020.5 |
 | `MemoryMax` | 1073741824 | 1024.0 |
 
 <!-- end generated -->
@@ -40,7 +40,7 @@ At the shipped defaults, a roster of 200 hosts and the unit's `MemoryMax=1G`, wh
 Because the QUIC row is the remainder, the sum sits on the usable line whatever the roster, and
 the floor is what eventually breaks that: the other rows grow with the fleet until there is less
 than 1 MiB per connection to hand out, and past that point the total goes over. At these
-defaults that happens at 498 hosts. A row that grows for any other reason brings it forward, so
+defaults that happens at 478 hosts. A row that grows for any other reason brings it forward, so
 a fleet well inside the limit today is not necessarily inside it after a bound moves.
 
 The ceiling was 512M until MD-05, where this table first got computed and the 200-host example
