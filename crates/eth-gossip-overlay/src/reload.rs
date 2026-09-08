@@ -35,9 +35,11 @@
 //! - `classes.small.batch_window_ms` and `classes.small.stale_after_ms`: one applier for the
 //!   section, sending both bounds to T-062's batcher task, which closes what it is holding under
 //!   the old ones and collects under the new.
-//! - `overlay.fanout.small.*`: one applier for the three relay keys, sending the fanout T-063's
-//!   router reads on to the fanout task. The `large` section keeps the values the process
-//!   started with, because its keys need a restart and this must not smuggle them in.
+//! - `overlay.fanout.small.*` and `overlay.fanout.large.stripe_min_recipients`: one applier
+//!   each, both sending the whole fanout T-063's and T-072's router reads on to the fanout
+//!   task. Either one composes the same value, so whichever runs leaves the other's key where
+//!   the file put it. `large.in_region` and `large.cross_region` keep the values the process
+//!   started with, because they need a restart and this must not smuggle them in.
 //! - `classes.large.repair_deadline_ms` (D24) has no applier: its consumer arrives with T-082,
 //!   which registers one. Until then a change is still applied, in that [`Reloader::config`]
 //!   answers with it.
@@ -56,7 +58,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwap;
-use overlay_core::config::{Config, Fanout, PublishRateLimit, SmallClass};
+use overlay_core::config::{Config, Fanout, LargeFanout, PublishRateLimit, SmallClass};
 use overlay_core::identity::{FleetSeed, Seeds, read_secret_file};
 use overlay_core::roster::Roster;
 use overlay_transport::tls::PinTable;
@@ -84,6 +86,7 @@ pub const RELOADABLE: &[&str] = &[
     "inject",
     "log.format",
     "log.level",
+    "overlay.fanout.large.stripe_min_recipients",
     "overlay.fanout.small.cross_region",
     "overlay.fanout.small.relay_min_remote_hosts",
     "overlay.fanout.small.relays_per_remote_region",
@@ -296,6 +299,7 @@ impl Reloader {
         let (document, config) = read_config(&config_path)?;
         let inject = deps.inject;
         let previous_seed = deps.previous_seed;
+        let started_with = config.overlay.fanout.large.clone();
         let appliers: Vec<(&'static str, Applier)> = vec![
             (
                 "inject",
@@ -329,23 +333,25 @@ impl Reloader {
                 },
             ),
             (
-                // One applier for the three relay keys, which the router weighs together. It
-                // sends the small section beside the `large` the process started with: those
-                // keys need a restart, and a reload that carried them would apply what it had
-                // just reported as restart-required.
+                // One applier for the three relay keys, which the router weighs together, and
+                // one for the stripe threshold beside it. Both build the whole fanout, so a
+                // file that changed keys in either section ends up with both.
                 "overlay.fanout.small",
                 {
-                    let fanout = deps.fanout;
-                    let large = config.overlay.fanout.large.clone();
+                    let (fanout, large) = (deps.fanout.clone(), started_with.clone());
                     Box::new(move |cfg: &Config| {
-                        fanout.send_replace(Fanout {
-                            large: large.clone(),
-                            small: cfg.overlay.fanout.small.clone(),
-                        });
+                        fanout.send_replace(fanout_of(cfg, &large));
                         Ok(())
                     })
                 },
             ),
+            ("overlay.fanout.large.stripe_min_recipients", {
+                let (fanout, large) = (deps.fanout, started_with);
+                Box::new(move |cfg: &Config| {
+                    fanout.send_replace(fanout_of(cfg, &large));
+                    Ok(())
+                })
+            }),
             ("log.level", {
                 let log = deps.log.clone();
                 Box::new(move |cfg: &Config| {
@@ -494,6 +500,19 @@ impl Reloader {
         }
         self.roster.send_replace(roster);
         report.applied.push("roster".to_owned());
+    }
+}
+
+/// The fanout the router routes under: what the file says, except for the two `large` keys that
+/// need a restart, which stay as `started_with` has them. An applier that sent the section as
+/// the file spells it would apply what the same reload had just reported as restart-required.
+fn fanout_of(cfg: &Config, started_with: &LargeFanout) -> Fanout {
+    Fanout {
+        large: LargeFanout {
+            stripe_min_recipients: cfg.overlay.fanout.large.stripe_min_recipients,
+            ..started_with.clone()
+        },
+        small: cfg.overlay.fanout.small.clone(),
     }
 }
 

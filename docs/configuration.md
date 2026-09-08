@@ -83,7 +83,7 @@ in its own row, since the table is generated from the same doc comments the code
 | `overlay.initial_window_bytes` | `4000000` | restart | the initial congestion window. A connection that carries one block every 12 s never leaves slow start with the RFC default. |
 | `overlay.fanout.large.in_region` | `stripe` | restart | how a large message reaches the origin's own region. One of `stripe`, `direct`. |
 | `overlay.fanout.large.cross_region` | `stripe` | restart | how it reaches each other region. One of `stripe`, `direct`, `relays`. |
-| `overlay.fanout.large.stripe_min_recipients` | `16` | restart | with fewer subscribed recipients than this the message goes out whole; a stripe over a handful of hosts saves nothing. |
+| `overlay.fanout.large.stripe_min_recipients` | `16` | reload | with fewer subscribed recipients than this the message goes out whole; a stripe over a handful of hosts saves nothing. |
 | `overlay.fanout.small.in_region` | `direct` | restart | how a batch reaches the origin's own region. One of `stripe`, `direct`. |
 | `overlay.fanout.small.cross_region` | `relays` | reload | how it reaches each other region. One of `direct`, `relays`. |
 | `overlay.fanout.small.relays_per_remote_region` | `3` | reload | how many hosts in a remote region receive a batch and re-fan it locally. |
