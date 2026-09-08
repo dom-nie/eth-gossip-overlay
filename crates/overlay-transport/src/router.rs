@@ -584,6 +584,76 @@ mod tests {
         );
     }
 
+    /// §5.4 step 2: a region big enough to be worth it takes one chunk per host, round robin in
+    /// hostname order from where the message id points. Two origins with the same live view
+    /// therefore send the same chunk to the same host, and the second copy deduplicates on
+    /// arrival instead of costing the region a second delivery.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_large_at_or_above_min_recipients_is_stripe() {
+        let connection = connection().await;
+        let block = topic("beacon_block");
+        let live = view_in(
+            &connection,
+            vec![
+                ("bn-eu-a", "eu", peer_state(&[(1, &block)], &[1])),
+                ("bn-eu-b", "eu", peer_state(&[(1, &block)], &[1])),
+                ("bn-eu-c", "eu", peer_state(&[(1, &block)], &[1])),
+            ],
+        );
+
+        let plan = route(
+            &block,
+            Class::Large,
+            Some(chunked(1, 2, 1)),
+            &live,
+            &me(),
+            &striping(3),
+        );
+
+        assert_eq!(
+            plan,
+            RoutePlan::Large(vec![RegionPlan::Stripe {
+                region: Region("eu".to_owned()),
+                targets_per_chunk: vec![host("bn-eu-b"), host("bn-eu-c"), host("bn-eu-a")],
+            }])
+        );
+    }
+
+    /// The origin already holds the message it is striping, so it is not one of the hosts its
+    /// own region's stripe runs over. Were it counted, the rotation would land elsewhere and
+    /// one chunk would be assigned to nobody.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_large_excludes_self_from_own_region_stripe() {
+        let connection = connection().await;
+        let block = topic("beacon_block");
+        let live = view_in(
+            &connection,
+            vec![
+                ("bn-eu-a", "eu", peer_state(&[(1, &block)], &[1])),
+                ("bn-eu-b", "eu", peer_state(&[(1, &block)], &[1])),
+                ("bn-eu-c", "eu", peer_state(&[(1, &block)], &[1])),
+                (&me().hostname.0, "eu", peer_state(&[(1, &block)], &[1])),
+            ],
+        );
+
+        let plan = route(
+            &block,
+            Class::Large,
+            Some(chunked(3, 2, 1)),
+            &live,
+            &me(),
+            &striping(3),
+        );
+
+        assert_eq!(
+            plan,
+            RoutePlan::Large(vec![RegionPlan::Stripe {
+                region: Region("eu".to_owned()),
+                targets_per_chunk: vec![host("bn-eu-a"), host("bn-eu-b"), host("bn-eu-c")],
+            }])
+        );
+    }
+
     /// v1 sends both classes the same way, so the class changes nothing about the plan. T-072
     /// rewrites this test: a large message becomes a stripe over the same peers, and the two
     /// answers stop matching.
