@@ -206,6 +206,11 @@ fn bytes32(root: Hash256) -> [u8; 32] {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use std::collections::BTreeSet;
+    use std::time::Duration;
+
+    use overlay_core::custody::{ColumnGap, CustodyTracker};
+    use overlay_core::time::{Clock, FakeClock};
     use ssz::{Decode, Encode};
     use types::{BeaconBlock, ChainSpec, DataColumnSidecarFulu};
 
@@ -246,15 +251,26 @@ mod tests {
     /// decoder is that it stops at the fixed part, and a fixture with an empty body would let a
     /// decoder that read the lot pass.
     fn column_sidecar(slot: u64, index: u64) -> (DataColumnSidecarFulu<MainnetEthSpec>, Vec<u8>) {
+        column_sidecar_of(
+            BeaconBlockHeader {
+                slot: Slot::new(slot),
+                proposer_index: 11,
+                parent_root: Hash256::repeat_byte(1),
+                state_root: Hash256::repeat_byte(2),
+                body_root: Hash256::repeat_byte(3),
+            },
+            index,
+        )
+    }
+
+    /// The same for a header a caller already has, so a block and one of its columns can name
+    /// the same root the way they do on a real network.
+    fn column_sidecar_of(
+        header: BeaconBlockHeader,
+        index: u64,
+    ) -> (DataColumnSidecarFulu<MainnetEthSpec>, Vec<u8>) {
         const CELL_BYTES: usize = 2048;
         const KZG_BYTES: usize = 48;
-        let header = BeaconBlockHeader {
-            slot: Slot::new(slot),
-            proposer_index: 11,
-            parent_root: Hash256::repeat_byte(1),
-            state_root: Hash256::repeat_byte(2),
-            body_root: Hash256::repeat_byte(3),
-        };
         let offsets = [
             COLUMN_FIXED_LEN,
             COLUMN_FIXED_LEN + CELL_BYTES,
@@ -330,5 +346,61 @@ mod tests {
                 assert!(column_header(&frame[..cut]).is_err(), "column frame {cut}");
             }
         }
+    }
+
+    /// The whole of what this ticket is for, with nothing stubbed: a block and one of its four
+    /// custody columns, both as a beacon node would gossip them, read by the decoder this crate
+    /// ships and handed to the tracker `overlay-core` ships. What comes back is the column that
+    /// never arrived, named by the root the block's own bytes hash to and the index the column's
+    /// own bytes carry, which is the pair a `REPAIR_REQ::Column` puts on the wire.
+    #[test]
+    fn a_real_block_and_column_leave_the_tracker_naming_what_is_missing() {
+        let deadline = Duration::from_millis(250);
+        let clock = FakeClock::new();
+        let (block, block_wire) = signed_block(4_242);
+        let (_, column_wire) = column_sidecar_of(block.message().block_header(), 5);
+        let mut tracker = CustodyTracker::new(&crate::spec::MAINNET);
+        let expected = tracker.expected_columns(&column_topics(&[0, 5]));
+
+        let Some(Header::Block { slot, root }) =
+            Headers.header(&topic("beacon_block"), &block_wire)
+        else {
+            panic!("the block payload carries a header");
+        };
+        tracker.on_block(slot, root, expected, clock.now());
+        let Some(Header::Column {
+            slot,
+            index,
+            block_root,
+        }) = Headers.header(&topic("data_column_sidecar_5"), &column_wire)
+        else {
+            panic!("the column payload carries a header");
+        };
+        tracker.on_column(slot, u16::from(index), block_root);
+        clock.advance(deadline);
+
+        let gaps = tracker.missing_past_deadline(deadline, clock.now(), &tracker.column_set([]));
+
+        assert_eq!(
+            gaps,
+            vec![ColumnGap {
+                block_root: bytes32(block.canonical_root()),
+                missing: vec![0],
+                have_count: 1,
+            }],
+            "the block and its column agree on one root and one column is still owed"
+        );
+    }
+
+    fn topic(name: &str) -> Topic {
+        Topic::parse(&format!("/eth2/6a95a1a9/{name}/ssz_snappy"))
+            .expect("a topic in the only shape the parser takes")
+    }
+
+    fn column_topics(indices: &[u16]) -> BTreeSet<Topic> {
+        indices
+            .iter()
+            .map(|index| topic(&format!("data_column_sidecar_{index}")))
+            .collect()
     }
 }
