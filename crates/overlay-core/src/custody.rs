@@ -13,7 +13,7 @@
 //! Nothing here is a socket or a channel: one call answers what is missing and in what order,
 //! and T-082's scheduler turns that into requests.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -21,9 +21,15 @@ use crate::header::Header;
 use crate::spec::SpecSnapshot;
 use crate::topic::{Topic, TopicKind};
 
-/// How many slots of column state a host keeps. Long enough that a block still under repair is
-/// still tracked (repair gives up 1.5 s after the deadline, D24) and short enough that the whole
-/// structure is a handful of bitsets whatever the beacon node does.
+/// How many blocks of column state a host keeps, and how far ahead of the newest of them a
+/// claimed slot may be.
+///
+/// Long enough that a block still under repair is still tracked (repair gives up 1.5 s after the
+/// deadline, D24) and short enough that the whole structure is a handful of bitsets whatever
+/// arrives. A slot comes out of a column header, which is bytes a peer chose, so one naming a
+/// slot far past anything real is refused rather than tracked: the oldest entry goes when the
+/// bound is reached, and without the refusal a single such column would take every real block
+/// with it.
 pub const TRACKED_SLOTS: usize = 4;
 
 /// A set of column indices.
@@ -96,16 +102,26 @@ pub struct ColumnGap {
     pub have_count: usize,
 }
 
-/// What one host knows about the columns of the slots it has seen.
+/// A block, as everything here names one: its slot and its root together.
+///
+/// Two blocks can exist for one slot, from a reorg or from a proposer that equivocated, and the
+/// root is what a column belongs to. Keying on both is what stops one block's columns clearing
+/// what the other is owed, and it makes a root that disagrees with the block's a separate entry
+/// rather than a value to reconcile.
+type BlockKey = (u64, [u8; 32]);
+
+/// What one host knows about the columns of the blocks it has seen.
 pub struct CustodyTracker {
     columns: usize,
     threshold: usize,
     conforming: bool,
-    slots: HashMap<u64, Block>,
+    blocks: HashMap<BlockKey, Block>,
+    /// The keys of `blocks` in the order they were opened, so the bound takes the oldest. A
+    /// value order rather than a slot order, because a slot is a claim and the arrival is not.
+    order: VecDeque<BlockKey>,
 }
 
 struct Block {
-    root: Option<[u8; 32]>,
     expected: BitSet,
     have: BitSet,
     seen_at: Option<Instant>,
@@ -118,7 +134,8 @@ impl CustodyTracker {
             columns: 0,
             threshold: 0,
             conforming: false,
-            slots: HashMap::new(),
+            blocks: HashMap::new(),
+            order: VecDeque::new(),
         };
         tracker.on_spec(spec);
         tracker
@@ -140,7 +157,8 @@ impl CustodyTracker {
             );
         }
         if columns != self.columns {
-            self.slots.clear();
+            self.blocks.clear();
+            self.order.clear();
         }
         self.columns = columns;
         self.threshold = columns / 2;
@@ -172,12 +190,9 @@ impl CustodyTracker {
     /// Records that a block for `slot` was seen at `now` and that `expected` columns are owed
     /// for it. The deadline every gap is measured from starts here.
     pub fn on_block(&mut self, slot: u64, root: [u8; 32], expected: BitSet, now: Instant) {
-        let columns = self.columns;
-        let block = self
-            .slots
-            .entry(slot)
-            .or_insert_with(|| Block::new(columns));
-        block.root = Some(root);
+        let Some(block) = self.open((slot, root)) else {
+            return;
+        };
         block.expected = expected;
         block.seen_at = Some(now);
         self.trim();
@@ -185,17 +200,14 @@ impl CustodyTracker {
 
     /// Records that column `index` of `block_root` arrived for `slot`.
     ///
-    /// A column that arrives before its block opens the slot, because the columns of a block do
-    /// not wait for it; the block is what puts a deadline on the slot, so nothing is repaired
-    /// until one has been seen.
+    /// A column that arrives before its block opens the entry, because the columns of a block do
+    /// not wait for it; the block is what puts a deadline on it, so nothing is repaired until one
+    /// has been seen. A column of some other block for the same slot lands in its own entry and
+    /// leaves this one owed exactly what it was owed.
     pub fn on_column(&mut self, slot: u64, index: u16, block_root: [u8; 32]) {
-        let columns = self.columns;
-        let block = self
-            .slots
-            .entry(slot)
-            .or_insert_with(|| Block::new(columns));
-        block.root.get_or_insert(block_root);
-        block.have.insert(index);
+        if let Some(block) = self.open((slot, block_root)) {
+            block.have.insert(index);
+        }
         self.trim();
     }
 
@@ -207,7 +219,7 @@ impl CustodyTracker {
     /// `missing` are the cheapest way to the import threshold; the never-seen ones follow by
     /// index, which is the only order there is when nothing announces who holds what (D23).
     pub fn missing_past_deadline(
-        &mut self,
+        &self,
         deadline: Duration,
         now: Instant,
         in_flight: &BitSet,
@@ -215,33 +227,60 @@ impl CustodyTracker {
         if !self.conforming {
             return Vec::new();
         }
-        let mut gaps: Vec<(u64, ColumnGap)> = self
-            .slots
+        let mut gaps: Vec<(BlockKey, ColumnGap)> = self
+            .blocks
             .iter()
-            .filter_map(|(slot, block)| Some((*slot, block.gap(deadline, now, in_flight)?)))
+            .filter_map(|(key, block)| Some((*key, block.gap(key.1, deadline, now, in_flight)?)))
             .collect();
-        gaps.sort_by_key(|(slot, _)| *slot);
+        gaps.sort_by_key(|(key, _)| *key);
         gaps.into_iter().map(|(_, gap)| gap).collect()
     }
 
-    /// Keeps the newest [`TRACKED_SLOTS`] slots and drops the rest. A slot the fleet has moved
-    /// past is one no repair can still help, and the bound holds however far apart the slots a
-    /// beacon node reports are.
-    fn trim(&mut self) {
-        if self.slots.len() <= TRACKED_SLOTS {
-            return;
+    /// The entry for `key`, opening one if this host has none, or `None` for a slot too far past
+    /// the newest block tracked to be one: a column header's slot is whatever its bytes claim,
+    /// and a claim nothing else supports must not open an entry the bound then evicts a real
+    /// block for.
+    fn open(&mut self, key: BlockKey) -> Option<&mut Block> {
+        if !self.blocks.contains_key(&key) {
+            if self.too_far_ahead(key.0) {
+                return None;
+            }
+            let columns = self.columns;
+            self.blocks.insert(key, Block::new(columns));
+            self.order.push_back(key);
         }
-        let mut slots: Vec<u64> = self.slots.keys().copied().collect();
-        slots.sort_unstable();
-        for slot in slots.iter().take(slots.len() - TRACKED_SLOTS) {
-            self.slots.remove(slot);
+        self.blocks.get_mut(&key)
+    }
+
+    fn too_far_ahead(&self, slot: u64) -> bool {
+        self.blocks
+            .keys()
+            .map(|(newest, _)| *newest)
+            .max()
+            .is_some_and(|newest| slot > newest.saturating_add(TRACKED_SLOTS as u64))
+    }
+
+    /// Keeps the newest [`TRACKED_SLOTS`] blocks by the order they were opened and drops the
+    /// rest. A block the fleet has moved past is one no repair can still help, and taking the
+    /// oldest arrival rather than the lowest slot is what keeps a made-up slot from deciding
+    /// which real block goes.
+    fn trim(&mut self) {
+        while self.order.len() > TRACKED_SLOTS {
+            if let Some(key) = self.order.pop_front() {
+                self.blocks.remove(&key);
+            }
         }
     }
 }
 
 impl Block {
-    fn gap(&self, deadline: Duration, now: Instant, in_flight: &BitSet) -> Option<ColumnGap> {
-        let root = self.root?;
+    fn gap(
+        &self,
+        root: [u8; 32],
+        deadline: Duration,
+        now: Instant,
+        in_flight: &BitSet,
+    ) -> Option<ColumnGap> {
         let seen_at = self.seen_at?;
         if now.saturating_duration_since(seen_at) < deadline {
             return None;
@@ -268,7 +307,6 @@ impl Block {
 
     fn new(columns: usize) -> Self {
         Self {
-            root: None,
             expected: BitSet::new(columns),
             have: BitSet::new(columns),
             seen_at: None,
