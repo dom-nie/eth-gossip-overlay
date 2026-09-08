@@ -435,7 +435,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn column_repair_end_to_end_publishes_missing_column() {
         let block = topic("beacon_block");
-        let columns: Vec<Topic> = (0..4).map(|i| topic(&format!("data_column_sidecar_{i}"))).collect();
+        let columns: Vec<Topic> = (0..4)
+            .map(|i| topic(&format!("data_column_sidecar_{i}")))
+            .collect();
         let wanted: Vec<&Topic> = std::iter::once(&block).chain(columns.iter()).collect();
         let mut cluster = Builder::new(&[NodeKind::Manager; 4])
             .decoder(Arc::new(TopicHeaders))
@@ -455,7 +457,12 @@ mod tests {
         let missing_id = msgid::compute(&columns[2].to_string(), &missing, MAX_PAYLOAD_BYTES).id;
         let header = cluster
             .recent(1)
-            .insert(missing_id, columns[2].clone(), missing.clone(), Instant::now())
+            .insert(
+                missing_id,
+                columns[2].clone(),
+                missing.clone(),
+                Instant::now(),
+            )
             .expect("the decoder reads a column topic");
         cluster.custody(1).observe(header, Instant::now());
         eventually("node 1 to announce its id for the missing column", || {

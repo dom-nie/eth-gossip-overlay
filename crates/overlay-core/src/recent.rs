@@ -393,6 +393,9 @@ mod tests {
         assert_eq!(recent.get_by_column([9; 32], 5), Some(id(1)));
 
         // A block is not a column and is filed under nothing.
-        assert_eq!(recent.insert(id(2), topic(), payload(2, 200), clock.now()), None);
+        assert_eq!(
+            recent.insert(id(2), topic(), payload(2, 200), clock.now()),
+            None
+        );
     }
 }

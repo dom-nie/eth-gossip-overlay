@@ -2,11 +2,10 @@
 
 pub mod bn_http;
 pub mod compat;
-/// The gossip payload decoder custody column repair needs (T-083).
-#[cfg(feature = "column-repair")]
-pub mod decode;
 #[cfg(test)]
 mod conformance;
+#[cfg(feature = "column-repair")]
+pub mod decode;
 pub mod gossip;
 pub mod inbound;
 pub mod link;

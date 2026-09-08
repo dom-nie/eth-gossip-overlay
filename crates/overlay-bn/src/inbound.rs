@@ -16,11 +16,11 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use overlay_core::custody::SharedCustody;
 use overlay_core::events::{self, FirstArrival};
 use overlay_core::fanout::Outbound;
 use overlay_core::lanes::{ClassLanes, LanePusher};
 use overlay_core::msgid::MessageId;
-use overlay_core::custody::SharedCustody;
 use overlay_core::recent::SharedRecentLarge;
 use overlay_core::roster::SelfIdentity;
 use overlay_core::seen::SharedSeenCache;
@@ -227,9 +227,9 @@ mod tests {
     use overlay_core::lanes::{ClassLanes, LARGE_LANE_CAPACITY, LanePusher};
     use overlay_core::msgid::{self, MessageId};
     use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
-    use overlay_core::spec::SpecSnapshot;
     use overlay_core::roster::{Hostname, Region};
     use overlay_core::seen::{SeenCache, SharedSeenCache};
+    use overlay_core::spec::SpecSnapshot;
     use overlay_core::time::FakeClock;
     use overlay_core::topic::{Class, SubscriptionSets, Topic, UNKNOWN_LARGE_THRESHOLD_BYTES};
     use prometheus_client::registry::Registry;

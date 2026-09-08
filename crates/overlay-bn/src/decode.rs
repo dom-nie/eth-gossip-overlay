@@ -266,7 +266,10 @@ mod tests {
             let whole = snappy(wire);
             for cut in 0..wire.len() {
                 assert!(block_header(&snappy(&wire[..cut])).is_err(), "block {cut}");
-                assert!(column_header(&snappy(&wire[..cut])).is_err(), "column {cut}");
+                assert!(
+                    column_header(&snappy(&wire[..cut])).is_err(),
+                    "column {cut}"
+                );
             }
             for cut in 0..whole.len() {
                 assert!(block_header(&whole[..cut]).is_err(), "block frame {cut}");

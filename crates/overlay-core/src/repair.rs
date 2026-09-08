@@ -233,7 +233,8 @@ impl Scheduler {
         // this host is done asking about it. The set is built once rather than scanned per
         // entry, because both sides of that comparison are bounded by `MAX_IN_FLIGHT`.
         let still_late: HashSet<MessageId> = incomplete.iter().map(|msg| msg.msg_id).collect();
-        self.messages.retain(|msg_id, _| still_late.contains(msg_id));
+        self.messages
+            .retain(|msg_id, _| still_late.contains(msg_id));
         incomplete
             .iter()
             .filter_map(|msg| self.decide(msg, &rtt, now))
@@ -303,7 +304,11 @@ impl Scheduler {
         }
         let over_budget = now.saturating_duration_since(repair.due_at) > REPAIR_TOTAL_BUDGET;
         let next = (!over_budget && repair.tried.len() < REPAIR_ATTEMPTS)
-            .then(|| candidates.iter().find(|(peer, _)| !repair.tried.contains(peer)))
+            .then(|| {
+                candidates
+                    .iter()
+                    .find(|(peer, _)| !repair.tried.contains(peer))
+            })
             .flatten();
         let Some((peer, rtt)) = next else {
             repair.gave_up = true;
@@ -624,7 +629,7 @@ mod tests {
     /// next one the moment the first says it does not hold it.
     #[test]
     fn never_seen_column_is_requested_from_in_region_peers_in_rtt_order_and_moves_on_after_not_found()
-    {
+     {
         let clock = FakeClock::new();
         let candidates = [
             (host("near"), Duration::from_millis(5)),
@@ -673,7 +678,8 @@ mod tests {
         in_flight.insert(4);
         let mut scheduler = Scheduler::default();
 
-        let decided = scheduler.tick_columns(&gaps, THRESHOLD, &in_flight, &candidates, clock.now());
+        let decided =
+            scheduler.tick_columns(&gaps, THRESHOLD, &in_flight, &candidates, clock.now());
 
         assert!(matches!(
             decided.as_slice(),

@@ -173,7 +173,10 @@ impl CustodyTracker {
     /// for it. The deadline every gap is measured from starts here.
     pub fn on_block(&mut self, slot: u64, root: [u8; 32], expected: BitSet, now: Instant) {
         let columns = self.columns;
-        let block = self.slots.entry(slot).or_insert_with(|| Block::new(columns));
+        let block = self
+            .slots
+            .entry(slot)
+            .or_insert_with(|| Block::new(columns));
         block.root = Some(root);
         block.expected = expected;
         block.seen_at = Some(now);
@@ -187,7 +190,10 @@ impl CustodyTracker {
     /// until one has been seen.
     pub fn on_column(&mut self, slot: u64, index: u16, block_root: [u8; 32]) {
         let columns = self.columns;
-        let block = self.slots.entry(slot).or_insert_with(|| Block::new(columns));
+        let block = self
+            .slots
+            .entry(slot)
+            .or_insert_with(|| Block::new(columns));
         block.root.get_or_insert(block_root);
         block.have.insert(index);
         self.trim();
@@ -268,7 +274,6 @@ impl Block {
             seen_at: None,
         }
     }
-
 }
 
 /// One [`CustodyTracker`] shared by the sites that fill it and the task that reads it.
@@ -367,8 +372,10 @@ mod tests {
         indices
             .iter()
             .map(|index| {
-                Topic::parse(&format!("/eth2/6a95a1a9/data_column_sidecar_{index}/ssz_snappy"))
-                    .expect("a topic in the only shape the parser takes")
+                Topic::parse(&format!(
+                    "/eth2/6a95a1a9/data_column_sidecar_{index}/ssz_snappy"
+                ))
+                .expect("a topic in the only shape the parser takes")
             })
             .collect()
     }
@@ -502,7 +509,11 @@ mod tests {
 
         let mainnet = CustodyTracker::new(&SpecSnapshot::MAINNET);
         assert_eq!(mainnet.threshold(), 64);
-        assert!(!mainnet.expected_columns(&column_topics(&[200])).contains(200));
+        assert!(
+            !mainnet
+                .expected_columns(&column_topics(&[200]))
+                .contains(200)
+        );
     }
 
     /// CL-N3's assertion. Expected columns are the beacon node's column subnets, so a network

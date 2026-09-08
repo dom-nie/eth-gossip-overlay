@@ -152,7 +152,7 @@ journalctl -u eth-gossip-overlay -o cat | jq 'select(.event == "first_arrival")'
 ```
 
 ```console
-{"timestamp":"2026-09-07T12:00:07.312905Z","level":"INFO","event":"first_arrival","msg_id":"9f3c…","class":"large","topic":"/eth2/6a95a1a9/beacon_block/ssz_snappy","node":"bn-ams1-07","region":"eu","site":"","first_arrival_ns":1757246407312905114,"source":"overlay","origin_peer":"bn-nyc1-01","target":"overlay::event"}
+{"timestamp":"2026-09-07T12:00:07.312905Z","level":"INFO","event":"first_arrival","msg_id":"9f3c…","class":"large","topic":"/eth2/6a95a1a9/beacon_block/ssz_snappy","node":"bn-ams1-07","region":"eu","site":"","first_arrival_ns":1757246407312905114,"source":"overlay","origin_peer":"bn-nyc1-01","slot":11814923,"block_root":"6f1c…","target":"overlay::event"}
 ```
 
 Blocks are one per slot, so give it a minute. The running total of who got there first is

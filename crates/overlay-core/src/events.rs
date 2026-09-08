@@ -121,10 +121,11 @@ pub fn emit_first_arrival(arrival: &FirstArrival<'_>) {
 /// A root as the 64 hex characters every other tool prints it as, without the `0x` the log's
 /// other identifiers do not carry either.
 fn hex(root: [u8; 32]) -> String {
-    root.iter().fold(String::with_capacity(64), |mut out, byte| {
-        let _ = write!(out, "{byte:02x}");
-        out
-    })
+    root.iter()
+        .fold(String::with_capacity(64), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
 }
 
 /// Nanoseconds since the Unix epoch, the one form of a timestamp that compares across hosts.
@@ -143,7 +144,7 @@ mod tests {
 
     use super::*;
     use crate::header::Header;
-use crate::msgid::MessageId;
+    use crate::msgid::MessageId;
     use crate::roster::{Hostname, Region, SelfIdentity};
     use crate::testlog::LOG;
     use crate::topic::{Class, Topic};
@@ -303,7 +304,10 @@ use crate::msgid::MessageId;
 
         let line = line_with(mark, &hex(5));
         assert!(line.contains("slot=9876"), "{line}");
-        assert!(line.contains(&format!("block_root={}", "ab".repeat(32))), "{line}");
+        assert!(
+            line.contains(&format!("block_root={}", "ab".repeat(32))),
+            "{line}"
+        );
 
         // A large message with no header keeps the schema it had: the keys are absent, not null.
         let mark = LOG.len();

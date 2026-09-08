@@ -49,17 +49,21 @@ the count of distinct large messages the host saw.
 | `first_arrival_ns` | integer | Arrival, in nanoseconds since the Unix epoch, read at receipt from the beacon node or off the socket |
 | `source` | string | `bn` if the local beacon node got there first, `overlay` if a fleet peer did |
 | `origin_peer` | string | The peer that sent it. Present only when `source` is `overlay` |
+| `slot` | integer | The slot the block or column belongs to. Present on `beacon_block` and `data_column_sidecar_*` lines |
+| `block_root` | 64 hex chars | The block root, which for a column is the block the column belongs to. Present with `slot` |
 
 Comparing `first_arrival_ns` across hosts is only as good as their clocks: run chrony with
 hardware timestamping (Architecture.md §11), which holds the fleet inside a few microseconds.
 
-Slot and import time are v3 (T-083, T-084) and arrive as a second event, `event="import"`.
-They are absent here rather than present and null.
+`slot` and `block_root` come from the payload's own header, which the sidecar reads only for
+these two topic kinds and only as far as the header. A line for any other large topic, and a line
+from a build without the `column-repair` feature, carries neither key rather than a null one.
+Import time is a second event, `event="import"`.
 
 ### One line
 
 ```json
-{"timestamp":"2026-09-07T12:00:07.312905Z","level":"INFO","event":"first_arrival","msg_id":"9f3c1d0a77b25e4418c6a2f0d51b3e8c7a409d62","class":"large","topic":"/eth2/6a95a1a9/beacon_block/ssz_snappy","node":"bn-ams1-07","region":"eu","site":"ams1","first_arrival_ns":1757246407312905114,"source":"overlay","origin_peer":"bn-fra1-02","target":"overlay::event"}
+{"timestamp":"2026-09-07T12:00:07.312905Z","level":"INFO","event":"first_arrival","msg_id":"9f3c1d0a77b25e4418c6a2f0d51b3e8c7a409d62","class":"large","topic":"/eth2/6a95a1a9/beacon_block/ssz_snappy","node":"bn-ams1-07","region":"eu","site":"ams1","first_arrival_ns":1757246407312905114,"source":"overlay","origin_peer":"bn-fra1-02","slot":11814923,"block_root":"6f1c4d2b8a09e7f3541c0b6d92a8e35f70bd41c8a2e96d035b7f18c40de2a961","target":"overlay::event"}
 ```
 
 ### Fleet spread
