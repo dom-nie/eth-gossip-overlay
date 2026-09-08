@@ -7,9 +7,13 @@
 //! Reed-Solomon buys the same resilience to a lost chunk while the common case, every data
 //! chunk present, is a concatenation that never calls the codec.
 
+use bytes::{Bytes, BytesMut};
 use reed_solomon_simd::ReedSolomonEncoder;
 
 use crate::wire::MAX_PAYLOAD_BYTES;
+
+/// Every call the codec refuses is a shape [`Params::for_len`] already ruled out.
+const SPLIT_IS_ENCODABLE: &str = "Params::for_len proved the codec takes this split";
 
 /// How one message is split: `k` data chunks of `chunk_bytes` each, `m` parity chunks after
 /// them, and the payload's own length so a receiver can drop the padding off the last data
@@ -57,6 +61,60 @@ impl Params {
             chunk_bytes,
             total_len: total_len as u32,
         })
+    }
+}
+
+/// Splits `payload` into `params.k` data chunks and the `params.m` parity chunks that follow
+/// them, `k + m` in all, each `params.chunk_bytes` long. A chunk's index is its position in the
+/// returned vector, which is what a [`crate::wire::Chunk`] header carries.
+///
+/// The last data chunk is zero-padded; `params.total_len` is what tells a receiver where the
+/// payload ended. Everything is one allocation: the padded message and its parity live in a
+/// single buffer and every returned `Bytes` is a refcounted view into it.
+///
+/// Infallible, so the caller owns the limits: `params` comes from [`Params::for_len`] for this
+/// payload, and a debug build stops on a payload of a different length rather than encode a
+/// message whose declared length is a lie.
+pub fn encode(payload: &[u8], params: Params) -> Vec<Bytes> {
+    debug_assert_eq!(
+        payload.len(),
+        params.total_len as usize,
+        "params were built for a different payload"
+    );
+    let chunk_bytes = params.chunk_bytes;
+    let (k, m) = (usize::from(params.k), usize::from(params.m));
+
+    let mut buf = BytesMut::zeroed((k + m) * chunk_bytes);
+    let len = payload.len().min(k * chunk_bytes);
+    buf[..len].copy_from_slice(&payload[..len]);
+    write_parity(&mut buf, params);
+
+    let buf = buf.freeze();
+    (0..k + m)
+        .map(|index| buf.slice(index * chunk_bytes..(index + 1) * chunk_bytes))
+        .collect()
+}
+
+/// Fills the `m` chunks after the data with parity computed over the data.
+#[expect(
+    clippy::expect_used,
+    reason = "for_len proved the shard count and size, and exactly k shards are added"
+)]
+fn write_parity(buf: &mut BytesMut, params: Params) {
+    let chunk_bytes = params.chunk_bytes;
+    let (k, m) = (usize::from(params.k), usize::from(params.m));
+
+    let mut encoder = ReedSolomonEncoder::new(k, m, chunk_bytes).expect(SPLIT_IS_ENCODABLE);
+    for index in 0..k {
+        encoder
+            .add_original_shard(&buf[index * chunk_bytes..(index + 1) * chunk_bytes])
+            .expect(SPLIT_IS_ENCODABLE);
+    }
+
+    let parity = encoder.encode().expect(SPLIT_IS_ENCODABLE);
+    for (index, shard) in parity.recovery_iter().enumerate() {
+        let at = (k + index) * chunk_bytes;
+        buf[at..at + chunk_bytes].copy_from_slice(shard);
     }
 }
 
