@@ -79,8 +79,10 @@ pub const MESH_N: usize = 1;
 pub const MESH_N_HIGH: usize = 1;
 /// See [`MESH_N_LOW`].
 pub const MESH_OUTBOUND_MIN: usize = 0;
-/// Messages at or above this size get an IDONTWANT sent ahead of them; the same 1 kB Lighthouse
-/// defaults to, so both ends draw the line in the same place.
+/// A message gets an IDONTWANT ahead of it once it is strictly over this size, measured on
+/// the encoded length the fork compares, payload and topic and framing together, not on the
+/// payload alone. The same 1 kB Lighthouse defaults to, so both ends draw the line in the
+/// same place.
 pub const IDONTWANT_MESSAGE_SIZE_THRESHOLD: usize = 1000;
 
 /// The behaviour type the BN link runs: identity transform, so payloads stay compressed, and
