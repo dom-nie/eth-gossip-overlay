@@ -3763,6 +3763,17 @@ mod tests {
         );
     }
 
+    /// T-083's per-peer repair bound is a number `overlay-core` cannot see, so it is written
+    /// down there and checked here: the four bidirectional streams a peer accepts, less the one
+    /// HELLO's control stream holds for the life of the connection (T-025).
+    #[test]
+    fn repair_in_flight_per_peer_is_the_stream_budget_less_the_control_stream() {
+        assert_eq!(
+            overlay_core::repair::MAX_REPAIR_IN_FLIGHT_PER_PEER,
+            MAX_REPAIR_STREAMS_PER_PEER - 1
+        );
+    }
+
     /// The arm T-082 left answering `not_found`. A peer that never saw a column has no message
     /// id for it, so it names the column and this host resolves it through the recent store's
     /// index (D23, T-081's hook). Every data chunk comes back, because a requester asking by

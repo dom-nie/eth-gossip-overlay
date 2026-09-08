@@ -209,7 +209,23 @@ struct Repair {
     gave_up: bool,
 }
 
+/// Whether `peer` is already answering as much as it will take.
+fn at_cap(outstanding: &HashMap<Hostname, usize>, peer: &Hostname) -> bool {
+    outstanding.get(peer).copied().unwrap_or_default() >= MAX_REPAIR_IN_FLIGHT_PER_PEER
+}
+
 impl Repair {
+    /// Whether there is nothing left to try for this repair: nobody untried, three peers already
+    /// asked, or the budget from the deadline spent (D24). Marks it given up, so it is decided
+    /// once and not on every tick until the message or the column clears.
+    fn exhausted(&mut self, no_candidates: bool, now: Instant) -> bool {
+        let spent = now.saturating_duration_since(self.due_at) > REPAIR_TOTAL_BUDGET;
+        if no_candidates || spent || self.tried.len() >= REPAIR_ATTEMPTS {
+            self.gave_up = true;
+        }
+        self.gave_up
+    }
+
     fn new(now: Instant) -> Self {
         Self {
             due_at: now,
@@ -248,10 +264,28 @@ impl Scheduler {
         let still_late: HashSet<MessageId> = incomplete.iter().map(|msg| msg.msg_id).collect();
         self.messages
             .retain(|msg_id, _| still_late.contains(msg_id));
+        let mut outstanding = self.outstanding();
         incomplete
             .iter()
-            .filter_map(|msg| self.decide(msg, &rtt, now))
+            .filter_map(|msg| self.decide(msg, &rtt, &mut outstanding, now))
             .collect()
+    }
+
+    /// How many requests are outstanding to each peer right now, chunks and columns together.
+    /// A repair that is asking has the peer it is asking at the end of its `tried` list.
+    fn outstanding(&self) -> HashMap<Hostname, usize> {
+        let mut counts: HashMap<Hostname, usize> = HashMap::new();
+        for repair in self
+            .messages
+            .values()
+            .chain(self.columns.values())
+            .filter(|repair| repair.asking)
+        {
+            if let Some(peer) = repair.tried.last() {
+                *counts.entry(peer.clone()).or_default() += 1;
+            }
+        }
+        counts
     }
 
     /// Records that the request for `msg_id` has been answered, one way or another, so the next
@@ -291,12 +325,12 @@ impl Scheduler {
                 .take(budget)
                 .map(|index| (gap.block_root, *index))
         });
+        let mut outstanding = self.outstanding();
         let mut decided = Vec::new();
         for key in wanted.filter(|(_, index)| !in_flight.contains(*index)) {
-            let Some(decision) = self.decide_column(key, candidates, now) else {
-                continue;
-            };
-            decided.push(decision);
+            if let Some(decision) = self.decide_column(key, candidates, &mut outstanding, now) {
+                decided.push(decision);
+            }
         }
         decided
     }
@@ -313,26 +347,29 @@ impl Scheduler {
         &mut self,
         key: ColumnKey,
         candidates: &[(Hostname, Duration)],
+        outstanding: &mut HashMap<Hostname, usize>,
         now: Instant,
     ) -> Option<Decision> {
         let repair = self.columns.entry(key).or_insert_with(|| Repair::new(now));
         if repair.asking || repair.gave_up {
             return None;
         }
-        let over_budget = now.saturating_duration_since(repair.due_at) > REPAIR_TOTAL_BUDGET;
-        let next = (!over_budget && repair.tried.len() < REPAIR_ATTEMPTS)
-            .then(|| {
-                candidates
-                    .iter()
-                    .find(|(peer, _)| !repair.tried.contains(peer))
-            })
-            .flatten();
-        let Some((peer, rtt)) = next else {
-            repair.gave_up = true;
+        let untried: Vec<&(Hostname, Duration)> = candidates
+            .iter()
+            .filter(|(peer, _)| !repair.tried.contains(peer))
+            .collect();
+        if repair.exhausted(untried.is_empty(), now) {
             return Some(Decision::GaveUpColumn(key));
-        };
+        }
+        // A peer with three requests outstanding would have a fourth stream dropped, so it is
+        // passed over and the next candidate takes the column; nothing is marked tried, because
+        // this peer has not been asked and is still owed its turn.
+        let (peer, rtt) = untried
+            .into_iter()
+            .find(|(peer, _)| !at_cap(outstanding, peer))?;
         repair.asking = true;
         repair.tried.push(peer.clone());
+        *outstanding.entry(peer.clone()).or_default() += 1;
         Some(Decision::AskColumn(ColumnRequest {
             block_root: key.0,
             index: key.1,
@@ -341,7 +378,13 @@ impl Scheduler {
         }))
     }
 
-    fn decide<R>(&mut self, msg: &Incomplete, rtt: &R, now: Instant) -> Option<Decision>
+    fn decide<R>(
+        &mut self,
+        msg: &Incomplete,
+        rtt: &R,
+        outstanding: &mut HashMap<Hostname, usize>,
+        now: Instant,
+    ) -> Option<Decision>
     where
         R: Fn(&Hostname) -> Option<Duration>,
     {
@@ -352,16 +395,23 @@ impl Scheduler {
         if repair.asking || repair.gave_up {
             return None;
         }
-        let over_budget = now.saturating_duration_since(repair.due_at) > REPAIR_TOTAL_BUDGET;
-        let peer = (!over_budget && repair.tried.len() < REPAIR_ATTEMPTS)
-            .then(|| candidates(&msg.senders, rtt))
-            .and_then(|order| order.into_iter().find(|peer| !repair.tried.contains(peer)));
-        let Some(peer) = peer else {
-            repair.gave_up = true;
+        let order = candidates(&msg.senders, rtt);
+        let untried: Vec<&Hostname> = order
+            .iter()
+            .filter(|peer| !repair.tried.contains(peer))
+            .collect();
+        if repair.exhausted(untried.is_empty(), now) {
             return Some(Decision::GaveUp(msg.msg_id));
-        };
+        }
+        // As in `decide_column`: a peer already answering three requests is passed over for this
+        // tick rather than counted as tried, because it has not been asked.
+        let peer = untried
+            .into_iter()
+            .find(|peer| !at_cap(outstanding, peer))?
+            .clone();
         repair.asking = true;
         repair.tried.push(peer.clone());
+        *outstanding.entry(peer.clone()).or_default() += 1;
         Some(Decision::Ask(Request {
             msg_id: msg.msg_id,
             missing: wanted(msg.k, msg.held, &msg.missing),
