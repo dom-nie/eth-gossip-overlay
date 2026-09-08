@@ -22,6 +22,11 @@ use crate::tls::PLACEHOLDER_NAME;
 /// (T-046), not here: a key would only let a host ask for less than the design needs.
 const SOCKET_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
+/// What a burst of small-class batches may occupy in the datagram queues (§5.3, D21). One batch
+/// is one datagram and a datagram is MTU-sized, so a tick that flushes one to every host of a
+/// 200-host fleet is under 300 kB; this is that with room over it.
+const DATAGRAM_BUFFER_BYTES: usize = 1024 * 1024;
+
 /// What the kernel reports back for a buffer it stored `n` bytes in: Linux doubles it, every
 /// other platform returns it.
 const REPORTED_BUFFER_MULTIPLE: usize = if cfg!(target_os = "linux") { 2 } else { 1 };
@@ -516,6 +521,16 @@ mod tests {
     /// would notice.
     #[tokio::test(flavor = "multi_thread")]
     async fn datagrams_are_enabled_and_delivered_on_loopback() {
+        let transport = transport_config(&Overlay::default(), TEST_RECEIVE_WINDOW);
+        assert_eq!(
+            field(&transport, "datagram_send_buffer_size"),
+            DATAGRAM_BUFFER_BYTES.to_string()
+        );
+        assert_eq!(
+            field(&transport, "datagram_receive_buffer_size"),
+            format!("Some({DATAGRAM_BUFFER_BYTES})")
+        );
+
         let (seeds, pins) = fleet(&["bn-a", "bn-b"]);
         let cfg = config("127.0.0.1:0");
         let acceptor = endpoint(&cfg, &pins, &seeds, "bn-a");
