@@ -21,15 +21,12 @@ use crate::header::Header;
 use crate::spec::SpecSnapshot;
 use crate::topic::{Topic, TopicKind};
 
-/// How many blocks of column state a host keeps, and how far ahead of the newest of them a
-/// claimed slot may be.
+/// How many blocks of column state a host keeps, of each kind [`CustodyTracker::trim`] tells
+/// apart.
 ///
 /// Long enough that a block still under repair is still tracked (repair gives up 1.5 s after the
 /// deadline, D24) and short enough that the whole structure is a handful of bitsets whatever
-/// arrives. A slot comes out of a column header, which is bytes a peer chose, so one naming a
-/// slot far past anything real is refused rather than tracked: the oldest entry goes when the
-/// bound is reached, and without the refusal a single such column would take every real block
-/// with it.
+/// arrives.
 pub const TRACKED_SLOTS: usize = 4;
 
 /// A set of column indices.
@@ -179,9 +176,7 @@ impl CustodyTracker {
     /// Records that a block for `slot` was seen at `now` and that `expected` columns are owed
     /// for it. The deadline every gap is measured from starts here.
     pub fn on_block(&mut self, slot: u64, root: [u8; 32], expected: BitSet, now: Instant) {
-        let Some(block) = self.open((slot, root)) else {
-            return;
-        };
+        let block = self.open((slot, root));
         block.expected = expected;
         block.seen_at = Some(now);
         self.trim();
@@ -194,14 +189,16 @@ impl CustodyTracker {
     /// has been seen. A column of some other block for the same slot lands in its own entry and
     /// leaves this one owed exactly what it was owed.
     pub fn on_column(&mut self, slot: u64, index: u16, block_root: [u8; 32]) {
-        if let Some(block) = self.open((slot, block_root)) {
-            block.have.insert(index);
-        }
+        self.open((slot, block_root)).have.insert(index);
         self.trim();
     }
 
-    /// Every block whose deadline has passed and which is still short of the threshold, with the
-    /// columns to repair in the order to repair them.
+    /// Every block whose deadline has passed and which is still missing an expected column, with
+    /// the columns to repair in the order to repair them.
+    ///
+    /// The threshold is not read here. It is how many of the columns listed are worth asking
+    /// for, which is the scheduler's to spend (T-082's `tick_columns`), not a reason to leave a
+    /// block out of the answer.
     ///
     /// `in_flight` is the columns the reassembler already holds chunks of. They are listed first
     /// because they complete with the fewest bytes, so the first `threshold - have_count` of
@@ -225,40 +222,48 @@ impl CustodyTracker {
         gaps.into_iter().map(|(_, gap)| gap).collect()
     }
 
-    /// The entry for `key`, opening one if this host has none, or `None` for a slot too far past
-    /// the newest block tracked to be one: a column header's slot is whatever its bytes claim,
-    /// and a claim nothing else supports must not open an entry the bound then evicts a real
-    /// block for.
-    fn open(&mut self, key: BlockKey) -> Option<&mut Block> {
-        if !self.blocks.contains_key(&key) {
-            if self.too_far_ahead(key.0) {
-                return None;
-            }
-            let columns = self.columns;
-            self.blocks.insert(key, Block::new(columns));
+    /// The entry for `key`, opening one if this host has none.
+    fn open(&mut self, key: BlockKey) -> &mut Block {
+        let columns = self.columns;
+        self.blocks.entry(key).or_insert_with(|| {
             self.order.push_back(key);
-        }
-        self.blocks.get_mut(&key)
+            Block::new(columns)
+        })
     }
 
-    fn too_far_ahead(&self, slot: u64) -> bool {
-        self.blocks
-            .keys()
-            .map(|(newest, _)| *newest)
-            .max()
-            .is_some_and(|newest| slot > newest.saturating_add(TRACKED_SLOTS as u64))
-    }
-
-    /// Keeps the newest [`TRACKED_SLOTS`] blocks by the order they were opened and drops the
-    /// rest. A block the fleet has moved past is one no repair can still help, and taking the
-    /// oldest arrival rather than the lowest slot is what keeps a made-up slot from deciding
-    /// which real block goes.
+    /// Keeps the newest [`TRACKED_SLOTS`] of each kind of entry by the order they were opened,
+    /// and drops the rest.
+    ///
+    /// The two kinds are what makes this bound hold against a peer. Only [`on_block`] sets
+    /// `seen_at`, and it runs on a payload this host decoded as a whole `SignedBeaconBlock`; an
+    /// entry a column opened has nothing behind it but a root read out of a 356-byte header
+    /// nobody checked, and one peer can invent as many of those per slot as it likes. So an
+    /// unanchored entry is only ever evicted for another unanchored entry, and the blocks this
+    /// host is repairing cannot be pushed out by bytes a peer made up. A column that arrives
+    /// before its block still keeps its place: `on_block` finds the entry the column opened and
+    /// anchors it, and `Block::gap` reports nothing for one no block has anchored.
+    ///
+    /// [`on_block`]: Self::on_block
     fn trim(&mut self) {
-        while self.order.len() > TRACKED_SLOTS {
-            if let Some(key) = self.order.pop_front() {
-                self.blocks.remove(&key);
-            }
+        self.drop_oldest(|block| block.seen_at.is_none());
+        self.drop_oldest(|block| block.seen_at.is_some());
+    }
+
+    /// Drops the oldest entries `kind` matches until [`TRACKED_SLOTS`] of them are left.
+    fn drop_oldest(&mut self, kind: impl Fn(&Block) -> bool) {
+        let matching: Vec<BlockKey> = self
+            .order
+            .iter()
+            .filter(|key| self.blocks.get(key).is_some_and(&kind))
+            .copied()
+            .collect();
+        let Some(over) = matching.len().checked_sub(TRACKED_SLOTS) else {
+            return;
+        };
+        for key in matching.into_iter().take(over) {
+            self.blocks.remove(&key);
         }
+        self.order.retain(|key| self.blocks.contains_key(key));
     }
 }
 
@@ -628,7 +633,8 @@ mod tests {
 
     /// A column header is bytes off the wire and its slot is whatever those bytes claim. One
     /// naming a slot far past anything real must not evict the blocks this host is repairing,
-    /// which is the whole of column repair for as long as the claims keep coming.
+    /// which is the whole of column repair for as long as the claims keep coming. Nothing here
+    /// checks the slot: what refuses it is that no block anchored it.
     #[test]
     fn a_slot_far_ahead_of_the_newest_does_not_evict_what_is_tracked() {
         let clock = FakeClock::new();
@@ -671,7 +677,9 @@ mod tests {
             .collect();
         assert_eq!(
             kept,
-            (1..=TRACKED_SLOTS as u64).map(real).collect::<Vec<[u8; 32]>>()
+            (1..=TRACKED_SLOTS as u64)
+                .map(real)
+                .collect::<Vec<[u8; 32]>>()
         );
     }
 }
