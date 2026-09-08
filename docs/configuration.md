@@ -42,11 +42,17 @@ hosts:
 ```
 
 Every host carries the same roster, and `region` is what the fan-out treats as a failure and
-latency domain. Have your discovery tool write `roster.yaml`; the sidecar notices a changed file
-within 10 seconds and reloads it. Such an automatic reload is refused if it would drop more than
-half of the hosts the sidecar currently has, on the grounds that a truncated file is more likely
-than half a fleet leaving at once. `eth-gossip-overlayctl roster reload` applies the file anyway,
-which is how a genuine shrink is done.
+latency domain. Have your discovery tool write `roster.yaml`; the sidecar reads the file's
+modification time every 10 seconds and reloads a file that changed, so membership needs no
+interface beyond the file. Write to a temporary file in the same directory and rename it into
+place: a poll that lands halfway through a direct write reads a file that does not parse, keeps
+the roster it has, and picks the finished one up at the next poll.
+
+Such an automatic reload is refused if it would drop more than half of the hosts the sidecar
+currently has, on the grounds that a truncated file is more likely than half a fleet leaving at
+once. The refusal counts `roster_reload_rejected_total`, which is alerted on.
+`eth-gossip-overlayctl roster reload` applies the file anyway, which is how a genuine shrink is
+done.
 
 ## The seed, the node key and the logs
 
