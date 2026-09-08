@@ -181,6 +181,9 @@ fn pin_current_thread(_cpu: u32) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
     use overlay_core::config::IoThread;
 
     use super::*;
@@ -279,5 +282,36 @@ mod tests {
         assert_eq!(back, b"a chunk");
         drop(echo.await.unwrap());
         io.shutdown().await;
+    }
+
+    /// §11 gives a stopping sidecar two seconds, and the I/O thread is inside it: the manager
+    /// closes the connections, then this thread has to end and be joined. The `Arc` is held by
+    /// a task on the I/O runtime, so a count back at one is that runtime gone rather than a
+    /// function that returned early.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_joins_the_io_thread_within_the_2_second_budget() {
+        let (seeds, pins) = fleet(&["bn-a"]);
+        let cfg = config("127.0.0.1:0");
+        let server = tls::server_config(pins, &own_key(&seeds, "bn-a")).unwrap();
+        let alive = Arc::new(());
+        let held = alive.clone();
+
+        let io = dedicated(None, move || {
+            tokio::spawn(async move {
+                let _held = held;
+                std::future::pending::<()>().await;
+            });
+            endpoint::bind(&cfg, TEST_RECEIVE_WINDOW, server)
+        })
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(2), io.shutdown())
+            .await
+            .expect("the I/O thread did not join inside the shutdown budget");
+        assert_eq!(
+            Arc::strong_count(&alive),
+            1,
+            "the I/O runtime is still running"
+        );
     }
 }
