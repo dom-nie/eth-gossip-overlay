@@ -58,7 +58,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use arc_swap::ArcSwap;
-use overlay_core::config::{Config, Fanout, LargeFanout, PublishRateLimit, SmallClass};
+use overlay_core::config::{
+    Config, Fanout, LargeClass, LargeFanout, PublishRateLimit, SmallClass,
+};
 use overlay_core::identity::{FleetSeed, Seeds, read_secret_file};
 use overlay_core::roster::Roster;
 use overlay_transport::tls::PinTable;
@@ -720,6 +722,7 @@ mod tests {
         limits: watch::Receiver<PublishRateLimit>,
         small: watch::Receiver<SmallClass>,
         fanout: watch::Receiver<Fanout>,
+        repair_deadline: watch::Receiver<Duration>,
         stats: Arc<Recorded>,
         reloader: Reloader,
     }
@@ -752,6 +755,8 @@ mod tests {
             let (limits_tx, limits) = watch::channel(PublishRateLimit::default());
             let (small_tx, small) = watch::channel(SmallClass::default());
             let (fanout_tx, fanout) = watch::channel(Fanout::default());
+            let (deadline_tx, repair_deadline) =
+                watch::channel(LargeClass::default().repair_deadline);
             let (sink, dispatch, log) = testing::subscriber(log_cfg, false, rust_log);
             let stats = Arc::new(Recorded::default());
             let reloader = Reloader::new(
@@ -763,6 +768,7 @@ mod tests {
                     limits: limits_tx,
                     small: small_tx,
                     fanout: fanout_tx,
+                    repair_deadline: deadline_tx,
                     log: Arc::new(log),
                     stats: stats.clone(),
                 },
@@ -778,6 +784,7 @@ mod tests {
                 limits,
                 small,
                 fanout,
+                repair_deadline,
                 stats,
                 reloader,
             };
@@ -925,8 +932,15 @@ mod tests {
         );
     }
 
+    /// The repair deadline reaches T-082's scheduler, which reads it on every tick, so a canary
+    /// that finds 250 ms firing during ordinary column bursts moves it without a restart (D24).
+    ///
+    /// It was the example of a reloadable key with no applier until this ticket gave it one, and
+    /// there is no such key left: the shape changed rather than the key, because the two halves
+    /// it proved, that a change is reported applied and that `config()` answers with it, are
+    /// owed by every reloadable key whether or not an applier reads it.
     #[test]
-    fn changed_reloadable_key_without_an_applier_is_reported_applied_and_visible_in_config() {
+    fn changed_repair_deadline_is_applied_reported_and_visible_in_config() {
         let mut h = Fixture::new(
             "overlay:\n  roster_file: ROSTER\nclasses:\n  large:\n    repair_deadline_ms: 250\ninject: true\n",
             &roster_yaml(3),
@@ -941,6 +955,10 @@ mod tests {
         assert!(report.restart_required.is_empty(), "{report:?}");
         assert_eq!(
             h.reloader.config().classes.large.repair_deadline,
+            Duration::from_millis(400)
+        );
+        assert_eq!(
+            *h.repair_deadline.borrow_and_update(),
             Duration::from_millis(400)
         );
     }
