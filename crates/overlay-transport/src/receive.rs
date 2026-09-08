@@ -2266,6 +2266,133 @@ mod tests {
         );
     }
 
+    /// D11: the second hop is never a third. A chunk that already carries `FORWARDED` reached
+    /// this host from a neighbour that had it from the origin, so every host in the region is
+    /// being offered it and passing it on again would cost the region a copy per host.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn forwarded_chunk_is_never_forwarded_again() {
+        let (cluster, peer, _) = striping_region(3).await;
+        let forwarder = cluster.hostname(1);
+
+        send(
+            &peer,
+            &[chunk_frame(MessageId([6; 20]), 1, ChunkFlags::FORWARDED)],
+        )
+        .await;
+
+        eventually("the host it was sent to to count it", || {
+            cluster.stats(1).chunks_received(&cluster.hostname(0)).len() == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        for node in [2, 3] {
+            assert!(
+                cluster.stats(node).chunks_received(&forwarder).is_empty(),
+                "node {node}"
+            );
+        }
+    }
+
+    /// §5.4: the second hop never crosses the WAN. The origin builds a stripe per region, so a
+    /// host that forwarded into another one would be sending copies that region is already
+    /// being sent, over the link the whole scheme exists to spend once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn clear_chunk_is_not_forwarded_to_hosts_in_other_regions() {
+        let block = topic("beacon_block");
+        let mut cluster = Builder::new(&[
+            NodeKind::Bare,
+            NodeKind::Manager,
+            NodeKind::Manager,
+            NodeKind::Manager,
+        ])
+        .regions(&["eu", "eu", "eu", "us"])
+        .start()
+        .await;
+        for node in 1..4 {
+            cluster.start_sidecar(node, subscriptions(&[&block], &[]));
+        }
+        eventually("the three sidecars to pair and subscribe", || {
+            (1..4).all(|node| cluster.live(node).subscribers(&block).len() == 2)
+        })
+        .await;
+        let peer = cluster
+            .dial_announcing(
+                0,
+                1,
+                &cluster.self_hello(0),
+                vec![(TopicId::new(3), block.to_string())],
+            )
+            .await;
+        let forwarder = cluster.hostname(1);
+
+        send(
+            &peer,
+            &[chunk_frame(MessageId([7; 20]), 0, ChunkFlags::NONE)],
+        )
+        .await;
+
+        eventually("the host in the same region to be given it", || {
+            !cluster.stats(2).chunks_received(&forwarder).is_empty()
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert!(
+            cluster.stats(3).chunks_received(&forwarder).is_empty(),
+            "the chunk crossed into the other region"
+        );
+    }
+
+    /// D19 and §5.4 step 2: two beacon nodes take the same block off public gossip and their
+    /// sidecars, seeing the same live set, assign every chunk the same way. The second copy of
+    /// an index is a duplicate the region has already been offered, and the bitmap in the
+    /// reassembler entry is what says so; a side table keyed by anything else would have to be
+    /// sized and expired on its own.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_origins_with_same_assignment_cause_one_forward_per_chunk() {
+        let block = topic("beacon_block");
+        let mut cluster = Builder::new(&[
+            NodeKind::Bare,
+            NodeKind::Bare,
+            NodeKind::Manager,
+            NodeKind::Manager,
+        ])
+        .start()
+        .await;
+        for node in [2, 3] {
+            cluster.start_sidecar(node, subscriptions(&[&block], &[]));
+        }
+        eventually("the two sidecars to pair and subscribe", || {
+            cluster.live(2).subscribers(&block).len() == 1
+        })
+        .await;
+        let announced = vec![(TopicId::new(3), block.to_string())];
+        let first = cluster
+            .dial_announcing(0, 2, &cluster.self_hello(0), announced.clone())
+            .await;
+        let second = cluster
+            .dial_announcing(1, 2, &cluster.self_hello(1), announced)
+            .await;
+        let forwarder = cluster.hostname(2);
+        let same = MessageId([8; 20]);
+
+        send(&first, &[chunk_frame(same, 3, ChunkFlags::NONE)]).await;
+        eventually("the first copy to be forwarded", || {
+            !cluster.stats(3).chunks_received(&forwarder).is_empty()
+        })
+        .await;
+        send(&second, &[chunk_frame(same, 3, ChunkFlags::NONE)]).await;
+
+        eventually("the second copy to arrive", || {
+            cluster.stats(2).chunks_received(&cluster.hostname(1)).len() == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            cluster.stats(3).chunks_received(&forwarder),
+            vec![(ChunkFlags::FORWARDED, 3)]
+        );
+    }
+
     /// A chunk is a piece of a message and this release cannot put one back together, so it is
     /// counted, offered to the region and dropped. Nothing is published until T-074 reconstructs.
     #[tokio::test(flavor = "multi_thread")]
