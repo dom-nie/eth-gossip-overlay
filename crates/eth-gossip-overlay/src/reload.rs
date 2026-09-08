@@ -1170,6 +1170,33 @@ mod tests {
         assert_eq!(fanout.large, LargeFanout::default());
     }
 
+    /// `stripe_min_recipients` reaches the same router (T-072), so an operator whose regions
+    /// turn out to be the wrong side of the threshold moves it without a restart. The two keys
+    /// beside it in `overlay.fanout.large` still need one, which is why this applier composes a
+    /// fanout rather than sending the section as it stands.
+    #[test]
+    fn reload_publishes_the_new_stripe_threshold() {
+        let mut h = Fixture::new(CONFIG, &roster_yaml(3));
+        h.write_config(
+            "overlay:\n  roster_file: ROSTER\n  fanout:\n    large:\n      stripe_min_recipients: 4\ninject: true\n",
+        );
+
+        let report = h.reloader.reload(Trigger::Manual);
+
+        assert_eq!(
+            report.applied,
+            ["overlay.fanout.large.stripe_min_recipients"]
+        );
+        assert!(report.error.is_none(), "{report:?}");
+        let fanout = h.fanout.borrow_and_update();
+        assert_eq!(fanout.large.stripe_min_recipients, 4);
+        assert_eq!(fanout.large.in_region, LargeFanout::default().in_region);
+        assert_eq!(
+            fanout.large.cross_region,
+            LargeFanout::default().cross_region
+        );
+    }
+
     /// Waits for `done`, so a test fails on a bound instead of hanging when the task under it
     /// stops working.
     async fn until(mut done: impl FnMut() -> bool) {
