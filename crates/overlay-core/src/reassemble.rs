@@ -37,9 +37,13 @@ use crate::rs::{self, Decoded, Params};
 use crate::topic::Topic;
 use crate::wire::{Chunk, MAX_PAYLOAD_BYTES};
 
-/// Messages one host collects chunks for at once. A slot brings one block and 128 data columns,
-/// so a host that is a few slots behind on the ones it has not finished still fits, and a peer
-/// that invents message ids reaches the bound instead of the host's memory (§10).
+/// Messages one host collects chunks for at once.
+///
+/// A slot brings one block and all 128 data columns to every host at full custody, so 129
+/// messages, and four slots of that is 516 (§10). Rounded down to the power of two, which is a
+/// host four slots behind on the messages it has not finished; a peer that invents message ids
+/// reaches this bound instead of the host's memory. T-076's memory budget table takes this row
+/// from here and from [`MAX_BYTES`].
 pub const MAX_IN_FLIGHT: usize = 512;
 
 /// Chunk bytes one host holds for messages it has not finished with.
@@ -49,7 +53,7 @@ pub const MAX_IN_FLIGHT: usize = 512;
 /// about 5.7 MiB for a slot. Four slots of that, which is the same margin [`MAX_IN_FLIGHT`]
 /// carries over the 129 messages a slot brings, is 23 MiB, rounded up here to the 32 MiB
 /// T-017's large publish lane is bounded by, so the two large-class buffers are the same size
-/// (§10). T-076's memory budget table takes this row from this constant.
+/// (§10).
 pub const MAX_BYTES: usize = 32 * 1024 * 1024;
 
 /// How long a message that never completed keeps its entry. Longer than the repair deadline plus

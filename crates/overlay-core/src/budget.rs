@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::pubqueue::{PUBLISH_LARGE_LANE_BYTES, PUBLISH_SMALL_LANE_ENTRIES};
 use crate::ratelimit::TokenBucket;
+use crate::reassemble;
 use crate::seen::SEEN_CAPACITY;
 
 /// How long a peer may stay over its budget before the connection is closed with
@@ -140,6 +141,11 @@ pub const SEEN_ENTRY_BYTES: u64 = 64;
 /// anything is measured against.
 pub const SMALL_MESSAGE_BYTES: u64 = 512;
 
+/// What one message in flight costs beside its chunks: a `(index, Bytes)` pair per chunk, which
+/// is a hundred and ten of them for a 200 KB block at the shipped chunk size, plus the two
+/// index bitmaps, the peers that sent a chunk, and the map and deque entries holding it all.
+pub const REASSEMBLY_ENTRY_BYTES: u64 = 4096;
+
 /// The headroom OPS-N4 asks the budget to leave under `MemoryMax`, as a percentage.
 pub const HEADROOM_PERCENT: u64 = 25;
 
@@ -160,9 +166,9 @@ pub struct SendLaneBounds {
 ///
 /// Every row is a structure with a bound in code, so the sum is a ceiling rather than a
 /// measurement: nothing here grows with traffic. T-076 owns the table in `docs/performance.md`
-/// and adds a row as each remaining structure lands (the recent store, the reassembler, the
-/// by-root cache, gossipsub's duplicate cache and message cache, and the QUIC receive windows
-/// once it sets them); this release has the three that exist.
+/// and adds a row as each remaining structure lands (the recent store, the by-root cache,
+/// gossipsub's duplicate cache and message cache, and the QUIC receive windows once it sets
+/// them); this release has the four that exist.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryBudget {
     /// Each structure's worst case, in the order the startup line prints them.
@@ -184,6 +190,11 @@ impl MemoryBudget {
                 "publish_queue",
                 PUBLISH_SMALL_LANE_ENTRIES as u64 * SMALL_MESSAGE_BYTES
                     + PUBLISH_LARGE_LANE_BYTES as u64,
+            ),
+            (
+                "reassembler",
+                reassemble::MAX_BYTES as u64
+                    + reassemble::MAX_IN_FLIGHT as u64 * REASSEMBLY_ENTRY_BYTES,
             ),
             (
                 "peer_send_lanes",
