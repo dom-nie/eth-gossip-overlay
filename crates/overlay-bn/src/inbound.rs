@@ -20,6 +20,7 @@ use overlay_core::events::{self, FirstArrival};
 use overlay_core::fanout::Outbound;
 use overlay_core::lanes::{ClassLanes, LanePusher};
 use overlay_core::msgid::MessageId;
+use overlay_core::custody::SharedCustody;
 use overlay_core::recent::SharedRecentLarge;
 use overlay_core::roster::SelfIdentity;
 use overlay_core::seen::SharedSeenCache;
@@ -67,6 +68,7 @@ pub struct Inbound {
     commands: mpsc::Sender<BnCommand>,
     seen: SharedSeenCache,
     recent: SharedRecentLarge,
+    custody: SharedCustody,
     out: LanePusher<Outbound>,
     node: Arc<SelfIdentity>,
     clock: Arc<dyn Clock>,
@@ -84,7 +86,7 @@ impl Inbound {
     /// a peer that may have to repair it (§5.6).
     #[expect(
         clippy::too_many_arguments,
-        reason = "the inbound path's wiring: where messages come from, the two stores it \
+        reason = "the inbound path's wiring: where messages come from, the three stores it \
                   records them in, where they go, who this host is, and one handle per \
                   consumer. Every parameter has its own type, so a call site cannot mix two up"
     )]
@@ -93,6 +95,7 @@ impl Inbound {
         commands: mpsc::Sender<BnCommand>,
         seen: SharedSeenCache,
         recent: SharedRecentLarge,
+        custody: SharedCustody,
         out: LanePusher<Outbound>,
         node: Arc<SelfIdentity>,
         clock: Arc<dyn Clock>,
@@ -103,6 +106,7 @@ impl Inbound {
             commands,
             seen,
             recent,
+            custody,
             out,
             node,
             clock,
@@ -172,15 +176,6 @@ impl Inbound {
             return;
         }
         self.stats.first_seen(class);
-        events::emit_first_arrival(&FirstArrival {
-            id,
-            class,
-            topic: &topic,
-            node: &self.node,
-            at: arrived,
-            source: events::Source::Bn,
-            header: None,
-        });
         let outbound = Outbound {
             topic,
             class,
@@ -188,16 +183,30 @@ impl Inbound {
             payload: msg.data.into(),
             received_at,
         };
-        // Insert site 1 of 2 for the recent store (§5.6); T-074's completion is the other. Only
-        // the large class is ever repaired, so only the large class is worth the bytes.
-        if class == Class::Large {
-            self.recent.insert(
+        // Insert site 1 of 3 for the recent store (§5.6); T-074's completion and T-032's whole
+        // delivery are the others. Only the large class is ever repaired, so only the large
+        // class is worth the bytes, and the insert is where the payload's header is read.
+        let header = match class {
+            Class::Large => self.recent.insert(
                 id,
                 outbound.topic.clone(),
                 outbound.payload.clone(),
                 received_at,
-            );
+            ),
+            Class::Small => None,
+        };
+        if let Some(header) = header {
+            self.custody.observe(header, received_at);
         }
+        events::emit_first_arrival(&FirstArrival {
+            id,
+            class,
+            topic: &outbound.topic,
+            node: &self.node,
+            at: arrived,
+            source: events::Source::Bn,
+            header,
+        });
         // The pusher has already counted the drop on its own LaneStats, and for the large
         // lane logged it; this is the series T-041 reads under the inbound path's name.
         if self.out.push(class, outbound).is_err() {
@@ -218,6 +227,7 @@ mod tests {
     use overlay_core::lanes::{ClassLanes, LARGE_LANE_CAPACITY, LanePusher};
     use overlay_core::msgid::{self, MessageId};
     use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
+    use overlay_core::spec::SpecSnapshot;
     use overlay_core::roster::{Hostname, Region};
     use overlay_core::seen::{SeenCache, SharedSeenCache};
     use overlay_core::time::FakeClock;
@@ -371,6 +381,7 @@ mod tests {
                 self.command_tx.clone(),
                 self.seen.clone(),
                 self.recent.clone(),
+                SharedCustody::new(&SpecSnapshot::MAINNET),
                 self.out.pusher(),
                 Arc::new(node()),
                 Arc::new(self.clock.clone()),
@@ -659,6 +670,7 @@ mod tests {
             commands.clone(),
             seen.clone(),
             SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)),
+            SharedCustody::new(&SpecSnapshot::MAINNET),
             out.pusher(),
             Arc::new(node()),
             Arc::new(clock),

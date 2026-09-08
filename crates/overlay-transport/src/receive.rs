@@ -65,6 +65,7 @@ use overlay_core::msgid::{self, Branch, MessageId};
 use overlay_core::protocol::{MAX_FRAME_BYTES, features};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
 use overlay_core::reassemble::{Outcome, Reason, Reassembler};
+use overlay_core::custody::SharedCustody;
 use overlay_core::recent::SharedRecentLarge;
 use overlay_core::repair::Outcome as RepairOutcome;
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
@@ -194,6 +195,9 @@ pub struct Deps {
     /// Where a message this host reassembled is kept so a peer can repair it from here (§5.6).
     /// The beacon node link (T-016) holds the other handle to the same store.
     pub recent: SharedRecentLarge,
+    /// What the beacon node's columns are owed and which have arrived (§6.4, T-083). Every
+    /// recent-store insert that decoded a header tells it what it saw; the repair task reads it.
+    pub custody: SharedCustody,
     /// T-017's publish queue, behind the trait that keeps `overlay-transport` clear of libp2p.
     pub publish: Arc<dyn PublishSink>,
     /// What the mirror says the beacon node is subscribed to, which is the gate (DX-N1).
@@ -736,6 +740,9 @@ impl Ctx {
             .deps
             .recent
             .insert(id, topic.clone(), payload.clone(), now);
+        if let Some(header) = header {
+            self.deps.custody.observe(header, now);
+        }
         events::emit_first_arrival(&FirstArrival {
             id,
             class,
@@ -1164,15 +1171,18 @@ impl Ctx {
             // message that arrived whole is one this host holds, and column repair asks
             // in-region peers by round trip whatever they sent it (D23). The insert is also
             // where the payload is decoded, so the event below has the block it names.
+            let now = self.deps.clock.now();
             let header = match class {
-                Class::Large => self.deps.recent.insert(
-                    computed.id,
-                    topic.clone(),
-                    payload.clone(),
-                    self.deps.clock.now(),
-                ),
+                Class::Large => {
+                    self.deps
+                        .recent
+                        .insert(computed.id, topic.clone(), payload.clone(), now)
+                }
                 Class::Small => None,
             };
+            if let Some(header) = header {
+                self.deps.custody.observe(header, now);
+            }
             events::emit_first_arrival(&FirstArrival {
                 id: computed.id,
                 class,
@@ -1231,6 +1241,7 @@ mod tests {
     use overlay_core::config;
     use overlay_core::reassemble::{MAX_IN_FLIGHT, ReassembleConfig};
     use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge};
+    use overlay_core::spec::SpecSnapshot;
     use overlay_core::rs::Params;
     use overlay_core::seen::SeenCache;
     use overlay_core::time::{FakeClock, SystemClock};
@@ -2533,6 +2544,7 @@ mod tests {
                     Arc::new(SystemClock),
                 )),
                 recent: SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)),
+                custody: SharedCustody::new(&SpecSnapshot::MAINNET),
                 publish: published.clone(),
                 sets: watching,
                 reassembler: Arc::new(Reassembler::new(ReassembleConfig::default())),

@@ -622,7 +622,7 @@ mod tests {
 
     use super::*;
     use crate::rs::{self, Params};
-    use crate::topic::{Topic, TopicKind};
+    use crate::topic::Topic;
 
     const TOPIC: &str = "/eth2/6a95a1a9/beacon_block/ssz_snappy";
 

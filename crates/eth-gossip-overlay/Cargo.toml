@@ -13,7 +13,10 @@ http-body-util.workspace = true
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util.workspace = true
 nix = { workspace = true, features = ["hostname"] }
-overlay-bn.workspace = true
+# `column-repair` promotes `types` to a production dependency of `overlay-bn` and turns on the
+# gossip payload decoder custody column repair needs (D05, T-083). This is the only crate that
+# asks for it; `cargo tree -p overlay-bn -e normal` lists `types` only when it is on.
+overlay-bn = { workspace = true, features = ["column-repair"] }
 overlay-core.workspace = true
 overlay-transport.workspace = true
 prometheus = { workspace = true, features = ["process"] }

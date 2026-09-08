@@ -327,6 +327,7 @@ mod tests {
             node,
             at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
             source,
+            header: None,
         }
     }
 

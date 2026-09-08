@@ -28,6 +28,8 @@
 
 use types::{BeaconBlockHeader, Hash256, MainnetEthSpec, SignedBeaconBlock, Slot};
 
+use overlay_core::header::{Header, HeaderDecoder};
+use overlay_core::topic::{Topic, TopicKind};
 use overlay_core::wire::MAX_PAYLOAD_BYTES;
 
 /// Why a payload is not the header it was expected to carry.
@@ -97,6 +99,41 @@ pub fn column_header(payload: &[u8]) -> Result<(u64, u8, [u8; 32]), HeaderError>
         index,
         bytes32(header.canonical_root()),
     ))
+}
+
+/// The two decoders behind the trait `overlay-core` holds them by, so the recent store and the
+/// custody tracker reach them without either crate linking `types` (D05).
+///
+/// A payload that is not what its topic names is `None` and a debug line, not an error the
+/// receive path acts on: the beacon node validated the message, so a disagreement here means
+/// this sidecar and its node read the fork differently, and the message still travels.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Headers;
+
+impl HeaderDecoder for Headers {
+    fn header(&self, topic: &Topic, payload: &[u8]) -> Option<Header> {
+        match topic.kind() {
+            TopicKind::BeaconBlock => match block_header(payload) {
+                Ok((slot, root)) => Some(Header::Block { slot, root }),
+                Err(error) => {
+                    tracing::debug!(%topic, %error, "a block payload carries no header");
+                    None
+                }
+            },
+            TopicKind::DataColumnSidecar(_) => match column_header(payload) {
+                Ok((slot, index, block_root)) => Some(Header::Column {
+                    slot,
+                    index,
+                    block_root,
+                }),
+                Err(error) => {
+                    tracing::debug!(%topic, %error, "a column payload carries no header");
+                    None
+                }
+            },
+            _ => None,
+        }
+    }
 }
 
 /// A slice the caller has already taken with `get`, read at `at`, so no range here can be out

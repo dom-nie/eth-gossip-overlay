@@ -14,8 +14,10 @@
 //! and T-082's scheduler turns that into requests.
 
 use std::collections::{BTreeSet, HashMap};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use crate::header::Header;
 use crate::spec::SpecSnapshot;
 use crate::topic::{Topic, TopicKind};
 
@@ -151,13 +153,20 @@ impl CustodyTracker {
 
     /// The columns the beacon node is subscribed to, as a set this tracker's size (T-014, D06).
     pub fn expected_columns(&self, advertised: &BTreeSet<Topic>) -> BitSet {
-        let mut expected = BitSet::new(self.columns);
-        for topic in advertised {
-            if let TopicKind::DataColumnSidecar(index) = topic.kind() {
-                expected.insert(u16::from(*index));
-            }
+        self.column_set(advertised.iter().filter_map(|topic| match topic.kind() {
+            TopicKind::DataColumnSidecar(index) => Some(u16::from(*index)),
+            _ => None,
+        }))
+    }
+
+    /// `indices` as a set sized by the snapshot, which is how the reassembler's open columns
+    /// reach [`missing_past_deadline`](Self::missing_past_deadline).
+    pub fn column_set(&self, indices: impl IntoIterator<Item = u16>) -> BitSet {
+        let mut set = BitSet::new(self.columns);
+        for index in indices {
+            set.insert(index);
         }
-        expected
+        set
     }
 
     /// Records that a block for `slot` was seen at `now` and that `expected` columns are owed
@@ -260,6 +269,89 @@ impl Block {
         }
     }
 
+}
+
+/// One [`CustodyTracker`] shared by the sites that fill it and the task that reads it.
+///
+/// Every method takes the lock for one call and gives it back, so nothing here is held across an
+/// `await`, the same rule [`SharedRecentLarge`](crate::recent::SharedRecentLarge) keeps.
+///
+/// The expected set lives beside the tracker because the three sites that see a header do not
+/// all have the beacon node's subscriptions: the repair task has them and refreshes it, and
+/// `on_block` reads whatever the latest refresh left, which is what "evaluated when the block is
+/// seen" comes to.
+#[derive(Clone)]
+pub struct SharedCustody(Arc<Mutex<Shared>>);
+
+struct Shared {
+    spec: SpecSnapshot,
+    tracker: CustodyTracker,
+    expected: BitSet,
+}
+
+impl SharedCustody {
+    /// A tracker sized by `spec`, expecting nothing until the first refresh.
+    pub fn new(spec: &SpecSnapshot) -> Self {
+        let tracker = CustodyTracker::new(spec);
+        Self(Arc::new(Mutex::new(Shared {
+            spec: *spec,
+            expected: BitSet::new(0),
+            tracker,
+        })))
+    }
+
+    /// Takes the current spec snapshot and the beacon node's advertised set.
+    ///
+    /// The snapshot is only handed on when it has changed, so a network whose subnet count does
+    /// not match its column count says so once rather than once a tick.
+    pub fn refresh(&self, spec: &SpecSnapshot, advertised: &BTreeSet<Topic>) {
+        let mut shared = self.lock();
+        if shared.spec != *spec {
+            shared.spec = *spec;
+            shared.tracker.on_spec(spec);
+        }
+        shared.expected = shared.tracker.expected_columns(advertised);
+    }
+
+    /// One header read at a recent-store insert, from any of its three sites.
+    pub fn observe(&self, header: Header, now: Instant) {
+        let mut shared = self.lock();
+        match header {
+            Header::Block { slot, root } => {
+                let expected = shared.expected.clone();
+                shared.tracker.on_block(slot, root, expected, now);
+            }
+            Header::Column {
+                slot,
+                index,
+                block_root,
+            } => shared.tracker.on_column(slot, u16::from(index), block_root),
+        }
+    }
+
+    /// [`CustodyTracker::missing_past_deadline`] under the lock.
+    pub fn gaps(&self, deadline: Duration, now: Instant, in_flight: &BitSet) -> Vec<ColumnGap> {
+        self.lock()
+            .tracker
+            .missing_past_deadline(deadline, now, in_flight)
+    }
+
+    /// [`CustodyTracker::threshold`] under the lock.
+    pub fn threshold(&self) -> usize {
+        self.lock().tracker.threshold()
+    }
+
+    /// [`CustodyTracker::column_set`] under the lock.
+    pub fn column_set(&self, indices: impl IntoIterator<Item = u16>) -> BitSet {
+        self.lock().tracker.column_set(indices)
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Shared> {
+        // Nothing that runs under this lock can panic, so a poisoned tracker cannot happen; if
+        // one ever did, its sets would still be consistent and idling column repair for the life
+        // of the process would be the worse failure.
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
 }
 
 #[cfg(test)]

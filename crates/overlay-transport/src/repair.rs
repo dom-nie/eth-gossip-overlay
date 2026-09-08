@@ -23,8 +23,11 @@ use std::time::Duration;
 
 use overlay_core::msgid::MessageId;
 use overlay_core::protocol::{MAX_FRAME_BYTES, features};
-use overlay_core::repair::{Decision, Outcome, REPAIR_TICK, Request, Scheduler};
-use overlay_core::roster::Hostname;
+use overlay_core::repair::{
+    ColumnKey, ColumnRequest, Decision, Outcome, REPAIR_TICK, Request, Scheduler,
+};
+use overlay_core::roster::{Hostname, Region};
+use overlay_core::spec::SpecSnapshot;
 use overlay_core::wire::{self, Frame, Read, RepairReq, RepairResp};
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
@@ -37,41 +40,85 @@ use crate::receive::{Deps, RepairSink};
 ///
 /// `deadline` is `classes.large.repair_deadline_ms` on the channel T-043's reload writes, read
 /// afresh on every tick so a change takes hold on the next one.
-pub fn spawn(deps: Deps, deadline: watch::Receiver<Duration>) -> JoinHandle<()> {
-    tokio::spawn(run(deps, deadline))
+pub fn spawn(
+    deps: Deps,
+    deadline: watch::Receiver<Duration>,
+    spec: watch::Receiver<SpecSnapshot>,
+) -> JoinHandle<()> {
+    tokio::spawn(run(deps, deadline, spec))
 }
 
-async fn run(deps: Deps, deadline: watch::Receiver<Duration>) {
+/// Which repair an attempt answered, so one [`JoinSet`] carries both forms.
+enum Answered {
+    Message(MessageId, Outcome),
+    Column(ColumnKey, Outcome),
+}
+
+async fn run(deps: Deps, deadline: watch::Receiver<Duration>, spec: watch::Receiver<SpecSnapshot>) {
     let mut scheduler = Scheduler::default();
-    let mut attempts: JoinSet<(MessageId, Outcome)> = JoinSet::new();
+    let mut attempts: JoinSet<Answered> = JoinSet::new();
     let mut tick = tokio::time::interval(REPAIR_TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
         while let Some(finished) = attempts.try_join_next() {
-            let Ok((msg_id, outcome)) = finished else {
-                continue;
-            };
-            deps.stats.repair_request(outcome);
-            scheduler.answered(&msg_id);
+            match finished {
+                Ok(Answered::Message(msg_id, outcome)) => {
+                    deps.stats.repair_request(outcome);
+                    scheduler.answered(&msg_id);
+                }
+                Ok(Answered::Column(key, outcome)) => {
+                    deps.stats.repair_request(outcome);
+                    scheduler.answered_column(&key);
+                }
+                Err(_) => continue,
+            }
         }
         // One snapshot per tick, which is also one read of every peer's smoothed round trip:
         // the estimate a candidate list is sorted by is the one taken when the list was built.
         let view = deps.relaying.live.live();
+        let now = deps.clock.now();
         let decided = scheduler.tick(
             &deps.reassembler,
             *deadline.borrow(),
             |peer| reachable(&view, peer),
-            deps.clock.now(),
+            now,
         );
-        for decision in decided {
+        // The columns the beacon node is short of, on the same tick and against the same live
+        // view. `refresh` reads both watches synchronously and leaves the tracker what a block
+        // seen now would be measured against (§6.4, CL-N3).
+        deps.custody
+            .refresh(&spec.borrow(), &deps.sets.borrow().advertised);
+        let in_flight = deps
+            .custody
+            .column_set(deps.reassembler.in_flight_columns());
+        let gaps = deps.custody.gaps(*deadline.borrow(), now, &in_flight);
+        let columns = scheduler.tick_columns(
+            &gaps,
+            deps.custody.threshold(),
+            &in_flight,
+            &in_region_by_rtt(&view, &deps.node.region),
+            now,
+        );
+        for decision in decided.into_iter().chain(columns) {
             match decision {
                 Decision::GaveUp(msg_id) => {
                     tracing::debug!(%msg_id, "nobody left to ask for this message");
                     deps.stats.repair_request(Outcome::GaveUp);
                 }
-                // T-083's column arms, wired in below.
-                Decision::AskColumn(_) | Decision::GaveUpColumn(_) => {}
+                Decision::GaveUpColumn((_, index)) => {
+                    tracing::debug!(index, "nobody left to ask for this column");
+                    deps.stats.repair_request(Outcome::GaveUp);
+                }
+                Decision::AskColumn(request) => match view.get(&request.peer) {
+                    Some(peer) => {
+                        attempts.spawn(column_attempt(deps.clone(), peer.clone(), request));
+                    }
+                    None => {
+                        deps.stats.repair_request(Outcome::Timeout);
+                        scheduler.answered_column(&(request.block_root, request.index));
+                    }
+                },
                 Decision::Ask(request) => match view.get(&request.peer) {
                     Some(peer) => {
                         attempts.spawn(attempt(deps.clone(), peer.clone(), request));
@@ -89,6 +136,23 @@ async fn run(deps: Deps, deadline: watch::Receiver<Duration>) {
     }
 }
 
+/// Who a column can be asked for, in the order to ask them (D23): live in-region peers that
+/// advertised `REPAIR` (D29), by round trip.
+///
+/// Nothing announces who holds a column, so unlike the chunk path there is no shorter list than
+/// this one. A peer that does not hold it answers `not_found` at once rather than costing an
+/// attempt's timeout, which is what makes asking down the list cheap.
+fn in_region_by_rtt(view: &LiveView, region: &Region) -> Vec<(Hostname, Duration)> {
+    let mut peers: Vec<(Hostname, Duration)> = view
+        .in_region(region)
+        .into_iter()
+        .filter(|(_, peer)| peer.negotiated.allows(features::REPAIR))
+        .map(|(hostname, peer)| (hostname.clone(), peer.rtt))
+        .collect();
+    peers.sort_by_key(|(_, rtt)| *rtt);
+    peers
+}
+
 /// The round trip to `peer`, or `None` for one that must not be asked: a peer that has left the
 /// live set, and a peer that never advertised `REPAIR` (D29).
 fn reachable(view: &LiveView, peer: &Hostname) -> Option<Duration> {
@@ -99,11 +163,45 @@ fn reachable(view: &LiveView, peer: &Hostname) -> Option<Duration> {
 /// One attempt, held to the timeout the request carries: four round trips to this peer, clamped
 /// (D24). The timeout covers the whole exchange rather than each read, which is what makes three
 /// attempts fit inside the total budget however the peer behaves.
-async fn attempt(deps: Deps, peer: LivePeer, request: Request) -> (MessageId, Outcome) {
-    let outcome = tokio::time::timeout(request.timeout, exchange(&deps, &peer, &request))
-        .await
-        .unwrap_or(Outcome::Timeout);
-    (request.msg_id, outcome)
+async fn attempt(deps: Deps, peer: LivePeer, request: Request) -> Answered {
+    let asked = Frame::RepairReq(RepairReq::Missing {
+        msg_id: request.msg_id,
+        missing: request.missing.clone(),
+    });
+    let outcome = tokio::time::timeout(
+        request.timeout,
+        exchange(&deps, &peer, &request.peer, &asked),
+    )
+    .await
+    .unwrap_or(Outcome::Timeout);
+    Answered::Message(request.msg_id, outcome)
+}
+
+/// One attempt at a column nobody has sent a chunk of, held to the same timeout (D24, T-083).
+///
+/// What comes back is the same `CHUNK` frames a chunk repair is answered with, so it goes
+/// through the same reassembler and the same completion. The requester has no message id for
+/// the column until the chunks name one, and the id it is handed is checked against the payload
+/// like every other (T-074), so a peer cannot answer with something else.
+async fn column_attempt(deps: Deps, peer: LivePeer, request: ColumnRequest) -> Answered {
+    let key = (request.block_root, request.index);
+    // A column index is a subnet index and reaches here from a `data_column_sidecar_{i}` topic,
+    // which parses into a `u8`, so this cannot narrow. One that did would name a column no peer
+    // could be asked for, which is the same to the scheduler as a peer that does not hold it.
+    let Ok(index) = u8::try_from(request.index) else {
+        return Answered::Column(key, Outcome::NotFound);
+    };
+    let asked = Frame::RepairReq(RepairReq::Column {
+        block_root: request.block_root,
+        index,
+    });
+    let outcome = tokio::time::timeout(
+        request.timeout,
+        exchange(&deps, &peer, &request.peer, &asked),
+    )
+    .await
+    .unwrap_or(Outcome::Timeout);
+    Answered::Column(key, outcome)
 }
 
 /// The exchange itself: the request out, the chunks and the trailer back.
@@ -117,20 +215,16 @@ async fn attempt(deps: Deps, peer: LivePeer, request: Request) -> (MessageId, Ou
 /// A peer that answers with chunks that do not put the message back together is
 /// [`Outcome::NotFound`] like one that has nothing: to the requester the two are the same, a
 /// candidate that could not finish the job, and the next one is asked.
-async fn exchange(deps: &Deps, peer: &LivePeer, request: &Request) -> Outcome {
+async fn exchange(deps: &Deps, peer: &LivePeer, name: &Hostname, asked: &Frame) -> Outcome {
     let Ok((mut send, mut recv)) = peer.connection.open_bi().await else {
         return Outcome::Timeout;
     };
-    let asked = Frame::RepairReq(RepairReq::Missing {
-        msg_id: request.msg_id,
-        missing: request.missing.clone(),
-    });
-    if wire::write_frame(&mut send, &asked).await.is_err() {
+    if wire::write_frame(&mut send, asked).await.is_err() {
         return Outcome::Timeout;
     }
     let _ = send.finish();
 
-    let sink = RepairSink::new(deps, &request.peer, peer);
+    let sink = RepairSink::new(deps, name, peer);
     let mut completed = false;
     loop {
         match wire::read_frame(&mut recv, MAX_FRAME_BYTES).await {
@@ -146,7 +240,7 @@ async fn exchange(deps: &Deps, peer: &LivePeer, request: &Request) -> Outcome {
             // cost the frame and not the answer (D10).
             Ok(_) => continue,
             Err(error) => {
-                tracing::debug!(peer = %request.peer, %error, "a repair answer ended early");
+                tracing::debug!(peer = %name, %error, "a repair answer ended early");
                 break;
             }
         }
