@@ -1209,6 +1209,82 @@ mod tests {
         assert!(cluster.published(2).is_empty());
     }
 
+    /// The arithmetic MD-04 is about: a region's subscribers to one attestation subnet are a
+    /// minority of its live hosts, and the relay window is drawn from all of them, so a relay
+    /// that wants nothing on the topic is the ordinary case rather than the odd one. Here every
+    /// relay is such a host, and the twelve subscribers behind them are each offered the
+    /// attestation once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_region_where_subscribers_are_a_minority_still_all_publish_once() {
+        let subnet = topic("beacon_attestation_7");
+        let its_own = topic("beacon_attestation_2");
+        let region: Vec<&str> = std::iter::once("eu")
+            .chain(std::iter::repeat_n("us", 20))
+            .collect();
+        let mut cluster = Builder::new(&[NodeKind::Manager; 21])
+            .regions(&region)
+            .start()
+            .await;
+        let pool: Vec<Hostname> = (1..21).map(|node| cluster.hostname(node)).collect();
+        let relays = overlay_core::relay::select(&cluster.hostname(0), &pool, 3);
+        // The subscribers are twelve of the seventeen hosts the window missed, so every relay
+        // is a host that wants nothing on the subnet and the old skip lost the whole region.
+        let subscribers: Vec<usize> = (1..21)
+            .filter(|node| !relays.contains(&cluster.hostname(*node)))
+            .take(12)
+            .collect();
+        cluster.start_sidecar(0, subscriptions(&[&subnet], &[]));
+        for node in 1..21 {
+            let wanted = match subscribers.contains(&node) {
+                true => &subnet,
+                false => &its_own,
+            };
+            cluster.start_sidecar(node, subscriptions(&[wanted], &[]));
+        }
+        eventually("the region to say what it wants", || {
+            cluster.live(0).subscribers(&subnet).len() == subscribers.len()
+        })
+        .await;
+        // The first attestations on the subnet are what make the relays intern an id for it,
+        // and they are lost while the announcement crosses the control stream.
+        let mut warm = 0;
+        eventually("every subscriber to be given one", || {
+            warm += 1;
+            cluster.from_bn(0, &subnet, &payload(format!("warming {warm}").as_bytes()));
+            subscribers
+                .iter()
+                .all(|node| !cluster.published(*node).is_empty())
+        })
+        .await;
+        let counted: Vec<usize> = subscribers
+            .iter()
+            .map(|node| cluster.published(*node).len())
+            .collect();
+
+        let once = payload(b"the one attestation this test counts");
+        assert!(cluster.from_bn(0, &subnet, &once));
+
+        for (node, before) in subscribers.iter().zip(counted) {
+            eventually("the subscriber to be given it", || {
+                cluster.published(*node).len() > before
+            })
+            .await;
+        }
+        tokio::time::sleep(SETTLE).await;
+        for node in 1..21 {
+            let copies = cluster
+                .published(node)
+                .iter()
+                .filter(|item| item.payload == once)
+                .count();
+            assert_eq!(
+                copies,
+                usize::from(subscribers.contains(&node)),
+                "node {node}"
+            );
+        }
+    }
+
     /// D21: the relay re-coalesces through its own batcher, so an in-region subscriber gets one
     /// batch holding the entries it asked for and nothing else. The relay itself wants both
     /// topics and publishes both; the host beside it wants one and is sent one.
