@@ -229,7 +229,6 @@ mod tests {
     use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
     use overlay_core::roster::{Hostname, Region};
     use overlay_core::seen::{SeenCache, SharedSeenCache};
-    use overlay_core::spec::SpecSnapshot;
     use overlay_core::time::FakeClock;
     use overlay_core::topic::{Class, SubscriptionSets, Topic, UNKNOWN_LARGE_THRESHOLD_BYTES};
     use prometheus_client::registry::Registry;
@@ -381,7 +380,7 @@ mod tests {
                 self.command_tx.clone(),
                 self.seen.clone(),
                 self.recent.clone(),
-                SharedCustody::new(&SpecSnapshot::MAINNET),
+                SharedCustody::new(&crate::spec::MAINNET),
                 self.out.pusher(),
                 Arc::new(node()),
                 Arc::new(self.clock.clone()),
@@ -670,7 +669,7 @@ mod tests {
             commands.clone(),
             seen.clone(),
             SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)),
-            SharedCustody::new(&SpecSnapshot::MAINNET),
+            SharedCustody::new(&crate::spec::MAINNET),
             out.pusher(),
             Arc::new(node()),
             Arc::new(clock),

@@ -3,8 +3,6 @@
 //! `beacon_node/lighthouse_network/src/config.rs`, is private. Each constant names its source
 //! line; the drift tests fail when a Lighthouse bump moves the value.
 
-use crate::spec::SpecSnapshot;
-
 /// The protocol ids both sides negotiate, newest first. Lighthouse sets no prefix
 /// (`gossipsub_config` in `beacon_node/lighthouse_network/src/config.rs:450-523` never calls
 /// `protocol_id_prefix`), so these are the fork's defaults from
@@ -34,12 +32,12 @@ pub const MAX_CONTROL_MESSAGE_SIZE: usize = 128 << 10;
 /// `max_uncompressed_len`, which `service/mod.rs:343` sets to `spec.max_payload_size`, so the
 /// message id must use the same bound or it would give a valid-domain id to a payload the BN
 /// never accepts.
-pub const MAX_PAYLOAD_SIZE: u64 = SpecSnapshot::MAINNET.max_payload_size;
+pub const MAX_PAYLOAD_SIZE: u64 = crate::spec::MAINNET.max_payload_size;
 
 /// The largest gossipsub RPC either side sends or accepts, from
 /// `beacon_node/lighthouse_network/src/service/mod.rs:243` (`ctx.chain_spec.max_message_size()`
 /// into `gossipsub_max_transmit_size`) with mainnet's `MAX_PAYLOAD_SIZE`.
-pub const MAX_TRANSMIT_SIZE: u64 = max_transmit_size_for(SpecSnapshot::MAINNET.max_payload_size);
+pub const MAX_TRANSMIT_SIZE: u64 = max_transmit_size_for(crate::spec::MAINNET.max_payload_size);
 
 /// `ChainSpec::max_message_size` from `consensus/types/src/core/chain_spec.rs:859-882`: snappy's
 /// worst-case compressed length of the payload, 1024 bytes for framing, floored at 1 MiB.
@@ -196,11 +194,11 @@ mod tests {
     #[test]
     fn max_payload_size_mismatch_is_reported() {
         assert_eq!(
-            check_max_payload_size(SpecSnapshot::MAINNET.max_payload_size),
+            check_max_payload_size(crate::spec::MAINNET.max_payload_size),
             Ok(())
         );
 
-        let bn = SpecSnapshot::MAINNET.max_payload_size + 1;
+        let bn = crate::spec::MAINNET.max_payload_size + 1;
 
         assert_eq!(
             check_max_payload_size(bn),

@@ -26,7 +26,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::spec::SpecSnapshot;
+use crate::spec::{SpecSnapshot, SpecWire};
 
 const IDENTITY: &str = "/eth/v1/node/identity";
 const VERSION: &str = "/eth/v1/node/version";
@@ -231,8 +231,8 @@ impl BnClient {
 
     /// The spec constants as the beacon node runs them.
     pub async fn spec(&self) -> Result<SpecSnapshot, BnHttpError> {
-        let Data { data } = self.get(&self.spec, SPEC).await?;
-        Ok(data)
+        let Data { data } = self.get::<Data<SpecWire>>(&self.spec, SPEC).await?;
+        Ok(data.into())
     }
 
     async fn get<T: DeserializeOwned>(
@@ -555,7 +555,7 @@ mod tests {
         assert_eq!(
             got,
             SpecSnapshot {
-                number_of_custody_groups: SpecSnapshot::MAINNET.number_of_custody_groups,
+                number_of_custody_groups: crate::spec::MAINNET.number_of_custody_groups,
                 ..MOCKED
             }
         );

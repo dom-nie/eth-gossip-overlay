@@ -812,7 +812,7 @@ mod tests {
     }
 
     fn spawn_with_key(cfg: LinkConfig, bn: &FakeBn, node_key: &NodeKey) -> Harness {
-        spawn_with_spec(cfg, bn, node_key, SpecSnapshot::MAINNET)
+        spawn_with_spec(cfg, bn, node_key, crate::spec::MAINNET)
     }
 
     /// A link whose spec watch already holds `spec` when it starts, the way a process that
@@ -1619,7 +1619,7 @@ mod tests {
                 trusted: None,
             }
         );
-        assert_eq!(*harness.spec.borrow(), SpecSnapshot::MAINNET);
+        assert_eq!(*harness.spec.borrow(), crate::spec::MAINNET);
         assert!(later.is_err(), "unexpected event after BnInfo: {later:?}");
         assert!(harness.link.connected.load(Ordering::Relaxed));
     }
@@ -1889,7 +1889,7 @@ mod tests {
         let spec = SpecSnapshot {
             custody_requirement: 1,
             number_of_custody_groups: 1,
-            ..SpecSnapshot::MAINNET
+            ..crate::spec::MAINNET
         };
         let harness = spawn_with_spec(
             link_config(&bn),

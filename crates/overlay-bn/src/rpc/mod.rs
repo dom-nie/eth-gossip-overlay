@@ -52,12 +52,12 @@ impl Default for Responder {
     fn default() -> Self {
         Self {
             metadata: MetaData {
-                custody_group_count: Some(SpecSnapshot::MAINNET.custody_requirement),
+                custody_group_count: Some(crate::spec::MAINNET.custody_requirement),
                 ..MetaData::default()
             },
             columns: BTreeSet::new(),
-            custody_requirement: SpecSnapshot::MAINNET.custody_requirement,
-            number_of_custody_groups: SpecSnapshot::MAINNET.number_of_custody_groups,
+            custody_requirement: crate::spec::MAINNET.custody_requirement,
+            number_of_custody_groups: crate::spec::MAINNET.number_of_custody_groups,
         }
     }
 }
@@ -479,7 +479,7 @@ mod tests {
             seq_number: 1,
             attnets: [0b1000, 0, 0, 0, 0, 0, 0, 0],
             syncnets: 0b10,
-            custody_group_count: Some(SpecSnapshot::MAINNET.custody_requirement),
+            custody_group_count: Some(crate::spec::MAINNET.custody_requirement),
         };
         assert_eq!(responder.metadata(), &expected);
         assert_eq!(
@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn custody_group_count_stays_inside_the_range_lighthouse_accepts() {
         let mut responder = Responder::new();
-        let floor = SpecSnapshot::MAINNET.custody_requirement;
+        let floor = crate::spec::MAINNET.custody_requirement;
 
         let syncing = responder.metadata().custody_group_count;
         responder.set_subscriptions(&topics(&["data_column_sidecar_0"]));
@@ -540,7 +540,7 @@ mod tests {
         responder.set_spec(&SpecSnapshot {
             custody_requirement: 1,
             number_of_custody_groups: 1,
-            ..SpecSnapshot::MAINNET
+            ..crate::spec::MAINNET
         });
 
         assert_eq!(syncing, Some(floor));
@@ -556,11 +556,11 @@ mod tests {
         responder.set_subscriptions(&topics(&["data_column_sidecar_0"]));
         let after_subscriptions = responder.metadata().seq_number;
 
-        responder.set_spec(&SpecSnapshot::MAINNET);
+        responder.set_spec(&crate::spec::MAINNET);
         let unchanged = responder.metadata().seq_number;
         responder.set_spec(&SpecSnapshot {
             custody_requirement: 1,
-            ..SpecSnapshot::MAINNET
+            ..crate::spec::MAINNET
         });
 
         assert_eq!(unchanged, after_subscriptions);

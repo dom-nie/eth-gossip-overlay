@@ -1243,7 +1243,6 @@ mod tests {
     use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge};
     use overlay_core::rs::Params;
     use overlay_core::seen::SeenCache;
-    use overlay_core::spec::SpecSnapshot;
     use overlay_core::time::{FakeClock, SystemClock};
     use overlay_core::topic::UNKNOWN_LARGE_THRESHOLD_BYTES;
     use overlay_core::wire::{BatchEntry, BatchFlags, RepairReq, RepairResp, encode_datagram};
@@ -2544,7 +2543,7 @@ mod tests {
                     Arc::new(SystemClock),
                 )),
                 recent: SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)),
-                custody: SharedCustody::new(&SpecSnapshot::MAINNET),
+                custody: SharedCustody::new(&crate::testutil::mainnet_spec()),
                 publish: published.clone(),
                 sets: watching,
                 reassembler: Arc::new(Reassembler::new(ReassembleConfig::default())),

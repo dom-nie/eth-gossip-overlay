@@ -366,6 +366,21 @@ mod tests {
     use crate::time::{Clock, FakeClock};
 
     const DEADLINE: Duration = Duration::from_millis(250);
+
+    /// What `overlay_bn::spec::MAINNET` holds, written out here because this crate does not
+    /// carry the beacon node's compiled defaults and a tracker has to be sized by something.
+    fn mainnet() -> SpecSnapshot {
+        SpecSnapshot {
+            data_column_sidecar_subnet_count: 128,
+            number_of_columns: 128,
+            number_of_custody_groups: 128,
+            custody_requirement: 4,
+            max_payload_size: 10_485_760,
+            seconds_per_slot: 12,
+            slots_per_epoch: 32,
+        }
+    }
+
     const ROOT: [u8; 32] = [7; 32];
 
     fn column_topics(indices: &[u16]) -> BTreeSet<Topic> {
@@ -382,14 +397,14 @@ mod tests {
 
     /// A tracker at mainnet with a block for slot 1 seen now, expecting `indices`.
     fn tracking(clock: &FakeClock, indices: &[u16]) -> CustodyTracker {
-        let mut tracker = CustodyTracker::new(&SpecSnapshot::MAINNET);
+        let mut tracker = CustodyTracker::new(&mainnet());
         let expected = tracker.expected_columns(&column_topics(indices));
         tracker.on_block(1, ROOT, expected, clock.now());
         tracker
     }
 
     fn gaps(tracker: &mut CustodyTracker, clock: &FakeClock) -> Vec<ColumnGap> {
-        let none = BitSet::new(SpecSnapshot::MAINNET.number_of_columns as usize);
+        let none = BitSet::new(mainnet().number_of_columns as usize);
         tracker.missing_past_deadline(DEADLINE, clock.now(), &none)
     }
 
@@ -445,7 +460,7 @@ mod tests {
     fn prioritisation_puts_partially_received_columns_first_then_lowest_index() {
         let clock = FakeClock::new();
         let all: Vec<u16> = (0..128).collect();
-        let mut tracker = CustodyTracker::new(&SpecSnapshot::MAINNET);
+        let mut tracker = CustodyTracker::new(&mainnet());
         let expected = tracker.expected_columns(&column_topics(&all));
         tracker.on_block(1, ROOT, expected, clock.now());
 
@@ -491,7 +506,7 @@ mod tests {
         let wide = SpecSnapshot {
             data_column_sidecar_subnet_count: 256,
             number_of_columns: 256,
-            ..SpecSnapshot::MAINNET
+            ..mainnet()
         };
         let clock = FakeClock::new();
 
@@ -507,7 +522,7 @@ mod tests {
             Vec::new()
         );
 
-        let mainnet = CustodyTracker::new(&SpecSnapshot::MAINNET);
+        let mainnet = CustodyTracker::new(&mainnet());
         assert_eq!(mainnet.threshold(), 64);
         assert!(
             !mainnet
@@ -526,7 +541,7 @@ mod tests {
         let mut tracker = CustodyTracker::new(&SpecSnapshot {
             data_column_sidecar_subnet_count: 64,
             number_of_columns: 128,
-            ..SpecSnapshot::MAINNET
+            ..mainnet()
         });
         let expected = tracker.expected_columns(&column_topics(&[0, 3, 7]));
         tracker.on_block(1, ROOT, expected, clock.now());
@@ -547,7 +562,7 @@ mod tests {
     #[test]
     fn gaps_are_garbage_collected_after_n_slots() {
         let clock = FakeClock::new();
-        let mut tracker = CustodyTracker::new(&SpecSnapshot::MAINNET);
+        let mut tracker = CustodyTracker::new(&mainnet());
         let expected = tracker.expected_columns(&column_topics(&[0, 3, 7]));
         for slot in 1..=(TRACKED_SLOTS as u64 + 1) {
             tracker.on_block(slot, ROOT, expected.clone(), clock.now());

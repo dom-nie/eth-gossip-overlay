@@ -60,6 +60,21 @@ use overlay_core::repair::Outcome as RepairOutcome;
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::seen::{SeenCache, SharedSeenCache};
 use overlay_core::spec::SpecSnapshot;
+
+/// What `overlay_bn::spec::MAINNET` holds. A cluster has no beacon node to answer
+/// `/eth/v1/config/spec` and this crate does not carry the compiled defaults, so a test that
+/// needs a custody tracker sized like a real one writes the two numbers it uses.
+pub fn mainnet_spec() -> SpecSnapshot {
+    SpecSnapshot {
+        data_column_sidecar_subnet_count: 128,
+        number_of_columns: 128,
+        number_of_custody_groups: 128,
+        custody_requirement: 4,
+        max_payload_size: 10_485_760,
+        seconds_per_slot: 12,
+        slots_per_epoch: 32,
+    }
+}
 use overlay_core::subs::{Bitmap, PeerState};
 use overlay_core::time::{Clock, SystemClock};
 use overlay_core::topic::Topic;
@@ -814,7 +829,7 @@ impl Builder {
             small: watch::channel(self.small).0,
             fanout: watch::channel(self.fanout).0,
             repair_deadline: watch::channel(self.large.repair_deadline).0,
-            spec: watch::channel(SpecSnapshot::MAINNET).0,
+            spec: watch::channel(mainnet_spec()).0,
             large: self.large,
             decoder: self.decoder,
             in_flight: self.in_flight,
@@ -1287,7 +1302,7 @@ impl<A: Admission> TestCluster<A> {
             Some(decoder) => store.with_decoder(decoder),
             None => store,
         });
-        let custody = SharedCustody::new(&SpecSnapshot::MAINNET);
+        let custody = SharedCustody::new(&mainnet_spec());
         let (subscriptions, watching) = watch::channel(sets);
         let reassembler = Arc::new(Reassembler::new(ReassembleConfig {
             max_in_flight: self.in_flight,

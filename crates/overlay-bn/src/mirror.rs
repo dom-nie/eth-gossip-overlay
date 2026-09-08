@@ -262,7 +262,7 @@ mod tests {
 
     /// A mirror whose link has connected to `BN`.
     fn connected() -> Mirror {
-        connected_with(&SpecSnapshot::MAINNET)
+        connected_with(&crate::spec::MAINNET)
     }
 
     /// A mirror built from `spec` whose link has connected to `BN`.
@@ -451,7 +451,7 @@ mod tests {
     /// Before the link has named the beacon node there is nobody to mirror.
     #[test]
     fn subscription_events_before_connected_are_ignored() {
-        let mut mirror = Mirror::new(&SpecSnapshot::MAINNET);
+        let mut mirror = Mirror::new(&crate::spec::MAINNET);
 
         let actions = mirror.on_bn_event(&subscribed(ATTESTATION_3));
 
@@ -527,7 +527,7 @@ mod tests {
     fn first_topic_with_new_digest_subscribes_every_column_of_it() {
         let spec = SpecSnapshot {
             number_of_columns: 8,
-            ..SpecSnapshot::MAINNET
+            ..crate::spec::MAINNET
         };
         let mut mirror = connected_with(&spec);
 
@@ -542,7 +542,7 @@ mod tests {
     fn column_count_comes_from_the_spec_snapshot_not_a_literal() {
         let sixty_four = SpecSnapshot {
             number_of_columns: 64,
-            ..SpecSnapshot::MAINNET
+            ..crate::spec::MAINNET
         };
         let mut small = connected_with(&sixty_four);
         let mut mainnet = connected();
@@ -673,7 +673,7 @@ mod tests {
         mirror.on_bn_event(&subscribed(ATTESTATION_3));
         let sixty_four = SpecSnapshot {
             number_of_columns: 64,
-            ..SpecSnapshot::MAINNET
+            ..crate::spec::MAINNET
         };
 
         let actions = mirror.on_spec(&sixty_four);
@@ -697,7 +697,7 @@ mod tests {
 
         let actions = mirror.on_spec(&SpecSnapshot {
             seconds_per_slot: 6,
-            ..SpecSnapshot::MAINNET
+            ..crate::spec::MAINNET
         });
 
         assert_eq!(actions, vec![]);
