@@ -478,8 +478,8 @@ mod tests {
 
     /// The responder's half of gap repair (§5.6): a large message the beacon node hands over is
     /// kept whole, so a peer that lost a chunk of it can be answered from here. This is the
-    /// first of the store's two insert sites; T-074's completion is the other. Small-class
-    /// messages are never repaired and never stored.
+    /// first of the store's three insert sites; T-074's completion and T-032's whole delivery
+    /// are the others. Small-class messages are never repaired and never stored.
     #[tokio::test(start_paused = true)]
     async fn bn_first_arrival_inserts_into_the_recent_store() {
         let mut h = Harness::new();

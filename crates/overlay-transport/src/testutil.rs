@@ -60,21 +60,6 @@ use overlay_core::repair::Outcome as RepairOutcome;
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::seen::{SeenCache, SharedSeenCache};
 use overlay_core::spec::SpecSnapshot;
-
-/// What `overlay_bn::spec::MAINNET` holds. A cluster has no beacon node to answer
-/// `/eth/v1/config/spec` and this crate does not carry the compiled defaults, so a test that
-/// needs a custody tracker sized like a real one writes the two numbers it uses.
-pub fn mainnet_spec() -> SpecSnapshot {
-    SpecSnapshot {
-        data_column_sidecar_subnet_count: 128,
-        number_of_columns: 128,
-        number_of_custody_groups: 128,
-        custody_requirement: 4,
-        max_payload_size: 10_485_760,
-        seconds_per_slot: 12,
-        slots_per_epoch: 32,
-    }
-}
 use overlay_core::subs::{Bitmap, PeerState};
 use overlay_core::time::{Clock, SystemClock};
 use overlay_core::topic::Topic;
@@ -100,6 +85,21 @@ use crate::sender::{
 };
 use crate::subs::SubsStats;
 use crate::tls::{self, FailureReason, HandshakeFailure, PinTable, Role};
+
+/// What `overlay_bn::spec::MAINNET` holds. A cluster has no beacon node to answer
+/// `/eth/v1/config/spec` and this crate does not carry the compiled defaults, so a test that
+/// needs a custody tracker sized like a real one writes the two numbers it uses.
+pub fn mainnet_spec() -> SpecSnapshot {
+    SpecSnapshot {
+        data_column_sidecar_subnet_count: 128,
+        number_of_columns: 128,
+        number_of_custody_groups: 128,
+        custody_requirement: 4,
+        max_payload_size: 10_485_760,
+        seconds_per_slot: 12,
+        slots_per_epoch: 32,
+    }
+}
 
 /// Long enough for a handshake, an admission and a reconnect on a loaded machine, and short
 /// enough that a test which will never pass fails instead of hanging.
@@ -1397,7 +1397,7 @@ impl<A: Admission> TestCluster<A> {
         if !sidecar.seen.insert(id) {
             return false;
         }
-        // Insert site 1 of 2 for the recent store, as T-016's inbound path makes it: a large
+        // Insert site 1 of 3 for the recent store, as T-016's inbound path makes it: a large
         // message the beacon node handed this host is one a peer can still ask it for (§5.6).
         if class == Class::Large {
             let now = Instant::now();

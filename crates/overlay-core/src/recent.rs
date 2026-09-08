@@ -82,9 +82,8 @@ impl RecentLarge {
         }
     }
 
-    /// Keeps `payload` under `msg_id`, answering whether it stored it. An id already held is
-    /// left as it arrived, so a second insert neither charges the bound again nor extends the
-    /// minute, and the caller knows not to decode it twice.
+    /// Keeps `payload` under `msg_id`. An id already held is left as it arrived, so a second
+    /// insert neither charges the bound again nor extends the minute.
     ///
     /// Nothing is decoded here. The header is read by [`SharedRecentLarge::insert`] once this
     /// lock is back, because a block's SSZ is milliseconds of work and the responder and the
@@ -93,16 +92,10 @@ impl RecentLarge {
     /// A payload larger than the whole bound takes the store down to itself and then goes too,
     /// which is the bound holding rather than a case to special-case: nothing this host accepts
     /// off the wire is that size.
-    pub fn insert(
-        &mut self,
-        msg_id: MessageId,
-        topic: Topic,
-        payload: Bytes,
-        now: Instant,
-    ) -> bool {
+    pub fn insert(&mut self, msg_id: MessageId, topic: Topic, payload: Bytes, now: Instant) {
         self.expire(now);
         if self.entries.contains_key(&msg_id) {
-            return false;
+            return;
         }
         self.bytes += payload.len();
         self.entries.insert(
@@ -116,7 +109,6 @@ impl RecentLarge {
         );
         self.order.push_back(msg_id);
         while self.bytes > self.max_bytes && self.pop_oldest() {}
-        true
     }
 
     /// The topic and bytes held for `msg_id`, for a responder about to answer a repair request
@@ -217,6 +209,11 @@ impl SharedRecentLarge {
     /// path decompressed it to compute the message id and the beacon node's path had it
     /// validated. The decode runs after the lock is back, so the only thing held across it is
     /// a `HashMap` insert.
+    ///
+    /// The header comes back whatever the store did with the payload. What a message says about
+    /// itself is not the store's to decide: the custody tracker's record of a column arriving,
+    /// and T-044's line naming the slot, are owed for a payload the byte bound turned away as
+    /// much as for one it kept.
     pub fn insert(
         &self,
         msg_id: MessageId,
@@ -225,14 +222,14 @@ impl SharedRecentLarge {
         ssz: Option<&[u8]>,
         now: Instant,
     ) -> Option<Header> {
-        if !self.lock().insert(msg_id, topic.clone(), payload, now) {
-            return None;
-        }
+        self.lock().insert(msg_id, topic.clone(), payload, now);
         let header = self.decoder.as_ref()?.header(&topic, ssz?)?;
         if let Header::Column {
             index, block_root, ..
         } = header
         {
+            // A no-op for an id the store no longer holds, which is what an entry the byte bound
+            // took comes to.
             self.lock().index_column(block_root, index, msg_id);
         }
         Some(header)
@@ -408,15 +405,18 @@ mod tests {
         );
         assert_eq!(recent.get_by_column([9; 32], 5), Some(id(1)));
 
-        // A block is not a column and is filed under nothing, and neither is a second insert of
-        // an id the store already holds.
+        // A block is not a column and is filed under nothing.
         assert_eq!(
             recent.insert(id(2), topic(), payload(2, 200), Some(&ssz), clock.now()),
             None
         );
+
+        // An id the store already holds is still read: what a payload says about itself does not
+        // depend on whether the bound had room for it.
+        let column = Topic::parse(COLUMN_TOPIC).expect("a topic the parser takes");
         assert_eq!(
-            recent.insert(id(1), topic(), payload(1, 200), Some(&ssz), clock.now()),
-            None
+            recent.insert(id(1), column, ssz.clone(), Some(&ssz), clock.now()),
+            header
         );
     }
 }
