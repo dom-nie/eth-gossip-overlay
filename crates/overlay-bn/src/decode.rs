@@ -216,4 +216,25 @@ mod tests {
         assert_eq!(u64::from(index), sidecar.index);
         assert_eq!(block_root, bytes32(sidecar.block_root()));
     }
+
+    /// Test 3 of the ticket: nothing a peer or a beacon node can send takes the process down.
+    /// Every prefix of a real payload is tried twice, once as the truncated object and once as
+    /// a truncated snappy frame, and each has to come back as an error.
+    #[test]
+    fn decoder_rejects_truncated_payload_without_panic() {
+        let (_, block) = signed_block(1);
+        let (_, column) = column_sidecar(1, 0);
+
+        for wire in [&block, &column] {
+            let whole = snappy(wire);
+            for cut in 0..wire.len() {
+                assert!(block_header(&snappy(&wire[..cut])).is_err(), "block {cut}");
+                assert!(column_header(&snappy(&wire[..cut])).is_err(), "column {cut}");
+            }
+            for cut in 0..whole.len() {
+                assert!(block_header(&whole[..cut]).is_err(), "block frame {cut}");
+                assert!(column_header(&whole[..cut]).is_err(), "column frame {cut}");
+            }
+        }
+    }
 }
