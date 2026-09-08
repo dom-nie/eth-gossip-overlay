@@ -1248,6 +1248,28 @@ mod tests {
         assert_eq!(bn.idontwant_msgs(), 1, "{}", bn.metrics_text());
     }
 
+    /// T-075 (2). The threshold is what keeps this to the messages worth it: an attestation
+    /// or a small block crosses the socket on its own, with no control message ahead of it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn small_message_publish_sends_no_idontwant() {
+        let mut bn = FakeBn::start_with_metrics().await;
+        let mut received = bn.received();
+        let mut harness = spawn(link_config(&bn), &bn);
+        subscribe_bn(&mut harness, &bn, BLOCK_TOPIC).await;
+        assert!(HELLO_SNAPPY.len() < crate::gossip::IDONTWANT_MESSAGE_SIZE_THRESHOLD);
+
+        publish(&harness.commands, BLOCK_TOPIC, HELLO_SNAPPY)
+            .await
+            .unwrap();
+
+        let (_, data, _) = tokio::time::timeout(WAIT, received.recv())
+            .await
+            .expect("the fake never received the publish")
+            .unwrap();
+        assert_eq!(data, b"hello");
+        assert_eq!(bn.idontwant_msgs(), 0, "{}", bn.metrics_text());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn link_reconnects_after_fake_bn_restart_with_new_peer_id() {
         let bn = FakeBn::start().await;
