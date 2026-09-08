@@ -21,6 +21,9 @@ use crate::tls::PLACEHOLDER_NAME;
 /// (T-046), not here: a key would only let a host ask for less than the design needs.
 const SOCKET_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
+/// Bytes one connection may have in flight before it waits for acknowledgements (§5.3).
+const SEND_WINDOW: u64 = 16 * 1024 * 1024;
+
 /// Why the endpoint could not be brought up, or a peer could not be reached.
 #[derive(Debug, thiserror::Error)]
 pub enum EndpointError {
@@ -126,10 +129,20 @@ fn bind_socket(listen: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
 /// class, and quinn does both unless a transport config says otherwise. Nothing here says
 /// otherwise; the tests hold quinn to it.
 pub fn transport_config(cfg: &Overlay) -> quinn::TransportConfig {
+    let mut cubic = quinn::congestion::CubicConfig::default();
+    // §5.3: a connection carrying one block every 12 s spends every block near slow start with
+    // the RFC's ~14 kB window, and the fleet's paths are ones the operator controls end to end.
+    cubic.initial_window(cfg.initial_window_bytes);
+
     let mut transport = quinn::TransportConfig::default();
     transport
         .keep_alive_interval(Some(cfg.keepalive))
-        .max_idle_timeout(Some(idle_timeout(cfg.idle_timeout)));
+        .max_idle_timeout(Some(idle_timeout(cfg.idle_timeout)))
+        .congestion_controller_factory(Arc::new(cubic))
+        // §5.3: four block-equivalents (§10's 200 kB block) is the floor a stripe and the
+        // batches beside it need in flight; T-033's 64 MiB process cap is what actually bounds
+        // what reaches quinn, so this sits well above the floor rather than on it.
+        .send_window(SEND_WINDOW);
     transport
 }
 
