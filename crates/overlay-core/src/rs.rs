@@ -417,6 +417,18 @@ mod tests {
         assert_eq!(decode(params, &past_the_end), Err(RsError::IndexOutOfRange));
     }
 
+    #[test]
+    fn decode_rejects_chunk_of_wrong_length() {
+        let len = 5 * 2048 + 100;
+        let params = Params::for_len(len, 2048, 0.10).unwrap();
+        let chunks = encode(&payload(len), params);
+
+        let mut short = held(&chunks, 0..params.k);
+        short[2].1.truncate(2047);
+
+        assert_eq!(decode(params, &short), Err(RsError::BadChunkLength));
+    }
+
     /// `k` of the `k + m` indices, sorted, picked by shuffling with `seed`.
     fn subset(params: Params, seed: u64) -> Vec<u16> {
         let mut indices: Vec<u16> = (0..params.k + params.m).collect();
