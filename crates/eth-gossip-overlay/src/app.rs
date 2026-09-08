@@ -82,8 +82,9 @@ const PEER_EVENT_QUEUE: usize = 256;
 
 /// The per-peer send-lane bounds the memory budget is computed from (T-033). They live in
 /// `overlay-transport`, which `overlay-core` must not depend on, so the wiring is what brings
-/// the two together.
-const SEND_LANES: SendLaneBounds = SendLaneBounds {
+/// the two together. Public so that the generator behind `docs/performance.md` states the
+/// budget at the same bounds a running sidecar does.
+pub const SEND_LANES: SendLaneBounds = SendLaneBounds {
     small_frames: SMALL_LANE_FRAMES,
     large_bytes: LARGE_LANE_BYTES,
     large_bytes_max: LARGE_QUEUED_BYTES_MAX,

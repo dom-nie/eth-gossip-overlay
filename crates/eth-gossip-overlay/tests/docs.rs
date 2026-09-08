@@ -14,23 +14,55 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use eth_gossip_overlay::app::SEND_LANES;
 use eth_gossip_overlay::reload::RELOADABLE;
+use overlay_core::budget::{self, MemoryBudget};
 use overlay_core::config::Config;
 use serde_yaml_bw as yaml;
 
 const CONFIGURATION: &str = "docs/configuration.md";
+const PERFORMANCE: &str = "docs/performance.md";
 const LIGHTHOUSE: &str = "docs/lighthouse.md";
 const CONFIG_SOURCE: &str = "crates/overlay-core/src/config.rs";
+const BUDGET_SOURCE: &str = "crates/overlay-core/src/budget.rs";
 const EXAMPLE_CONFIG: &str = "deploy/examples/config.yaml";
 const DROP_IN: &str =
     "deploy/systemd/lighthouse-bn.service.d/10-eth-gossip-overlay-trusted-peer.conf";
 
-/// The markers around the generated part of the reference, the same shape the ticket backlog's
-/// own generator uses, so the preamble a person writes and the table a program writes live in
-/// one document.
-const BEGIN: &str =
-    "<!-- generated from crates/overlay-core/src/config.rs, do not edit by hand -->";
+/// The markers around the generated part of a document, the same shape the ticket backlog's own
+/// generator uses, so the preamble a person writes and the table a program writes live in one
+/// document.
+fn begin(source: &str) -> String {
+    format!("<!-- generated from {source}, do not edit by hand -->")
+}
 const END: &str = "<!-- end generated -->";
+
+/// Holds the generated part of `document` to what `source` says it should be, and writes the
+/// new text instead of failing under `UPDATE_DOCS=1`.
+fn check_generated(document: &str, source: &str, body: &str) {
+    let text = read(document);
+    let begin = begin(source);
+    let (head, rest) = text
+        .split_once(&begin)
+        .unwrap_or_else(|| panic!("{document} has no {begin}"));
+    let (_, tail) = rest
+        .split_once(END)
+        .unwrap_or_else(|| panic!("{document} has no {END}"));
+    let wanted = format!("{head}{begin}\n\n{body}\n{END}{tail}");
+
+    if text == wanted {
+        return;
+    }
+    if std::env::var_os("UPDATE_DOCS").is_some() {
+        let path = workspace_root().join(document);
+        std::fs::write(&path, wanted).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+        return;
+    }
+    panic!(
+        "{document} is not what {source} says; regenerate it with\n    \
+         UPDATE_DOCS=1 cargo test -p eth-gossip-overlay --test docs"
+    );
+}
 
 /// A document longer than this is one an operator stops reading. The count is the words outside
 /// fenced code blocks: a command block is copied, not read.
@@ -304,32 +336,61 @@ fn reference_table() -> String {
     table
 }
 
+/// The roster the memory budget table is stated at: the fleet Architecture.md's §2 describes,
+/// which is the example every other number in `docs/performance.md` is taken at.
+const BUDGET_ROSTER: usize = 200;
+
+/// The generated half of `docs/performance.md`: every bounded structure's worst case at the
+/// Appendix A defaults, the sum, the headroom OPS-N4 asks for, and the ceiling it all has to
+/// fit under.
+fn budget_table() -> String {
+    let budget = MemoryBudget::compute(
+        &Config::default(),
+        BUDGET_ROSTER,
+        budget::MEMORY_MAX_DEFAULT,
+        SEND_LANES,
+    );
+    let mib = |bytes: u64| format!("{:.1}", bytes as f64 / (1024.0 * 1024.0));
+
+    let mut table = format!(
+        "At the shipped defaults, a roster of {BUDGET_ROSTER} hosts and the unit's \
+         `MemoryMax={}M`, which gives every connection a receive window of {} MiB.\n\n\
+         | Structure | Bytes | MiB |\n|---|---:|---:|\n",
+        budget.limit / (1024 * 1024),
+        mib(budget.receive_window),
+    );
+    for (name, bytes) in &budget.rows {
+        table.push_str(&format!("| `{name}` | {bytes} | {} |\n", mib(*bytes)));
+    }
+    table.push_str(&format!(
+        "| **Sum of the bounds** | {} | {} |\n\
+         | **Plus {}% headroom** | {} | {} |\n\
+         | `MemoryMax` | {} | {} |\n",
+        budget.bounded_bytes,
+        mib(budget.bounded_bytes),
+        budget::HEADROOM_PERCENT,
+        budget.total_bytes,
+        mib(budget.total_bytes),
+        budget.limit,
+        mib(budget.limit),
+    ));
+    table
+}
+
 /// Check 1. The reference is generated, so a key added to `Config` without a word about what it
 /// does, or a default changed in the code and not in the document, fails here rather than
 /// reaching an operator. `UPDATE_DOCS=1` writes the new table instead of failing.
 #[test]
 fn configuration_reference_matches_generated_output() {
-    let text = read(CONFIGURATION);
-    let (head, rest) = text
-        .split_once(BEGIN)
-        .unwrap_or_else(|| panic!("{CONFIGURATION} has no {BEGIN}"));
-    let (_, tail) = rest
-        .split_once(END)
-        .unwrap_or_else(|| panic!("{CONFIGURATION} has no {END}"));
-    let wanted = format!("{head}{BEGIN}\n\n{}\n{END}{tail}", reference_table());
+    check_generated(CONFIGURATION, CONFIG_SOURCE, &reference_table());
+}
 
-    if text == wanted {
-        return;
-    }
-    if std::env::var_os("UPDATE_DOCS").is_some() {
-        let path = workspace_root().join(CONFIGURATION);
-        std::fs::write(&path, wanted).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
-        return;
-    }
-    panic!(
-        "{CONFIGURATION} is not what {CONFIG_SOURCE} says; regenerate it with\n    \
-         UPDATE_DOCS=1 cargo test -p eth-gossip-overlay --test docs"
-    );
+/// The same for the memory budget (OPS-N4). An operator sizes `MemoryMax` off this table, and a
+/// bound that moves in the code without moving here would have them size against a number the
+/// process stopped holding to.
+#[test]
+fn memory_budget_table_matches_generated_output() {
+    check_generated(PERFORMANCE, BUDGET_SOURCE, &budget_table());
 }
 
 /// Check 2. Every key an operator can copy out of the shipped example has a row of its own. The

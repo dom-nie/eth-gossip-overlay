@@ -7,6 +7,7 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use overlay_core::budget;
 use overlay_core::config::{Config, LogFormat, LogLevel, Steering};
 use overlay_core::roster::Roster;
 
@@ -84,13 +85,18 @@ fn sets(text: &str, key: &str) -> bool {
 
 /// §5.7: the sidecar gets a memory ceiling it was sized for and never a CPU quota, because CFS
 /// throttling would stall a fanout in the middle of a block.
+///
+/// The ceiling is written out of `MEMORY_MAX_DEFAULT`, which is what the memory budget falls
+/// back to on a host with no cgroup file. A unit that raises `MemoryMax` without raising that
+/// constant would have every such host sizing itself against a limit it no longer runs under.
 #[test]
 fn unit_has_no_cpuquota_and_has_memorymax_512m() {
     let text = read(UNIT);
+    let ceiling = format!("MemoryMax={}M", budget::MEMORY_MAX_DEFAULT / (1024 * 1024));
 
     assert!(
-        has_directive(&text, "MemoryMax=512M"),
-        "{UNIT} is missing MemoryMax=512M"
+        has_directive(&text, &ceiling),
+        "{UNIT} is missing {ceiling}"
     );
     assert!(!sets(&text, "CPUQuota"), "{UNIT} sets a CPU quota");
 }
