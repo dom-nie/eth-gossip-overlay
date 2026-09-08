@@ -26,7 +26,7 @@
 //! buffer is allocated, every read is bounds-checked, and a shape that is not the object the
 //! topic names is an error rather than a panic.
 
-use types::{Hash256, MainnetEthSpec, SignedBeaconBlock, Slot};
+use types::{Hash256, MainnetEthSpec, SignedBeaconBlock};
 
 use overlay_core::wire::MAX_PAYLOAD_BYTES;
 
@@ -47,6 +47,17 @@ pub enum HeaderError {
     Index,
 }
 
+/// Where a `DataColumnSidecar`'s `signed_block_header` starts: the `index`, then the three
+/// offsets of `column`, `kzg_commitments` and `kzg_proofs`.
+const COLUMN_HEADER_AT: usize = 8 + 3 * 4;
+
+/// A `BeaconBlockHeader`: slot, proposer index and three roots.
+const BEACON_BLOCK_HEADER_LEN: usize = 8 + 8 + 3 * 32;
+
+/// The fixed part up to the end of `signed_block_header`, which is the header plus a signature.
+/// What follows it, the inclusion proof, is sized by a preset and is not read here.
+const COLUMN_FIXED_MIN: usize = COLUMN_HEADER_AT + BEACON_BLOCK_HEADER_LEN + 96;
+
 /// The slot a block is for and its block root, from the payload the beacon node gossips.
 pub fn block_header(payload: &[u8]) -> Result<(u64, [u8; 32]), HeaderError> {
     let bytes = decompress(payload)?;
@@ -62,7 +73,8 @@ pub fn block_header(payload: &[u8]) -> Result<(u64, [u8; 32]), HeaderError> {
 /// agreeing is the beacon node's rule to enforce and not this sidecar's: what the responder
 /// indexes and what a requester asks for both have to be what the object says it is.
 pub fn column_header(payload: &[u8]) -> Result<(u64, u8, [u8; 32]), HeaderError> {
-    let _ = decompress(payload)?;
+    let bytes = decompress(payload)?;
+    let _fixed = bytes.get(..COLUMN_FIXED_MIN).ok_or(HeaderError::Truncated)?;
     Err(HeaderError::Ssz)
 }
 
@@ -87,8 +99,8 @@ fn bytes32(root: Hash256) -> [u8; 32] {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use ssz::Encode;
-    use types::{BeaconBlock, ChainSpec};
+    use ssz::{Decode, Encode};
+    use types::{BeaconBlock, BeaconBlockHeader, ChainSpec, DataColumnSidecarFulu, Slot};
 
     use super::*;
 
@@ -120,6 +132,31 @@ mod tests {
         (decoded, wire)
     }
 
+    /// A column sidecar for `slot` carrying `index`, as `types` decodes it. The variable
+    /// lists are empty, so all three offsets are the length of the fixed part and the wire
+    /// form ends where the fixed part does: what the decoder reads is exactly what is here.
+    fn column_sidecar(slot: u64, index: u64) -> (DataColumnSidecarFulu<MainnetEthSpec>, Vec<u8>) {
+        const PROOF_BYTES: usize = 4 * 32;
+        let fixed = COLUMN_FIXED_MIN + PROOF_BYTES;
+        let header = BeaconBlockHeader {
+            slot: Slot::new(slot),
+            proposer_index: 11,
+            parent_root: Hash256::repeat_byte(1),
+            state_root: Hash256::repeat_byte(2),
+            body_root: Hash256::repeat_byte(3),
+        };
+        let mut wire = index.to_le_bytes().to_vec();
+        for _ in 0..3 {
+            wire.extend_from_slice(&(fixed as u32).to_le_bytes());
+        }
+        wire.extend_from_slice(&header.as_ssz_bytes());
+        wire.extend_from_slice(&infinity_signature());
+        wire.extend_from_slice(&[0; PROOF_BYTES]);
+        let decoded = DataColumnSidecarFulu::<MainnetEthSpec>::from_ssz_bytes(&wire)
+            .expect("the hand-built wire form is one types reads back");
+        (decoded, wire)
+    }
+
     #[test]
     fn block_header_decodes_slot_and_root_from_compressed_payload() {
         let (block, wire) = signed_block(4_242);
@@ -128,5 +165,16 @@ mod tests {
 
         assert_eq!(slot, 4_242);
         assert_eq!(root, bytes32(block.canonical_root()));
+    }
+
+    #[test]
+    fn column_header_decodes_slot_index_and_root() {
+        let (sidecar, wire) = column_sidecar(9_001, 200);
+
+        let (slot, index, block_root) = column_header(&snappy(&wire)).unwrap();
+
+        assert_eq!(slot, sidecar.slot().as_u64());
+        assert_eq!(u64::from(index), sidecar.index);
+        assert_eq!(block_root, bytes32(sidecar.block_root()));
     }
 }
