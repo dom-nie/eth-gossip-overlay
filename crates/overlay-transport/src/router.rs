@@ -654,6 +654,78 @@ mod tests {
         );
     }
 
+    /// §5.4: one stripe per region, the origin's own included, each built from this host's own
+    /// view of that region. A cross-region stripe goes straight into the other region, so the
+    /// plan names its hosts and not a relay of theirs, and a region nobody in wants the topic
+    /// gets no plan at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_large_produces_one_plan_per_region_with_live_subscribers_including_own() {
+        let connection = connection().await;
+        let (block, attestation) = (topic("beacon_block"), topic("beacon_attestation_3"));
+        let live = view_in(
+            &connection,
+            vec![
+                ("bn-ap-01", "ap", peer_state(&[(1, &attestation)], &[1])),
+                ("bn-eu-a", "eu", peer_state(&[(1, &block)], &[1])),
+                ("bn-us-01", "us", peer_state(&[(1, &block)], &[1])),
+                ("bn-us-02", "us", peer_state(&[(1, &block)], &[1])),
+            ],
+        );
+
+        let plan = route(
+            &block,
+            Class::Large,
+            Some(chunked(0, 2, 1)),
+            &live,
+            &me(),
+            &Fanout::default(),
+        );
+
+        assert_eq!(
+            plan,
+            RoutePlan::Large(vec![
+                RegionPlan::Whole {
+                    targets: vec![host("bn-eu-a")],
+                },
+                RegionPlan::Whole {
+                    targets: vec![host("bn-us-01"), host("bn-us-02")],
+                },
+            ])
+        );
+    }
+
+    /// A fleet in one region is one stripe, which is the shape an operator running a single
+    /// datacenter gets and the shape §5.4's two regions are each half of.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn route_large_single_region_fleet_produces_one_plan() {
+        let connection = connection().await;
+        let block = topic("beacon_block");
+        let live = view_in(
+            &connection,
+            vec![
+                ("bn-eu-a", "eu", peer_state(&[(1, &block)], &[1])),
+                ("bn-eu-b", "eu", peer_state(&[(1, &block)], &[1])),
+            ],
+        );
+
+        let plan = route(
+            &block,
+            Class::Large,
+            Some(chunked(0, 1, 1)),
+            &live,
+            &me(),
+            &striping(2),
+        );
+
+        assert_eq!(
+            plan,
+            RoutePlan::Large(vec![RegionPlan::Stripe {
+                region: Region("eu".to_owned()),
+                targets_per_chunk: vec![host("bn-eu-a"), host("bn-eu-b")],
+            }])
+        );
+    }
+
     /// v1 sends both classes the same way, so the class changes nothing about the plan. T-072
     /// rewrites this test: a large message becomes a stripe over the same peers, and the two
     /// answers stop matching.
