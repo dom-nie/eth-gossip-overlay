@@ -1544,5 +1544,19 @@ mod tests {
             assert!(!h.roster.has_changed().unwrap(), "the roster was published");
             assert_eq!(h.roster.borrow_and_update().hosts.len(), 8);
         }
+
+        #[tokio::test(start_paused = true)]
+        async fn automatic_reload_removing_exactly_half_is_applied() {
+            let mut h = Watched::start(8).await;
+            h.write(&roster_yaml(4));
+
+            h.poll().await;
+
+            let report = h.stats.last();
+            assert_eq!(report.applied, ["roster"]);
+            assert!(report.error.is_none(), "{report:?}");
+            assert_eq!(h.stats.rejected(), 0);
+            assert_eq!(h.roster.borrow_and_update().hosts.len(), 4);
+        }
     }
 }
