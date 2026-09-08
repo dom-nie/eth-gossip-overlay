@@ -101,6 +101,9 @@ pub enum Outcome {
         topic_id: u16,
         /// The message, padding removed.
         payload: Bytes,
+        /// The same bytes decompressed, which checking the id against the payload produced
+        /// anyway. Handed on so T-083's header decoder does not decompress a second time.
+        ssz: Vec<u8>,
         /// Whether a parity chunk had to stand in for a data one (§12).
         used_parity: bool,
         /// When the first chunk of this message arrived, which is what `reconstruct_seconds`
@@ -446,7 +449,10 @@ impl State {
         else {
             return Some(rejected(Reason::Undecodable, &origin));
         };
-        let computed = msgid::compute(&topic.to_string(), &payload, MAX_PAYLOAD_BYTES);
+        let (computed, ssz) =
+            msgid::compute_with_bytes(&topic.to_string(), &payload, MAX_PAYLOAD_BYTES);
+        // `Branch::Valid` is what says the bytes are there, so the unwrap below cannot be
+        // reached: an id computed over anything else fails the check above it.
         if computed.branch != Branch::Valid || computed.id != *msg_id {
             return Some(rejected(Reason::InvalidPayload, &origin));
         }
@@ -454,6 +460,7 @@ impl State {
             msg_id: *msg_id,
             topic_id,
             payload,
+            ssz: ssz.unwrap_or_default(),
             used_parity,
             first_chunk_at,
             origin,

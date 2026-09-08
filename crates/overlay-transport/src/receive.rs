@@ -658,6 +658,7 @@ impl Ctx {
             Outcome::Completed {
                 msg_id,
                 payload,
+                ssz,
                 used_parity,
                 first_chunk_at,
                 origin,
@@ -667,7 +668,9 @@ impl Ctx {
                 // When the first chunk came off the socket, which is when this host heard of the
                 // message: the wall clock reading now, less how long the rest of it took.
                 let arrived = self.deps.clock.wall() - took;
-                if self.publish_reassembled(topic, class, msg_id, payload, &origin, arrived, now) {
+                if self
+                    .publish_reassembled(topic, class, msg_id, payload, ssz, &origin, arrived, now)
+                {
                     if used_parity {
                         self.deps.stats.parity_used();
                     }
@@ -721,6 +724,7 @@ impl Ctx {
         class: Class,
         id: MessageId,
         payload: Bytes,
+        ssz: Vec<u8>,
         origin: &Hostname,
         arrived: SystemTime,
         now: Instant,
@@ -742,11 +746,10 @@ impl Ctx {
         });
         // Insert site 2 of 3 for the recent store (§5.6); T-016's inbound path and T-032's whole
         // delivery are the others. A reassembled message is always large class, and the peers
-        // that sent its chunks are the ones that may still be missing some of them. The
-        // reassembler checked this payload against its id when it completed, so the
-        // decompression cannot fail on anything it accepted (T-074).
-        let ssz = msgid::decompressed(&payload, wire::MAX_PAYLOAD_BYTES);
-        let header = self.remember(id, topic, payload, ssz.as_deref(), class, now);
+        // that sent its chunks are the ones that may still be missing some of them. `ssz` is
+        // what the reassembler decompressed to check this payload against its id, handed on
+        // rather than produced again (T-074).
+        let header = self.remember(id, topic, payload, Some(&ssz), class, now);
         events::emit_first_arrival(&FirstArrival {
             id,
             class,
