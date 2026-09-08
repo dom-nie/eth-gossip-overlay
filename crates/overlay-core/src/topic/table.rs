@@ -242,6 +242,16 @@ impl Announcer {
         self.told.insert(peer.clone(), sent);
     }
 
+    /// Whether `peer` has already been told what `id` stands for. A relay asks before it names
+    /// an id on a frame: [`OwnTopicTable::intern`] binds one the instant it is called, and an
+    /// entry sent under a binding the peer has not had yet is one it drops and counts as
+    /// `unknown_topic_id_total`, which D12 nominated as the alarm for a different fault (MD-04).
+    pub fn told(&self, peer: &Hostname, id: TopicId) -> bool {
+        self.told
+            .get(peer)
+            .is_some_and(|told| usize::from(id.get()) < *told)
+    }
+
     /// The bindings `peer` has not been told, which this call records as told. T-027 puts them
     /// on that peer's control stream.
     pub fn announce(&mut self, peer: &Hostname, table: &OwnTopicTable) -> Vec<Frame> {

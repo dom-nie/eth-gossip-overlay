@@ -541,23 +541,32 @@ impl Ctx {
     ///
     /// Every payload here came out of a `BATCH` entry, so it already fits the `u16` length one
     /// carries and [`Batcher::push`](overlay_core::batch::Batcher::push)'s precondition holds
-    /// without a second check. A topic this host has no id of its own for is not re-fanned: an
-    /// id its peers have never been told is unreadable on a frame, and minting one mid-flight is
-    /// what D12 rules out.
+    /// without a second check. An entry goes out only under an id the peer has already been
+    /// told: the intern below binds one at once, and a frame naming a binding the peer has not
+    /// had is one it drops and counts as `unknown_topic_id_total` (MD-04). The entries in that
+    /// window are lost, which is what the small class has public gossip for.
+    ///
+    /// `relayed_batches_total` counts a batch that arrives here with something new in it, and
+    /// not one that reached a peer: a batch that correctly re-fanned nothing is D20 working and
+    /// is deliberately not counted, so counting the pushes as well would make it look the same
+    /// as one whose every entry was dropped. What was dropped is `unannounced_topic_total`.
     fn refan(&self, new: Vec<(Topic, Bytes)>) {
         if new.is_empty() {
             return;
         }
+        self.deps.stats.relayed_batch();
         let relaying = &self.deps.relaying;
         let view = relaying.live.live();
-        let mut refanned = false;
         for (topic, payload) in new {
-            let Some(topic_id) = crate::hello::lock(&relaying.topics).table.get(&topic) else {
-                tracing::debug!(%topic, "no id of this host's own to re-fan an entry under");
+            let Some(topic_id) = self.own_id(&topic) else {
                 continue;
             };
+            // One lock for the whole region rather than one per peer. Nothing under it takes
+            // the topics lock, so the order this nests in is the only one there is.
+            let own = crate::hello::lock(&relaying.topics);
             for (hostname, peer) in view.in_region(&self.deps.node.region) {
                 let wanted = *hostname != self.deps.node.hostname
+                    && own.announcer.told(hostname, topic_id)
                     && subs::state(&peer.state).subscribed(&topic);
                 let Some(max_bytes) = wanted
                     .then(|| crate::fanout::datagram_limit(&self.deps.node.hostname, peer))
@@ -565,7 +574,7 @@ impl Ctx {
                 else {
                     continue;
                 };
-                let queued = relaying.batches.push(Small {
+                let _ = relaying.batches.push(Small {
                     dest: hostname.clone(),
                     topic_id,
                     payload: payload.clone(),
@@ -573,12 +582,48 @@ impl Ctx {
                     relay: false,
                     sender: peer.sender.clone(),
                 });
-                refanned |= queued.is_ok();
             }
         }
-        if refanned {
-            self.deps.stats.relayed_batch();
+    }
+
+    /// The id this host names `topic` by on the wire, interning one if it has none (MD-04). A
+    /// relay carries topics its own beacon node never subscribed to, and `route` leaves a
+    /// relayed region out of the origin's direct plan, so an entry this host cannot name is one
+    /// its whole region loses.
+    ///
+    /// Only a topic whose fork digest this host already knows is interned. `Topic::parse`
+    /// accepts any of ~2^32 digests and the fan-out budget is denominated in bytes, so without
+    /// the bound a peer could make this host allocate an unbounded id space at no cost to
+    /// itself; with it the reachable set is the couple of hundred topics a digest has.
+    ///
+    /// The digest is checked between the two lock takes rather than inside one: the announce
+    /// loop reads the mirror and then takes this lock, and taking them the other way round here
+    /// would be the one ordering that can deadlock.
+    fn own_id(&self, topic: &Topic) -> Option<TopicId> {
+        if let Some(id) = crate::hello::lock(&self.deps.relaying.topics)
+            .table
+            .get(topic)
+        {
+            return Some(id);
         }
+        if !self.knows_digest(topic) {
+            tracing::debug!(%topic, peer = %self.peer, "a fork digest this host does not know");
+            return None;
+        }
+        crate::hello::lock(&self.deps.relaying.topics)
+            .intern(topic)
+            .inspect_err(|error| tracing::error!(%topic, %error, "no id left to carry a topic"))
+            .ok()
+    }
+
+    /// Whether `topic`'s fork digest is one this host's own beacon node is subscribed under.
+    fn knows_digest(&self, topic: &Topic) -> bool {
+        self.deps
+            .sets
+            .borrow()
+            .local
+            .iter()
+            .any(|known| known.fork_digest() == topic.fork_digest())
     }
 
     /// Charges this peer's fan-out budget for `bytes` of second-hop work and counts a refusal
