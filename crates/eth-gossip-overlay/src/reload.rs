@@ -1525,5 +1525,24 @@ mod tests {
             assert_eq!(h.stats.last().applied, ["roster"]);
             assert_eq!(h.roster.borrow_and_update().hosts.len(), 4);
         }
+
+        #[tokio::test(start_paused = true)]
+        async fn automatic_reload_removing_more_than_half_the_hosts_is_rejected_and_counted() {
+            let mut h = Watched::start(8).await;
+            h.write(&roster_yaml(3));
+
+            h.poll().await;
+
+            assert_eq!(
+                h.stats.last().error,
+                Some(ReloadError::RosterShrinkRejected {
+                    before: 8,
+                    after: 3
+                })
+            );
+            assert_eq!(h.stats.rejected(), 1);
+            assert!(!h.roster.has_changed().unwrap(), "the roster was published");
+            assert_eq!(h.roster.borrow_and_update().hosts.len(), 8);
+        }
     }
 }
