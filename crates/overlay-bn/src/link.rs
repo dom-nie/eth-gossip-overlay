@@ -1288,7 +1288,11 @@ mod tests {
                 "overlay_gossipsub_topic_msg_recv_counts_unfiltered_total",
                 topic,
             ),
-            testutil::topic_counter(&text, "overlay_gossipsub_topic_msg_recv_counts_total", topic),
+            testutil::topic_counter(
+                &text,
+                "overlay_gossipsub_topic_msg_recv_counts_total",
+                topic,
+            ),
         )
     }
 
@@ -1383,9 +1387,10 @@ mod tests {
         let id = publish(&harness.commands, BLOCK_TOPIC, &compress(&payload))
             .await
             .unwrap();
-        until("the sidecar's IDONTWANT never reached the beacon node", || {
-            bn.idontwant_msgs() > 0
-        })
+        until(
+            "the sidecar's IDONTWANT never reached the beacon node",
+            || bn.idontwant_msgs() > 0,
+        )
         .await;
         assert_eq!(
             bn.msgs_received_unfiltered(BLOCK_TOPIC),
