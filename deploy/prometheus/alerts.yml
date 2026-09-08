@@ -126,9 +126,9 @@ groups:
           summary: "{{ $labels.instance }} has restarted more than twice in an hour"
           runbook: docs/troubleshooting.md#overlaysidecarrestarting
 
-      # §12, and silent until v3: T-082 is what makes this counter move. The series is registered
-      # at zero from v1 so the rule can ship with the rest rather than wait for the release that
-      # gives it a producer.
+      # §12. The threshold is derived in docs/rollout.md: the integration harness measures a
+      # healthy fleet at exactly zero repair requests, and 0.1 per second is about one large
+      # message in a hundred at full custody, sustained for the whole window.
       - alert: OverlayRepairRateRising
         expr: sum by (instance) (rate(overlay_repair_requests_total[15m])) > 0.1
         for: 15m

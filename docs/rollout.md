@@ -193,6 +193,25 @@ The sidecar's own cost is on the dashboard's process row and is the smaller half
 rate(process_cpu_seconds_total{job="eth-gossip-overlay"}[5m])
 ```
 
+## Where the repair-rate threshold comes from
+
+`OverlayRepairRateRising` fires on more than 0.1 repair requests per second per host, held for
+fifteen minutes:
+
+```promql
+sum by (instance) (rate(overlay_repair_requests_total[15m])) > 0.1
+```
+
+The floor is measured. Twenty 100 KiB blocks striped across a five-host region in the integration
+harness, all imported everywhere, leave `overlay_repair_requests_total` at exactly zero on every
+host in every outcome. A healthy fleet does not repair, so the threshold is not clearing a noise
+floor; it sits where the rate is worth waking someone for.
+
+That point comes from the traffic. A host at full custody takes 129 large messages a slot, about
+10.75 a second, so 0.1 per second is one message in a hundred needing repair across the 75 slots
+the window covers. Below that, a lost chunk here and there is repair working; above it, a host or
+a link is dropping chunks steadily.
+
 ## What this buys you on chain
 
 The four things to measure, and how long each one takes to answer, are in

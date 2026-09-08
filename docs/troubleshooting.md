@@ -132,10 +132,19 @@ startup rather than looping it, and `eth-gossip-overlay check-config` says so in
 ## OverlayRepairRateRising
 
 This host is asking peers to resend chunks it did not receive, at a rate that is not incidental.
-Repair is a v3 feature and the counter cannot move before it ships, so on a v1 or v2 fleet this
-alert firing means something other than the sidecar is writing that series.
+[rollout.md](rollout.md) says where the threshold comes from. A rising rate is loss on the overlay
+path rather than a fault in the sidecar: one host or one link dropping chunks, or a region whose
+stripes do not arrive inside `classes.large.repair_deadline_ms`. Read it next to
+`overlay_peer_queue_drops_total` on the sending side, which says whether the chunks were dropped
+before they were ever sent.
 
-Once repair is in, a rising rate is loss on the overlay path rather than a fault in the sidecar:
-one host or one link dropping chunks, or a region whose stripes do not arrive inside the deadline.
-Read it next to `overlay_peer_queue_drops_total` on the sending side, which says whether the
-chunks were dropped before they were ever sent.
+The `outcome` label says which half to look at:
+
+```promql
+sum by (instance, outcome) (rate(overlay_repair_requests_total[15m]))
+```
+
+`completed` rising means chunks are being lost and repair is covering it. `not_found` and
+`timeout` mean the peers that held the message could not answer. `gave_up` means no request went
+out, because no peer that sent a chunk was live and advertising the repair feature bit, which
+during a rolling upgrade is expected and passes.
