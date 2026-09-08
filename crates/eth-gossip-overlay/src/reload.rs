@@ -709,6 +709,15 @@ mod tests {
         fn first(&self) -> ReloadReport {
             self.reports.lock().unwrap()[0].clone()
         }
+
+        /// How many reloads ran at all, which is what a poll that must not reload asserts on.
+        fn count(&self) -> usize {
+            self.reports.lock().unwrap().len()
+        }
+
+        fn last(&self) -> ReloadReport {
+            self.reports.lock().unwrap().last().unwrap().clone()
+        }
     }
 
     impl ReloadStats for Recorded {
@@ -1338,6 +1347,78 @@ mod tests {
                 .filter(|(key, _)| covers(key, path))
                 .count();
             assert!(owners <= 1, "{path} is applied by {owners} appliers");
+        }
+    }
+
+    /// The roster file watcher (T-086) over T-043's real reloader, on a paused clock.
+    mod watcher {
+        use super::*;
+
+        /// A watcher polling a roster file in a temp directory, holding everything a test
+        /// asserts on: the roster the reload publishes, the reports it recorded, and the handle
+        /// a manual reload goes through.
+        struct Watched {
+            _dir: TempDir,
+            roster_path: PathBuf,
+            roster: watch::Receiver<Roster>,
+            stats: Arc<Recorded>,
+            handle: ReloadHandle,
+            _tasks: Vec<JoinHandle<()>>,
+        }
+
+        impl Watched {
+            /// A fleet of `hosts` hosts, with the watcher already polling its roster file.
+            async fn start(hosts: usize) -> Self {
+                let f = Fixture::new(CONFIG, &roster_yaml(hosts));
+                let (roster_path, roster, stats) =
+                    (f.roster_path.clone(), f.roster.clone(), f.stats.clone());
+                let (handle, reloads) = spawn(f.reloader);
+                let watcher =
+                    tokio::spawn(RosterWatcher::new(roster_path.clone(), handle.clone()).run());
+                let watched = Self {
+                    _dir: f._dir,
+                    roster_path,
+                    roster,
+                    stats,
+                    handle,
+                    _tasks: vec![reloads, watcher],
+                };
+                watched.settle().await;
+                watched
+            }
+
+            fn write(&self, roster: &str) {
+                fs::write(&self.roster_path, roster).unwrap();
+            }
+
+            /// The next poll, and whatever it does. The clock is paused, so the interval only
+            /// comes round when a test says so, and the yields are every task reaching its next
+            /// await, which is when the poll has finished.
+            async fn poll(&self) {
+                tokio::time::advance(ROSTER_POLL_INTERVAL).await;
+                self.settle().await;
+            }
+
+            async fn settle(&self) {
+                for _ in 0..16 {
+                    tokio::task::yield_now().await;
+                }
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn changed_mtime_triggers_an_automatic_reload_on_the_next_poll() {
+            let mut h = Watched::start(3).await;
+            h.write(&roster_yaml(4));
+
+            h.poll().await;
+
+            let report = h.stats.last();
+            assert_eq!(report.trigger, Trigger::Automatic);
+            assert_eq!(report.applied, ["roster"]);
+            let published = h.roster.borrow_and_update();
+            assert_eq!(published.hosts.len(), 4);
+            assert_eq!(published.hosts[3].hostname, Hostname("bn-4".to_owned()));
         }
     }
 }
