@@ -75,7 +75,7 @@ pub fn spawn(
     cfg: &IoThread,
     build: impl FnOnce() -> Result<quinn::Endpoint, EndpointError> + Send + 'static,
 ) -> Result<IoHandle, IoThreadError> {
-    let Some(cpu) = cfg.pin_cpu else {
+    let Some(cpu) = pin_cpu(cfg) else {
         tracing::info!(
             pin_cpu = ?cfg.pin_cpu,
             linux = cfg!(target_os = "linux"),
@@ -88,6 +88,20 @@ pub fn spawn(
         });
     };
     dedicated(Some(cpu), build)
+}
+
+/// The core to run the endpoint on, which is what the configuration says.
+#[cfg(target_os = "linux")]
+fn pin_cpu(cfg: &IoThread) -> Option<u32> {
+    cfg.pin_cpu
+}
+
+/// No core anywhere else. A thread of its own with no affinity behind it would cost a context
+/// switch per read and buy nothing, so a configuration written for a fleet still starts a
+/// sidecar on a developer's machine, unchanged from before E9 existed.
+#[cfg(not(target_os = "linux"))]
+fn pin_cpu(_cfg: &IoThread) -> Option<u32> {
+    None
 }
 
 /// The endpoint on a `current_thread` runtime of its own, pinned to `cpu` where there is one.
