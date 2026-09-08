@@ -177,6 +177,18 @@ pub fn ok_json(body: serde_json::Value) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(body)
 }
 
+/// One of the fork's per-topic gossipsub counters out of an encoded registry, by its full
+/// name including the prefix the registry was built with and the `_total` suffix. A family
+/// with no series for `topic` yet reads 0, which is what an untouched counter means.
+pub fn topic_counter(metrics: &str, family: &str, topic: &str) -> u64 {
+    let series = format!("{family}{{hash=\"{topic}\"}} ");
+    metrics
+        .lines()
+        .find_map(|line| line.strip_prefix(&series))
+        .map(|count| count.trim().parse().unwrap())
+        .unwrap_or(0)
+}
+
 /// A link config pointed at `bn`, with a backoff fast enough for a test to see a reconnect and
 /// an ephemeral listen port, so tests run in parallel without agreeing on one.
 pub fn link_config(bn: &FakeBn) -> LinkConfig {

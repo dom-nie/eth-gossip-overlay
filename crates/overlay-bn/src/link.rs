@@ -728,7 +728,7 @@ mod tests {
     use crate::node_key::NodeKey;
     use crate::spec::spec_watch;
     use crate::testutil::{
-        FakeBn, FakeBnEvent, IDLE_TIMEOUT, LOG, RpcAnswer, link_config, node_key, ok_json,
+        self, FakeBn, FakeBnEvent, IDLE_TIMEOUT, LOG, RpcAnswer, link_config, node_key, ok_json,
     };
 
     /// Long enough for a dial, a noise handshake and a gossipsub exchange on a loaded CI box,
@@ -748,6 +748,9 @@ mod tests {
         sets: watch::Sender<SubscriptionSets>,
         lanes: ClassLanes<BnMessage>,
         stats: Arc<Counts>,
+        /// Where the link registered gossipsub's own metrics, which is where a test reads
+        /// what the sidecar's gossipsub took off the socket.
+        registry: Registry,
     }
 
     #[derive(Default)]
@@ -827,11 +830,12 @@ mod tests {
         let (sets, sets_rx) = watch::channel(SubscriptionSets::default());
         let stats = Arc::new(Counts::default());
         let lanes = ClassLanes::new(stats.clone());
+        let mut registry = Registry::default();
         let link = BnLink::spawn(
             cfg,
             node_key,
             BnClient::new(bn.http_addr(), Duration::from_secs(2)),
-            &mut Registry::default(),
+            &mut registry,
             lanes.pusher(),
             spec_tx,
             sets_rx,
@@ -846,6 +850,7 @@ mod tests {
             sets,
             lanes,
             stats,
+            registry,
         }
     }
 
@@ -1267,6 +1272,57 @@ mod tests {
             .expect("the fake never received the publish")
             .unwrap();
         assert_eq!(data, b"hello");
+        assert_eq!(bn.idontwant_msgs(), 0, "{}", bn.metrics_text());
+    }
+
+    /// What the sidecar's gossipsub took off the socket for `topic`, and how much of it was
+    /// new. The fork counts no duplicates of its own, so the difference between the two is
+    /// the duplicate count (T-075).
+    fn recv_counts(harness: &Harness, topic: &str) -> (u64, u64) {
+        let mut text = String::new();
+        prometheus_client::encoding::text::encode(&mut text, &harness.registry).unwrap();
+        (
+            testutil::topic_counter(
+                &text,
+                "overlay_gossipsub_topic_msg_recv_counts_unfiltered_total",
+                topic,
+            ),
+            testutil::topic_counter(&text, "overlay_gossipsub_topic_msg_recv_counts_total", topic),
+        )
+    }
+
+    /// Whether the large lane stays empty for a second: what T-016's inbound task, and behind
+    /// it the seen cache, would have been handed.
+    async fn nothing_large_within_a_second(lanes: &mut ClassLanes<BnMessage>) -> bool {
+        tokio::time::timeout(Duration::from_secs(1), lanes.recv_from(Class::Large))
+            .await
+            .is_err()
+    }
+
+    /// T-075 (3). CL-N4's echo model with the flag off, so nothing but the model is left:
+    /// the beacon node's `forward_msg` excludes the peer a message came from, so the sidecar's
+    /// own publish never comes back and its gossipsub reads nothing on the topic at all.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bn_does_not_return_own_publish_even_with_the_flag_off() {
+        let mut bn = FakeBn::start_with_metrics().await;
+        let mut cfg = link_config(&bn);
+        cfg.gossip.idontwant_on_publish = false;
+        let mut harness = spawn(cfg, &bn);
+        let mut received = bn.received();
+        subscribe_bn(&mut harness, &bn, BLOCK_TOPIC).await;
+        subscribe_link(&harness, &mut bn, &[BLOCK_TOPIC]).await;
+        let payload = incompressible(4096);
+
+        publish(&harness.commands, BLOCK_TOPIC, &compress(&payload))
+            .await
+            .unwrap();
+
+        tokio::time::timeout(WAIT, received.recv())
+            .await
+            .expect("the fake never received the publish")
+            .unwrap();
+        assert!(nothing_large_within_a_second(&mut harness.lanes).await);
+        assert_eq!(recv_counts(&harness, BLOCK_TOPIC), (0, 0));
         assert_eq!(bn.idontwant_msgs(), 0, "{}", bn.metrics_text());
     }
 
