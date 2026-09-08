@@ -30,6 +30,16 @@ pub const REPAIR_ATTEMPT_MIN: Duration = Duration::from_millis(100);
 /// [`REPAIR_TOTAL_BUDGET`] (D24).
 pub const REPAIR_ATTEMPT_MAX: Duration = Duration::from_millis(500);
 
+/// How many columns one host asks for at once (T-083).
+///
+/// `MAX_REPAIR_STREAMS_PER_PEER` is four and HELLO's control stream permanently holds one of
+/// them, so a conforming peer answers three at a time. Every column request goes to the same
+/// lowest-round-trip peer first, unlike a chunk repair, whose candidates are whoever sent that
+/// message a chunk; without a bound a host short of a slot's columns would open a stream per
+/// column against one peer and have most of them dropped. Two leaves the third for the chunk
+/// path, and a column that has to wait is asked for on a later tick.
+pub const MAX_COLUMNS_IN_FLIGHT: usize = 2;
+
 /// How long a message is repaired for, measured from its deadline. Past it the message is given
 /// up on whoever is left to ask, because a block that arrives this late has already lost the race
 /// the overlay exists to win (D24).
@@ -685,5 +695,37 @@ mod tests {
             decided.as_slice(),
             [Decision::AskColumn(request)] if request.index == 9
         ));
+    }
+
+    /// The note T-082 left about stream budgets: three bidi streams reach a conforming peer and
+    /// every column request goes to the same lowest-round-trip host, so a host short of half a
+    /// slot's columns asks for two at a time rather than opening a stream per column.
+    #[test]
+    fn no_more_columns_are_asked_for_at_once_than_the_stream_budget_allows() {
+        let clock = FakeClock::new();
+        let candidates = [(host("near"), Duration::from_millis(5))];
+        let gaps = [gap(&[1, 2, 3, 4, 5], 0)];
+        let none = BitSet::new(128);
+        let mut scheduler = Scheduler::default();
+
+        let first = scheduler.tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now());
+        assert_eq!(first.len(), MAX_COLUMNS_IN_FLIGHT);
+
+        // And no more while those are outstanding.
+        clock.advance(REPAIR_TICK);
+        assert_eq!(
+            scheduler.tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now()),
+            Vec::new()
+        );
+
+        // One answer frees one slot, and the next column takes it.
+        scheduler.answered_column(&([3; 32], 1));
+        clock.advance(REPAIR_TICK);
+        assert_eq!(
+            scheduler
+                .tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now())
+                .len(),
+            1
+        );
     }
 }
