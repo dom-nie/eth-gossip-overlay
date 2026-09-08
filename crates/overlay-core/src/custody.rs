@@ -310,4 +310,16 @@ mod tests {
         assert_eq!(gap.missing, vec![0, 7]);
         assert_eq!(gap.have_count, 1);
     }
+
+    #[test]
+    fn missing_past_deadline_lists_gaps_only_after_deadline() {
+        let clock = FakeClock::new();
+        let mut tracker = tracking(&clock, &[0, 3, 7]);
+
+        clock.advance(DEADLINE - Duration::from_millis(1));
+        assert_eq!(gaps(&mut tracker, &clock), Vec::new());
+
+        clock.advance(Duration::from_millis(1));
+        assert_eq!(gaps(&mut tracker, &clock).len(), 1);
+    }
 }
