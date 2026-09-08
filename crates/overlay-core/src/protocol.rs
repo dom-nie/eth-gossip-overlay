@@ -54,8 +54,10 @@ pub mod features {
 /// class is coalesced into `BATCH` datagrams (T-062), and toward one that advertises `STRIPING`
 /// a large message is cut into chunks and spread over the peer's region (T-073). A peer that
 /// advertises neither is sent whole messages on streams, which is what every release can read
-/// and what makes an upgrade a rolling one.
-pub const SUPPORTED_FEATURES: u64 = features::DATAGRAM_BATCHES | features::STRIPING;
+/// and what makes an upgrade a rolling one. `REPAIR` is the one a peer has to advertise before
+/// it is ever asked for a chunk it holds, or answered when it asks (T-082).
+pub const SUPPORTED_FEATURES: u64 =
+    features::DATAGRAM_BATCHES | features::STRIPING | features::REPAIR;
 
 /// The largest frame this build accepts on a stream, which is what it advertises in HELLO. A
 /// whole message plus the chunk header and the room a `REPAIR_RESP` needs around it.

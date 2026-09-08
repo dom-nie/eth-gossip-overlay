@@ -78,6 +78,6 @@ mod tests {
             "{}",
             lines[0]
         );
-        assert_eq!(lines[1], "protocol 1.0 features=0x3");
+        assert_eq!(lines[1], "protocol 1.0 features=0x7");
     }
 }

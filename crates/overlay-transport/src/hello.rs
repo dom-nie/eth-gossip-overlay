@@ -811,9 +811,15 @@ mod tests {
         let acceptor = cluster.self_hello(1);
         let (dialling, accepting) = cluster.connected_pair(0, 1).await;
         let (mut send, _recv) = dialling.open_bi().await.unwrap();
+        // Bit 3 is one no release has defined, which is what makes the peer several releases
+        // ahead rather than one this build could keep up with.
+        let unheard_of: u64 = 1 << 3;
         let ahead = Hello {
             minor: 7,
-            features: features::DATAGRAM_BATCHES | features::STRIPING | features::REPAIR,
+            features: features::DATAGRAM_BATCHES
+                | features::STRIPING
+                | features::REPAIR
+                | unheard_of,
             ..peer_hello(&lower)
         };
         write_frame(&mut send, &Frame::Hello(ahead)).await.unwrap();
@@ -830,14 +836,15 @@ mod tests {
         .await
         .unwrap();
 
-        // The literals rather than the constants: this release advertises minor 0 and the one
-        // bit it implements, and a test that reads the answer out of the same constants it is
+        // The literals rather than the constants: this release advertises minor 0 and the three
+        // bits it implements, and a test that reads the answer out of the same constants it is
         // checking would still pass if the negotiation stopped happening.
         assert_eq!(peer.negotiated.minor, 0);
-        assert_eq!(peer.negotiated.features, 3);
+        assert_eq!(peer.negotiated.features, 7);
         assert!(peer.negotiated.allows(features::DATAGRAM_BATCHES));
         assert!(peer.negotiated.allows(features::STRIPING));
-        assert!(!peer.negotiated.allows(features::REPAIR));
+        assert!(peer.negotiated.allows(features::REPAIR));
+        assert!(!peer.negotiated.allows(unheard_of));
     }
 
     /// The limits in [`Negotiated`] are the peer's own, not this host's and not the smaller of
