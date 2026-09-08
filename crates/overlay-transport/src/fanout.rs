@@ -675,4 +675,31 @@ mod tests {
         .await;
         assert!(links[0].sent().is_empty());
     }
+
+    /// What a large plan means to this release: the regions too small to stripe are the whole
+    /// answer, in the order the plan lists them, and a striped region waits for the chunk send
+    /// T-073 writes.
+    #[test]
+    fn whole_takes_the_regions_a_stripe_would_not_cover() {
+        let plan = vec![
+            RegionPlan::Whole {
+                targets: vec![Hostname("bn-eu-a".to_owned())],
+            },
+            RegionPlan::Stripe {
+                region: Region("us".to_owned()),
+                targets_per_chunk: vec![Hostname("bn-us-01".to_owned())],
+            },
+            RegionPlan::Whole {
+                targets: vec![Hostname("bn-ap-01".to_owned())],
+            },
+        ];
+
+        assert_eq!(
+            whole(plan),
+            vec![
+                Hostname("bn-eu-a".to_owned()),
+                Hostname("bn-ap-01".to_owned())
+            ]
+        );
+    }
 }

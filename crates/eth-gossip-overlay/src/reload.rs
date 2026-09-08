@@ -35,11 +35,11 @@
 //! - `classes.small.batch_window_ms` and `classes.small.stale_after_ms`: one applier for the
 //!   section, sending both bounds to T-062's batcher task, which closes what it is holding under
 //!   the old ones and collects under the new.
-//! - `overlay.fanout.small.*` and `overlay.fanout.large.stripe_min_recipients`: one applier
-//!   each, both sending the whole fanout T-063's and T-072's router reads on to the fanout
-//!   task. Either one composes the same value, so whichever runs leaves the other's key where
-//!   the file put it. `large.in_region` and `large.cross_region` keep the values the process
-//!   started with, because they need a restart and this must not smuggle them in.
+//! - `overlay.fanout.small.*` and `overlay.fanout.large.stripe_min_recipients`: an applier
+//!   each, both composing the whole fanout T-063's and T-072's router reads and sending it to
+//!   the fanout task, so a file that changed keys in one section carries the other's too.
+//!   `large.in_region` and `large.cross_region` keep the values the process started with,
+//!   because they need a restart and this must not smuggle them in.
 //! - `classes.large.repair_deadline_ms` (D24) has no applier: its consumer arrives with T-082,
 //!   which registers one. Until then a change is still applied, in that [`Reloader::config`]
 //!   answers with it.
