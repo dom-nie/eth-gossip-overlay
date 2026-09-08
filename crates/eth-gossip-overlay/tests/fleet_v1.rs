@@ -782,3 +782,82 @@ async fn wedged_bn_on_one_host_does_not_delay_the_second_hop_to_its_region() {
         "the wedged beacon node cannot have taken anything"
     );
 }
+
+/// DX-N5 scenario 12: a region with fewer subscribers than `stripe_min_recipients` takes a
+/// large message whole, and one below `relay_min_remote_hosts` takes the small class straight
+/// from the origin (§5.4, D36). A single-host region and a two-host region are under both
+/// thresholds the shipped configuration sets, which is how a small fleet stays on the path v1
+/// delivered everything by while a fleet of a hundred hosts per region stripes and relays.
+#[tokio::test(flavor = "multi_thread")]
+async fn single_and_two_host_regions_use_whole_delivery_and_the_direct_small_path() {
+    let (block, subnet) = (topic("beacon_block"), topic("beacon_attestation_9"));
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", 1), ("us", 2)])
+        .start()
+        .await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+        node.subscribe(&subnet).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    fleet.settle().await;
+    let sent_to = |scrape: &Scrape, peer: &Hostname| {
+        scrape.sum(
+            MESSAGES_TOTAL,
+            &[(LABEL_DIRECTION, "out"), (LABEL_PEER, &peer.0)],
+        )
+    };
+    let before = fleet.node(0).metrics().await;
+
+    let payload = b"a block into a two host region".to_vec();
+    fleet.node(0).bn().publish(&block, &payload).await;
+    fleet
+        .wait_for(
+            "both hosts of the other region to import it",
+            WAIT,
+            |fleet| (1..3).all(|node| fleet.node(node).bn().count(&block, &payload) == 1),
+        )
+        .await;
+    let attestation = b"an attestation into a two host region".to_vec();
+    fleet.node(0).bn().publish(&subnet, &attestation).await;
+    fleet
+        .wait_for(
+            "both of them to import the attestation too",
+            WAIT,
+            |fleet| (1..3).all(|node| fleet.node(node).bn().count(&subnet, &attestation) == 1),
+        )
+        .await;
+    fleet.settle().await;
+
+    // One copy of each message per host, which is what whole delivery and a direct batch look
+    // like from the origin: no chunk went to one host for the other to forward, and no batch
+    // went to one host to be re-fanned to the other.
+    let after = fleet.node(0).metrics().await;
+    for node in 1..3 {
+        let peer = fleet.node(node).hostname();
+        assert_eq!(
+            sent_to(&after, peer) - sent_to(&before, peer),
+            2.0,
+            "node {node}"
+        );
+    }
+    // The single-host region is a recipient as well as an origin: nobody in it forwards, so a
+    // message that reached it whole is a message its beacon node has.
+    let homeward = b"a block into a single host region".to_vec();
+    fleet.node(1).bn().publish(&block, &homeward).await;
+    fleet
+        .wait_for(
+            "the other region and the region peer to import it",
+            WAIT,
+            |fleet| {
+                [0, 2]
+                    .iter()
+                    .all(|node| fleet.node(*node).bn().count(&block, &homeward) == 1)
+            },
+        )
+        .await;
+    fleet.settle().await;
+    for (node, scrape) in fleet.metrics().await.iter().enumerate() {
+        assert_eq!(scrape.sum(RELAYED_BATCHES_TOTAL, &[]), 0.0, "node {node}");
+    }
+}
