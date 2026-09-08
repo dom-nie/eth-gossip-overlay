@@ -984,7 +984,7 @@ mod tests {
     use overlay_core::seen::SeenCache;
     use overlay_core::time::{FakeClock, SystemClock};
     use overlay_core::topic::UNKNOWN_LARGE_THRESHOLD_BYTES;
-    use overlay_core::wire::{BatchEntry, BatchFlags, encode_datagram};
+    use overlay_core::wire::{BatchEntry, BatchFlags, RepairReq, RepairResp, encode_datagram};
     use tokio::io::AsyncWriteExt;
 
     /// The gossipsub wire form of `data`: snappy-compressed, which is what a payload has to be
@@ -3360,6 +3360,110 @@ mod tests {
                 .messages(Direction::Out, &cluster.hostname(2)),
             0,
             "B sent C something after receiving from the overlay"
+        );
+    }
+
+    /// A gossipsub payload of about `bytes` that snappy cannot shrink much, so a repair test
+    /// works on a message that really was cut into several chunks.
+    fn large_payload(bytes: usize) -> Vec<u8> {
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let raw: Vec<u8> = (0..bytes)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                (state >> 33) as u8
+            })
+            .collect();
+        payload(&raw)
+    }
+
+    /// Puts `body` in node 1's recent store under the id it hashes to on `topic`, which is what
+    /// an arrival from its own beacon node or a message it reassembled would have done (§5.6).
+    fn holding(cluster: &TestCluster, topic: &Topic, body: &[u8]) -> MessageId {
+        let id = msgid::compute(&topic.to_string(), body, wire::MAX_PAYLOAD_BYTES).id;
+        cluster.recent(1).insert(
+            id,
+            topic.clone(),
+            Bytes::copy_from_slice(body),
+            Instant::now(),
+        );
+        id
+    }
+
+    /// Returns once node 1 has told node 0 the id it names `topic` by, so a frame it answers
+    /// with is one node 0 can resolve (MD-04).
+    async fn told_about(cluster: &TestCluster, topic: &Topic) {
+        let peer = cluster.hostname(0);
+        eventually("node 1 to announce its id for the topic", || {
+            let own = crate::hello::lock(cluster.topics(1));
+            own.table
+                .get(topic)
+                .is_some_and(|id| own.announcer.told(&peer, id))
+        })
+        .await;
+    }
+
+    /// Asks node 1 for `missing` of `msg_id` on a stream of its own and reads back everything it
+    /// answers, up to and including the `REPAIR_RESP` that ends the exchange.
+    async fn ask(peer: &PeerInfo, msg_id: MessageId, missing: Vec<u16>) -> Vec<Frame> {
+        let (mut send, mut recv) = peer.connection.open_bi().await.unwrap();
+        wire::write_frame(
+            &mut send,
+            &Frame::RepairReq(RepairReq::Missing { msg_id, missing }),
+        )
+        .await
+        .unwrap();
+        send.finish().unwrap();
+
+        let mut answer = Vec::new();
+        while let Ok(Ok(wire::Read::Frame(frame))) = tokio::time::timeout(
+            WAIT,
+            wire::read_frame(&mut recv, overlay_core::protocol::MAX_FRAME_BYTES),
+        )
+        .await
+        {
+            let last = matches!(frame, Frame::RepairResp(_));
+            answer.push(frame);
+            if last {
+                break;
+            }
+        }
+        answer
+    }
+
+    /// §5.6's other half: a host that holds a message answers a peer's request with the indices
+    /// it asked for and nothing else. Each chunk travels as a `CHUNK` frame, because that is the
+    /// only shape that carries `FORWARDED`, and the bit is what stops the requester passing them
+    /// on to a region that has already been offered them (D11, D19). A `REPAIR_RESP` ends the
+    /// exchange so the requester knows there is no more coming.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn responder_returns_requested_indices_only_with_forwarded_set_and_a_trailer() {
+        let block = topic("beacon_block");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(1, &block)]).await;
+        let body = large_payload(8 * 1024);
+        let msg_id = holding(&cluster, &block, &body);
+        told_about(&cluster, &block).await;
+
+        let answer = ask(&peer, msg_id, vec![1, 3]).await;
+
+        let split = Params::for_len(body.len(), 2048, 0.10).unwrap();
+        let chunks = overlay_core::rs::encode(&body, split);
+        let (indices, trailer) = answer.split_at(answer.len() - 1);
+        assert_eq!(trailer, [Frame::RepairResp(RepairResp::Chunks(Vec::new()))]);
+        let sent: Vec<(ChunkFlags, u16, Bytes)> = indices
+            .iter()
+            .map(|frame| match frame {
+                Frame::Chunk { flags, chunk } => (*flags, chunk.index, chunk.data.clone()),
+                other => panic!("{other:?} is not a chunk"),
+            })
+            .collect();
+        assert_eq!(
+            sent,
+            vec![
+                (ChunkFlags::FORWARDED, 1, chunks[1].clone()),
+                (ChunkFlags::FORWARDED, 3, chunks[3].clone()),
+            ]
         );
     }
 }
