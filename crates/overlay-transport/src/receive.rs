@@ -732,7 +732,8 @@ impl Ctx {
         // Insert site 2 of 2 for the recent store (§5.6); T-016's inbound path is the other. A
         // reassembled message is always large class, and the peers that sent its chunks are the
         // ones that may still be missing some of them.
-        self.deps
+        let header = self
+            .deps
             .recent
             .insert(id, topic.clone(), payload.clone(), now);
         events::emit_first_arrival(&FirstArrival {
@@ -742,7 +743,7 @@ impl Ctx {
             node: &self.deps.node,
             at: arrived,
             source: events::Source::Overlay { origin },
-            header: None,
+            header,
         });
         self.deps.publish.enqueue(PublishItem {
             topic: topic.clone(),
@@ -1142,6 +1143,19 @@ impl Ctx {
         };
         if wanted {
             self.deps.stats.first_seen(class);
+            // Insert site 3 of 3 for the recent store (§5.6), and the one T-081 left open: a
+            // message that arrived whole is one this host holds, and column repair asks
+            // in-region peers by round trip whatever they sent it (D23). The insert is also
+            // where the payload is decoded, so the event below has the block it names.
+            let header = match class {
+                Class::Large => self.deps.recent.insert(
+                    computed.id,
+                    topic.clone(),
+                    payload.clone(),
+                    self.deps.clock.now(),
+                ),
+                Class::Small => None,
+            };
             events::emit_first_arrival(&FirstArrival {
                 id: computed.id,
                 class,
@@ -1149,7 +1163,7 @@ impl Ctx {
                 node: &self.deps.node,
                 at: arrived,
                 source: events::Source::Overlay { origin: &self.peer },
-                header: None,
+                header,
             });
             self.deps.publish.enqueue(PublishItem {
                 topic,
