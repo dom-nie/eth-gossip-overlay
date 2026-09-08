@@ -10,6 +10,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use overlay_core::budget::STREAM_RECEIVE_WINDOW;
 use overlay_core::config::Overlay;
 use quinn::{IdleTimeout, VarInt};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -23,6 +24,14 @@ const SOCKET_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 
 /// Bytes one connection may have in flight before it waits for acknowledgements (§5.3).
 const SEND_WINDOW: u64 = 16 * 1024 * 1024;
+
+/// Unidirectional streams one peer may hold open at once (DX-N3). A stripe is one stream per
+/// chunk, so this is what a sibling's whole slot may occupy while the receiver reads it.
+const MAX_UNI_STREAMS: u32 = 64;
+
+/// Bidirectional streams one peer may hold open at once (DX-N3), which is T-082's repair
+/// exchange and nothing else.
+const MAX_BIDI_STREAMS: u32 = 4;
 
 /// Why the endpoint could not be brought up, or a peer could not be reached.
 #[derive(Debug, thiserror::Error)]
@@ -142,7 +151,11 @@ pub fn transport_config(cfg: &Overlay) -> quinn::TransportConfig {
         // §5.3: four block-equivalents (§10's 200 kB block) is the floor a stripe and the
         // batches beside it need in flight; T-033's 64 MiB process cap is what actually bounds
         // what reaches quinn, so this sits well above the floor rather than on it.
-        .send_window(SEND_WINDOW);
+        .send_window(SEND_WINDOW)
+        // DX-N3: quinn would let one peer open a hundred of each and hold 1.25 MB per stream.
+        .max_concurrent_uni_streams(MAX_UNI_STREAMS.into())
+        .max_concurrent_bidi_streams(MAX_BIDI_STREAMS.into())
+        .stream_receive_window(varint(STREAM_RECEIVE_WINDOW));
     transport
 }
 
@@ -152,6 +165,13 @@ pub fn transport_config(cfg: &Overlay) -> quinn::TransportConfig {
 /// refuse to start.
 fn idle_timeout(idle: Duration) -> IdleTimeout {
     IdleTimeout::try_from(idle).unwrap_or_else(|_| IdleTimeout::from(VarInt::MAX))
+}
+
+/// A window as the variable-length integer QUIC carries it in, saturating the way
+/// [`idle_timeout`] does: every value passed here is a constant or a share of the memory limit,
+/// both far inside the range, and neither is worth refusing to start over.
+fn varint(bytes: u64) -> VarInt {
+    VarInt::from_u64(bytes).unwrap_or(VarInt::MAX)
 }
 
 #[cfg(test)]
@@ -305,7 +325,11 @@ mod tests {
 
         assert_eq!(field(&transport, "max_concurrent_uni_streams"), "64");
         assert_eq!(field(&transport, "max_concurrent_bidi_streams"), "4");
-        assert_eq!(field(&transport, "stream_receive_window"), "1048576");
+        assert_eq!(
+            field(&transport, "stream_receive_window"),
+            STREAM_RECEIVE_WINDOW.to_string()
+        );
+        assert_eq!(STREAM_RECEIVE_WINDOW, 1024 * 1024);
     }
 
     #[test]

@@ -149,6 +149,12 @@ pub const REASSEMBLY_ENTRY_BYTES: u64 = 4096;
 /// The headroom OPS-N4 asks the budget to leave under `MemoryMax`, as a percentage.
 pub const HEADROOM_PERCENT: u64 = 25;
 
+/// What one QUIC stream may hold unread (DX-N3), and the floor the derived connection window
+/// can never go below: a connection allowed less than one stream's worth would stall the single
+/// stream it is carrying. It lives here rather than beside the rest of the transport parameters
+/// because the budget's arithmetic is written against it and `overlay-core` links no quinn.
+pub const STREAM_RECEIVE_WINDOW: u64 = 1024 * 1024;
+
 /// The per-peer send-lane bounds (T-033). They live in `overlay-transport`, which this crate
 /// must not depend on, so the wiring passes them in rather than this reaching for them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
