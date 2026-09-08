@@ -388,6 +388,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn decode_rejects_duplicate_index_and_out_of_range_index() {
+        let len = 5 * 2048 + 100;
+        let params = Params::for_len(len, 2048, 0.10).unwrap();
+        let chunks = encode(&payload(len), params);
+
+        let mut twice = held(&chunks, 0..params.k);
+        twice.push((0, chunks[0].clone()));
+        let mut past_the_end = held(&chunks, 0..params.k);
+        past_the_end.push((params.k + params.m, chunks[0].clone()));
+
+        assert_eq!(decode(params, &twice), Err(RsError::DuplicateIndex));
+        assert_eq!(decode(params, &past_the_end), Err(RsError::IndexOutOfRange));
+    }
+
     /// `k` of the `k + m` indices, sorted, picked by shuffling with `seed`.
     fn subset(params: Params, seed: u64) -> Vec<u16> {
         let mut indices: Vec<u16> = (0..params.k + params.m).collect();
