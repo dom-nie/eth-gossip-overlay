@@ -46,16 +46,19 @@
 //!
 //! | # | Scenario | Written by |
 //! |---|---|---|
-//! | 10 | two origins with divergent live views publish once, at most 2(k+m) chunks received | T-074 |
+//! | 10 | two origins with divergent live views publish once, at most 2(k+m) chunks received | T-074, written |
 //! | 11 | a chunk arriving before its `TOPIC_ADD` is counted, not crashed, and zero in steady state | T-073, written |
 //! | 12 | single-host and two-host regions use whole delivery and the direct small path | T-072, written |
 //! | 13 | an unsubscribed relay re-fans but does not publish | T-063, written |
 //! | 15 | a wedged beacon node on one host does not delay the second hop to its region | T-063 for the relay hop, T-073 for the chunk one, both written |
-//! | 16 | one third of a region lost mid-slot completes via parity or repair before the deadline | T-074, T-082 |
+//! | 16 | one third of a region lost mid-slot completes via parity or repair before the deadline | T-074 for the parity half, written; T-082 for the repair half |
 //!
 //! T-073 also left the egress figure §5.4 is built around in
 //! `striped_block_costs_the_origin_two_block_equivalents_and_each_host_one`, which is not one of
-//! DX-N5's scenarios but is the number the whole large class exists for.
+//! DX-N5's scenarios but is the number the whole large class exists for. T-074 left two more
+//! that are not DX-N5's either, `block_striped_across_region_is_published_once_on_every_node`
+//! and `block_still_completes_when_one_stripe_host_is_down`: the first is striping delivering at
+//! all, and the second is what the parity chunks are for.
 
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used)]
 
@@ -71,7 +74,7 @@ use eth_gossip_overlay::logging::{self, LogHandle};
 use eth_gossip_overlay::metrics::{LABEL_DIRECTION, LABEL_PEER, MESSAGES_TOTAL};
 use overlay_bn::node_key::NodeKey;
 use overlay_bn::testutil::{FakeBn, FakeBnEvent};
-use overlay_core::config::{Config, LargeFanout, Log, LogFormat, LogLevel};
+use overlay_core::config::{Config, LargeClass, LargeFanout, Log, LogFormat, LogLevel};
 use overlay_core::relay;
 use overlay_core::roster::Hostname;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
@@ -153,6 +156,10 @@ pub struct Settings {
     /// large message is striped across it rather than sent whole (§5.4). A harness fleet is
     /// below the shipped sixteen, so a scenario about striping lowers it.
     pub stripe_min_recipients: usize,
+    /// `classes.large.parity_ratio`: parity chunks as a fraction of data chunks. A fleet of a
+    /// handful of hosts gives each of them several chunks, so a scenario about losing a host
+    /// raises this above the shipped tenth to buy back what that host was carrying.
+    pub parity_ratio: f64,
 }
 
 impl Default for Settings {
@@ -162,6 +169,7 @@ impl Default for Settings {
             relay_min_remote_hosts: relay::DEFAULT_RELAY_MIN_REMOTE_HOSTS,
             relays_per_remote_region: relay::DEFAULT_RELAYS_PER_REMOTE_REGION,
             stripe_min_recipients: LargeFanout::default().stripe_min_recipients,
+            parity_ratio: LargeClass::default().parity_ratio,
         }
     }
 }
@@ -480,6 +488,7 @@ impl Fleet {
              \x20 fanout:\n    large:\n      stripe_min_recipients: {}\n\
              \x20   small:\n      relay_min_remote_hosts: {}\n\
              \x20     relays_per_remote_region: {}\n\
+             classes:\n  large:\n    parity_ratio: {}\n\
              bn:\n  node_key_file: {}\n  identity_url: \"{}\"\n  libp2p_addr: \"{}\"\n\
              \x20 listen_addr: \"/ip4/127.0.0.1/tcp/0\"\n\
              inject: {}\nadmin_socket: {}\nmetrics_listen: \"{}\"\n\
@@ -491,6 +500,7 @@ impl Fleet {
             self.settings.stripe_min_recipients,
             self.settings.relay_min_remote_hosts,
             self.settings.relays_per_remote_region,
+            self.settings.parity_ratio,
             path("node.key"),
             node.bn_http,
             node.bn_addr,

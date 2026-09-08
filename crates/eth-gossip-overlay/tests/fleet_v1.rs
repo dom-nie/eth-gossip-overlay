@@ -4,16 +4,18 @@
 use std::time::{Duration, Instant};
 
 use eth_gossip_overlay::metrics::{
-    BN_SUBSCRIPTIONS, BYTES_TOTAL, FIRST_SEEN_TOTAL, LABEL_CLASS, LABEL_DIRECTION, LABEL_PEER,
-    LABEL_REASON, LABEL_SOURCE, LABEL_UNIT, MESSAGES_TOTAL, PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL,
-    PEER_QUEUE_DEPTH, PEER_QUEUE_DROPS_TOTAL, PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF,
-    RELAYED_BATCHES_TOTAL, SOURCE_OVERLAY, UNANNOUNCED_TOPIC_TOTAL, UNIT_BYTES,
+    BN_SUBSCRIPTIONS, BYTES_TOTAL, CHUNKS_RECEIVED_TOTAL, FIRST_SEEN_TOTAL, LABEL_CLASS,
+    LABEL_DIRECTION, LABEL_PEER, LABEL_REASON, LABEL_SOURCE, LABEL_UNIT, MESSAGES_TOTAL,
+    PARITY_USED_TOTAL, PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL, PEER_QUEUE_DEPTH, PEER_QUEUE_DROPS_TOTAL,
+    PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF, RECONSTRUCT_SECONDS, RELAYED_BATCHES_TOTAL,
+    REPAIR_REQUESTS_TOTAL, SOURCE_OVERLAY, UNANNOUNCED_TOPIC_TOTAL, UNIT_BYTES,
     UNKNOWN_TOPIC_ID_TOTAL, UNWANTED_TOPIC_TOTAL,
 };
 use harness::{Fleet, SETTLE, Scrape, WAIT, topic};
 use overlay_core::protocol::features;
 use overlay_core::relay;
 use overlay_core::roster::Hostname;
+use overlay_core::rs::Params;
 use overlay_transport::sender::{DropReason, LARGE_LANE_BYTES};
 use overlay_transport::testutil::features::mask;
 
@@ -1014,6 +1016,233 @@ async fn striped_block_costs_the_origin_two_block_equivalents_and_each_host_one(
         assert!(
             (0.8..1.2).contains(&host),
             "node {node} sent {host} block-equivalents"
+        );
+    }
+}
+
+/// How many messages a node has put back together from chunks, which is the `_count` of the
+/// `reconstruct_seconds` histogram.
+fn reassembled(scrape: &Scrape) -> f64 {
+    scrape.sum(&format!("{RECONSTRUCT_SECONDS}_count"), &[])
+}
+
+/// The chunks one message of `bytes` is cut into at `parity_ratio`, rounded generously: the
+/// sidecar splits the gossipsub wire form, and snappy leaves an incompressible payload a few
+/// bytes longer than it started.
+fn chunks_per_message(bytes: usize, parity_ratio: f64) -> usize {
+    let params = Params::for_len(bytes + 64, 2048, parity_ratio).expect("a split");
+    usize::from(params.k) + usize::from(params.m)
+}
+
+/// §5.4 end to end, which is what the whole large class exists for: a block one beacon node
+/// validated is cut up, spread over the region a chunk per host, passed on once by each of them
+/// and put back together on every host, whose beacon node imports it exactly once. Until the
+/// reassembler landed the chunks were counted, forwarded and dropped, so this is the scenario
+/// that says striping delivers.
+///
+/// Nothing is asserted about `parity_used_total` here. A message is put back together from the
+/// first k chunks that arrive, and a host reads its own assignment before the forwards, so a
+/// parity chunk lands among the first k whenever the arrival order is not the index order. The
+/// counter says the codec was needed, which is a weaker thing than a host having been down.
+#[tokio::test(flavor = "multi_thread")]
+async fn block_striped_across_region_is_published_once_on_every_node() {
+    let block = topic("beacon_block");
+    let hosts = 5;
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", hosts)])
+        .config(|settings| settings.stripe_min_recipients = 2)
+        .start()
+        .await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+
+    let payload = incompressible(21, 200 * 1024);
+    fleet.node(0).bn().publish(&block, &payload).await;
+
+    fleet
+        .wait_for(
+            "every other beacon node to import the block",
+            WAIT,
+            |fleet| (1..hosts).all(|node| fleet.node(node).bn().count(&block, &payload) == 1),
+        )
+        .await;
+    fleet.settle().await;
+    for node in 1..hosts {
+        assert_eq!(
+            fleet.node(node).bn().count(&block, &payload),
+            1,
+            "node {node}"
+        );
+    }
+    assert_eq!(
+        fleet.node(0).bn().count(&block, &payload),
+        0,
+        "the origin was published its own block"
+    );
+    let now = fleet.metrics().await;
+    for node in 1..hosts {
+        assert_eq!(reassembled(&now[node]), 1.0, "node {node}");
+    }
+    assert_eq!(
+        reassembled(&now[0]),
+        0.0,
+        "the origin reassembled its own block"
+    );
+}
+
+/// §5.4 step 4: parity exists for the host that is not there. One host of the region is cut off
+/// from the rest of it, so the chunks the origin striped to it never reach anybody else, and
+/// every other host still ends up with the block because the parity chunks stand in for what it
+/// was carrying. The origin keeps the cut host in its live view, which is what makes it a stripe
+/// target whose chunks go nowhere rather than a host the assignment skips.
+#[tokio::test(flavor = "multi_thread")]
+async fn block_still_completes_when_one_stripe_host_is_down() {
+    let block = topic("beacon_block");
+    let hosts = 5;
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", hosts)])
+        .config(|settings| {
+            settings.stripe_min_recipients = 2;
+            settings.parity_ratio = 1.0;
+        })
+        .start()
+        .await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    fleet.partition(&[hosts - 1], &[1, 2, 3]).await;
+
+    let payload = incompressible(22, 100 * 1024);
+    fleet.node(0).bn().publish(&block, &payload).await;
+
+    fleet
+        .wait_for(
+            "the rest of the region to import the block",
+            WAIT,
+            |fleet| (1..hosts - 1).all(|node| fleet.node(node).bn().count(&block, &payload) == 1),
+        )
+        .await;
+    fleet.settle().await;
+    let now = fleet.metrics().await;
+    for node in 1..hosts - 1 {
+        assert_eq!(
+            fleet.node(node).bn().count(&block, &payload),
+            1,
+            "node {node}"
+        );
+        assert!(
+            now[node].sum(PARITY_USED_TOTAL, &[]) > 0.0,
+            "node {node} completed without the parity it should have needed"
+        );
+    }
+}
+
+/// DX-N5 scenario 10 and D19: two beacon nodes take the same block off public gossip, and their
+/// sidecars do not see the same region, so the two stripes overlap without matching. Every host
+/// still publishes the block once, and reads at most two stripes' worth of chunks, because the
+/// second copy of an index is stored nowhere and passed on nowhere.
+///
+/// Neither origin can hear the other, which is what makes them two origins rather than one: a
+/// sidecar that had already put the block together would find its own beacon node's copy in its
+/// seen cache and fan out nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn two_origins_with_divergent_live_views_publish_once_with_at_most_2k_plus_m_chunks_received()
+{
+    let block = topic("beacon_block");
+    let hosts = 5;
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", hosts)])
+        .config(|settings| settings.stripe_min_recipients = 2)
+        .start()
+        .await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    // One origin sees neither the other origin nor the last host, so the two assignments run
+    // over different pools and neither origin is a target of the other.
+    fleet.partition(&[0], &[1, hosts - 1]).await;
+    let before = fleet.metrics().await;
+
+    let payload = incompressible(23, 100 * 1024);
+    fleet.node(0).bn().publish(&block, &payload).await;
+    fleet.node(1).bn().publish(&block, &payload).await;
+
+    fleet
+        .wait_for(
+            "every host that is not an origin to import it",
+            WAIT,
+            |fleet| (2..hosts).all(|node| fleet.node(node).bn().count(&block, &payload) == 1),
+        )
+        .await;
+    fleet.settle().await;
+    let stripe = chunks_per_message(payload.len(), 0.1);
+    let now = fleet.metrics().await;
+    for node in 0..hosts {
+        assert!(
+            fleet.node(node).bn().count(&block, &payload) <= 1,
+            "node {node} imported the block twice"
+        );
+        let chunks = now[node].sum(CHUNKS_RECEIVED_TOTAL, &[])
+            - before[node].sum(CHUNKS_RECEIVED_TOTAL, &[]);
+        assert!(
+            chunks <= 2.0 * stripe as f64,
+            "node {node} read {chunks} chunks of a {stripe} chunk message"
+        );
+    }
+    for origin in 0..2 {
+        assert!(
+            reassembled(&now[origin]) <= 1.0,
+            "origin {origin} reassembled more than the one stripe it could hear"
+        );
+    }
+}
+
+/// DX-N5 scenario 16, the parity half: a third of a region goes away in the middle of a slot,
+/// taking the chunks the origin striped to it with them, and the hosts that are left put the
+/// block together from parity without asking anyone for anything. The repair half of this
+/// scenario, where parity alone is not enough, arrives with T-082; `repair_requests_total`
+/// reading zero here is what says parity did the work on its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_third_of_a_region_lost_mid_slot_completes_via_parity_or_repair_before_the_deadline() {
+    let block = topic("beacon_block");
+    let hosts = 6;
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", hosts)])
+        .config(|settings| {
+            settings.stripe_min_recipients = 2;
+            settings.parity_ratio = 1.0;
+        })
+        .start()
+        .await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    fleet.partition(&[4, 5], &[1, 2, 3]).await;
+
+    let payload = incompressible(24, 100 * 1024);
+    fleet.node(0).bn().publish(&block, &payload).await;
+
+    fleet
+        .wait_for("the two thirds still talking to import it", WAIT, |fleet| {
+            (1..4).all(|node| fleet.node(node).bn().count(&block, &payload) == 1)
+        })
+        .await;
+    fleet.settle().await;
+    let now = fleet.metrics().await;
+    for node in 1..4 {
+        assert!(
+            now[node].sum(PARITY_USED_TOTAL, &[]) > 0.0,
+            "node {node} did not need the parity a third of the region was carrying"
+        );
+        assert_eq!(
+            now[node].sum(REPAIR_REQUESTS_TOTAL, &[]),
+            0.0,
+            "node {node} asked for chunks parity had already covered"
         );
     }
 }
