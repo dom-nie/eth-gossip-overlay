@@ -172,8 +172,16 @@ impl CustodyTracker {
     }
 
     /// Records that column `index` of `block_root` arrived for `slot`.
+    ///
+    /// A column that arrives before its block opens the slot, because the columns of a block do
+    /// not wait for it; the block is what puts a deadline on the slot, so nothing is repaired
+    /// until one has been seen.
     pub fn on_column(&mut self, slot: u64, index: u16, block_root: [u8; 32]) {
-        let _ = (slot, index, block_root);
+        let columns = self.columns;
+        let block = self.slots.entry(slot).or_insert_with(|| Block::new(columns));
+        block.root.get_or_insert(block_root);
+        block.have.insert(index);
+        self.trim();
     }
 
     /// Every block whose deadline has passed and which is still short of the threshold, with the
