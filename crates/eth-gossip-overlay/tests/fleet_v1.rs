@@ -5,11 +5,11 @@ use std::time::{Duration, Instant};
 
 use eth_gossip_overlay::metrics::{
     BN_SUBSCRIPTIONS, BYTES_TOTAL, CHUNKS_RECEIVED_TOTAL, FIRST_SEEN_TOTAL, LABEL_CLASS,
-    LABEL_DIRECTION, LABEL_PEER, LABEL_REASON, LABEL_SOURCE, LABEL_UNIT, MESSAGES_TOTAL,
-    PARITY_USED_TOTAL, PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL, PEER_QUEUE_DEPTH, PEER_QUEUE_DROPS_TOTAL,
-    PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF, RECONSTRUCT_SECONDS, RELAYED_BATCHES_TOTAL,
-    REPAIR_REQUESTS_TOTAL, SOURCE_OVERLAY, UNANNOUNCED_TOPIC_TOTAL, UNIT_BYTES,
-    UNKNOWN_TOPIC_ID_TOTAL, UNWANTED_TOPIC_TOTAL,
+    LABEL_DIRECTION, LABEL_OUTCOME, LABEL_PEER, LABEL_REASON, LABEL_SOURCE, LABEL_UNIT,
+    MESSAGES_TOTAL, PARITY_USED_TOTAL, PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL, PEER_QUEUE_DEPTH,
+    PEER_QUEUE_DROPS_TOTAL, PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF, RECONSTRUCT_SECONDS,
+    RELAYED_BATCHES_TOTAL, REPAIR_REQUESTS_TOTAL, SOURCE_OVERLAY, UNANNOUNCED_TOPIC_TOTAL,
+    UNIT_BYTES, UNKNOWN_TOPIC_ID_TOTAL, UNWANTED_TOPIC_TOTAL,
 };
 use harness::{Fleet, SETTLE, Scrape, WAIT, incompressible, topic};
 use overlay_core::protocol::features;
@@ -1239,6 +1239,55 @@ async fn one_third_of_a_region_lost_mid_slot_completes_via_parity_or_repair_befo
             scrape.sum(REPAIR_REQUESTS_TOTAL, &[]),
             0.0,
             "node {node} asked for chunks parity had already covered"
+        );
+    }
+}
+
+/// §5.6 on a whole fleet: a stripe host stops talking to the rest of its region in the middle of
+/// a transfer, so the chunks the origin sent it reach nobody else, and the shipped tenth of
+/// parity is nowhere near enough to cover what it was carrying. Every host that is left asks a
+/// peer for exactly the indices it is short of and hands its beacon node the block once.
+///
+/// The host is cut from the region rather than stopped, because a host the origin no longer sees
+/// is one the assignment skips and there is nothing to repair; what repair exists for is the host
+/// that is still a stripe target when the block is cut up and is gone by the time its chunks
+/// should have been passed on.
+#[tokio::test(flavor = "multi_thread")]
+async fn block_completes_via_repair_when_a_stripe_host_dies_mid_transfer() {
+    let block = topic("beacon_block");
+    let hosts = 5;
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", hosts)])
+        .config(|settings| settings.stripe_min_recipients = 2)
+        .start()
+        .await;
+    for node in fleet.nodes() {
+        node.subscribe(&block).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    fleet.partition(&[hosts - 1], &[1, 2, 3]).await;
+
+    let payload = incompressible(25, 100 * 1024);
+    fleet.node(0).bn().publish(&block, &payload).await;
+
+    fleet
+        .wait_for(
+            "the rest of the region to import the block",
+            WAIT,
+            |fleet| (1..hosts - 1).all(|node| fleet.node(node).bn().count(&block, &payload) == 1),
+        )
+        .await;
+    fleet.settle().await;
+    let now = fleet.metrics().await;
+    for (node, scrape) in now.iter().enumerate().take(hosts - 1).skip(1) {
+        assert_eq!(
+            fleet.node(node).bn().count(&block, &payload),
+            1,
+            "node {node}"
+        );
+        assert!(
+            scrape.sum(REPAIR_REQUESTS_TOTAL, &[(LABEL_OUTCOME, "completed")]) > 0.0,
+            "node {node} finished the block without repairing it"
         );
     }
 }
