@@ -3657,4 +3657,54 @@ mod tests {
             [Frame::RepairResp(RepairResp::NotFound)]
         );
     }
+
+    /// D24's responder cap, which is DX-N3's `max_concurrent_bidi_streams` under another name.
+    ///
+    /// Two halves. A peer cannot have more streams of this kind open at once than the constant,
+    /// because the connection was given that number and the control stream it opened during
+    /// HELLO is one of them; that is the bound the responder is held to and the reason its own
+    /// guard is a second line rather than the first. And every stream inside the bound is served
+    /// by a task of its own, so the peers that opened a stream and said nothing hold up neither
+    /// each other nor the one that did ask.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn responder_caps_concurrent_repair_streams_per_peer_at_the_constant() {
+        assert_eq!(
+            MAX_REPAIR_STREAMS_PER_PEER,
+            crate::endpoint::MAX_BIDI_STREAMS as usize
+        );
+        let block = topic("beacon_block");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(1, &block)]).await;
+        let body = large_payload(8 * 1024);
+        let msg_id = holding(&cluster, &block, &body);
+        told_about(&cluster, &block).await;
+
+        // Every stream the peer is allowed beyond its control stream, opened and left silent.
+        let mut held = Vec::new();
+        while let Ok(Ok(stream)) = tokio::time::timeout(SETTLE, peer.connection.open_bi()).await {
+            held.push(stream);
+        }
+        assert_eq!(held.len() + 1, MAX_REPAIR_STREAMS_PER_PEER);
+
+        // The last of them still gets an answer while the others sit there saying nothing.
+        let (mut send, mut recv) = held.pop().unwrap();
+        wire::write_frame(
+            &mut send,
+            &Frame::RepairReq(RepairReq::Missing {
+                msg_id,
+                missing: vec![0],
+            }),
+        )
+        .await
+        .unwrap();
+        send.finish().unwrap();
+
+        let answered = tokio::time::timeout(WAIT, wire::read_frame(&mut recv, MAX_FRAME_BYTES))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(&answered, Read::Frame(Frame::Chunk { chunk, .. }) if chunk.index == 0),
+            "{answered:?}"
+        );
+    }
 }
