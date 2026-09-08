@@ -562,6 +562,8 @@ impl Bits {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
     use crate::rs::{self, Params};
     use crate::topic::Topic;
@@ -998,6 +1000,58 @@ mod tests {
         let last = feed(&reassembler, msg_id, params, &chunks, &data, now);
 
         assert_eq!(last, Outcome::Rejected(Reason::InvalidPayload));
+    }
+
+    /// `k` of the `k + m` indices in the order `seed` shuffles them into, which is the order a
+    /// stripe and its second hop really deliver in.
+    fn arrival_order(params: Params, seed: u64) -> Vec<u16> {
+        let mut indices: Vec<u16> = (0..params.k + params.m).collect();
+        let mut state = seed | 1;
+        for position in (1..indices.len()).rev() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            indices.swap(position, (state % (position as u64 + 1)) as usize);
+        }
+        indices.truncate(usize::from(params.k));
+        indices
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(48))]
+
+        /// Whatever k chunks arrive and whatever order they arrive in, the message comes back
+        /// once and only once. Nothing tells a receiver which chunks it will end up holding, so
+        /// this is the property the whole large class rests on.
+        #[test]
+        fn property_random_arrival_order_and_random_k_subset_always_completes_once(
+            len in prop_oneof![1usize..=4096, 4097usize..=64 * 1024],
+            seed in any::<u64>(),
+        ) {
+            let (msg_id, params, chunks, payload) = striped(len, 512);
+            let reassembler = Reassembler::new(ReassembleConfig::default());
+            let now = Instant::now();
+            let order = arrival_order(params, seed);
+
+            let mut completions = 0;
+            for &index in &order {
+                let chunk = header(msg_id, params, index, chunks[usize::from(index)].clone());
+                if let Outcome::Completed { payload: got, used_parity, .. } =
+                    on(&reassembler, &chunk, false, now)
+                {
+                    completions += 1;
+                    prop_assert_eq!(&got[..], &payload[..]);
+                    prop_assert_eq!(used_parity, order.iter().any(|i| *i >= params.k));
+                }
+            }
+
+            prop_assert_eq!(completions, 1);
+            prop_assert_eq!(reassembler.in_flight(), 0);
+            for index in 0..params.k + params.m {
+                let chunk = header(msg_id, params, index, chunks[usize::from(index)].clone());
+                prop_assert_eq!(on(&reassembler, &chunk, false, now), Outcome::LateAfterCompletion);
+            }
+        }
     }
 
     /// Completion frees the entry as well as recording the id, so nothing stays in flight for a
