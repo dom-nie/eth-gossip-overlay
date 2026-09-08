@@ -641,6 +641,87 @@ mod tests {
             host("bn-b")
         );
     }
+    /// DX-N3's cap is a queue, not a refusal: a peer with more to send than 64 streams' worth
+    /// waits for one to close rather than losing anything. A striping origin opens a stream per
+    /// chunk, and a slot's columns are well over the cap, so this is the ordinary case rather
+    /// than an abusive one.
+    ///
+    /// The receiver holds its 64 without reading, which is what proves the cap binds: nothing
+    /// else can arrive while they are open, and everything does once they are drained.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn streams_beyond_the_uni_cap_queue_and_all_complete_without_stall() {
+        const STREAMS: u32 = 100;
+        const NOTHING_FURTHER: Duration = Duration::from_millis(50);
+        let (seeds, pins) = fleet(&["bn-a", "bn-b"]);
+        let cfg = config("127.0.0.1:0");
+        let acceptor = endpoint(&cfg, &pins, &seeds, "bn-a");
+        let dialler = endpoint(&cfg, &pins, &seeds, "bn-b");
+        let addr = acceptor.local_addr().unwrap();
+
+        let received = tokio::spawn(async move {
+            let connection = acceptor
+                .accept()
+                .await
+                .expect("the endpoint is still open")
+                .await
+                .unwrap();
+            let mut held = Vec::new();
+            for _ in 0..MAX_UNI_STREAMS {
+                held.push(connection.accept_uni().await.unwrap());
+            }
+            assert!(
+                tokio::time::timeout(NOTHING_FURTHER, connection.accept_uni())
+                    .await
+                    .is_err(),
+                "a stream past the cap arrived while the cap's worth were still open"
+            );
+
+            let mut payloads = Vec::new();
+            for mut stream in held {
+                payloads.push(stream.read_to_end(64).await.unwrap());
+            }
+            for _ in MAX_UNI_STREAMS..STREAMS {
+                let mut stream = connection.accept_uni().await.unwrap();
+                payloads.push(stream.read_to_end(64).await.unwrap());
+            }
+            payloads
+        });
+
+        let connection = connect(
+            &cfg,
+            TEST_RECEIVE_WINDOW,
+            &dialler,
+            addr,
+            dial_config(&pins, &seeds, "bn-b", "bn-a"),
+        )
+        .await
+        .unwrap();
+        let sent = tokio::spawn(async move {
+            for index in 0..STREAMS {
+                let mut stream = connection.open_uni().await.unwrap();
+                stream.write_all(&index.to_le_bytes()).await.unwrap();
+                stream.finish().unwrap();
+            }
+            // Held open, because a connection dropped here would reset the streams still in
+            // flight and the receiver would see fewer than it was sent.
+            std::future::pending::<()>().await;
+        });
+
+        let mut arrived: Vec<Vec<u8>> = tokio::time::timeout(Duration::from_secs(1), received)
+            .await
+            .expect("every stream to complete on loopback within a second")
+            .unwrap();
+        sent.abort();
+
+        arrived.sort();
+        let wanted: Vec<Vec<u8>> = {
+            let mut all: Vec<Vec<u8>> = (0..STREAMS).map(|i| i.to_le_bytes().to_vec()).collect();
+            all.sort();
+            all
+        };
+        assert_eq!(arrived, wanted);
+    }
+
     /// `overlay.listen` is the one thing an operator can change here, so the error names it.
     /// A bare "address already in use" leaves them guessing which of the sidecar's ports it
     /// means.
