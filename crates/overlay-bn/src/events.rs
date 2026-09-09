@@ -407,6 +407,26 @@ mod tests {
         events.task.abort();
     }
 
+    #[tokio::test]
+    async fn a_beacon_node_without_the_event_endpoint_is_not_retried() {
+        // No mock is mounted, so every request is answered 404.
+        let bn = MockServer::start().await;
+        let (_spec, spec) = spec_watch();
+        let arrivals = Arc::new(Arrivals::new(Arc::new(FakeClock::new()), spec));
+
+        let events = BlockEvents::spawn(
+            format!("{}{EVENTS}?topics=block", bn.uri())
+                .parse()
+                .unwrap(),
+            Backoff::new(Duration::from_millis(5), Duration::from_millis(5)),
+            arrivals,
+            Arc::new(()),
+        );
+
+        timeout(PATIENCE, events.task).await.unwrap().unwrap();
+        assert_eq!(bn.received_requests().await.unwrap().len(), 1);
+    }
+
     #[test]
     fn arrival_records_older_than_eight_slots_are_dropped() {
         let clock = FakeClock::new();
