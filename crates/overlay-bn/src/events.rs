@@ -26,6 +26,10 @@ struct BlockData {
     block: String,
 }
 
+/// The one event name the sidecar reads. Every other topic on the stream, and the comments the
+/// beacon node writes to hold the connection open, are skipped.
+const BLOCK: &str = "block";
+
 /// Cuts the beacon node's byte stream into frames and reads the events out of them. A chunk
 /// stops wherever the network put it, so whatever follows the last blank line waits for more.
 #[derive(Default)]
@@ -50,15 +54,22 @@ impl Frames {
 
 /// The event one frame carries, if it is one the sidecar reads.
 fn block_event(frame: &str) -> Option<BlockEvent> {
+    let mut name = None;
     let mut data = None;
     for line in frame.lines() {
-        // A line with no colon is not a field at all.
+        // A line with no colon is not a field at all, and one whose name is empty is a comment.
         let Some((field, value)) = line.split_once(':') else {
             continue;
         };
-        if field == "data" {
-            data = Some(value.strip_prefix(' ').unwrap_or(value));
+        let value = value.strip_prefix(' ').unwrap_or(value);
+        match field {
+            "event" => name = Some(value),
+            "data" => data = Some(value),
+            _ => {}
         }
+    }
+    if name != Some(BLOCK) {
+        return None;
     }
     let data: BlockData = serde_json::from_str(data?).ok()?;
     Some(BlockEvent {
