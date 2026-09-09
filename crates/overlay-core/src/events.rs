@@ -147,8 +147,9 @@ pub struct ImportEvent<'a> {
 
 /// Logs `import`.
 ///
-/// One arm per combination for the same reason [`emit_first_arrival`] has them: a line from the
-/// beacon node has no `origin_peer` key at all rather than a null one.
+/// One arm per combination for the same reason [`emit_first_arrival`] has them: a block with no
+/// arrival record carries no lag, no arrival and no source key at all rather than three null
+/// ones, and a line from the beacon node has no `origin_peer`.
 pub fn emit_import(import: &ImportEvent<'_>) {
     let slot = import.slot;
     let block_root = hex(import.block_root);
@@ -165,20 +166,21 @@ pub fn emit_import(import: &ImportEvent<'_>) {
             )
         };
     }
-    if let (Some(at), Some(source), Some(lag_ms)) =
+    let (Some(at), Some(source), Some(lag_ms)) =
         (import.first_arrival_at, &import.source, import.lag_ms)
-    {
-        let first_arrival_ns = epoch_nanos(at);
-        match source {
-            Source::Bn => import!(matched = true, first_arrival_ns, lag_ms, source = "bn"),
-            Source::Overlay { origin } => import!(
-                matched = true,
-                first_arrival_ns,
-                lag_ms,
-                source = "overlay",
-                origin_peer = %origin,
-            ),
-        }
+    else {
+        return import!(matched = false);
+    };
+    let first_arrival_ns = epoch_nanos(at);
+    match source {
+        Source::Bn => import!(matched = true, first_arrival_ns, lag_ms, source = "bn"),
+        Source::Overlay { origin } => import!(
+            matched = true,
+            first_arrival_ns,
+            lag_ms,
+            source = "overlay",
+            origin_peer = %origin,
+        ),
     }
 }
 
