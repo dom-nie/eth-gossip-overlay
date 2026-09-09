@@ -346,6 +346,7 @@ pub fn check(budget: &MemoryBudget) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recent;
     use crate::testlog::LOG;
 
     /// T-033's lane bounds, which are what the wiring passes.
@@ -448,6 +449,48 @@ mod tests {
             budget.bounded_bytes - usable,
             MEMORY_MAX_DEFAULT / (1024 * 1024),
         );
+    }
+
+    /// The bytes of one row of `budget`.
+    fn row(budget: &MemoryBudget, name: &str) -> u64 {
+        budget
+            .rows
+            .iter()
+            .find(|(row, _)| *row == name)
+            .map(|(_, bytes)| *bytes)
+            .unwrap_or_else(|| panic!("the budget has no {name} row"))
+    }
+
+    /// OPS-N4: the by-root cache is a row of the one budget and turning it on is what fills it
+    /// (T-085). The row is what the configured window adds on top of the five slots the repair
+    /// store holds anyway, so the two rows together are the store's real bound and no byte is
+    /// counted twice. The QUIC window is the remainder, so what an operator pays for the cache
+    /// is a smaller window per connection rather than a larger total.
+    #[test]
+    fn enabling_the_cache_adds_its_row_to_the_startup_budget() {
+        let off = budget();
+        let mut on = Config::default();
+        on.bn.by_root_cache.enabled = true;
+        let on = MemoryBudget::compute(&on, 200, MEMORY_MAX_DEFAULT, LANES);
+
+        assert_eq!(row(&off, "by_root_cache"), 0, "the cache ships off");
+        let window = recent::window_bytes(Config::default().bn.by_root_cache.slots) as u64;
+        assert_eq!(
+            row(&on, "by_root_cache"),
+            window - RECENT_MAX_BYTES as u64,
+            "the row is the window less the five slots repair already holds"
+        );
+        assert_eq!(
+            row(&off, "recent_store"),
+            row(&on, "recent_store"),
+            "the repair row does not move"
+        );
+        assert_eq!(
+            off.receive_window - on.receive_window,
+            row(&on, "by_root_cache") / 200,
+            "the cache is paid for out of the derived receive window"
+        );
+        assert!(on.receive_window >= STREAM_RECEIVE_WINDOW);
     }
 
     /// The rows are what T-076's table grows from, so the sum has to be the rows and the total
