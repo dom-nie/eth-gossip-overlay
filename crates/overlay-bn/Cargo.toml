@@ -12,10 +12,17 @@ repository.workspace = true
 # (D05); `cargo tree -p overlay-bn -e normal` lists it only with this on. The binary enables it.
 column-repair = ["dep:types"]
 
+# The optional by-root cache over the beacon node's own req/resp (§5.8, T-085). It reads two
+# consensus request bodies out of SSZ, so it needs `types` and the SSZ decoder that goes with it,
+# and it needs the column index `column-repair`'s decoder fills. `cargo tree -p overlay-bn -e
+# normal` lists neither `ethereum_ssz` nor `lighthouse_network` without this.
+by-root-cache = ["column-repair", "dep:ethereum_ssz"]
+
 # `FakeBn` and its helpers, for the fleet harness in `eth-gossip-overlay` (T-051). Lighthouse's own
 # crates come with it, so nothing but a test build may turn it on: the harness enables it
 # through a dev-dependency, which resolver 3 never unifies into a normal build.
 test-util = [
+    "dep:ethereum_ssz",
     "dep:lighthouse_network",
     "dep:types",
     "dep:sha2",
@@ -25,6 +32,7 @@ test-util = [
 
 [dependencies]
 enr.workspace = true
+ethereum_ssz = { workspace = true, optional = true }
 libp2p.workspace = true
 lighthouse_network = { workspace = true, optional = true }
 overlay-core.workspace = true

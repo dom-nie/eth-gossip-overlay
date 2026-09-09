@@ -37,7 +37,7 @@ use tokio::task::JoinHandle;
 use crate::bn_http::{BnClient, BnHttpError, PeerInfo};
 use crate::gossip::{BnLinkConfig, GossipBehaviour, build_behaviour};
 use crate::node_key::NodeKey;
-use crate::rpc::{Eth2Codec, Request, Responder, Response, proto};
+use crate::rpc::{ByRootCache, Eth2Codec, Request, Responder, Response, proto};
 use crate::spec::SpecSnapshot;
 
 /// The first delay before redialling a beacon node that went away; §5.3 uses the same
@@ -707,13 +707,14 @@ fn build_swarm(
 mod tests {
     use std::collections::{BTreeSet, HashSet};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use lighthouse_network::rpc::methods::{MetaData, StatusMessageV2};
     use lighthouse_network::rpc::{GoodbyeReason, StatusMessage};
     use overlay_core::config::Config;
     use overlay_core::lanes::{ClassLanes, LaneStats, SMALL_LANE_CAPACITY};
     use overlay_core::msgid;
+    use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
     use overlay_core::topic::{Class, Topic, TopicKind};
     use prometheus_client::registry::Registry;
     use proptest::prelude::*;
@@ -727,6 +728,8 @@ mod tests {
     use crate::bn_http::BnClient;
     use crate::gossip::wire;
     use crate::node_key::NodeKey;
+    use crate::rpc::ByRootStats;
+    use crate::rpc::proto::Protocol as RpcProtocol;
     use crate::spec::spec_watch;
     use crate::testutil::{
         self, FakeBn, FakeBnEvent, IDLE_TIMEOUT, LOG, PublicPeer, Received, RpcAnswer, link_config,
@@ -753,6 +756,12 @@ mod tests {
         /// Where the link registered gossipsub's own metrics, which is where a test reads
         /// what the sidecar's gossipsub took off the socket.
         registry: Registry,
+        /// The store the by-root cache answers out of, which a test fills directly rather than
+        /// driving payloads through gossip.
+        recent: SharedRecentLarge,
+        /// `bn.by_root_cache.enabled`, which SIGHUP flips under a running link.
+        by_root_on: Arc<AtomicBool>,
+        by_root_counts: Arc<ByRootCounts>,
     }
 
     #[derive(Default)]
@@ -833,6 +842,9 @@ mod tests {
         let stats = Arc::new(Counts::default());
         let lanes = ClassLanes::new(stats.clone());
         let mut registry = Registry::default();
+        let recent = SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES));
+        let by_root_on = Arc::new(AtomicBool::new(false));
+        let by_root_counts = Arc::new(ByRootCounts::default());
         let link = BnLink::spawn(
             cfg,
             node_key,
@@ -843,6 +855,11 @@ mod tests {
             sets_rx,
             commands_rx,
             Arc::default(),
+            ByRootCache::new(
+                recent.clone(),
+                by_root_on.clone(),
+                by_root_counts.clone(),
+            ),
         );
         Harness {
             peer_id: node_key.peer_id(),
@@ -853,6 +870,27 @@ mod tests {
             lanes,
             stats,
             registry,
+            recent,
+            by_root_on,
+            by_root_counts,
+        }
+    }
+
+    /// What the responder counted for by-root requests, the series §12 names
+    /// `by_root_requests_total{protocol, outcome}`.
+    #[derive(Default)]
+    struct ByRootCounts {
+        hits: AtomicUsize,
+        misses: AtomicUsize,
+    }
+
+    impl ByRootStats for ByRootCounts {
+        fn by_root_request(&self, _: RpcProtocol, hit: bool) {
+            match hit {
+                true => &self.hits,
+                false => &self.misses,
+            }
+            .fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -2048,6 +2086,100 @@ mod tests {
         };
         assert!(text.contains("ResourceUnavailable"), "{text}");
         assert!(text.contains(protocol), "{text}");
+    }
+
+    /// The topic a payload of `name` arrived on, under the fork digest the fake stands in. The
+    /// digest is where a by-root answer takes its context bytes from.
+    fn fulu_topic(name: &str) -> Topic {
+        let [a, b, c, d] = testutil::fulu_fork_digest();
+        Topic::parse(&format!("/eth2/{a:02x}{b:02x}{c:02x}{d:02x}/{name}/ssz_snappy"))
+            .expect("a topic in the only shape the parser takes")
+    }
+
+    /// Puts `fixture` into the store the way T-016 does on a first arrival, under the decoder
+    /// that reads its identity, and turns the cache on.
+    fn hold(harness: &Harness, topic: Topic, fixture: &testutil::Fixture) {
+        harness.by_root_on.store(true, Ordering::Relaxed);
+        let payload = bytes::Bytes::from(fixture.payload.clone());
+        let id = msgid::of(&topic, &payload);
+        harness
+            .recent
+            .insert(id, topic, payload, Some(&fixture.ssz), Instant::now());
+    }
+
+    /// §5.8's whole point: a block the sidecar already holds comes back over localhost instead
+    /// of the beacon node going to the public network for it. The bytes are the ones the store
+    /// holds, so the block Lighthouse's own outbound codec reads back is the block that was
+    /// gossiped, fork context bytes and all.
+    #[cfg(feature = "by-root-cache")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn block_by_root_hit_returns_stored_bytes() {
+        let mut bn = FakeBn::start().await;
+        let (harness, mut answers) = connected(&mut bn).await;
+        let block = testutil::fulu_block(4_096);
+        hold(&harness, fulu_topic("beacon_block"), &block);
+
+        bn.request_blocks_by_root(&[block.root]).await;
+
+        let answer = next_answer(&mut answers).await;
+        let RpcAnswer::BlockByRoot(back) = &answer else {
+            panic!("the block was not served: {answer:?}");
+        };
+        assert_eq!(back.canonical_root(), block.root);
+        assert_eq!(harness.by_root_counts.hits.load(Ordering::Relaxed), 1);
+        assert_eq!(harness.by_root_counts.misses.load(Ordering::Relaxed), 0);
+    }
+
+    /// A root the store never held is refused exactly as it was before the cache existed, so a
+    /// beacon node whose lookup misses is no worse off than it was and goes to the public
+    /// network as it always would have.
+    #[cfg(feature = "by-root-cache")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn block_by_root_miss_returns_resource_unavailable() {
+        let mut bn = FakeBn::start().await;
+        let (harness, mut answers) = connected(&mut bn).await;
+        let block = testutil::fulu_block(4_096);
+        hold(&harness, fulu_topic("beacon_block"), &block);
+
+        bn.request_blocks_by_root(&[Hash256::repeat_byte(0xee)])
+            .await;
+
+        assert_unavailable(next_answer(&mut answers).await, "BlocksByRoot");
+        assert_eq!(harness.by_root_counts.hits.load(Ordering::Relaxed), 0);
+        assert_eq!(harness.by_root_counts.misses.load(Ordering::Relaxed), 1);
+    }
+
+    /// A by-root request names the columns it wants, and a host holding more of them than it was
+    /// asked for sends only those: a custody set the beacon node did not ask about is bytes over
+    /// the link it has no use for.
+    #[cfg(feature = "by-root-cache")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn columns_by_root_returns_only_requested_indices() {
+        let mut bn = FakeBn::start().await;
+        let (harness, mut answers) = connected(&mut bn).await;
+        let mut root = Hash256::ZERO;
+        for index in 0..3u64 {
+            let column = testutil::column_sidecar(4_096, index);
+            root = column.root;
+            hold(
+                &harness,
+                fulu_topic(&format!("data_column_sidecar_{index}")),
+                &column,
+            );
+        }
+
+        bn.request_columns_by_root(root, &[0, 2]).await;
+
+        let mut served: Vec<u64> = Vec::new();
+        for _ in 0..2 {
+            let answer = next_answer(&mut answers).await;
+            let RpcAnswer::ColumnByRoot(column) = &answer else {
+                panic!("a column was not served: {answer:?}");
+            };
+            served.push(*column.index());
+        }
+        assert_eq!(served, [0, 2]);
+        assert_eq!(harness.by_root_counts.hits.load(Ordering::Relaxed), 1);
     }
 
     /// The behaviour is registered inbound only, so there is no path that opens an outbound

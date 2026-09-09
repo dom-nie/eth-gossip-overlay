@@ -69,9 +69,11 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+use ssz::{Decode, Encode};
 use types::{
-    ChainSpec, DataColumnSidecar, DataColumnsByRootIdentifier, ForkContext, Hash256,
-    MainnetEthSpec, SignedBeaconBlock, Slot,
+    BeaconBlock, BeaconBlockFulu, BeaconBlockHeader, ChainSpec, DataColumnSidecar,
+    DataColumnSidecarFulu, DataColumnsByRootIdentifier, EmptyBlock, EthSpec, ForkContext, ForkName,
+    Hash256, MainnetEthSpec, SignedBeaconBlock, Slot,
 };
 use url::Url;
 use wiremock::matchers::{method, path};
@@ -932,14 +934,109 @@ fn lighthouse_swarm(metrics: Option<&mut Registry>) -> Swarm<FakeBnBehaviour> {
         .build()
 }
 
-/// Mainnet at slot 0. The sidecar never reads a fork digest of its own, so the current fork
-/// only decides which protocols the fake offers on its own inbound side.
+/// Mainnet at the first slot of Fulu, the fork a data column belongs to.
+///
+/// The current fork decides which protocols the fake offers on its own inbound side, which the
+/// sidecar never uses because it asks for nothing, and the response sizes its outbound codec
+/// accepts, which a by-root answer is measured against. A beacon node asking for a data column
+/// is running Fulu by definition, so that is where the fake stands.
 fn fork_context() -> Arc<ForkContext> {
+    let spec = ChainSpec::mainnet();
+    let fulu = spec
+        .fork_epoch(ForkName::Fulu)
+        .expect("mainnet schedules Fulu");
     Arc::new(ForkContext::new::<MainnetEthSpec>(
-        Slot::new(0),
+        fulu.start_slot(MainnetEthSpec::slots_per_epoch()),
         Hash256::ZERO,
-        &ChainSpec::mainnet(),
+        &spec,
     ))
+}
+
+/// The fork digest the fake's own `ForkContext` computes for Fulu.
+///
+/// A by-root response carries context bytes, and the sidecar takes them from the fork digest in
+/// the gossip topic the payload arrived on, so a test's topic has to name the fork the fake
+/// stands in or its outbound codec cannot place the answer.
+pub fn fulu_fork_digest() -> [u8; 4] {
+    fork_context().current_fork_digest()
+}
+
+/// One gossip payload with the identity the sidecar files it under.
+pub struct Fixture {
+    /// The root the sidecar's own decoder reads out of it: a block's own root, or the root of
+    /// the block a column belongs to.
+    pub root: Hash256,
+    /// The decompressed SSZ, which is what a by-root answer carries.
+    pub ssz: Vec<u8>,
+    /// The snappy form the beacon node gossips and the recent store holds.
+    pub payload: Vec<u8>,
+}
+
+impl Fixture {
+    fn new(root: Hash256, ssz: Vec<u8>) -> Self {
+        let payload = snap::raw::Encoder::new()
+            .compress_vec(&ssz)
+            .expect("a Vec sink never runs out of room");
+        Self { root, ssz, payload }
+    }
+}
+
+/// A BLS signature in its infinity form, the one 96-byte value `types` decodes without a curve
+/// point behind it. Nothing here verifies a signature; the fixtures only need the field present.
+fn infinity_signature() -> Vec<u8> {
+    let mut sig = vec![0; 96];
+    sig[0] = 0xc0;
+    sig
+}
+
+/// An empty Fulu block at `slot`, in the wire form `SignedBeaconBlock` reads back: the offset of
+/// its message, an infinity signature and the block.
+pub fn fulu_block(slot: u64) -> Fixture {
+    let mut block: BeaconBlock<MainnetEthSpec> =
+        BeaconBlock::Fulu(BeaconBlockFulu::empty(&ChainSpec::mainnet()));
+    *block.slot_mut() = Slot::new(slot);
+    let mut ssz = 100u32.to_le_bytes().to_vec();
+    ssz.extend_from_slice(&infinity_signature());
+    ssz.extend_from_slice(&block.as_ssz_bytes());
+    let decoded = SignedBeaconBlock::<MainnetEthSpec>::any_from_ssz_bytes(&ssz)
+        .expect("the hand-built wire form is one types reads back");
+    Fixture::new(decoded.canonical_root(), ssz)
+}
+
+/// Column `index` of the block at `slot`, carrying one cell, one commitment and one proof so the
+/// body behind the fixed part is a real shape rather than nothing.
+pub fn column_sidecar(slot: u64, index: u64) -> Fixture {
+    const CELL_BYTES: usize = 2048;
+    const KZG_BYTES: usize = 48;
+    const PROOF_BYTES: usize = 4 * 32;
+    // The index, the three offsets, `signed_block_header` and the inclusion proof, which is where
+    // a Fulu sidecar's first offset points on every preset.
+    const FIXED_LEN: usize = 8 + 3 * 4 + (8 + 8 + 3 * 32) + 96 + PROOF_BYTES;
+
+    let header = BeaconBlockHeader {
+        slot: Slot::new(slot),
+        proposer_index: 11,
+        parent_root: Hash256::repeat_byte(1),
+        state_root: Hash256::repeat_byte(2),
+        body_root: Hash256::repeat_byte(3),
+    };
+    let mut ssz = index.to_le_bytes().to_vec();
+    for offset in [
+        FIXED_LEN,
+        FIXED_LEN + CELL_BYTES,
+        FIXED_LEN + CELL_BYTES + KZG_BYTES,
+    ] {
+        ssz.extend_from_slice(&(offset as u32).to_le_bytes());
+    }
+    ssz.extend_from_slice(&header.as_ssz_bytes());
+    ssz.extend_from_slice(&infinity_signature());
+    ssz.extend_from_slice(&[0; PROOF_BYTES]);
+    ssz.extend_from_slice(&[7; CELL_BYTES]);
+    ssz.extend_from_slice(&[0xc0; KZG_BYTES]);
+    ssz.extend_from_slice(&[0xc0; KZG_BYTES]);
+    DataColumnSidecarFulu::<MainnetEthSpec>::from_ssz_bytes(&ssz)
+        .expect("the hand-built wire form is one types reads back");
+    Fixture::new(header.canonical_root(), ssz)
 }
 
 /// The behaviour as `service/mod.rs:341-350` constructs it, minus the whitelist filter (every
