@@ -1,3 +1,85 @@
+//! The beacon node's block event stream, which is the only place import time comes from (§12).
+//!
+//! `GET /eth/v1/events?topics=block` is Server-Sent Events: a frame per event, fields one to a
+//! line, a blank line closing the frame. Lighthouse fires a `block` event when it has imported
+//! the block, which is the moment §2 says arrival is not, so this is where the 200 to 500 ms of
+//! `newPayload` and column verification becomes a number an operator can see.
+
+use std::str::from_utf8;
+
+use serde::Deserialize;
+
+/// One `block` event: the beacon node has imported this block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BlockEvent {
+    /// The slot the block was proposed for.
+    pub slot: u64,
+    /// Its root, which is what a first-arrival record is filed under.
+    pub block_root: [u8; 32],
+}
+
+/// The `data` of a `block` event. Lighthouse writes the slot as a quoted decimal and the root
+/// as `0x`-prefixed hex; `execution_optimistic` rides along and is not read.
+#[derive(Deserialize)]
+struct BlockData {
+    slot: String,
+    block: String,
+}
+
+/// Cuts the beacon node's byte stream into frames and reads the events out of them. A chunk
+/// stops wherever the network put it, so whatever follows the last blank line waits for more.
+#[derive(Default)]
+struct Frames {
+    buf: Vec<u8>,
+}
+
+impl Frames {
+    /// Every event `chunk` completed, in the order the beacon node wrote them.
+    fn feed(&mut self, chunk: &[u8]) -> Vec<BlockEvent> {
+        self.buf.extend_from_slice(chunk);
+        let mut events = Vec::new();
+        while let Some(blank) = self.buf.windows(2).position(|pair| pair == b"\n\n") {
+            let frame: Vec<u8> = self.buf.drain(..blank + 2).collect();
+            if let Ok(text) = from_utf8(&frame) {
+                events.extend(block_event(text));
+            }
+        }
+        events
+    }
+}
+
+/// The event one frame carries, if it is one the sidecar reads.
+fn block_event(frame: &str) -> Option<BlockEvent> {
+    let mut data = None;
+    for line in frame.lines() {
+        // A line with no colon is not a field at all.
+        let Some((field, value)) = line.split_once(':') else {
+            continue;
+        };
+        if field == "data" {
+            data = Some(value.strip_prefix(' ').unwrap_or(value));
+        }
+    }
+    let data: BlockData = serde_json::from_str(data?).ok()?;
+    Some(BlockEvent {
+        slot: data.slot.parse().ok()?,
+        block_root: root(&data.block)?,
+    })
+}
+
+/// Reads the `0x`-prefixed 32 bytes the beacon API reports a root as.
+fn root(text: &str) -> Option<[u8; 32]> {
+    let digits = text.strip_prefix("0x")?.as_bytes();
+    let mut root = [0; 32];
+    if digits.len() != 2 * root.len() {
+        return None;
+    }
+    for (byte, pair) in root.iter_mut().zip(digits.chunks_exact(2)) {
+        *byte = u8::from_str_radix(from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
