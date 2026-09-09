@@ -93,7 +93,45 @@ fn root(text: &str) -> Option<[u8; 32]> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use overlay_core::backoff::Backoff;
+    use overlay_core::events::Source;
+    use overlay_core::time::FakeClock;
+    use tokio::sync::mpsc;
+    use tokio::time::timeout;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
     use super::*;
+    use crate::spec::spec_watch;
+
+    /// The path of the beacon node's event stream.
+    const EVENTS: &str = "/eth/v1/events";
+
+    /// What the stream is served as.
+    const SSE: &str = "text/event-stream";
+
+    /// Long enough for a reconnect on a loaded box, short enough that a client that never comes
+    /// back fails the test instead of hanging it.
+    const PATIENCE: Duration = Duration::from_secs(5);
+
+    /// A stats sink that hands every import straight back to the test, in order.
+    struct Imports(mpsc::UnboundedSender<bool>);
+
+    impl BlockEventStats for Imports {
+        fn set_connected(&self, _: bool) {}
+
+        fn imported(&self, matched: bool) {
+            let _ = self.0.send(matched);
+        }
+    }
+
+    /// Whether the next import matched an arrival record, or a failed test if none arrives.
+    async fn next(imports: &mut mpsc::UnboundedReceiver<bool>) -> Option<bool> {
+        timeout(PATIENCE, imports.recv()).await.unwrap()
+    }
 
     /// The frame Lighthouse writes for one imported block: the event name, the JSON payload and
     /// the blank line that closes the frame.
@@ -141,5 +179,40 @@ mod tests {
                 block_root: [0x22; 32],
             }]
         );
+    }
+
+    #[tokio::test]
+    async fn reconnects_after_the_stream_closes_and_resumes_emitting() {
+        let bn = MockServer::start().await;
+        // The first connection carries a block this host never saw, then ends.
+        Mock::given(method("GET"))
+            .and(path(EVENTS))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(frame(11, &root(0x11)), SSE))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&bn)
+            .await;
+        // Every connection after it carries one this host did see.
+        Mock::given(method("GET"))
+            .and(path(EVENTS))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(frame(22, &root(0x22)), SSE))
+            .with_priority(2)
+            .mount(&bn)
+            .await;
+        let (_spec, spec) = spec_watch();
+        let arrivals = Arc::new(Arrivals::new(Arc::new(FakeClock::new()), spec));
+        arrivals.arrived([0x22; 32], &Source::Bn);
+        let (sender, mut imports) = mpsc::unbounded_channel();
+
+        let events = BlockEvents::spawn(
+            format!("{}{EVENTS}?topics=block", bn.uri()).parse().unwrap(),
+            Backoff::new(Duration::from_millis(5), Duration::from_millis(5)),
+            arrivals,
+            Arc::new(Imports(sender)),
+        );
+
+        assert_eq!(next(&mut imports).await, Some(false));
+        assert_eq!(next(&mut imports).await, Some(true));
+        events.task.abort();
     }
 }
