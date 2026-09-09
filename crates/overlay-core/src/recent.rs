@@ -32,17 +32,35 @@ use crate::header::{Header, HeaderDecoder};
 use crate::msgid::MessageId;
 use crate::topic::Topic;
 
-/// How long a payload can still be asked for (§5.6). The same minute the seen cache remembers
-/// the id for, so a peer that has not yet forgotten a message finds its bytes here.
-pub const RECENT_TTL: Duration = Duration::from_secs(60);
+/// A slot on every network the sidecar has seen. The window is stated in slots because that is
+/// the unit the traffic arrives in and the unit an operator reasons about.
+pub const SLOT: Duration = Duration::from_secs(12);
 
-/// Payload bytes one host keeps for repair.
-///
-/// §10's slot is one 200 KB block and 128 data columns of about 40 KB, which is 5.2 MiB, and
-/// [`RECENT_TTL`] is five mainnet slots of it: 26 MiB. Payloads are kept whole rather than as
-/// chunks, so unlike the reassembler's bound there is no parity to leave room for. T-076's
-/// memory budget table takes this row from here.
-pub const RECENT_MAX_BYTES: usize = 5 * (200 * 1024 + 128 * 40 * 1024);
+/// What one slot of large-class traffic comes to at §10's sizes: one 200 KB block and 128 data
+/// columns of about 40 KB each, which is 5.2 MiB. Payloads are kept whole rather than as chunks,
+/// so unlike the reassembler's bound there is no parity to leave room for.
+pub const SLOT_BYTES: usize = 200 * 1024 + 128 * 40 * 1024;
+
+/// How many slots the store holds for repair alone (§5.6): the same minute the seen cache
+/// remembers an id for, so a peer that has not yet forgotten a message finds its bytes here.
+pub const RECENT_SLOTS: u32 = 5;
+
+/// How long a payload can still be asked for with only repair to serve.
+pub const RECENT_TTL: Duration = window_ttl(RECENT_SLOTS);
+
+/// Payload bytes one host keeps for repair alone. T-076's memory budget table takes this row
+/// from here; T-085's by-root cache widens the window past it and prices the difference.
+pub const RECENT_MAX_BYTES: usize = window_bytes(RECENT_SLOTS);
+
+/// How long `slots` slots take to arrive, which is how long the last of them has to stay.
+pub const fn window_ttl(slots: u32) -> Duration {
+    Duration::from_secs(slots as u64 * SLOT.as_secs())
+}
+
+/// What `slots` slots of large-class traffic come to at §10's sizes.
+pub const fn window_bytes(slots: u32) -> usize {
+    slots as usize * SLOT_BYTES
+}
 
 /// How a payload is named by the consensus object inside it: a block by its own root, a column by
 /// the root of the block it belongs to and its index, which is also its subnet.
