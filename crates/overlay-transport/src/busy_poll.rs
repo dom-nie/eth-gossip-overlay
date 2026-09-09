@@ -94,6 +94,13 @@ pub(crate) trait Kernel {
     fn set_epoll_params(&self, epoll: RawFd, params: &EpollParams) -> io::Result<()>;
     /// `ioctl(epoll, EPIOCGPARAMS, …)`, which changes nothing.
     fn epoll_params(&self, epoll: RawFd) -> io::Result<EpollParams>;
+    /// `getsockopt(SO_INCOMING_NAPI_ID)`. Zero until the queue has delivered a packet, and on
+    /// every device that has no NAPI instance.
+    fn napi_id(&self, socket: RawFd) -> io::Result<u32>;
+    /// Whether this process holds `CAP_NET_ADMIN`, without which netdev netlink answers nothing.
+    fn has_cap_net_admin(&self) -> bool;
+    /// `NETDEV_CMD_NAPI_SET` with `irq-suspend-timeout`, which the kernel counts in nanoseconds.
+    fn set_irq_suspend_timeout(&self, napi_id: u32, nanos: u64) -> io::Result<()>;
 }
 
 /// The running kernel.
@@ -116,6 +123,43 @@ impl Kernel for Host {
             unsafe { libc::ioctl(epoll, libc::EPIOCGPARAMS, std::ptr::from_mut(&mut params)) };
         result(done).map(|()| params)
     }
+
+    fn napi_id(&self, socket: RawFd) -> io::Result<u32> {
+        let mut id: u32 = 0;
+        let mut len = size_of::<u32>() as libc::socklen_t;
+        // The kernel writes four bytes through the value pointer and the length it wrote
+        // through the other; both are live exclusive borrows of exactly that size.
+        let read = unsafe {
+            libc::getsockopt(
+                socket,
+                libc::SOL_SOCKET,
+                libc::SO_INCOMING_NAPI_ID,
+                std::ptr::from_mut(&mut id).cast(),
+                std::ptr::from_mut(&mut len),
+            )
+        };
+        result(read).map(|()| id)
+    }
+
+    fn has_cap_net_admin(&self) -> bool {
+        /// From `include/uapi/linux/capability.h`.
+        const CAP_NET_ADMIN: u32 = 12;
+
+        // A process that cannot read its own status has bigger problems than an unsuspended
+        // IRQ, and the caller's answer to both is the same line.
+        let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+            return false;
+        };
+        status
+            .lines()
+            .find_map(|line| line.strip_prefix("CapEff:"))
+            .and_then(|effective| u64::from_str_radix(effective.trim(), 16).ok())
+            .is_some_and(|caps| caps & (1 << CAP_NET_ADMIN) != 0)
+    }
+
+    fn set_irq_suspend_timeout(&self, napi_id: u32, nanos: u64) -> io::Result<()> {
+        napi::netlink::set_irq_suspend_timeout(napi_id, nanos)
+    }
 }
 
 /// Off Linux there is no epoll instance to set anything on, so the answer is the one every
@@ -127,6 +171,21 @@ impl Kernel for Host {
     }
 
     fn epoll_params(&self, _epoll: RawFd) -> io::Result<EpollParams> {
+        Err(io::Error::from_raw_os_error(libc::ENOTTY))
+    }
+
+    /// No NAPI, so no id, which is the same answer a Linux host gives for loopback.
+    fn napi_id(&self, _socket: RawFd) -> io::Result<u32> {
+        Ok(0)
+    }
+
+    /// No capabilities to hold, so the caller stops before it reaches for netlink that is also
+    /// not there.
+    fn has_cap_net_admin(&self) -> bool {
+        false
+    }
+
+    fn set_irq_suspend_timeout(&self, _napi_id: u32, _nanos: u64) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(libc::ENOTTY))
     }
 }
