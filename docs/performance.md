@@ -8,9 +8,8 @@ the second is arithmetic over the code's own constants.
 
 `MemoryMax=1G` in the shipped unit is the ceiling this table is written against (OPS-N4). Every
 row is a structure with a bound in code, so the sum is a worst case and not a measurement:
-nothing in it grows with traffic, and a real fleet sits far below it. One row reads zero because
-the structure it names has not been built yet, `by_root_cache` (T-085); that ticket fills its own
-row in.
+nothing in it grows with traffic, and a real fleet sits far below it. `by_root_cache` reads zero
+because the optional cache it names ships off; the section below says what turning it on costs.
 
 `quic_receive_windows` is the one row that is not a constant. It is whatever the other rows
 leave under the ceiling, shared out over the roster and floored at the 1 MiB stream window
@@ -42,6 +41,26 @@ the floor is what eventually breaks that: the other rows grow with the fleet unt
 than 1 MiB per connection to hand out, and past that point the total goes over. At these
 defaults that happens at 478 hosts. A row that grows for any other reason brings it forward, so
 a fleet well inside the limit today is not necessarily inside it after a bound moves.
+
+### The by-root cache
+
+`bn.by_root_cache.enabled` widens the recent store so the sidecar answers its node's own block
+and column lookups out of it. One slot above is a 200 KB block and 128 columns of 40 KB:
+
+| Slots | Bytes | MiB | Row |
+|---:|---:|---:|---|
+| 5 | 27238400 | 26.0 | `recent_store`, held for repair whatever the cache does |
+| 16 | 87162880 | 83.1 | the shipped `bn.by_root_cache.slots` |
+| 11 | 59924480 | 57.1 | the difference, which is `by_root_cache` when it is on |
+
+An ignored test in `crates/overlay-core/src/recent.rs` fills a sixteen-slot store with sixteen
+slots of that traffic: 2064 entries and 87,162,880 bytes, on the bound to the byte. The maps
+indexing them add about 300 bytes an entry, under a percent of what they index.
+
+The total does not move, because the QUIC row is the remainder: at 200 hosts each connection goes
+from 2.79 MiB to 2.50 MiB, and past 73 slots it is at its 1 MiB floor. Sixteen is the default
+because Lighthouse walks only a few slots back for a missing parent; the 64 slots §5.8 sketched
+would fit, at a 321 MB row and a 1.26 MiB window.
 
 The ceiling was 512M until MD-05, where this table first got computed and the 200-host example
 did not fit; the largest roster that did was 181. Nothing had grown, and 512M had never been

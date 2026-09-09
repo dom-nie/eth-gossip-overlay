@@ -70,11 +70,15 @@ The `log` section sets the level and the format of the sidecar's one output stre
 the events as well. [events.md](events.md) has the fields, the queries, and why
 `tracing-journald` is an option rather than the default.
 
+`bn.by_root_cache` trades memory for latency and is off. On, the sidecar answers the node's own
+block and column lookups from what it holds, saving a public round trip. Lighthouse picks that
+peer at random, so `overlay_by_root_requests_total` is what says whether it pays. Each of `slots`
+costs 5.2 MiB of the connection receive window ([performance.md](performance.md)).
+
 ## Every key
 
 `On change` is `reload` for a key a running sidecar picks up and `restart` for one it reads only
-at startup. Every key below has been here since 0.1.0, the first release; one added later says so
-in its own row, since the table is generated from the same doc comments the code carries.
+at startup. Every key below ships in 0.1.0, the first release.
 
 <!-- generated from crates/overlay-core/src/config.rs, do not edit by hand -->
 
@@ -106,8 +110,8 @@ in its own row, since the table is generated from the same doc comments the code
 | `bn.publish_rate_limit.large_per_s` | `300` | reload | large-class messages per second. |
 | `bn.publish_rate_limit.bytes_per_s` | `33554432` | reload | payload bytes per second across both classes. |
 | `bn.idontwant_on_publish` | `true` | restart | tell the beacon node IDONTWANT for a message as it is published. |
-| `bn.by_root_cache.enabled` | `false` | reload | answer by-root requests from the recent store instead of refusing them. |
-| `bn.by_root_cache.slots` | `16` | restart | how many slots of blocks and columns the store holds while the cache is on. Each one costs a slot's worth of the memory budget in `docs/performance.md`. |
+| `bn.by_root_cache.enabled` | `false` | reload | answer by-root lookups from the recent store. |
+| `bn.by_root_cache.slots` | `16` | restart | slots of blocks and columns held while the cache is on. |
 | `classes.small.batch_window_ms` | `10` | reload | how long a batch collects entries before it is flushed. |
 | `classes.small.stale_after_ms` | `1000` | reload | a batch older than this is dropped rather than delivered late. |
 | `classes.large.chunk_bytes` | `2048` | restart | the fixed chunk size. The Reed-Solomon shards need an even length; a multiple of 64 is the stricter rule the sidecar holds them to, so a chunk lands on a cache line and the SIMD paths run at their widest stride. |

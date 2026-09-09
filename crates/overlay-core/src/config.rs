@@ -197,10 +197,9 @@ pub struct Bn {
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ByRootCache {
-    /// `enabled`: answer by-root requests from the recent store instead of refusing them.
+    /// `enabled`: answer by-root lookups from the recent store.
     pub enabled: bool,
-    /// `slots`: how many slots of blocks and columns the store holds while the cache is on. Each
-    /// one costs a slot's worth of the memory budget in `docs/performance.md`.
+    /// `slots`: slots of blocks and columns held while the cache is on.
     pub slots: u32,
 }
 
