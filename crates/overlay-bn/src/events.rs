@@ -280,7 +280,7 @@ fn root(text: &str) -> Option<[u8; 32]> {
     if digits.len() != 2 * root.len() {
         return None;
     }
-    for (byte, pair) in root.iter_mut().zip(digits.chunks_exact(2)) {
+    for (byte, pair) in root.iter_mut().zip(digits.as_chunks::<2>().0) {
         *byte = u8::from_str_radix(from_utf8(pair).ok()?, 16).ok()?;
     }
     Some(root)
