@@ -119,7 +119,7 @@ impl Arrivals {
     /// Drops the records the retention window no longer covers. Both entry points call it, so a
     /// beacon node that has stopped importing still lets the map empty out.
     fn prune(&self, seen: &mut BTreeMap<[u8; 32], FirstArrival>, now: Instant) {
-        let window = Duration::from_secs(RETENTION_SLOTS * SpecSnapshot::MAINNET.seconds_per_slot);
+        let window = Duration::from_secs(RETENTION_SLOTS * self.spec.borrow().seconds_per_slot);
         seen.retain(|_, arrival| now.saturating_duration_since(arrival.seen) <= window);
     }
 
