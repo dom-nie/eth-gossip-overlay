@@ -5,9 +5,21 @@
 //! the block, which is the moment §2 says arrival is not, so this is where the 200 to 500 ms of
 //! `newPayload` and column verification becomes a number an operator can see.
 
+use std::collections::BTreeMap;
 use std::str::from_utf8;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Instant, SystemTime};
 
+use overlay_core::backoff::Backoff;
+use overlay_core::events::{ImportEvent, Source, emit_import};
+use overlay_core::roster::Hostname;
+use overlay_core::time::Clock;
 use serde::Deserialize;
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use url::Url;
+
+use crate::spec::SpecSnapshot;
 
 /// One `block` event: the beacon node has imported this block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -16,6 +28,161 @@ pub struct BlockEvent {
     pub slot: u64,
     /// Its root, which is what a first-arrival record is filed under.
     pub block_root: [u8; 32],
+}
+
+/// What the sidecar counts about the event stream. The binary implements it on its metrics; a
+/// caller that wants no series passes `()`.
+pub trait BlockEventStats: Send + Sync {
+    /// Whether the stream is connected right now.
+    fn set_connected(&self, connected: bool);
+    /// One import event, and whether this host had a record of the block arriving.
+    fn imported(&self, matched: bool);
+}
+
+impl BlockEventStats for () {
+    fn set_connected(&self, _: bool) {}
+    fn imported(&self, _: bool) {}
+}
+
+/// When a block first reached this host, and over which side.
+struct FirstArrival {
+    /// The wall reading, which is the only form that means anything on another host.
+    at: SystemTime,
+    /// The same moment on the monotonic clock. The lag is measured on this one, because
+    /// subtracting two wall readings gives whatever a clock step did to them in between.
+    seen: Instant,
+    /// The peer whose stream carried it, or `None` when the beacon node's own gossip won.
+    origin: Option<Hostname>,
+}
+
+/// Which blocks reached this host lately, so an import event can be turned into a lag.
+pub struct Arrivals {
+    clock: Arc<dyn Clock>,
+    spec: watch::Receiver<SpecSnapshot>,
+    seen: Mutex<BTreeMap<[u8; 32], FirstArrival>>,
+}
+
+impl Arrivals {
+    /// An empty keeper. `spec` is read fresh on every use, so a beacon node that reports a
+    /// different `SECONDS_PER_SLOT` changes the retention window without anything reconnecting.
+    pub fn new(clock: Arc<dyn Clock>, spec: watch::Receiver<SpecSnapshot>) -> Self {
+        Self {
+            clock,
+            spec,
+            seen: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// Files the arrival of `block_root`. A block that arrives again keeps the record it already
+    /// has, which is the one a lag is worth measuring from.
+    pub fn arrived(&self, block_root: [u8; 32], source: &Source<'_>) {
+        let arrival = FirstArrival {
+            at: self.clock.wall(),
+            seen: self.clock.now(),
+            origin: match source {
+                Source::Bn => None,
+                Source::Overlay { origin } => Some((*origin).clone()),
+            },
+        };
+        self.seen().entry(block_root).or_insert(arrival);
+    }
+
+    /// Logs `event` as an import and says whether an arrival record matched it.
+    pub fn imported(&self, event: &BlockEvent) -> bool {
+        let now = self.clock.now();
+        let seen = self.seen();
+        let arrival = seen.get(&event.block_root);
+        emit_import(&ImportEvent {
+            slot: event.slot,
+            block_root: event.block_root,
+            imported_at: self.clock.wall(),
+            first_arrival_at: arrival.map(|arrival| arrival.at),
+            source: arrival.map(|arrival| match &arrival.origin {
+                None => Source::Bn,
+                Some(origin) => Source::Overlay { origin },
+            }),
+            lag_ms: arrival.map(|arrival| {
+                u64::try_from(now.saturating_duration_since(arrival.seen).as_millis())
+                    .unwrap_or(u64::MAX)
+            }),
+        });
+        arrival.is_some()
+    }
+
+    fn seen(&self) -> MutexGuard<'_, BTreeMap<[u8; 32], FirstArrival>> {
+        // A poisoned lock is a panic in another holder. The records are still records, and
+        // losing import telemetry is not worth spreading a panic into a receive path.
+        self.seen.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The task that reads the beacon node's block event stream.
+pub struct BlockEvents {
+    /// The stream task. It runs until it is aborted.
+    pub task: JoinHandle<()>,
+}
+
+impl BlockEvents {
+    /// Starts reading `url`. The beacon node ends the stream on its own restart and on any
+    /// hiccup between the two processes, so every end is a reconnect under `backoff` (T-013).
+    #[expect(
+        clippy::expect_used,
+        reason = "with no TLS backend compiled in, a client can only fail to build on proxy \
+                  setup, and none is configured"
+    )]
+    pub fn spawn(
+        url: Url,
+        backoff: Backoff,
+        arrivals: Arc<Arrivals>,
+        stats: Arc<dyn BlockEventStats>,
+    ) -> Self {
+        // No request timeout: this one is meant to stay open between blocks.
+        let http = reqwest::Client::builder()
+            .build()
+            .expect("plain HTTP client");
+        Self {
+            task: tokio::spawn(run(http, url, backoff, arrivals, stats)),
+        }
+    }
+}
+
+/// One connection after another, for as long as the task lives.
+async fn run(
+    http: reqwest::Client,
+    url: Url,
+    mut backoff: Backoff,
+    arrivals: Arc<Arrivals>,
+    stats: Arc<dyn BlockEventStats>,
+) {
+    loop {
+        match read(&http, &url, &arrivals, &stats).await {
+            // The beacon node closed a stream it had been serving, so the next one is worth
+            // trying at once. A failure gets the delay the last one earned.
+            Ok(()) => backoff.reset(),
+            Err(err) => tracing::debug!(%err, %url, "the beacon node's event stream failed"),
+        }
+        stats.set_connected(false);
+        let delay = backoff.next_delay(&mut rand::rng());
+        tokio::time::sleep(delay).await;
+    }
+}
+
+/// One connection, until the beacon node closes it or the read fails.
+async fn read(
+    http: &reqwest::Client,
+    url: &Url,
+    arrivals: &Arrivals,
+    stats: &Arc<dyn BlockEventStats>,
+) -> Result<(), reqwest::Error> {
+    let mut response = http.get(url.clone()).send().await?;
+    stats.set_connected(true);
+    let mut frames = Frames::default();
+    while let Some(chunk) = response.chunk().await? {
+        for event in frames.feed(&chunk) {
+            stats.imported(arrivals.imported(&event));
+        }
+    }
+    Ok(())
 }
 
 /// The `data` of a `block` event. Lighthouse writes the slot as a quoted decimal and the root
