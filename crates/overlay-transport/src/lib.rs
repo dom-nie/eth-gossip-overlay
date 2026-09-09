@@ -1,6 +1,7 @@
 //! QUIC transport between sidecars.
 
 pub mod batching;
+pub mod busy_poll;
 pub mod endpoint;
 pub mod fanout;
 pub mod hello;
