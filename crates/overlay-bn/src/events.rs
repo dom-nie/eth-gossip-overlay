@@ -5,23 +5,16 @@
 //! the block, which is the moment §2 says arrival is not, so this is where the 200 to 500 ms of
 //! `newPayload` and column verification becomes a number an operator can see.
 
-use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use std::str::from_utf8;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::Arc;
 
 use overlay_core::backoff::Backoff;
-use overlay_core::events::{ImportEvent, Source, emit_import};
-use overlay_core::roster::Hostname;
-use overlay_core::time::Clock;
+use overlay_core::events::Arrivals;
 use reqwest::StatusCode;
 use serde::Deserialize;
-use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use url::Url;
-
-use crate::spec::SpecSnapshot;
 
 /// One `block` event: the beacon node has imported this block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,92 +37,6 @@ pub trait BlockEventStats: Send + Sync {
 impl BlockEventStats for () {
     fn set_connected(&self, _: bool) {}
     fn imported(&self, _: bool) {}
-}
-
-/// When a block first reached this host, and over which side.
-struct FirstArrival {
-    /// The wall reading, which is the only form that means anything on another host.
-    at: SystemTime,
-    /// The same moment on the monotonic clock. The lag is measured on this one, because
-    /// subtracting two wall readings gives whatever a clock step did to them in between.
-    seen: Instant,
-    /// The peer whose stream carried it, or `None` when the beacon node's own gossip won.
-    origin: Option<Hostname>,
-}
-
-/// How many slots of arrival records to keep: long enough that a block cannot still be waiting
-/// to be imported, short enough that the map stays a handful of entries.
-const RETENTION_SLOTS: u64 = 8;
-
-/// Which blocks reached this host lately, so an import event can be turned into a lag.
-pub struct Arrivals {
-    clock: Arc<dyn Clock>,
-    spec: watch::Receiver<SpecSnapshot>,
-    seen: Mutex<BTreeMap<[u8; 32], FirstArrival>>,
-}
-
-impl Arrivals {
-    /// An empty keeper. `spec` is read fresh on every use, so a beacon node that reports a
-    /// different `SECONDS_PER_SLOT` changes the retention window without anything reconnecting.
-    pub fn new(clock: Arc<dyn Clock>, spec: watch::Receiver<SpecSnapshot>) -> Self {
-        Self {
-            clock,
-            spec,
-            seen: Mutex::new(BTreeMap::new()),
-        }
-    }
-
-    /// Files the arrival of `block_root`. A block that arrives again keeps the record it already
-    /// has, which is the one a lag is worth measuring from.
-    pub fn arrived(&self, block_root: [u8; 32], source: &Source<'_>) {
-        let arrival = FirstArrival {
-            at: self.clock.wall(),
-            seen: self.clock.now(),
-            origin: match source {
-                Source::Bn => None,
-                Source::Overlay { origin } => Some((*origin).clone()),
-            },
-        };
-        let mut seen = self.seen();
-        self.prune(&mut seen, arrival.seen);
-        seen.entry(block_root).or_insert(arrival);
-    }
-
-    /// Logs `event` as an import and says whether an arrival record matched it.
-    pub fn imported(&self, event: &BlockEvent) -> bool {
-        let now = self.clock.now();
-        let mut seen = self.seen();
-        self.prune(&mut seen, now);
-        let arrival = seen.get(&event.block_root);
-        emit_import(&ImportEvent {
-            slot: event.slot,
-            block_root: event.block_root,
-            imported_at: self.clock.wall(),
-            first_arrival_at: arrival.map(|arrival| arrival.at),
-            source: arrival.map(|arrival| match &arrival.origin {
-                None => Source::Bn,
-                Some(origin) => Source::Overlay { origin },
-            }),
-            lag_ms: arrival.map(|arrival| {
-                u64::try_from(now.saturating_duration_since(arrival.seen).as_millis())
-                    .unwrap_or(u64::MAX)
-            }),
-        });
-        arrival.is_some()
-    }
-
-    /// Drops the records the retention window no longer covers. Both entry points call it, so a
-    /// beacon node that has stopped importing still lets the map empty out.
-    fn prune(&self, seen: &mut BTreeMap<[u8; 32], FirstArrival>, now: Instant) {
-        let window = Duration::from_secs(RETENTION_SLOTS * self.spec.borrow().seconds_per_slot);
-        seen.retain(|_, arrival| now.saturating_duration_since(arrival.seen) <= window);
-    }
-
-    fn seen(&self) -> MutexGuard<'_, BTreeMap<[u8; 32], FirstArrival>> {
-        // A poisoned lock is a panic in another holder. The records are still records, and
-        // losing import telemetry is not worth spreading a panic into a receive path.
-        self.seen.lock().unwrap_or_else(PoisonError::into_inner)
-    }
 }
 
 /// The task that reads the beacon node's block event stream.
@@ -207,7 +114,7 @@ async fn read(
     let mut frames = Frames::default();
     while let Some(chunk) = response.chunk().await? {
         for event in frames.feed(&chunk) {
-            stats.imported(arrivals.imported(&event));
+            stats.imported(arrivals.imported(event.slot, event.block_root));
         }
     }
     Ok(ControlFlow::Continue(()))
@@ -300,7 +207,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::spec::{self, spec_watch};
+    use crate::spec::spec_watch;
 
     /// The path of the beacon node's event stream.
     const EVENTS: &str = "/eth/v1/events";
@@ -339,14 +246,6 @@ mod tests {
     /// A block root of one repeated byte, in the `0x`-prefixed form the beacon API reports.
     fn root(byte: u8) -> String {
         format!("0x{}", format!("{byte:02x}").repeat(32))
-    }
-
-    /// An import of the block whose root is `byte` repeated.
-    fn block(slot: u64, byte: u8) -> BlockEvent {
-        BlockEvent {
-            slot,
-            block_root: [byte; 32],
-        }
     }
 
     #[test]
@@ -439,39 +338,5 @@ mod tests {
 
         timeout(PATIENCE, events.task).await.unwrap().unwrap();
         assert_eq!(bn.received_requests().await.unwrap().len(), 1);
-    }
-
-    #[test]
-    fn arrival_records_older_than_eight_slots_are_dropped() {
-        let clock = FakeClock::new();
-        let (_spec, spec) = spec_watch();
-        let arrivals = Arrivals::new(Arc::new(clock.clone()), spec);
-        arrivals.arrived([0x33; 32], &Source::Bn);
-        clock.advance(Duration::from_secs(10));
-        arrivals.arrived([0x44; 32], &Source::Bn);
-
-        clock.advance(Duration::from_secs(90));
-
-        // Eight slots of the 12 s default is 96 s, so the older of the two is past it.
-        assert!(!arrivals.imported(&block(1, 0x33)));
-        assert!(arrivals.imported(&block(2, 0x44)));
-    }
-
-    #[test]
-    fn retention_follows_the_spec_snapshot() {
-        let clock = FakeClock::new();
-        let (sender, spec) = spec_watch();
-        let arrivals = Arrivals::new(Arc::new(clock.clone()), spec);
-        arrivals.arrived([0x55; 32], &Source::Bn);
-        clock.advance(Duration::from_secs(50));
-        assert!(arrivals.imported(&block(1, 0x55)));
-
-        // Eight slots of six seconds is 48 s, which the record is already past.
-        sender.send_replace(SpecSnapshot {
-            seconds_per_slot: 6,
-            ..spec::MAINNET
-        });
-
-        assert!(!arrivals.imported(&block(2, 0x55)));
     }
 }
