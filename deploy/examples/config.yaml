@@ -19,6 +19,7 @@ overlay:
     pin_cpu: null               # a reserved core pins the overlay I/O thread; off by default
     prefer_busy_poll: false
     busy_poll_usecs: 100
+    irq_suspend_timeout_ms: 20  # the queue's IRQ stays masked during a burst; needs CAP_NET_ADMIN
     steering: off               # auto: ntuple flow rule if the NIC supports it, else RFS
 bn:
   identity_url: http://127.0.0.1:5052/eth/v1/node/identity

@@ -100,6 +100,7 @@ at startup. Every key below ships in 0.1.0, the first release.
 | `overlay.io_thread.pin_cpu` | `none` | restart | a reserved core to pin the overlay I/O thread to. `null` leaves it unpinned. |
 | `overlay.io_thread.prefer_busy_poll` | `false` | restart | spin on the socket instead of waiting for interrupts. |
 | `overlay.io_thread.busy_poll_usecs` | `100` | restart | how long each busy-poll spin lasts. |
+| `overlay.io_thread.irq_suspend_timeout_ms` | `20` | restart | how long the NIC queue's interrupt stays masked while polling keeps finding packets. Needs `CAP_NET_ADMIN`; `0` asks for the busy polling without the suspension. |
 | `overlay.io_thread.steering` | `off` | restart | how the overlay's packets are steered to the pinned core's NIC queue. One of `auto`, `ntuple`, `rfs`, `off`. |
 | `bn.identity_url` | `http://127.0.0.1:5052/eth/v1/node/identity` | restart | the beacon API endpoint that reports the node's peer id. |
 | `bn.events_url` | `http://127.0.0.1:5052/eth/v1/events?topics=block` | restart | the beacon API event stream. |

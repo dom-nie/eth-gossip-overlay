@@ -13,6 +13,11 @@ use url::Url;
 
 use crate::relay;
 
+/// The longest `overlay.io_thread.irq_suspend_timeout_ms` may be. It is how long the NIC
+/// queue's interrupt stays masked with nothing polling behind it if the reserved core ever
+/// stops, and §11.1 asks for twenty milliseconds; a second of it is an outage, not a tuning.
+const MAX_IRQ_SUSPEND_TIMEOUT: Duration = Duration::from_secs(1);
+
 /// The whole `config.yaml`, one field per key.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -145,6 +150,11 @@ pub struct IoThread {
     pub prefer_busy_poll: bool,
     /// `busy_poll_usecs`: how long each busy-poll spin lasts.
     pub busy_poll_usecs: u32,
+    /// `irq_suspend_timeout_ms`: how long the NIC queue's interrupt stays masked while polling
+    /// keeps finding packets. Needs `CAP_NET_ADMIN`; `0` asks for the busy polling without the
+    /// suspension.
+    #[serde(rename = "irq_suspend_timeout_ms", deserialize_with = "millis")]
+    pub irq_suspend_timeout: Duration,
     /// `steering`: how the overlay's packets are steered to the pinned core's NIC queue.
     pub steering: Steering,
 }
@@ -360,6 +370,7 @@ impl Default for IoThread {
             pin_cpu: None,
             prefer_busy_poll: false,
             busy_poll_usecs: 100,
+            irq_suspend_timeout: Duration::from_millis(20),
             steering: Steering::Off,
         }
     }
@@ -538,6 +549,25 @@ impl Config {
                     "{} ms is shorter than batch_window_ms ({} ms)",
                     stale.as_millis(),
                     window.as_millis()
+                ),
+            ));
+        }
+        let io_thread = &self.overlay.io_thread;
+        if io_thread.prefer_busy_poll && io_thread.pin_cpu.is_none() {
+            return Err(invalid(
+                "overlay.io_thread.prefer_busy_poll",
+                "needs a pin_cpu: busy polling is set on the epoll instance the I/O thread owns"
+                    .to_owned(),
+            ));
+        }
+        let suspend = io_thread.irq_suspend_timeout;
+        if suspend > MAX_IRQ_SUSPEND_TIMEOUT {
+            return Err(invalid(
+                "overlay.io_thread.irq_suspend_timeout_ms",
+                format!(
+                    "{} ms leaves the queue's interrupt masked longer than {} ms",
+                    suspend.as_millis(),
+                    MAX_IRQ_SUSPEND_TIMEOUT.as_millis()
                 ),
             ));
         }
@@ -749,7 +779,7 @@ log:
     fn pin_cpu_accepts_null_and_an_integer() {
         let null = Config::from_yaml("overlay: { io_thread: { pin_cpu: null } }").unwrap();
         let absent =
-            Config::from_yaml("overlay: { io_thread: { prefer_busy_poll: true } }").unwrap();
+            Config::from_yaml("overlay: { io_thread: { busy_poll_usecs: 50 } }").unwrap();
         let pinned = Config::from_yaml("overlay: { io_thread: { pin_cpu: 30 } }").unwrap();
 
         assert_eq!(null.overlay.io_thread.pin_cpu, None);
