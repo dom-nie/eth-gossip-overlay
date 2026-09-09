@@ -57,7 +57,8 @@ use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, noise, yamux};
 use lighthouse_network::rpc::methods::{
-    MetaData, MetadataRequest, OldBlocksByRangeRequest, Ping as RpcPing, RpcSuccessResponse,
+    BlocksByRootRequest, DataColumnsByRootRequest, MetaData, MetadataRequest,
+    OldBlocksByRangeRequest, Ping as RpcPing, RpcSuccessResponse,
 };
 use lighthouse_network::rpc::{
     GoodbyeReason, Protocol, RPC, RPCMessage, RPCReceived, RequestType, StatusMessage,
@@ -68,7 +69,10 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use types::{ChainSpec, ForkContext, Hash256, MainnetEthSpec, Slot};
+use types::{
+    ChainSpec, DataColumnSidecar, DataColumnsByRootIdentifier, ForkContext, Hash256,
+    MainnetEthSpec, SignedBeaconBlock, Slot,
+};
 use url::Url;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -248,6 +252,10 @@ pub enum RpcAnswer {
     Pong(u64),
     /// The peer's metadata.
     MetaData(Arc<MetaData<MainnetEthSpec>>),
+    /// A block the peer answered a `beacon_blocks_by_root` request with.
+    BlockByRoot(Arc<SignedBeaconBlock<MainnetEthSpec>>),
+    /// A column the peer answered a `data_column_sidecars_by_root` request with.
+    ColumnByRoot(Arc<DataColumnSidecar<MainnetEthSpec>>),
     /// An error chunk or a handler failure, as text. Lighthouse keeps its handler error type
     /// crate-private, so text is the only shape available; the result code is in it by name
     /// (`ErrorResponse(ResourceUnavailable, ..)`), along with the protocol it was sent on.
@@ -547,6 +555,28 @@ impl FakeBn {
     /// Says goodbye and closes the connection, as `RPC::shutdown` does on the real node.
     pub async fn send_goodbye(&self, reason: GoodbyeReason) {
         self.commands.send(Cmd::Goodbye(reason)).await.unwrap();
+    }
+
+    /// Asks for blocks by root, the request a missing-parent lookup makes. Lighthouse offers
+    /// `beacon_blocks_by_root/2` first, so that is the version negotiated.
+    pub async fn request_blocks_by_root(&self, roots: &[Hash256]) {
+        let request = BlocksByRootRequest::new(roots.to_vec(), &fork_context())
+            .expect("a root list inside the request limit");
+        self.request(RequestType::BlocksByRoot(request)).await;
+    }
+
+    /// Asks for the columns `indices` of `block_root` on `data_column_sidecars_by_root/1`.
+    pub async fn request_columns_by_root(&self, block_root: Hash256, indices: &[u64]) {
+        let id = DataColumnsByRootIdentifier {
+            block_root,
+            columns: indices
+                .to_vec()
+                .try_into()
+                .expect("an index list inside NUMBER_OF_COLUMNS"),
+        };
+        let request = DataColumnsByRootRequest::new(vec![id], 1)
+            .expect("one identifier is inside the request limit");
+        self.request(RequestType::DataColumnsByRoot(request)).await;
     }
 
     /// Sends a goodbye as an ordinary request instead of through `RPC::shutdown`. Lighthouse's
@@ -861,12 +891,14 @@ async fn drive(mut swarm: Swarm<FakeBnBehaviour>, mut commands: mpsc::Receiver<C
     }
 }
 
-/// The three responses the sidecar ever sends; anything else is kept as text.
+/// The five responses the sidecar ever sends; anything else is kept as text.
 fn answer(response: RpcSuccessResponse<MainnetEthSpec>) -> RpcAnswer {
     match response {
         RpcSuccessResponse::Status(status) => RpcAnswer::Status(status),
         RpcSuccessResponse::Pong(ping) => RpcAnswer::Pong(ping.data),
         RpcSuccessResponse::MetaData(metadata) => RpcAnswer::MetaData(metadata),
+        RpcSuccessResponse::BlocksByRoot(block) => RpcAnswer::BlockByRoot(block),
+        RpcSuccessResponse::DataColumnsByRoot(column) => RpcAnswer::ColumnByRoot(column),
         other => RpcAnswer::Error(format!("{other:?}")),
     }
 }

@@ -711,6 +711,7 @@ mod tests {
 
     use lighthouse_network::rpc::methods::{MetaData, StatusMessageV2};
     use lighthouse_network::rpc::{GoodbyeReason, StatusMessage};
+    use overlay_core::config::Config;
     use overlay_core::lanes::{ClassLanes, LaneStats, SMALL_LANE_CAPACITY};
     use overlay_core::msgid;
     use overlay_core::topic::{Class, Topic, TopicKind};
@@ -2019,6 +2020,34 @@ mod tests {
         assert!(text.contains("ResourceUnavailable"), "{text}");
         assert!(text.contains("BlocksByRange"), "{text}");
         drop(harness);
+    }
+
+    /// §5.8 is optional and ships off, so an operator who has not asked for it gets exactly
+    /// what T-019 gave them: both by-root protocols negotiate and both are refused. The
+    /// refusal is `PeerAction::Fatal` on `BlocksByRoot`, which is why trust has to be in
+    /// place either way (D25).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn disabled_by_default_and_by_root_requests_get_resource_unavailable() {
+        assert!(!Config::default().bn.by_root_cache.enabled);
+        let mut bn = FakeBn::start().await;
+        let (harness, mut answers) = connected(&mut bn).await;
+
+        bn.request_blocks_by_root(&[Hash256::repeat_byte(1)]).await;
+        assert_unavailable(next_answer(&mut answers).await, "BlocksByRoot");
+
+        bn.request_columns_by_root(Hash256::repeat_byte(1), &[3])
+            .await;
+        assert_unavailable(next_answer(&mut answers).await, "DataColumnsByRoot");
+        drop(harness);
+    }
+
+    /// An error chunk carrying `ResourceUnavailable`, on `protocol`.
+    fn assert_unavailable(answer: RpcAnswer, protocol: &str) {
+        let RpcAnswer::Error(text) = &answer else {
+            panic!("{protocol} was answered: {answer:?}");
+        };
+        assert!(text.contains("ResourceUnavailable"), "{text}");
+        assert!(text.contains(protocol), "{text}");
     }
 
     /// The behaviour is registered inbound only, so there is no path that opens an outbound
