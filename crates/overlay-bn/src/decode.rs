@@ -20,11 +20,23 @@
 //! whole and nothing but its slot and its root is taken; it is one payload a slot, against the
 //! `NUMBER_OF_COLUMNS` columns beside it.
 //!
+//! # Mainnet in practice
+//!
+//! [`column_header`] is preset-independent: the fixed part it reads is one length on every preset
+//! Lighthouse ships. [`block_header`] is not, because a tree hash merkleises to list lengths the
+//! preset fixes, so its root is mainnet's. On another preset the two disagree by construction and
+//! the roots this module produces stop matching each other, which is why MD-06 left the custody
+//! tracker to T-087 and why nothing here may act on a root beyond filing it. A network on another
+//! preset needs the preset in `SpecSnapshot` before either of those changes.
+//!
 //! # Every byte is hostile
 //!
 //! A payload reaches here from the wire, so the declared decompressed length is checked before a
 //! buffer is allocated, every read is bounds-checked, and a shape that is not the object the
-//! topic names is an error rather than a panic.
+//! topic names is an error rather than a panic. None of that makes what comes out true: a payload
+//! that decodes is a payload a peer could build, and nothing here checks a signature, a proposer
+//! or that any beacon node accepted the block. MD-06 is what that costs, and the only two things
+//! allowed to read this module's answer are the recent store's index and T-044's arrival line.
 
 use types::{BeaconBlockHeader, Hash256, MainnetEthSpec, SignedBeaconBlock, Slot};
 
