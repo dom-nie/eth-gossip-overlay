@@ -361,6 +361,28 @@ mod tests {
     }
 
     #[test]
+    fn emits_import_line_with_matched_false_when_arrival_is_unknown() {
+        let mark = LOG.len();
+
+        emit_import(&ImportEvent {
+            slot: 7_654_322,
+            block_root: [0x6b; 32],
+            imported_at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
+            first_arrival_at: None,
+            source: None,
+            lag_ms: None,
+        });
+
+        let line = line_with(mark, &root(0x6b));
+        assert!(line.contains(r#"event="import""#), "{line}");
+        assert!(line.contains("slot=7654322"), "{line}");
+        assert!(line.contains("matched=false"), "{line}");
+        assert!(!line.contains("first_arrival_ns"), "{line}");
+        assert!(!line.contains("lag_ms"), "{line}");
+        assert!(!line.contains("source"), "{line}");
+    }
+
+    #[test]
     fn a_small_class_arrival_is_not_logged() {
         let node = node();
         let topic = Topic::parse("/eth2/00000000/beacon_attestation_3/ssz_snappy").unwrap();
