@@ -290,4 +290,53 @@ mod tests {
 
         assert_eq!(id_of_with(&arrived, SOCKET).unwrap(), Some(NAPI));
     }
+
+    /// The socket option itself, on the platform that has it.
+    #[cfg(target_os = "linux")]
+    mod socket_option {
+        use std::net::UdpSocket;
+        use std::os::fd::AsRawFd;
+
+        use super::*;
+
+        /// What the fake cannot say: that `SO_INCOMING_NAPI_ID` is a real option this kernel
+        /// answers, that it reads zero before anything has arrived, and that a packet is what
+        /// changes the answer.
+        ///
+        /// Loopback usually has no NAPI instance, so on most hosts the second read is still
+        /// none. That is the path the sidecar takes on a container or a laptop and it is worth
+        /// asserting; a host that does name a queue for loopback has to name a real one.
+        #[test]
+        fn napi_id_is_read_from_socket_after_first_packet() {
+            let receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+            let sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+
+            assert_eq!(
+                id_of(receiver.as_raw_fd()).unwrap(),
+                None,
+                "a socket that has received nothing cannot have a queue"
+            );
+
+            sender
+                .send_to(b"a packet", receiver.local_addr().unwrap())
+                .unwrap();
+            let mut buf = [0u8; 8];
+            receiver.recv_from(&mut buf).unwrap();
+
+            match id_of(receiver.as_raw_fd()).unwrap() {
+                Some(id) => assert_ne!(id, 0),
+                None => eprintln!("loopback has no NAPI instance here; took the no-queue path"),
+            }
+        }
+    }
+
+    /// The name stays in the list on every platform, and off Linux it says why it is not an
+    /// answer rather than passing silently.
+    #[cfg(not(target_os = "linux"))]
+    mod socket_option {
+        #[test]
+        fn napi_id_is_read_from_socket_after_first_packet() {
+            eprintln!("skipped: SO_INCOMING_NAPI_ID is Linux only");
+        }
+    }
 }
