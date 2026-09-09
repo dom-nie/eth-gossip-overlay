@@ -897,6 +897,15 @@ log:
         );
     }
 
+    /// A window of nothing is a cache that answers nothing and a recent store that holds
+    /// nothing, which is worse than turning the cache off.
+    #[test]
+    fn by_root_cache_slots_must_be_at_least_one() {
+        let err = Config::from_yaml("bn: { by_root_cache: { slots: 0 } }").unwrap_err();
+
+        assert!(err.to_string().contains("bn.by_root_cache.slots"), "{err}");
+    }
+
     #[test]
     fn listen_addr_parses_and_defaults_to_localhost_7787() {
         let default = Config::from_yaml("{}").unwrap();
