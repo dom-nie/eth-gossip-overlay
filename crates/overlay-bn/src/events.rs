@@ -111,4 +111,24 @@ mod tests {
             }]
         );
     }
+
+    #[test]
+    fn ignores_other_event_types_and_comments() {
+        let mut frames = Frames::default();
+        let stream = format!(
+            ": keep-alive\n\n{}{}",
+            frame(11, &root(0x11)).replace("event: block", "event: head"),
+            frame(22, &root(0x22)),
+        );
+
+        let events = frames.feed(stream.as_bytes());
+
+        assert_eq!(
+            events,
+            [BlockEvent {
+                slot: 22,
+                block_root: [0x22; 32],
+            }]
+        );
+    }
 }
