@@ -21,7 +21,7 @@ use crate::config::Config;
 use crate::pubqueue::{PUBLISH_LARGE_LANE_BYTES, PUBLISH_SMALL_LANE_ENTRIES};
 use crate::ratelimit::TokenBucket;
 use crate::reassemble;
-use crate::recent::{self, RECENT_MAX_BYTES, RECENT_SLOTS};
+use crate::recent::{self, RECENT_MAX_BYTES};
 use crate::seen::{SEEN_CAPACITY, SEEN_TTL};
 
 /// How long a peer may stay over its budget before the connection is closed with
@@ -268,7 +268,7 @@ impl MemoryBudget {
 }
 
 /// What the by-root cache costs the budget (§5.8, T-085): the window `bn.by_root_cache.slots`
-/// asks for, less the [`RECENT_SLOTS`] the recent store holds for repair whatever the cache does.
+/// asks for, less the [`recent::RECENT_SLOTS`] the store holds for repair whatever the cache does.
 /// The two rows together are that one store's bound, so nothing is counted twice, and the row is
 /// zero while the cache is off, which is how it ships.
 ///
