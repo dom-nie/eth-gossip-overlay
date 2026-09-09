@@ -327,8 +327,8 @@ mod tests {
     use crate::header::{Header, HeaderDecoder};
     use crate::msgid::MessageId;
     use crate::recent::{
-        RECENT_MAX_BYTES, RECENT_SLOTS, RECENT_TTL, RecentLarge, SLOT_BYTES, SharedRecentLarge,
-        window_bytes, window_ttl,
+        RECENT_MAX_BYTES, RECENT_SLOTS, RECENT_TTL, RecentLarge, SLOT, SLOT_BYTES,
+        SharedRecentLarge, window_bytes, window_ttl,
     };
     use crate::time::{Clock, FakeClock};
     use crate::topic::Topic;
@@ -401,6 +401,69 @@ mod tests {
         clock.advance(window_ttl(2));
         recent.gc(clock.now());
         assert_eq!(recent.get(&id(3)), None);
+    }
+
+    /// The number the `by_root_cache` row of T-076's table is recorded from: a store configured
+    /// for the shipped sixteen-slot window, filled with sixteen slots of §10's traffic, one
+    /// 200 KB block and 128 columns of 40 KB per slot.
+    ///
+    /// It holds all of it and nothing above the bound, so the row is the payload bytes and the
+    /// index beside them is the 2064 entries this prints, at roughly 300 bytes each between the
+    /// two maps and the queue. That is under a percent of the row and is why the row does not
+    /// carry it.
+    ///
+    /// Ignored because it allocates the 83 MiB it is measuring. Run it when the row moves:
+    ///
+    /// ```sh
+    /// cargo test -p overlay-core --lib memory_budget_test -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "allocates sixteen slots of block and column payloads"]
+    fn memory_budget_test_16_slots_of_full_blocks_and_columns_stays_under_documented_bound() {
+        const SLOTS: u32 = 16;
+        const BLOCK_BYTES: usize = 200 * 1024;
+        const COLUMN_BYTES: usize = 40 * 1024;
+        const COLUMNS: u8 = 128;
+
+        // One slot every twelve seconds, so the sixteenth arrives exactly as the window's own
+        // minute and a bit runs out and none of it has expired yet.
+        let clock = FakeClock::new();
+        let mut recent = RecentLarge::new(window_ttl(SLOTS), window_bytes(SLOTS));
+        let mut ids = Vec::new();
+        for slot in 0..SLOTS {
+            for object in 0..=u32::from(COLUMNS) {
+                let mut bytes = [0; 20];
+                bytes[..4].copy_from_slice(&(slot * 1000 + object).to_le_bytes());
+                let id = MessageId(bytes);
+                let len = match object {
+                    0 => BLOCK_BYTES,
+                    _ => COLUMN_BYTES,
+                };
+                recent.insert(id, topic(), Bytes::from(vec![7; len]), clock.now());
+                ids.push(id);
+            }
+            clock.advance(SLOT);
+        }
+
+        let held: Vec<usize> = ids
+            .iter()
+            .filter_map(|id| recent.get(id))
+            .map(|(_, payload)| payload.len())
+            .collect();
+        let bytes: usize = held.iter().sum();
+        println!(
+            "{SLOTS} slots: {} entries, {bytes} bytes ({:.1} MiB), bound {} bytes",
+            held.len(),
+            bytes as f64 / (1024.0 * 1024.0),
+            window_bytes(SLOTS),
+        );
+
+        assert_eq!(
+            held.len(),
+            ids.len(),
+            "the window dropped a slot it was sized for"
+        );
+        assert_eq!(bytes, window_bytes(SLOTS));
     }
 
     /// The shipped store is five slots, which is what §5.6 asks for and what T-076's table has
