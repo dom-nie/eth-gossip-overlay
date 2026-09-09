@@ -1079,7 +1079,7 @@
         },
         {
           "type": "timeseries",
-          "title": "Arrival to import (v3)",
+          "title": "Arrival to import (ms)",
           "id": 22,
           "gridPos": {
             "x": 12,
@@ -1097,9 +1097,18 @@
                 "type": "loki",
                 "uid": "${loki}"
               },
-              "expr": "sum(count_over_time({unit=\"eth-gossip-overlay.service\"} | json | event=\"import\" [5m]))",
+              "expr": "avg(quantile_over_time(0.5, {unit=\"eth-gossip-overlay.service\"} | json | event=\"import\" | matched=\"true\" | unwrap lag_ms [5m]))",
               "refId": "A",
-              "legendFormat": "import events"
+              "legendFormat": "p50, fleet mean"
+            },
+            {
+              "datasource": {
+                "type": "loki",
+                "uid": "${loki}"
+              },
+              "expr": "max(quantile_over_time(0.99, {unit=\"eth-gossip-overlay.service\"} | json | event=\"import\" | matched=\"true\" | unwrap lag_ms [5m]))",
+              "refId": "B",
+              "legendFormat": "p99, worst host"
             }
           ],
           "fieldConfig": {
@@ -1110,7 +1119,8 @@
                 "fillOpacity": 8,
                 "showPoints": "never",
                 "spanNulls": true
-              }
+              },
+              "unit": "ms"
             },
             "overrides": []
           },
@@ -1125,7 +1135,7 @@
               "sort": "desc"
             }
           },
-          "description": "Import time comes from the beacon node's event stream in v3 (T-084) as a second event joined by msg_id. Until that ships this panel counts import events, and there are none."
+          "description": "How long the beacon node spends on a block this host already had. It is the ceiling on what the overlay can still win, because none of it is time the overlay can take back. Each host's own quantile over the window, then averaged and worst-cased across the fleet. Blocks the beacon node imported that never reached this host are left out here and counted by overlay_import_events_total{matched=\"no\"}; docs/events.md has both queries."
         }
       ]
     }
