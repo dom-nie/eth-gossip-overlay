@@ -14,8 +14,9 @@
 //! was holding would send the requester on to the next peer for nothing.
 //!
 //! A column is asked for by `(block_root, index)` rather than by message id, because a host that
-//! never saw the column has no id for it (T-083). The index that answers that question is part of
-//! the entry, so it goes when the entry goes.
+//! never saw the column has no id for it (T-083). A block is asked for by its root alone, which is
+//! how the beacon node's own lookups name one (T-085). Both keys are part of the entry, so they go
+//! when the entry goes.
 //!
 //! `now` is a parameter rather than a clock of its own, so nothing here reads a time the caller
 //! did not give it: every insert site already holds the injected clock, and a test drives expiry
@@ -43,15 +44,15 @@ pub const RECENT_TTL: Duration = Duration::from_secs(60);
 /// memory budget table takes this row from here.
 pub const RECENT_MAX_BYTES: usize = 5 * (200 * 1024 + 128 * 40 * 1024);
 
-/// How T-083 names a column: the root of the block it belongs to and its index, which is also
-/// its subnet.
-type ColumnKey = ([u8; 32], u8);
+/// How a payload is named by the consensus object inside it: a block by its own root, a column by
+/// the root of the block it belongs to and its index, which is also its subnet.
+type RootKey = ([u8; 32], Option<u8>);
 
 struct Entry {
     topic: Topic,
     payload: Bytes,
     at: Instant,
-    column: Option<ColumnKey>,
+    by_root: Option<RootKey>,
 }
 
 /// The large messages this host took recently, oldest first, bounded by the bytes they come to.
@@ -64,7 +65,7 @@ pub struct RecentLarge {
     bytes: usize,
     entries: HashMap<MessageId, Entry>,
     order: VecDeque<MessageId>,
-    columns: HashMap<ColumnKey, MessageId>,
+    by_root: HashMap<RootKey, MessageId>,
 }
 
 impl RecentLarge {
@@ -78,7 +79,7 @@ impl RecentLarge {
             bytes: 0,
             entries: HashMap::new(),
             order: VecDeque::new(),
-            columns: HashMap::new(),
+            by_root: HashMap::new(),
         }
     }
 
@@ -104,7 +105,7 @@ impl RecentLarge {
                 topic,
                 payload,
                 at: now,
-                column: None,
+                by_root: None,
             },
         );
         self.order.push_back(msg_id);
@@ -121,32 +122,47 @@ impl RecentLarge {
     }
 
     /// Records that the message held under `msg_id` is the column `index` of `block_root`, so a
-    /// peer that never saw the column can still ask for it (T-083). An id the store no longer
-    /// holds is ignored: there would be nothing for the key to resolve to.
-    ///
-    /// A key already pointing at another message is left alone. The root comes from a header a
-    /// peer chose and nothing has proved it, so a second payload claiming a column this host
-    /// already holds is a claim, not a correction; taking it would let one forged sidecar decide
-    /// what every peer is served for that column (MD-06). First writer wins, and the entry goes
-    /// with its payload when the minute or the byte bound takes it.
+    /// peer that never saw the column can still ask for it (T-083).
     pub fn index_column(&mut self, block_root: [u8; 32], index: u8, msg_id: MessageId) {
-        let Some(entry) = self.entries.get_mut(&msg_id) else {
-            return;
-        };
-        let key = (block_root, index);
-        if self.columns.get(&key).is_some_and(|held| *held != msg_id) {
-            return;
-        }
-        if let Some(previous) = entry.column.replace(key) {
-            self.columns.remove(&previous);
-        }
-        self.columns.insert(key, msg_id);
+        self.index((block_root, Some(index)), msg_id);
+    }
+
+    /// Records that the message held under `msg_id` is the block whose root is `block_root`, which
+    /// is how the beacon node's own by-root lookups name one (T-085).
+    pub fn index_block(&mut self, block_root: [u8; 32], msg_id: MessageId) {
+        self.index((block_root, None), msg_id);
     }
 
     /// Which message is column `index` of `block_root`, for a caller that then reads it with
     /// [`get`](Self::get).
     pub fn get_by_column(&self, block_root: [u8; 32], index: u8) -> Option<MessageId> {
-        self.columns.get(&(block_root, index)).copied()
+        self.by_root.get(&(block_root, Some(index))).copied()
+    }
+
+    /// Which message is the block whose root is `block_root`, read the same way.
+    pub fn get_by_block(&self, block_root: [u8; 32]) -> Option<MessageId> {
+        self.by_root.get(&(block_root, None)).copied()
+    }
+
+    /// Files `msg_id` under `key`. An id the store no longer holds is ignored: there would be
+    /// nothing for the key to resolve to.
+    ///
+    /// A key already pointing at another message is left alone. The root comes from a header a
+    /// peer chose and nothing has proved it, so a second payload claiming an identity this host
+    /// already holds is a claim, not a correction; taking it would let one forged sidecar decide
+    /// what every peer is served under that name (MD-06). First writer wins, and the entry goes
+    /// with its payload when the minute or the byte bound takes it.
+    fn index(&mut self, key: RootKey, msg_id: MessageId) {
+        let Some(entry) = self.entries.get_mut(&msg_id) else {
+            return;
+        };
+        if self.by_root.get(&key).is_some_and(|held| *held != msg_id) {
+            return;
+        }
+        if let Some(previous) = entry.by_root.replace(key) {
+            self.by_root.remove(&previous);
+        }
+        self.by_root.insert(key, msg_id);
     }
 
     /// Drops every entry past its minute now, for a caller that wants the memory back between
@@ -178,8 +194,8 @@ impl RecentLarge {
             return true;
         };
         self.bytes -= entry.payload.len();
-        if let Some(key) = entry.column {
-            self.columns.remove(&key);
+        if let Some(key) = entry.by_root {
+            self.by_root.remove(&key);
         }
         true
     }
@@ -234,13 +250,13 @@ impl SharedRecentLarge {
     ) -> Option<Header> {
         self.lock().insert(msg_id, topic.clone(), payload, now);
         let header = self.decoder.as_ref()?.header(&topic, ssz?)?;
-        if let Header::Column {
-            index, block_root, ..
-        } = header
-        {
-            // A no-op for an id the store no longer holds, which is what an entry the byte bound
-            // took comes to.
-            self.lock().index_column(block_root, index, msg_id);
+        // A no-op for an id the store no longer holds, which is what an entry the byte bound took
+        // comes to.
+        match header {
+            Header::Column {
+                index, block_root, ..
+            } => self.lock().index_column(block_root, index, msg_id),
+            Header::Block { root, .. } => self.lock().index_block(root, msg_id),
         }
         Some(header)
     }
@@ -255,9 +271,19 @@ impl SharedRecentLarge {
         self.lock().index_column(block_root, index, msg_id);
     }
 
+    /// [`RecentLarge::index_block`] under the lock.
+    pub fn index_block(&self, block_root: [u8; 32], msg_id: MessageId) {
+        self.lock().index_block(block_root, msg_id);
+    }
+
     /// [`RecentLarge::get_by_column`] under the lock.
     pub fn get_by_column(&self, block_root: [u8; 32], index: u8) -> Option<MessageId> {
         self.lock().get_by_column(block_root, index)
+    }
+
+    /// [`RecentLarge::get_by_block`] under the lock.
+    pub fn get_by_block(&self, block_root: [u8; 32]) -> Option<MessageId> {
+        self.lock().get_by_block(block_root)
     }
 
     /// [`RecentLarge::gc`] under the lock.
@@ -422,11 +448,15 @@ mod tests {
         );
         assert_eq!(recent.get_by_column([9; 32], 5), Some(id(1)));
 
-        // A block is not a column and is filed under nothing.
+        // A block is not a column: it reads as a block and is filed under its own root.
         assert_eq!(
             recent.insert(id(2), topic(), payload(2, 200), Some(&ssz), clock.now()),
-            None
+            Some(Header::Block {
+                slot: 42,
+                root: [8; 32]
+            })
         );
+        assert_eq!(recent.get_by_column([8; 32], 5), None);
 
         // An id the store already holds is still read: what a payload says about itself does not
         // depend on whether the bound had room for it.
