@@ -42,6 +42,7 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use overlay_bn::compat::{self, CompatStats};
+use overlay_bn::events::BlockEventStats;
 use overlay_bn::inbound::InboundStats;
 use overlay_bn::publish::PublishStats;
 use overlay_core::budget::FanoutKind;
@@ -86,6 +87,8 @@ pub const BN_COMPAT: &str = "overlay_bn_compat";
 /// 1 when the beacon node lists the sidecar as a trusted peer, 0 when it does not, and no
 /// series at all while it has not said.
 pub const BN_TRUSTED: &str = "overlay_bn_trusted";
+/// 1 while the beacon node's block event stream is connected.
+pub const BN_EVENTS_CONNECTED: &str = "overlay_bn_events_connected";
 /// Messages the swarm loop could not hand on because the lane was full.
 pub const BN_EVENTS_DROPPED_TOTAL: &str = "overlay_bn_events_dropped_total";
 /// Messages that crossed the overlay or went into the beacon node.
@@ -108,6 +111,8 @@ pub const PUBLISH_ERRORS_TOTAL: &str = "overlay_publish_errors_total";
 pub const PUBLISH_QUEUE_DROPS_TOTAL: &str = "overlay_publish_queue_drops_total";
 /// Publishes suppressed before they reached gossipsub, the kill switch included.
 pub const PUBLISH_SUPPRESSED_TOTAL: &str = "overlay_publish_suppressed_total";
+/// Blocks the beacon node imported, by whether this host had seen the block arrive.
+pub const IMPORT_EVENTS_TOTAL: &str = "overlay_import_events_total";
 /// Payloads that failed the snappy or message-id check on the receive path.
 pub const INVALID_PAYLOAD_TOTAL: &str = "overlay_invalid_payload_total";
 /// Frames carrying a topic id the peer has not announced.
@@ -173,6 +178,8 @@ pub const LABEL_REGION: &str = "region";
 pub const LABEL_SITE: &str = "site";
 /// Which side delivered a message first.
 pub const LABEL_SOURCE: &str = "source";
+/// Whether an imported block matched an arrival this host had recorded.
+pub const LABEL_MATCHED: &str = "matched";
 /// Why something was dropped, refused or failed.
 pub const LABEL_REASON: &str = "reason";
 /// The compatibility state.
@@ -194,6 +201,10 @@ pub const LABEL_GIT_SHA: &str = "git_sha";
 pub const SOURCE_BN: &str = "bn";
 /// The overlay delivered it first.
 pub const SOURCE_OVERLAY: &str = "overlay";
+/// This host saw the block arrive before its beacon node imported it.
+pub const MATCHED_YES: &str = "yes";
+/// It did not, so the overlay missed that block entirely.
+pub const MATCHED_NO: &str = "no";
 /// Published into the local beacon node, which has no peer, region or site.
 pub const DIRECTION_BN_OUT: &str = "bn_out";
 /// The lane counts whole frames.
@@ -255,6 +266,7 @@ pub struct Metrics {
     bn_info: IntGaugeVec,
     bn_compat: IntGaugeVec,
     bn_trusted: IntGaugeVec,
+    bn_events_connected: IntGauge,
     bn_events_dropped: IntCounterVec,
     messages: IntCounterVec,
     bytes: IntCounterVec,
@@ -265,6 +277,7 @@ pub struct Metrics {
     publish_errors: IntCounterVec,
     publish_queue_drops: IntCounterVec,
     publish_suppressed: IntCounterVec,
+    import_events: IntCounterVec,
     invalid_payload: IntCounterVec,
     unknown_topic_id: IntCounterVec,
     unknown_frame_type: IntCounterVec,
@@ -339,6 +352,10 @@ impl Metrics {
             "1 when the beacon node lists the sidecar as trusted.",
             &[],
         )?;
+        let bn_events_connected = b.gauge(
+            BN_EVENTS_CONNECTED,
+            "1 while the beacon node's block event stream is connected.",
+        )?;
         let bn_events_dropped = b.counter_vec(
             BN_EVENTS_DROPPED_TOTAL,
             "Beacon node events dropped because their lane was full.",
@@ -380,6 +397,11 @@ impl Metrics {
             PUBLISH_SUPPRESSED_TOTAL,
             "Publishes suppressed before gossipsub saw them.",
             class_reason,
+        )?;
+        let import_events = b.counter_vec(
+            IMPORT_EVENTS_TOTAL,
+            "Blocks the beacon node imported.",
+            &[LABEL_MATCHED],
         )?;
         let invalid_payload = b.counter_vec(
             INVALID_PAYLOAD_TOTAL,
@@ -533,6 +555,7 @@ impl Metrics {
             bn_info,
             bn_compat,
             bn_trusted,
+            bn_events_connected,
             bn_events_dropped,
             messages,
             bytes,
@@ -543,6 +566,7 @@ impl Metrics {
             publish_errors,
             publish_queue_drops,
             publish_suppressed,
+            import_events,
             invalid_payload,
             unknown_topic_id,
             unknown_frame_type,
@@ -594,6 +618,19 @@ impl Metrics {
     /// core is restart-required, and nothing moves the endpoint under a running process.
     pub fn set_io_thread_pinned(&self, pinned: bool) {
         self.io_thread_pinned.set(i64::from(pinned));
+    }
+}
+
+impl BlockEventStats for Metrics {
+    fn set_connected(&self, connected: bool) {
+        self.bn_events_connected.set(i64::from(connected));
+    }
+
+    /// An import with no arrival record is a block the overlay missed altogether, which is
+    /// worth a series of its own rather than a hole in another one.
+    fn imported(&self, matched: bool) {
+        let matched = if matched { MATCHED_YES } else { MATCHED_NO };
+        self.import_events.with_label_values(&[matched]).inc();
     }
 }
 
