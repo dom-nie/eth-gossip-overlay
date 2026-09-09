@@ -30,14 +30,17 @@ use std::time::{Duration, Instant};
 use arc_swap::ArcSwap;
 use overlay_bn::bn_http::BnClient;
 use overlay_bn::compat;
+use overlay_bn::events::BlockEvents;
 use overlay_bn::inbound::Inbound;
 use overlay_bn::link::{self, BnCommand, BnEvent, BnLink, LinkConfig};
 use overlay_bn::mirror;
 use overlay_bn::node_key::NodeKey;
 use overlay_bn::publish::Publisher;
 use overlay_bn::spec::spec_watch;
+use overlay_core::backoff::Backoff;
 use overlay_core::budget::{self, FanoutBudget, MemoryBudget, SendLaneBounds};
 use overlay_core::config::Config;
+use overlay_core::events::Arrivals;
 use overlay_core::identity::{Seeds, derive_tls_keypair};
 use overlay_core::lanes::ClassLanes;
 use overlay_core::reassemble::{ReassembleConfig, Reassembler};
@@ -296,6 +299,9 @@ impl App {
 
         let progress = Progress::default();
         let (spec_tx, spec_rx) = spec_watch();
+        // Both receive paths file into this one keeper, and the event stream below is what
+        // reads it (T-084). The retention window comes off the same snapshot the rest does.
+        let arrivals = Arc::new(Arrivals::new(clock.clone(), spec_rx.clone()));
         let (sets_tx, sets_rx) = watch::channel(SubscriptionSets::default());
         let (commands, commands_rx) = mpsc::channel(COMMAND_QUEUE);
         let bn_lanes = ClassLanes::new(metrics.clone());
@@ -347,6 +353,15 @@ impl App {
             node.clone(),
             clock.clone(),
             Arc::new(BnInbound(metrics.clone())),
+            arrivals.clone(),
+        );
+        // Import time: what the beacon node does with a block after this host already had it,
+        // which is the part of the slot the overlay cannot win back (§2, §12).
+        let block_events = BlockEvents::spawn(
+            cfg.bn.events_url.clone(),
+            Backoff::new(link::BACKOFF_MIN, link::BACKOFF_MAX),
+            arrivals.clone(),
+            metrics.clone(),
         );
 
         let pins = Arc::new(ArcSwap::from_pointee(PinTable::build(
@@ -400,6 +415,7 @@ impl App {
         let receive_deps = ReceiveDeps {
             seen,
             recent,
+            arrivals,
             publish: Arc::new(publish),
             sets: sets_rx.clone(),
             reassembler,
@@ -501,6 +517,7 @@ impl App {
                 compat,
                 publisher,
                 inbound,
+                block_events.task,
                 receivers,
                 repair,
                 exchange,
