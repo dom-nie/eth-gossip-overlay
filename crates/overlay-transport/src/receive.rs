@@ -3362,6 +3362,30 @@ mod tests {
         );
     }
 
+    /// A block the overlay put back together is a block the overlay won the race for, so the
+    /// beacon node's own import of it has to find a record here. Without this every block a
+    /// striping fleet wins reads as one the overlay never carried, which is the opposite of what
+    /// the import line exists to say.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reassembled_block_is_filed_for_its_import() {
+        let block = topic("beacon_block");
+        let payload = payload(b"a striped block only the import telemetry test sends");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        let (_, params, frames) = striped(0, &block, &payload, 64);
+
+        send(&peer, &frames[..usize::from(params.k)]).await;
+
+        eventually("the message to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert!(
+            cluster
+                .arrivals(1)
+                .imported(DECODED_BLOCK.slot(), DECODED_BLOCK.block_root())
+        );
+    }
+
     /// DX-N1 at the third ingress site: a host reassembles a message for a topic its own beacon
     /// node never asked for, and publishes nothing. The chunks were still worth taking in, since
     /// the region was owed them.
