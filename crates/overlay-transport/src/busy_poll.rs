@@ -244,9 +244,13 @@ fn missing_ioctl(err: &io::Error) -> bool {
 #[cfg(test)]
 pub(crate) mod tests {
     use std::mem::{align_of, offset_of, size_of};
-    use std::sync::Mutex;
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
+
+    use overlay_core::config::IoThread;
 
     use super::*;
+    use crate::testlog::LOG;
 
     /// Not a descriptor of anything. Every test here goes through [`Fake`], which never touches
     /// the number, and passing a plausible one would only invite a reader to think it matters.
@@ -394,5 +398,65 @@ pub(crate) mod tests {
             assert_eq!(libc::EPIOCSPARAMS as u64, 0x4008_8a01);
             assert_eq!(libc::EPIOCGPARAMS as u64, 0x8008_8a02);
         }
+    }
+
+    /// An address no socket in this process is bound to, so the lookup has nothing to find on
+    /// any platform.
+    fn unbound() -> SocketAddr {
+        SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 1))
+    }
+
+    /// What [`enable`] reported, since the gauge it drives lives in another crate.
+    #[derive(Clone, Default)]
+    struct Reported(Arc<Mutex<Vec<bool>>>);
+
+    impl Reported {
+        fn sink(&self) -> impl Fn(bool) + Send + 'static {
+            let seen = self.0.clone();
+            move |enabled| seen.lock().unwrap().push(enabled)
+        }
+
+        fn seen(&self) -> Vec<bool> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// The shipped default (D30). Nothing is asked of any kernel and nothing is said, because a
+    /// feature nobody turned on has nothing to report.
+    #[tokio::test]
+    async fn busy_poll_off_asks_the_kernel_for_nothing() {
+        let mark = LOG.len();
+        let reported = Reported::default();
+
+        enable(&IoThread::default(), unbound(), reported.sink());
+
+        assert_eq!(reported.seen(), vec![false]);
+        assert!(!LOG.since(mark).contains("overlay busy polling"));
+    }
+
+    /// Busy polling is set on an epoll instance, and the only one worth setting it on is the
+    /// one holding the overlay socket. Where the process has none, which is a kernel before
+    /// 6.13, a host that is not Linux, and this test everywhere, the sidecar says so once and
+    /// carries on with the gauge at zero.
+    #[tokio::test]
+    async fn an_epoll_without_the_overlay_socket_is_one_line_and_a_gauge_at_zero() {
+        let mark = LOG.len();
+        let reported = Reported::default();
+        let cfg = IoThread {
+            pin_cpu: Some(0),
+            prefer_busy_poll: true,
+            ..IoThread::default()
+        };
+
+        enable(&cfg, unbound(), reported.sink());
+
+        assert_eq!(reported.seen(), vec![false]);
+        assert_eq!(
+            LOG.since(mark)
+                .lines()
+                .filter(|line| line.contains("overlay busy polling not set"))
+                .count(),
+            1
+        );
     }
 }
