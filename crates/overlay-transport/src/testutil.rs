@@ -46,7 +46,6 @@ use bytes::Bytes;
 use ed25519_dalek::SigningKey;
 use overlay_core::budget::{FanoutBudget, FanoutKind, STREAM_RECEIVE_WINDOW};
 use overlay_core::config::{self, Overlay};
-use overlay_core::custody::SharedCustody;
 use overlay_core::fanout::Outbound;
 use overlay_core::header::HeaderDecoder;
 use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
@@ -59,7 +58,6 @@ use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRece
 use overlay_core::repair::Outcome as RepairOutcome;
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::seen::{SeenCache, SharedSeenCache};
-use overlay_core::spec::SpecSnapshot;
 use overlay_core::subs::{Bitmap, PeerState};
 use overlay_core::time::{Clock, SystemClock};
 use overlay_core::topic::Topic;
@@ -85,21 +83,6 @@ use crate::sender::{
 };
 use crate::subs::SubsStats;
 use crate::tls::{self, FailureReason, HandshakeFailure, PinTable, Role};
-
-/// What `overlay_bn::spec::MAINNET` holds. A cluster has no beacon node to answer
-/// `/eth/v1/config/spec` and this crate does not carry the compiled defaults, so a test that
-/// needs a custody tracker sized like a real one writes the two numbers it uses.
-pub fn mainnet_spec() -> SpecSnapshot {
-    SpecSnapshot {
-        data_column_sidecar_subnet_count: 128,
-        number_of_columns: 128,
-        number_of_custody_groups: 128,
-        custody_requirement: 4,
-        max_payload_size: 10_485_760,
-        seconds_per_slot: 12,
-        slots_per_epoch: 32,
-    }
-}
 
 /// Long enough for a handshake, an admission and a reconnect on a loaded machine, and short
 /// enough that a test which will never pass fails instead of hanging.
@@ -829,7 +812,6 @@ impl Builder {
             small: watch::channel(self.small).0,
             fanout: watch::channel(self.fanout).0,
             repair_deadline: watch::channel(self.large.repair_deadline).0,
-            spec: watch::channel(mainnet_spec()).0,
             large: self.large,
             decoder: self.decoder,
             in_flight: self.in_flight,
@@ -969,9 +951,6 @@ pub struct TestCluster<A: Admission = HelloAdmission> {
     /// How long every sidecar waits before asking a peer for the chunks it is missing, on the
     /// channel a reload publishes on (T-082, T-043).
     repair_deadline: watch::Sender<Duration>,
-    /// The spec snapshot every sidecar sizes its custody tracker by (CL-N3). Mainnet, since a
-    /// cluster has no beacon node to answer.
-    spec: watch::Sender<SpecSnapshot>,
     /// What reads the header of a stored payload, when a test installed one (T-083).
     decoder: Option<Arc<dyn HeaderDecoder>>,
     /// The bounds every sidecar's reassembler runs under.
@@ -1302,7 +1281,6 @@ impl<A: Admission> TestCluster<A> {
             Some(decoder) => store.with_decoder(decoder),
             None => store,
         };
-        let custody = SharedCustody::new(&mainnet_spec());
         let (subscriptions, watching) = watch::channel(sets);
         let reassembler = Arc::new(Reassembler::new(ReassembleConfig {
             max_in_flight: self.in_flight,
@@ -1318,7 +1296,6 @@ impl<A: Admission> TestCluster<A> {
         let deps = Deps {
             seen: seen.clone(),
             recent: recent.clone(),
-            custody: custody.clone(),
             publish: published.clone(),
             sets: watching.clone(),
             reassembler: reassembler.clone(),
@@ -1348,11 +1325,7 @@ impl<A: Admission> TestCluster<A> {
         let to_fanout = lanes.pusher();
         let tasks = vec![
             crate::subs::spawn(exchanged, watching, node.topics.clone(), stats.clone()),
-            crate::repair::spawn(
-                deps.clone(),
-                self.repair_deadline.subscribe(),
-                self.spec.subscribe(),
-            ),
+            crate::repair::spawn(deps.clone(), self.repair_deadline.subscribe()),
             tokio::spawn(receive_peers(events, to_exchange, deps, receivers.clone())),
             Fanout::spawn(
                 lanes,
@@ -1370,7 +1343,6 @@ impl<A: Admission> TestCluster<A> {
         self.nodes[index].sidecar = Some(Sidecar {
             seen,
             recent,
-            custody,
             reassembler,
             to_fanout,
             published,
@@ -1397,18 +1369,17 @@ impl<A: Admission> TestCluster<A> {
         if !sidecar.seen.insert(id) {
             return false;
         }
-        // Insert site 1 of 3 for the recent store, as T-016's inbound path makes it: a large
+        // Insert site 1 of 2 for the recent store, as T-016's inbound path makes it: a large
         // message the beacon node handed this host is one a peer can still ask it for (§5.6).
         if class == Class::Large {
-            let now = Instant::now();
             let ssz = msgid::decompressed(&payload, MAX_PAYLOAD_BYTES);
-            let header =
-                sidecar
-                    .recent
-                    .insert(id, topic.clone(), payload.clone(), ssz.as_deref(), now);
-            if let Some(header) = header {
-                sidecar.custody.observe(header, now);
-            }
+            sidecar.recent.insert(
+                id,
+                topic.clone(),
+                payload.clone(),
+                ssz.as_deref(),
+                Instant::now(),
+            );
         }
         sidecar
             .to_fanout
@@ -1436,12 +1407,6 @@ impl<A: Admission> TestCluster<A> {
     /// (§5.6).
     pub fn recent(&self, index: usize) -> &SharedRecentLarge {
         &self.sidecar(index).recent
-    }
-
-    /// Node `index`'s custody tracker, for a test that puts a column into one node's store
-    /// without the rest of the cluster seeing it (T-083).
-    pub fn custody(&self, index: usize) -> &SharedCustody {
-        &self.sidecar(index).custody
     }
 
     /// What node `index` has queued for its beacon node, oldest first.
@@ -1541,8 +1506,6 @@ struct Sidecar {
     seen: SharedSeenCache,
     /// The large payloads a peer could still ask this node to repair (§5.6).
     recent: SharedRecentLarge,
-    /// Which columns this node's beacon node is owed and which have arrived (T-083).
-    custody: SharedCustody,
     /// What the receive path asks whether a chunk is owed to the region (D19).
     reassembler: Arc<Reassembler>,
     to_fanout: LanePusher<Outbound>,

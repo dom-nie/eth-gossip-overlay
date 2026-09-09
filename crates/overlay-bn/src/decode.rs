@@ -214,10 +214,10 @@ fn bytes32(root: Hash256) -> [u8; 32] {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use std::collections::BTreeSet;
-    use std::time::Duration;
+    use std::sync::Arc;
 
-    use overlay_core::custody::{ColumnGap, CustodyTracker};
+    use overlay_core::msgid::MessageId;
+    use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
     use overlay_core::time::{Clock, FakeClock};
     use ssz::{Decode, Encode};
     use types::{BeaconBlock, BeaconBlockFulu, ChainSpec, DataColumnSidecarFulu, EmptyBlock};
@@ -381,60 +381,46 @@ mod tests {
         }
     }
 
-    /// The whole of what this ticket is for, with nothing stubbed: a block and one of its four
-    /// custody columns, both as a beacon node would gossip them, read by the decoder this crate
-    /// ships and handed to the tracker `overlay-core` ships. What comes back is the column that
-    /// never arrived, named by the root the block's own bytes hash to and the index the column's
-    /// own bytes carry, which is the pair a `REPAIR_REQ::Column` puts on the wire.
+    /// The whole of what this ticket ships, with nothing stubbed: a real column sidecar as a
+    /// beacon node would gossip it, read by the decoder this crate ships and filed by the store
+    /// `overlay-core` ships, under the block root the payload's own bytes hash to and the index
+    /// its own bytes carry. That pair is what a peer names a column by (T-081, T-087).
     #[test]
-    fn a_real_block_and_column_leave_the_tracker_naming_what_is_missing() {
-        let deadline = Duration::from_millis(250);
+    fn a_real_column_reaches_the_recent_store_under_its_own_identity() {
         let clock = FakeClock::new();
-        let (block, block_wire) = fulu_block(4_242);
-        let (_, column_wire) = column_sidecar_of(block.message().block_header(), 5);
-        let mut tracker = CustodyTracker::new(&crate::spec::MAINNET);
-        let expected = tracker.expected_columns(&column_topics(&[0, 5]));
+        let (block, _) = fulu_block(4_242);
+        let (sidecar, wire) = column_sidecar_of(block.message().block_header(), 5);
+        let recent = SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES))
+            .with_decoder(Arc::new(Headers));
+        let id = MessageId([1; 20]);
+        let payload = snappy(&wire).into();
 
-        let Some(Header::Block { slot, root }) =
-            Headers.header(&topic("beacon_block"), &block_wire)
-        else {
-            panic!("the block payload carries a header");
-        };
-        tracker.on_block(slot, root, expected, clock.now());
-        let Some(Header::Column {
-            slot,
-            index,
-            block_root,
-        }) = Headers.header(&topic("data_column_sidecar_5"), &column_wire)
-        else {
-            panic!("the column payload carries a header");
-        };
-        tracker.on_column(slot, u16::from(index), block_root);
-        clock.advance(deadline);
-
-        let gaps = tracker.missing_past_deadline(deadline, clock.now(), &tracker.column_set([]));
+        let header = recent.insert(
+            id,
+            topic("data_column_sidecar_5"),
+            payload,
+            Some(&wire),
+            clock.now(),
+        );
 
         assert_eq!(
-            gaps,
-            vec![ColumnGap {
-                block_root: bytes32(block.canonical_root()),
-                missing: vec![0],
-                have_count: 1,
-            }],
-            "the block and its column agree on one root and one column is still owed"
+            header,
+            Some(Header::Column {
+                slot: 4_242,
+                index: 5,
+                block_root: bytes32(sidecar.block_root()),
+            })
+        );
+        assert_eq!(
+            recent.get_by_column(bytes32(block.canonical_root()), 5),
+            Some(id),
+            "the column files under the root its own block hashes to"
         );
     }
 
     fn topic(name: &str) -> Topic {
         Topic::parse(&format!("/eth2/6a95a1a9/{name}/ssz_snappy"))
             .expect("a topic in the only shape the parser takes")
-    }
-
-    fn column_topics(indices: &[u16]) -> BTreeSet<Topic> {
-        indices
-            .iter()
-            .map(|index| topic(&format!("data_column_sidecar_{index}")))
-            .collect()
     }
 
     /// The refusal the exact first offset is for. A Gloas column sidecar's fixed part is 56

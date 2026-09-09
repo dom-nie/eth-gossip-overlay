@@ -38,7 +38,6 @@ use overlay_bn::publish::Publisher;
 use overlay_bn::spec::spec_watch;
 use overlay_core::budget::{self, FanoutBudget, MemoryBudget, SendLaneBounds};
 use overlay_core::config::Config;
-use overlay_core::custody::SharedCustody;
 use overlay_core::identity::{Seeds, derive_tls_keypair};
 use overlay_core::lanes::ClassLanes;
 use overlay_core::reassemble::{ReassembleConfig, Reassembler};
@@ -289,16 +288,14 @@ impl App {
             capacity = SEEN_CAPACITY,
             "seen cache ready"
         );
-        // What a repair request is answered from, filled by the beacon node link, by the
-        // reassembler and by a whole delivery, which is why all three are handed the one handle
-        // (§5.6). The decoder is what fills its column index and what tells the custody tracker
-        // which column arrived (T-083).
+        // What a repair request is answered from, filled by the beacon node link and by the
+        // reassembler, which is why both are handed the one handle (§5.6). The decoder is what
+        // fills its `(block_root, index)` index as payloads go in (T-083).
         let recent = SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES))
             .with_decoder(Arc::new(overlay_bn::decode::Headers));
 
         let progress = Progress::default();
         let (spec_tx, spec_rx) = spec_watch();
-        let custody = SharedCustody::new(&spec_rx.borrow());
         let (sets_tx, sets_rx) = watch::channel(SubscriptionSets::default());
         let (commands, commands_rx) = mpsc::channel(COMMAND_QUEUE);
         let bn_lanes = ClassLanes::new(metrics.clone());
@@ -346,7 +343,6 @@ impl App {
             commands.clone(),
             seen.clone(),
             recent.clone(),
-            custody.clone(),
             fanout_lanes.pusher(),
             node.clone(),
             clock.clone(),
@@ -404,7 +400,6 @@ impl App {
         let receive_deps = ReceiveDeps {
             seen,
             recent,
-            custody,
             publish: Arc::new(publish),
             sets: sets_rx.clone(),
             reassembler,
@@ -428,7 +423,7 @@ impl App {
         };
         // The repair scheduler reads the same reassembler the receive path fills and answers on
         // the same connections, so it takes the same dependencies (§5.6, T-082).
-        let repair = repair::spawn(receive_deps.clone(), repair_deadline_rx, spec_rx.clone());
+        let repair = repair::spawn(receive_deps.clone(), repair_deadline_rx);
         let receivers = tokio::spawn(receive_peers(peer_events_rx, to_exchange, receive_deps));
         let exchange = subs::spawn(exchanged, sets_rx.clone(), topics.clone(), metrics.clone());
         let fanout = Fanout::spawn(

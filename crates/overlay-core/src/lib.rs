@@ -5,7 +5,6 @@ pub mod backoff;
 pub mod batch;
 pub mod budget;
 pub mod config;
-pub mod custody;
 pub mod events;
 pub mod fanout;
 pub mod header;

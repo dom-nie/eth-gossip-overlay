@@ -16,7 +16,6 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use overlay_core::custody::SharedCustody;
 use overlay_core::events::{self, FirstArrival};
 use overlay_core::fanout::Outbound;
 use overlay_core::lanes::{ClassLanes, LanePusher};
@@ -69,7 +68,6 @@ pub struct Inbound {
     commands: mpsc::Sender<BnCommand>,
     seen: SharedSeenCache,
     recent: SharedRecentLarge,
-    custody: SharedCustody,
     out: LanePusher<Outbound>,
     node: Arc<SelfIdentity>,
     clock: Arc<dyn Clock>,
@@ -87,7 +85,7 @@ impl Inbound {
     /// a peer that may have to repair it (§5.6).
     #[expect(
         clippy::too_many_arguments,
-        reason = "the inbound path's wiring: where messages come from, the three stores it \
+        reason = "the inbound path's wiring: where messages come from, the two stores it \
                   records them in, where they go, who this host is, and one handle per \
                   consumer. Every parameter has its own type, so a call site cannot mix two up"
     )]
@@ -96,7 +94,6 @@ impl Inbound {
         commands: mpsc::Sender<BnCommand>,
         seen: SharedSeenCache,
         recent: SharedRecentLarge,
-        custody: SharedCustody,
         out: LanePusher<Outbound>,
         node: Arc<SelfIdentity>,
         clock: Arc<dyn Clock>,
@@ -107,7 +104,6 @@ impl Inbound {
             commands,
             seen,
             recent,
-            custody,
             out,
             node,
             clock,
@@ -204,9 +200,6 @@ impl Inbound {
             }
             Class::Small => None,
         };
-        if let Some(header) = header {
-            self.custody.observe(header, received_at);
-        }
         events::emit_first_arrival(&FirstArrival {
             id,
             class,
@@ -384,7 +377,6 @@ mod tests {
                 self.command_tx.clone(),
                 self.seen.clone(),
                 self.recent.clone(),
-                SharedCustody::new(&crate::spec::MAINNET),
                 self.out.pusher(),
                 Arc::new(node()),
                 Arc::new(self.clock.clone()),
@@ -673,7 +665,6 @@ mod tests {
             commands.clone(),
             seen.clone(),
             SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)),
-            SharedCustody::new(&crate::spec::MAINNET),
             out.pusher(),
             Arc::new(node()),
             Arc::new(clock),
