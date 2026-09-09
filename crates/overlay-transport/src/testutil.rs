@@ -46,7 +46,9 @@ use bytes::Bytes;
 use ed25519_dalek::SigningKey;
 use overlay_core::budget::{FanoutBudget, FanoutKind, STREAM_RECEIVE_WINDOW};
 use overlay_core::config::{self, Overlay};
+use overlay_core::events::Arrivals;
 use overlay_core::fanout::Outbound;
+use overlay_core::header::{Header, HeaderDecoder};
 use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
 use overlay_core::lanes::{ClassLanes, LanePusher};
 use overlay_core::msgid;
@@ -57,6 +59,7 @@ use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRece
 use overlay_core::repair::Outcome as RepairOutcome;
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::seen::{SeenCache, SharedSeenCache};
+use overlay_core::spec::SpecSnapshot;
 use overlay_core::subs::{Bitmap, PeerState};
 use overlay_core::time::{Clock, SystemClock};
 use overlay_core::topic::Topic;
@@ -106,6 +109,23 @@ const RECEIVE_WINDOW: u64 = STREAM_RECEIVE_WINDOW;
 
 /// The seen cache every sidecar in a cluster runs, at §5.5's TTL and a capacity sized for a
 /// test rather than for a fleet.
+/// The block every node's decoder reads out of whatever payload it is handed. A cluster has no
+/// beacon node and no real SSZ, and what the tests need is a header, not a decoder.
+pub const DECODED_BLOCK: Header = Header::Block {
+    slot: 8_675_309,
+    root: [0x9c; 32],
+};
+
+/// Stands in for T-083's `overlay_bn::decode::Headers`, which `overlay-transport` cannot reach
+/// and which would need a real block to answer anyway.
+struct OneBlock;
+
+impl HeaderDecoder for OneBlock {
+    fn header(&self, _: &Topic, _: &[u8]) -> Option<Header> {
+        Some(DECODED_BLOCK)
+    }
+}
+
 const SEEN_TTL: Duration = Duration::from_secs(60);
 const SEEN_CAPACITY: usize = 4096;
 
@@ -1262,7 +1282,16 @@ impl<A: Admission> TestCluster<A> {
             Arc::new(SystemClock),
         ));
         published.watching(seen.clone());
-        let recent = SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES));
+        let recent = SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES))
+            .with_decoder(Arc::new(OneBlock));
+        let arrivals = Arc::new(Arrivals::new(
+            self.clock.clone(),
+            watch::Sender::new(SpecSnapshot {
+                seconds_per_slot: 12,
+                ..SpecSnapshot::default()
+            })
+            .subscribe(),
+        ));
         let (subscriptions, watching) = watch::channel(sets);
         let reassembler = Arc::new(Reassembler::new(ReassembleConfig {
             max_in_flight: self.in_flight,
@@ -1278,6 +1307,7 @@ impl<A: Admission> TestCluster<A> {
         let deps = Deps {
             seen: seen.clone(),
             recent: recent.clone(),
+            arrivals: arrivals.clone(),
             publish: published.clone(),
             sets: watching.clone(),
             reassembler: reassembler.clone(),
@@ -1325,6 +1355,7 @@ impl<A: Admission> TestCluster<A> {
         self.nodes[index].sidecar = Some(Sidecar {
             seen,
             recent,
+            arrivals,
             reassembler,
             to_fanout,
             published,
@@ -1383,6 +1414,11 @@ impl<A: Admission> TestCluster<A> {
     /// published (D08).
     pub fn seen(&self, index: usize) -> &SharedSeenCache {
         &self.sidecar(index).seen
+    }
+
+    /// Node `index`'s arrival keeper, which the import event is matched against (T-084).
+    pub fn arrivals(&self, index: usize) -> &Arc<Arrivals> {
+        &self.sidecar(index).arrivals
     }
 
     /// Node `index`'s recent store, which is what a repair request would be answered from
@@ -1488,6 +1524,7 @@ struct Sidecar {
     seen: SharedSeenCache,
     /// The large payloads a peer could still ask this node to repair (§5.6).
     recent: SharedRecentLarge,
+    arrivals: Arc<Arrivals>,
     /// What the receive path asks whether a chunk is owed to the region (D19).
     reassembler: Arc<Reassembler>,
     to_fanout: LanePusher<Outbound>,

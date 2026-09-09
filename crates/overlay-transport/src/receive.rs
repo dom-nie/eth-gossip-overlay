@@ -60,7 +60,7 @@ use std::time::{Duration, Instant, SystemTime};
 use bytes::Bytes;
 use overlay_core::budget::{Charge, FanoutBudget, FanoutKind};
 use overlay_core::config::LargeClass;
-use overlay_core::events::{self, FirstArrival};
+use overlay_core::events::{self, Arrivals, FirstArrival};
 use overlay_core::msgid::{self, Branch, MessageId};
 use overlay_core::protocol::{MAX_FRAME_BYTES, features};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
@@ -194,6 +194,9 @@ pub struct Deps {
     /// Where a message this host reassembled is kept so a peer can repair it from here (§5.6).
     /// The beacon node link (T-016) holds the other handle to the same store.
     pub recent: SharedRecentLarge,
+    /// When each block reached this host, so the beacon node's own import of it can be timed
+    /// against that (T-084). The link holds the other handle, and only blocks are filed.
+    pub arrivals: Arc<Arrivals>,
     /// T-017's publish queue, behind the trait that keeps `overlay-transport` clear of libp2p.
     pub publish: Arc<dyn PublishSink>,
     /// What the mirror says the beacon node is subscribed to, which is the gate (DX-N1).
@@ -749,13 +752,15 @@ impl Ctx {
             .deps
             .recent
             .insert(id, topic.clone(), payload, Some(&ssz), now);
+        let source = events::Source::Overlay { origin };
+        self.deps.arrivals.saw(header, &source);
         events::emit_first_arrival(&FirstArrival {
             id,
             class,
             topic,
             node: &self.deps.node,
             at: arrived,
-            source: events::Source::Overlay { origin },
+            source,
             header,
         });
         true
@@ -1206,8 +1211,8 @@ mod tests {
     use super::*;
     use crate::testlog::LOG;
     use crate::testutil::{
-        Builder, CountingStats, NodeKind, PUBLISHED_MAX, PublishSpy, SETTLE, TestCluster, WAIT,
-        eventually, subscriptions, topic,
+        Builder, CountingStats, DECODED_BLOCK, NodeKind, PUBLISHED_MAX, PublishSpy, SETTLE,
+        TestCluster, WAIT, eventually, subscriptions, topic,
     };
     use bytes::BytesMut;
     use overlay_core::budget::SUSTAINED_VIOLATION;
@@ -1216,6 +1221,7 @@ mod tests {
     use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge};
     use overlay_core::rs::Params;
     use overlay_core::seen::SeenCache;
+    use overlay_core::spec::SpecSnapshot;
     use overlay_core::time::{FakeClock, SystemClock};
     use overlay_core::topic::UNKNOWN_LARGE_THRESHOLD_BYTES;
     use overlay_core::wire::{BatchEntry, BatchFlags, RepairReq, RepairResp, encode_datagram};
@@ -2516,6 +2522,10 @@ mod tests {
                     Arc::new(SystemClock),
                 )),
                 recent: SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)),
+                arrivals: Arc::new(Arrivals::new(
+                    Arc::new(SystemClock),
+                    watch::Sender::new(SpecSnapshot::default()).subscribe(),
+                )),
                 publish: published.clone(),
                 sets: watching,
                 reassembler: Arc::new(Reassembler::new(ReassembleConfig::default())),
