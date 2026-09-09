@@ -19,6 +19,7 @@ test-util = ["tokio/rt-multi-thread"]
 arc-swap.workspace = true
 bytes.workspace = true
 ed25519-dalek.workspace = true
+libc.workspace = true
 overlay-core.workspace = true
 quinn.workspace = true
 rand.workspace = true

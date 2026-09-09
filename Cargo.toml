@@ -39,6 +39,10 @@ quinn = { version = "0.11", default-features = false, features = ["log", "runtim
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
 arc-swap = "1"
 socket2 = "0.6"
+# The kernel ABI overlay-transport reaches for by hand (T-092): `epoll_params`, the
+# EPIOCSPARAMS request numbers, `SO_INCOMING_NAPI_ID`, and the errno values every platform
+# numbers differently. Already in the tree under socket2 and tokio, so nothing new is built.
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_bw = "2"

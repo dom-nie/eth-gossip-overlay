@@ -37,6 +37,18 @@
 //! and one written for T-093 the same way stays registered in this thread's epoll, where the
 //! lookup below still finds it.
 
+use std::io;
+use std::os::fd::RawFd;
+
+/// Whether the kernel took the busy-poll parameters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Support {
+    /// The epoll instance is busy polling: Linux 6.13 or later.
+    Enabled,
+    /// The ioctl is not there, so nothing was changed. A kernel before 6.13, or not Linux.
+    Unsupported,
+}
+
 /// `struct epoll_params` from `include/uapi/linux/eventpoll.h`, the argument `EPIOCSPARAMS`
 /// reads and `EPIOCGPARAMS` writes back.
 ///
@@ -67,6 +79,105 @@ impl EpollParams {
             pad: 0,
         }
     }
+}
+
+/// The kernel calls this module makes.
+///
+/// Behind a trait because every answer that decides what an operator sees is one no test can
+/// arrange for real: a kernel too old for the ioctl, a process without `CAP_NET_ADMIN`, a queue
+/// with no NAPI id. [`Host`] is the one implementation that reaches a kernel, and off Linux
+/// even that one only says so.
+pub(crate) trait Kernel {
+    /// `ioctl(epoll, EPIOCSPARAMS, params)`.
+    fn set_epoll_params(&self, epoll: RawFd, params: &EpollParams) -> io::Result<()>;
+    /// `ioctl(epoll, EPIOCGPARAMS, …)`, which changes nothing.
+    fn epoll_params(&self, epoll: RawFd) -> io::Result<EpollParams>;
+}
+
+/// The running kernel.
+pub(crate) struct Host;
+
+#[cfg(target_os = "linux")]
+impl Kernel for Host {
+    fn set_epoll_params(&self, epoll: RawFd, params: &EpollParams) -> io::Result<()> {
+        // The kernel copies eight bytes out of the pointer and writes nothing back, and
+        // `params` is a live borrow of exactly that struct.
+        let done = unsafe { libc::ioctl(epoll, libc::EPIOCSPARAMS, std::ptr::from_ref(params)) };
+        result(done)
+    }
+
+    fn epoll_params(&self, epoll: RawFd) -> io::Result<EpollParams> {
+        let mut params = EpollParams::default();
+        // The kernel writes eight bytes into the pointer, which is a live exclusive borrow of
+        // exactly that struct.
+        let done =
+            unsafe { libc::ioctl(epoll, libc::EPIOCGPARAMS, std::ptr::from_mut(&mut params)) };
+        result(done).map(|()| params)
+    }
+}
+
+/// Off Linux there is no epoll instance to set anything on, so the answer is the one every
+/// caller already handles: this kernel does not have the ioctl.
+#[cfg(not(target_os = "linux"))]
+impl Kernel for Host {
+    fn set_epoll_params(&self, _epoll: RawFd, _params: &EpollParams) -> io::Result<()> {
+        Err(io::Error::from_raw_os_error(libc::ENOTTY))
+    }
+
+    fn epoll_params(&self, _epoll: RawFd) -> io::Result<EpollParams> {
+        Err(io::Error::from_raw_os_error(libc::ENOTTY))
+    }
+}
+
+/// What an ioctl returned, as an error where it failed.
+#[cfg(target_os = "linux")]
+fn result(returned: libc::c_int) -> io::Result<()> {
+    match returned {
+        0.. => Ok(()),
+        _ => Err(io::Error::last_os_error()),
+    }
+}
+
+/// Sets `params` on `epoll`, so `epoll_wait` spins on the queue before it sleeps.
+///
+/// A kernel that does not have the ioctl is [`Support::Unsupported`] and not an error, because
+/// losing a tuning must never cost the mesh (§11.1). Anything else the kernel says does come
+/// back as an error: the caller logs it and carries on, but it says what happened.
+pub fn apply(epoll: RawFd, params: &EpollParams) -> io::Result<Support> {
+    apply_with(&Host, epoll, params)
+}
+
+fn apply_with(kernel: &dyn Kernel, epoll: RawFd, params: &EpollParams) -> io::Result<Support> {
+    match kernel.set_epoll_params(epoll, params) {
+        Ok(()) => Ok(Support::Enabled),
+        Err(err) if missing_ioctl(&err) => Ok(Support::Unsupported),
+        Err(err) => Err(err),
+    }
+}
+
+/// The busy-poll parameters `epoll` is running with, or `None` from a kernel that has no
+/// `EPIOCSPARAMS` at all.
+///
+/// Reads and changes nothing, so it is both the startup probe that tells a kernel before 6.13
+/// from an epoll instance that could not be found, and the read-back `docs/performance.md`
+/// gives an operator for confirming that [`apply`] took.
+pub fn detect(epoll: RawFd) -> io::Result<Option<EpollParams>> {
+    detect_with(&Host, epoll)
+}
+
+fn detect_with(kernel: &dyn Kernel, epoll: RawFd) -> io::Result<Option<EpollParams>> {
+    match kernel.epoll_params(epoll) {
+        Ok(params) => Ok(Some(params)),
+        Err(err) if missing_ioctl(&err) => Ok(None),
+        Err(err) => Err(err),
+    }
+}
+
+/// Whether the error says this kernel has no `EPIOCSPARAMS`, rather than that the call went
+/// wrong. `ENOTTY` is a kernel before 6.13 answering a number it has never heard of; `EINVAL`
+/// is one that knows the number but not on this descriptor.
+fn missing_ioctl(err: &io::Error) -> bool {
+    matches!(err.raw_os_error(), Some(libc::ENOTTY | libc::EINVAL))
 }
 
 #[cfg(test)]

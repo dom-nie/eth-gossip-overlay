@@ -4416,6 +4416,7 @@ dependencies = [
  "arc-swap",
  "bytes",
  "ed25519-dalek 3.0.0",
+ "libc",
  "mutants",
  "nix 0.29.0",
  "overlay-core",
