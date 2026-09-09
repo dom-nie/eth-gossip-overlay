@@ -562,6 +562,7 @@ impl Config {
             ("bn.publish_rate_limit.small_per_s", limits.small_per_s == 0),
             ("bn.publish_rate_limit.large_per_s", limits.large_per_s == 0),
             ("bn.publish_rate_limit.bytes_per_s", limits.bytes_per_s == 0),
+            ("bn.by_root_cache.slots", self.bn.by_root_cache.slots == 0),
         ] {
             if zero {
                 return Err(invalid(field, "must be at least 1".to_owned()));
