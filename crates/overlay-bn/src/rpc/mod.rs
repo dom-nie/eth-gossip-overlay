@@ -4,8 +4,10 @@
 //! The wire format is Lighthouse's `SSZSnappyInboundCodec`
 //! (`beacon_node/lighthouse_network/src/rpc/codec.rs`): a request is the uncompressed SSZ
 //! length as an unsigned LEB128 varint followed by the SSZ in snappy's framing format, and a
-//! response chunk is a result byte in front of the same. The protocols answered here carry no
-//! context bytes (`ProtocolId::has_context_bytes` in `rpc/protocol.rs`).
+//! response chunk is a result byte in front of the same. Of the protocols answered here, only
+//! §5.8's two by-root ones carry context bytes, four bytes of fork digest between the result
+//! byte and the length (`ProtocolId::has_context_bytes` in `rpc/protocol.rs`); the rest write
+//! one chunk with none.
 //!
 //! Answering `ResourceUnavailable` is not free on every protocol. For a request the beacon
 //! node made itself on `BlocksByRange` or `BlocksByRoot` it is `PeerAction::Fatal`, an
@@ -206,13 +208,17 @@ impl Responder {
     /// The response to what the codec read off one stream.
     ///
     /// The protocol is decided on before the body: a protocol the sidecar registers but does
-    /// not serve is answered `ResourceUnavailable` whatever arrived on it, because a body
-    /// longer than the 92 bytes of the largest request the sidecar serves is routine there (a
-    /// by-root request of three roots is 96 bytes) and `InvalidRequest` costs the sidecar
-    /// peer score, while `ResourceUnavailable` costs nothing on the two protocols upstream
-    /// exempts, `BlobsByRoot` and `DataColumnsByRoot` (`RPCError::ErrorResponse` in
+    /// not serve is answered `ResourceUnavailable` whatever arrived on it, because a request
+    /// longer than anything the sidecar reads is routine there and `InvalidRequest` costs the
+    /// sidecar peer score, while `ResourceUnavailable` costs nothing on the two protocols
+    /// upstream exempts, `BlobsByRoot` and `DataColumnsByRoot` (`RPCError::ErrorResponse` in
     /// `beacon_node/lighthouse_network/src/peer_manager/mod.rs:559`). On the rest it is the
     /// module doc's `PeerAction::Fatal`, which is why trust has to be in place.
+    ///
+    /// The two by-root protocols are the exception: their bodies are read, because the cache
+    /// has to know which roots were asked for. A body that does not read back is still
+    /// `ResourceUnavailable` rather than `InvalidRequest`, so serving them cannot cost the
+    /// sidecar standing it was not already risking (§5.8).
     pub fn answer(&self, request: &Request) -> Response {
         match request {
             (Protocol::Unsupported, _) => Response::ResourceUnavailable,
