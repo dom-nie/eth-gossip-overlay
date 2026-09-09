@@ -37,10 +37,115 @@
 //! and one written for T-093 the same way stays registered in this thread's epoll, where the
 //! lookup below still finds it.
 
+mod epoll_fd;
 pub mod napi;
 
 use std::io;
+use std::net::SocketAddr;
 use std::os::fd::RawFd;
+use std::time::Duration;
+
+use overlay_core::config::IoThread;
+
+/// How often to ask the overlay socket which queue delivered to it, and how many times before
+/// giving up.
+///
+/// The id only exists once a packet has arrived, and at startup none has. A minute is longer
+/// than a fleet takes to connect its first peer, and thirteen `getsockopt` calls spread over it
+/// is the opposite of the retry storm the ticket warns about.
+const NAPI_POLL_INTERVAL: Duration = Duration::from_secs(5);
+const NAPI_POLL_ATTEMPTS: u32 = 12;
+
+/// Turns on busy polling for the overlay's epoll instance, and IRQ suspension for the NIC queue
+/// behind it, reporting through `enabled` whether the whole path came up.
+///
+/// Call it once at startup, after the endpoint is bound, from the runtime that runs the rest of
+/// the sidecar: none of this touches the overlay socket's readiness, so none of it belongs on
+/// the I/O thread. It needs the I/O thread to exist, which is why the configuration refuses
+/// `prefer_busy_poll` without a `pin_cpu`.
+///
+/// Every failure here is one info line and a gauge left at zero. The tuning is optional and the
+/// mesh is not (§11.1).
+pub fn enable(cfg: &IoThread, listen: SocketAddr, enabled: impl Fn(bool) + Send + 'static) {
+    if !cfg.prefer_busy_poll {
+        enabled(false);
+        return;
+    }
+    let (epoll, socket) = match epoll_fd::find(listen) {
+        Ok(found) => found,
+        Err(reason) => {
+            tracing::info!(%listen, reason, "overlay busy polling not set");
+            enabled(false);
+            return;
+        }
+    };
+    let params = EpollParams::preferring_busy_poll(cfg.busy_poll_usecs);
+    match apply(epoll, &params) {
+        Ok(Support::Enabled) => {}
+        Ok(Support::Unsupported) => {
+            tracing::info!(
+                reason = "the kernel has no EPIOCSPARAMS; Linux 6.13 added it",
+                "overlay busy polling not set"
+            );
+            enabled(false);
+            return;
+        }
+        Err(err) => {
+            tracing::info!(%err, "overlay busy polling not set");
+            enabled(false);
+            return;
+        }
+    }
+    tracing::info!(
+        busy_poll_usecs = cfg.busy_poll_usecs,
+        "overlay endpoint busy polling"
+    );
+
+    if cfg.irq_suspend_timeout.is_zero() {
+        // An operator who set the timeout to zero asked for exactly this and does not need
+        // CAP_NET_ADMIN for it, so the path is up as far as they wanted it.
+        enabled(true);
+        return;
+    }
+    tokio::spawn(suspend_when_the_queue_is_known(
+        socket,
+        cfg.irq_suspend_timeout,
+        enabled,
+    ));
+}
+
+/// Waits for the first packet to name a queue, then asks netdev to suspend its IRQ.
+///
+/// A device with no NAPI instance never names one, which is loopback and most of what a
+/// container gives a process. That ends in one line rather than in an attempt per interval
+/// forever.
+async fn suspend_when_the_queue_is_known(socket: RawFd, timeout: Duration, enabled: impl Fn(bool)) {
+    for _ in 0..NAPI_POLL_ATTEMPTS {
+        match napi::id_of(socket) {
+            Ok(Some(napi_id)) => {
+                match napi::set_irq_suspend_timeout(napi_id, timeout) {
+                    Ok(asked) => enabled(asked),
+                    Err(err) => {
+                        tracing::info!(napi_id, %err, "overlay IRQ suspension not set");
+                        enabled(false);
+                    }
+                }
+                return;
+            }
+            Ok(None) => tokio::time::sleep(NAPI_POLL_INTERVAL).await,
+            Err(err) => {
+                tracing::info!(%err, "overlay NIC queue not read from the socket");
+                enabled(false);
+                return;
+            }
+        }
+    }
+    tracing::info!(
+        reason = "the overlay socket never named a NAPI queue",
+        "overlay IRQ suspension not set"
+    );
+    enabled(false);
+}
 
 /// Whether the kernel took the busy-poll parameters.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

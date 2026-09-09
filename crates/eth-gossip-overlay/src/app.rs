@@ -51,6 +51,7 @@ use overlay_core::seen::{SEEN_CAPACITY, SEEN_TTL, SeenCache, SharedSeenCache};
 use overlay_core::time::SystemClock;
 use overlay_core::topic::SubscriptionSets;
 use overlay_transport::batching::Batching;
+use overlay_transport::busy_poll;
 use overlay_transport::endpoint;
 use overlay_transport::fanout::Fanout;
 use overlay_transport::hello::{HelloAdmission, OwnTopics, SelfHello};
@@ -396,6 +397,13 @@ impl App {
             endpoint::bind(&overlay, receive_window, server)
         })?;
         metrics.set_io_thread_pinned(io.pinned());
+        // The bound address rather than the configured one, because that is what the lookup
+        // compares against `getsockname`, and a port of zero is a real configuration.
+        let listen = io.endpoint().local_addr().unwrap_or(cfg.overlay.listen);
+        busy_poll::enable(&cfg.overlay.io_thread, listen, {
+            let metrics = metrics.clone();
+            move |enabled| metrics.set_busy_poll_enabled(enabled)
+        });
         tracing::info!(listen = %cfg.overlay.listen, "overlay endpoint bound");
 
         let (roster_tx, _) = watch::channel(me.roster.clone());
