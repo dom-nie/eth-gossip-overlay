@@ -243,6 +243,18 @@ impl Arrivals {
         seen.entry(block_root).or_insert(arrival);
     }
 
+    /// Files what a receive path just took in, if it was a block.
+    ///
+    /// The two paths hand over whatever T-083's decoder read, which is `None` on a build without
+    /// it and a column as often as a block. A column carries its block's root, but a host that
+    /// only ever saw columns did not carry the block, and measuring the block's lag from one
+    /// would credit the overlay with a block the beacon node fetched itself.
+    pub fn saw(&self, header: Option<Header>, source: &Source<'_>) {
+        if let Some(Header::Block { root, .. }) = header {
+            self.arrived(root, source);
+        }
+    }
+
     /// Logs the import of the block at `slot` and says whether an arrival record matched it.
     pub fn imported(&self, slot: u64, block_root: [u8; 32]) -> bool {
         let now = self.clock.now();
