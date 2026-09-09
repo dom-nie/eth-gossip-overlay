@@ -6,6 +6,7 @@
 //! `newPayload` and column verification becomes a number an operator can see.
 
 use std::collections::BTreeMap;
+use std::ops::ControlFlow;
 use std::str::from_utf8;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime};
@@ -14,6 +15,7 @@ use overlay_core::backoff::Backoff;
 use overlay_core::events::{ImportEvent, Source, emit_import};
 use overlay_core::roster::Hostname;
 use overlay_core::time::Clock;
+use reqwest::StatusCode;
 use serde::Deserialize;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -169,26 +171,38 @@ async fn run(
     stats: Arc<dyn BlockEventStats>,
 ) {
     loop {
-        match read(&http, &url, &arrivals, &stats).await {
+        let outcome = read(&http, &url, &arrivals, &stats).await;
+        stats.set_connected(false);
+        match outcome {
             // The beacon node closed a stream it had been serving, so the next one is worth
-            // trying at once. A failure gets the delay the last one earned.
-            Ok(()) => backoff.reset(),
+            // trying at once. Anything else gets the delay the last attempt earned.
+            Ok(ControlFlow::Continue(())) => backoff.reset(),
+            Ok(ControlFlow::Break(())) => return,
             Err(err) => tracing::debug!(%err, %url, "the beacon node's event stream failed"),
         }
-        stats.set_connected(false);
         let delay = backoff.next_delay(&mut rand::rng());
         tokio::time::sleep(delay).await;
     }
 }
 
-/// One connection, until the beacon node closes it or the read fails.
+/// One connection, until the beacon node closes it or the read fails. It breaks when the beacon
+/// node has no such endpoint, which no amount of retrying will change.
 async fn read(
     http: &reqwest::Client,
     url: &Url,
     arrivals: &Arrivals,
     stats: &Arc<dyn BlockEventStats>,
-) -> Result<(), reqwest::Error> {
-    let mut response = http.get(url.clone()).send().await?;
+) -> Result<ControlFlow<()>, reqwest::Error> {
+    let response = http.get(url.clone()).send().await?;
+    if response.status() == StatusCode::NOT_FOUND {
+        tracing::warn!(
+            %url,
+            "the beacon node has no block event stream; import telemetry is off for this host"
+        );
+        return Ok(ControlFlow::Break(()));
+    }
+    // Any other refusal is worth waiting out: a beacon node that is still starting answers 503.
+    let mut response = response.error_for_status()?;
     stats.set_connected(true);
     let mut frames = Frames::default();
     while let Some(chunk) = response.chunk().await? {
@@ -196,7 +210,7 @@ async fn read(
             stats.imported(arrivals.imported(&event));
         }
     }
-    Ok(())
+    Ok(ControlFlow::Continue(()))
 }
 
 /// The `data` of a `block` event. Lighthouse writes the slot as a quoted decimal and the root
