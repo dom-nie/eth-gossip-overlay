@@ -34,7 +34,7 @@ use bytes::Bytes;
 use crate::msgid::{self, Branch, MessageId};
 use crate::roster::Hostname;
 use crate::rs::{self, Decoded, Params};
-use crate::topic::{Topic, TopicKind};
+use crate::topic::Topic;
 use crate::wire::{Chunk, MAX_PAYLOAD_BYTES};
 
 /// Messages one host collects chunks for at once.
@@ -275,7 +275,7 @@ impl Reassembler {
             Some(entry) if entry.params != params => return Outcome::HeaderConflict,
             Some(_) => {}
             None if !usable(params) => return rejected(Reason::BadHeader, from),
-            None => state.open(chunk.msg_id, chunk.topic_id, topic.kind(), params, now),
+            None => state.open(chunk.msg_id, chunk.topic_id, params, now),
         }
         state.store(chunk, topic, from, forwarded)
     }
@@ -314,22 +314,6 @@ impl Reassembler {
         let mut state = self.state();
         state.expire(now);
         state.trim_completed();
-    }
-
-    /// The column index of every message still being collected, ascending (T-083).
-    ///
-    /// A column with chunks already here completes with the fewest bytes, so the custody tracker
-    /// lists these first and T-082's chunk path, not column identity, is what finishes them.
-    pub fn in_flight_columns(&self) -> Vec<u16> {
-        let mut columns: Vec<u16> = self
-            .state()
-            .in_flight
-            .values()
-            .filter_map(|entry| entry.column.map(u16::from))
-            .collect();
-        columns.sort_unstable();
-        columns.dedup();
-        columns
     }
 
     /// How many messages are in flight, which is the only thing that grows as chunks arrive.
@@ -385,14 +369,7 @@ struct State {
 impl State {
     /// Opens an entry for `msg_id`, which may take the oldest one away: that is the bound on how
     /// many messages a peer can make this host hold.
-    fn open(
-        &mut self,
-        msg_id: MessageId,
-        topic_id: u16,
-        kind: &TopicKind,
-        params: Params,
-        now: Instant,
-    ) {
+    fn open(&mut self, msg_id: MessageId, topic_id: u16, params: Params, now: Instant) {
         while self.in_flight.len() >= self.cfg.max_in_flight {
             if !self.drop_oldest(Evicted::MaxInFlight) {
                 break;
@@ -400,7 +377,7 @@ impl State {
         }
         self.order.push_back(msg_id);
         self.in_flight
-            .insert(msg_id, Entry::new(topic_id, kind, params, now));
+            .insert(msg_id, Entry::new(topic_id, params, now));
     }
 
     /// Records one chunk against an entry that is already open, and answers what its arrival
@@ -532,9 +509,6 @@ impl State {
 /// One message being collected.
 struct Entry {
     topic_id: u16,
-    /// The column index of the topic this message is on, for T-083's prioritisation. Read from
-    /// the topic the sender's id resolved to, once, when the entry is opened.
-    column: Option<u8>,
     params: Params,
     first_chunk_at: Instant,
     /// The chunks held, paired with the index their header carried, which is the shape
@@ -548,13 +522,9 @@ struct Entry {
 }
 
 impl Entry {
-    fn new(topic_id: u16, kind: &TopicKind, params: Params, first_chunk_at: Instant) -> Self {
+    fn new(topic_id: u16, params: Params, first_chunk_at: Instant) -> Self {
         Self {
             topic_id,
-            column: match kind {
-                TopicKind::DataColumnSidecar(index) => Some(*index),
-                _ => None,
-            },
             params,
             first_chunk_at,
             chunks: Vec::new(),
@@ -1189,22 +1159,5 @@ mod tests {
         reassembler.complete(MessageId([1; 20]));
 
         assert_eq!(reassembler.in_flight(), 0);
-    }
-
-    /// What T-083's prioritisation reads: a column whose chunks are already arriving is repaired
-    /// through the chunk path and counted as nearly here, and a block on the same reassembler is
-    /// not a column at all.
-    #[test]
-    fn in_flight_columns_names_only_the_column_topics_being_collected() {
-        let now = Instant::now();
-        let column =
-            Topic::parse("/eth2/6a95a1a9/data_column_sidecar_5/ssz_snappy").expect("a topic");
-        let reassembler = Reassembler::new(ReassembleConfig::default());
-        let peer = Hostname("bn-1".to_owned());
-
-        reassembler.on_chunk(&chunk(1, 0, 4, 2), &column, &peer, false, now);
-        reassembler.on_chunk(&chunk(2, 0, 4, 2), &block(), &peer, false, now);
-
-        assert_eq!(reassembler.in_flight_columns(), vec![5]);
     }
 }
