@@ -60,7 +60,8 @@ these two topic kinds and only as far as the header, and only where it keeps the
 message arrives from the beacon node, and as one it reassembled from chunks comes back. A message
 a sibling delivered whole is not kept and carries neither key, and neither does a line for any
 other large topic or a line from a build without the `column-repair` feature. The keys are absent
-rather than null. Import time is a second event, `event="import"`.
+rather than null. When the block root is here, it is what joins this line to the
+[`import`](#import) event for the same block, in the same rendering on both.
 
 ### One line
 
@@ -97,6 +98,72 @@ sum(count_over_time({unit="eth-gossip-overlay.service"} | json | event="first_ar
 ```
 
 Drop the `topic` filter in either query for every large message rather than blocks alone.
+
+## `import`
+
+One per block the beacon node imported, whether or not the block ever reached this host.
+
+Arrival is not import. `newPayload` and column verification take 200 to 500 ms on a full block
+(Architecture.md §2), and every 100 ms of that cancels 100 ms of whatever the overlay won. This
+line is how you see how much of it your hosts are spending, and it is telemetry only: nothing in
+the sidecar decides anything on it.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `timestamp` | RFC 3339 string | When the line was written, from the subscriber |
+| `level` | string | Always `INFO` |
+| `target` | string | Always `overlay::event` |
+| `event` | string | Always `import` |
+| `slot` | integer | The slot the block was proposed for |
+| `block_root` | 64 hex chars | The block root, rendered as `first_arrival` renders it, which is what joins the two |
+| `imported_ns` | integer | When the beacon node reported the import, in nanoseconds since the Unix epoch |
+| `matched` | bool | Whether this host had a record of the block arriving |
+| `first_arrival_ns` | integer | When the block first reached this host. Present only when `matched` is true |
+| `lag_ms` | integer | Arrival to import, in milliseconds. Present only when `matched` is true |
+| `source` | string | `bn` or `overlay`, whichever got the block here first. Present only when `matched` is true |
+| `origin_peer` | string | The peer that sent it. Present only when `source` is `overlay` |
+
+A `matched` of false is a block the beacon node imported that this host has no arrival for at
+all, which is the overlay missing a block rather than nothing happening. Arrival records are
+kept for eight slots of whatever `SECONDS_PER_SLOT` the beacon node reports, so a block imported
+more than eight slots after it arrived also reads as unmatched, and so does one whose
+`first_arrival` line carried no root: a build without the `column-repair` feature, or a block a
+sibling delivered whole.
+
+`lag_ms` is measured on the monotonic clock rather than by subtracting the two nanosecond
+fields. Those two are wall readings, for comparing across hosts; a clock stepped between them
+would put their difference anywhere.
+
+### One line
+
+The same block as the `first_arrival` line above, 315 ms later.
+
+```json
+{"timestamp":"2026-09-07T12:00:07.627905Z","level":"INFO","event":"import","slot":11814923,"block_root":"6f1c4d2b8a09e7f3541c0b6d92a8e35f70bd41c8a2e96d035b7f18c40de2a961","imported_ns":1757246407627905114,"matched":true,"first_arrival_ns":1757246407312905114,"lag_ms":315,"source":"overlay","origin_peer":"bn-fra1-02","target":"overlay::event"}
+```
+
+### Arrival to import
+
+How long the beacon node spends on a block this host already had. It is the ceiling on what the
+overlay can still win, so a p99 climbing towards a slot says the next bottleneck is the beacon
+node and not the network.
+
+```logql
+quantile_over_time(0.99, {unit="eth-gossip-overlay.service"} | json | event="import" | matched="true" | unwrap lag_ms [5m])
+```
+
+Swap `0.99` for `0.5` for the median.
+
+### Blocks the overlay missed
+
+The share of imports this host had no arrival for. `overlay_import_events_total{matched="no"}`
+is the same number as a counter, which is what the dashboard reads.
+
+```logql
+sum(count_over_time({unit="eth-gossip-overlay.service"} | json | event="import" | matched="false" [5m]))
+/
+sum(count_over_time({unit="eth-gossip-overlay.service"} | json | event="import" [5m]))
+```
 
 ## journald fields
 
