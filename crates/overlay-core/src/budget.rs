@@ -21,7 +21,7 @@ use crate::config::Config;
 use crate::pubqueue::{PUBLISH_LARGE_LANE_BYTES, PUBLISH_SMALL_LANE_ENTRIES};
 use crate::ratelimit::TokenBucket;
 use crate::reassemble;
-use crate::recent::RECENT_MAX_BYTES;
+use crate::recent::{self, RECENT_MAX_BYTES, RECENT_SLOTS};
 use crate::seen::{SEEN_CAPACITY, SEEN_TTL};
 
 /// How long a peer may stay over its budget before the connection is closed with
@@ -194,8 +194,8 @@ pub struct SendLaneBounds {
 ///
 /// Every row is a structure with a bound in code, so the sum is a ceiling rather than a
 /// measurement: nothing here grows with traffic. `docs/performance.md` carries the same table
-/// generated from here. One row reads zero because the structure it names has not been built:
-/// `by_root_cache` is T-085's, and that ticket fills its own row in rather than adding one.
+/// generated from here. `by_root_cache` reads zero until an operator turns the cache on, which
+/// is the one row a configuration key moves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemoryBudget {
     /// Each structure's worst case, in the order the startup line prints them.
@@ -224,9 +224,6 @@ impl MemoryBudget {
         memory_max: u64,
         lanes: SendLaneBounds,
     ) -> Self {
-        // Every row below is constants. `cfg` is here because the row that will read a key is
-        // T-085's by-root cache, so that ticket adds a row rather than changes this signature.
-        let _ = cfg;
         let peers = roster_len.saturating_sub(1) as u64;
         let mut rows = vec![
             ("seen_cache", SEEN_CAPACITY as u64 * SEEN_ENTRY_BYTES),
@@ -247,9 +244,7 @@ impl MemoryBudget {
                     + (peers * lanes.large_bytes as u64).min(lanes.large_bytes_max as u64),
             ),
             ("gossipsub", gossipsub_caches()),
-            // T-085's window is a config key that does not exist yet. The row is here at zero so
-            // the table names the structure and that ticket has a place to put its arithmetic.
-            ("by_root_cache", 0),
+            ("by_root_cache", by_root_cache_bytes(cfg)),
         ];
         // DX-N3 derives the one parameter that is not a constant: whatever the rows above leave
         // under the usable limit, shared out over the roster. The QUIC row below is that share
@@ -270,6 +265,21 @@ impl MemoryBudget {
             receive_window,
         }
     }
+}
+
+/// What the by-root cache costs the budget (§5.8, T-085): the window `bn.by_root_cache.slots`
+/// asks for, less the [`RECENT_SLOTS`] the recent store holds for repair whatever the cache does.
+/// The two rows together are that one store's bound, so nothing is counted twice, and the row is
+/// zero while the cache is off, which is how it ships.
+///
+/// A window narrower than the repair store's own is free rather than negative: the store keeps
+/// the wider of the two, because a repair answer is owed either way.
+pub fn by_root_cache_bytes(cfg: &Config) -> u64 {
+    let cache = &cfg.bn.by_root_cache;
+    if !cache.enabled {
+        return 0;
+    }
+    recent::window_bytes(cache.slots).saturating_sub(RECENT_MAX_BYTES) as u64
 }
 
 /// What the rows may add up to: the limit less [`HEADROOM_PERCENT`], which is the 0.8 of
