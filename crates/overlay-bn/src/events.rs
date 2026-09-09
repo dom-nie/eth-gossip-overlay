@@ -313,6 +313,14 @@ mod tests {
         format!("0x{}", format!("{byte:02x}").repeat(32))
     }
 
+    /// An import of the block whose root is `byte` repeated.
+    fn block(slot: u64, byte: u8) -> BlockEvent {
+        BlockEvent {
+            slot,
+            block_root: [byte; 32],
+        }
+    }
+
     #[test]
     fn parses_block_event_slot_and_root() {
         let mut frames = Frames::default();
@@ -381,5 +389,21 @@ mod tests {
         assert_eq!(next(&mut imports).await, Some(false));
         assert_eq!(next(&mut imports).await, Some(true));
         events.task.abort();
+    }
+
+    #[test]
+    fn arrival_records_older_than_eight_slots_are_dropped() {
+        let clock = FakeClock::new();
+        let (_spec, spec) = spec_watch();
+        let arrivals = Arrivals::new(Arc::new(clock.clone()), spec);
+        arrivals.arrived([0x33; 32], &Source::Bn);
+        clock.advance(Duration::from_secs(10));
+        arrivals.arrived([0x44; 32], &Source::Bn);
+
+        clock.advance(Duration::from_secs(90));
+
+        // Eight slots of the 12 s default is 96 s, so the older of the two is past it.
+        assert!(!arrivals.imported(&block(1, 0x33)));
+        assert!(arrivals.imported(&block(2, 0x44)));
     }
 }
