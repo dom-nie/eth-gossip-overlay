@@ -286,7 +286,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::spec::spec_watch;
+    use crate::spec::{self, spec_watch};
 
     /// The path of the beacon node's event stream.
     const EVENTS: &str = "/eth/v1/events";
@@ -421,5 +421,23 @@ mod tests {
         // Eight slots of the 12 s default is 96 s, so the older of the two is past it.
         assert!(!arrivals.imported(&block(1, 0x33)));
         assert!(arrivals.imported(&block(2, 0x44)));
+    }
+
+    #[test]
+    fn retention_follows_the_spec_snapshot() {
+        let clock = FakeClock::new();
+        let (sender, spec) = spec_watch();
+        let arrivals = Arrivals::new(Arc::new(clock.clone()), spec);
+        arrivals.arrived([0x55; 32], &Source::Bn);
+        clock.advance(Duration::from_secs(50));
+        assert!(arrivals.imported(&block(1, 0x55)));
+
+        // Eight slots of six seconds is 48 s, which the record is already past.
+        sender.send_replace(SpecSnapshot {
+            seconds_per_slot: 6,
+            ..spec::MAINNET
+        });
+
+        assert!(!arrivals.imported(&block(2, 0x55)));
     }
 }
