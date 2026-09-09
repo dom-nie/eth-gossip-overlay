@@ -56,9 +56,11 @@ Comparing `first_arrival_ns` across hosts is only as good as their clocks: run c
 hardware timestamping (Architecture.md §11), which holds the fleet inside a few microseconds.
 
 `slot` and `block_root` come from the payload's own header, which the sidecar reads only for
-these two topic kinds and only as far as the header. A line for any other large topic, and a line
-from a build without the `column-repair` feature, carries neither key rather than a null one.
-Import time is a second event, `event="import"`.
+these two topic kinds and only as far as the header, and only where it keeps the payload: as a
+message arrives from the beacon node, and as one it reassembled from chunks comes back. A message
+a sibling delivered whole is not kept and carries neither key, and neither does a line for any
+other large topic or a line from a build without the `column-repair` feature. The keys are absent
+rather than null. Import time is a second event, `event="import"`.
 
 ### One line
 
