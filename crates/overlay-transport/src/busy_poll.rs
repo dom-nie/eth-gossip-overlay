@@ -37,6 +37,8 @@
 //! and one written for T-093 the same way stays registered in this thread's epoll, where the
 //! lookup below still finds it.
 
+pub mod napi;
+
 use std::io;
 use std::os::fd::RawFd;
 
@@ -181,7 +183,7 @@ fn missing_ioctl(err: &io::Error) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::mem::{align_of, offset_of, size_of};
     use std::sync::Mutex;
 
@@ -193,17 +195,23 @@ mod tests {
 
     /// A kernel that answers whatever the test needs, and records what it was asked.
     ///
-    /// The three answers worth testing cannot be arranged on a real host: no development
-    /// machine runs a kernel older than the ioctl, and a test cannot take `CAP_NET_ADMIN` away
-    /// from a process that has it or give it to one that has not.
+    /// Every answer worth testing is one no host can be made to give: no development machine
+    /// runs a kernel older than the ioctl, and a test cannot take `CAP_NET_ADMIN` away from a
+    /// process that holds it or hand it to one that does not.
     #[derive(Default)]
-    struct Fake {
+    pub(crate) struct Fake {
         /// What `EPIOCSPARAMS` was handed, in order.
-        applied: Mutex<Vec<(RawFd, EpollParams)>>,
+        pub applied: Mutex<Vec<(RawFd, EpollParams)>>,
         /// The errno both epoll ioctls fail with, where the test wants them to fail.
-        epoll_errno: Option<i32>,
+        pub epoll_errno: Option<i32>,
         /// What `EPIOCGPARAMS` reads back.
-        holds: EpollParams,
+        pub holds: EpollParams,
+        /// What `SO_INCOMING_NAPI_ID` answers. Zero is a queue that has delivered nothing.
+        pub napi_id: u32,
+        /// Whether the process is allowed to talk to netdev netlink.
+        pub cap_net_admin: bool,
+        /// The NAPI id and nanoseconds `NETDEV_CMD_NAPI_SET` was handed, in order.
+        pub suspended: Mutex<Vec<(u32, u64)>>,
     }
 
     impl Kernel for Fake {
@@ -220,6 +228,19 @@ mod tests {
                 Some(errno) => Err(io::Error::from_raw_os_error(errno)),
                 None => Ok(self.holds),
             }
+        }
+
+        fn napi_id(&self, _socket: RawFd) -> io::Result<u32> {
+            Ok(self.napi_id)
+        }
+
+        fn has_cap_net_admin(&self) -> bool {
+            self.cap_net_admin
+        }
+
+        fn set_irq_suspend_timeout(&self, napi_id: u32, nanos: u64) -> io::Result<()> {
+            self.suspended.lock().unwrap().push((napi_id, nanos));
+            Ok(())
         }
     }
 
