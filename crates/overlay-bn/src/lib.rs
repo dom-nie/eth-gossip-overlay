@@ -6,6 +6,7 @@ pub mod compat;
 mod conformance;
 #[cfg(feature = "column-repair")]
 pub mod decode;
+pub mod events;
 pub mod gossip;
 pub mod inbound;
 pub mod link;
