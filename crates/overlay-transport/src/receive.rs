@@ -60,9 +60,7 @@ use std::time::{Duration, Instant, SystemTime};
 use bytes::Bytes;
 use overlay_core::budget::{Charge, FanoutBudget, FanoutKind};
 use overlay_core::config::LargeClass;
-use overlay_core::custody::SharedCustody;
 use overlay_core::events::{self, FirstArrival};
-use overlay_core::header::Header;
 use overlay_core::msgid::{self, Branch, MessageId};
 use overlay_core::protocol::{MAX_FRAME_BYTES, features};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
@@ -196,9 +194,6 @@ pub struct Deps {
     /// Where a message this host reassembled is kept so a peer can repair it from here (§5.6).
     /// The beacon node link (T-016) holds the other handle to the same store.
     pub recent: SharedRecentLarge,
-    /// What the beacon node's columns are owed and which have arrived (§6.4, T-083). Every
-    /// recent-store insert that decoded a header tells it what it saw; the repair task reads it.
-    pub custody: SharedCustody,
     /// T-017's publish queue, behind the trait that keeps `overlay-transport` clear of libp2p.
     pub publish: Arc<dyn PublishSink>,
     /// What the mirror says the beacon node is subscribed to, which is the gate (DX-N1).
@@ -744,12 +739,16 @@ impl Ctx {
             payload: payload.clone(),
             class,
         });
-        // Insert site 2 of 3 for the recent store (§5.6); T-016's inbound path and T-032's whole
-        // delivery are the others. A reassembled message is always large class, and the peers
-        // that sent its chunks are the ones that may still be missing some of them. `ssz` is
-        // what the reassembler decompressed to check this payload against its id, handed on
-        // rather than produced again (T-074).
-        let header = self.remember(id, topic, payload, Some(&ssz), class, now);
+        // Insert site 2 of 2 for the recent store (§5.6); T-016's inbound path is the other. A
+        // reassembled message is always large class, and the peers that sent its chunks are the
+        // ones that may still be missing some of them. `ssz` is what the reassembler
+        // decompressed to check this payload against its id, handed on rather than produced
+        // again, and the header it yields fills the column index and names the slot on the line
+        // below (T-074, T-083).
+        let header = self
+            .deps
+            .recent
+            .insert(id, topic.clone(), payload, Some(&ssz), now);
         events::emit_first_arrival(&FirstArrival {
             id,
             class,
@@ -838,10 +837,13 @@ impl Ctx {
     /// this peer yet (MD-04).
     fn repair(&self, request: &RepairReq) -> Vec<Frame> {
         let not_found = || vec![Frame::RepairResp(RepairResp::NotFound)];
-        let Some(msg_id) = self.asked_for(request) else {
+        // Column identity is T-087's under MD-06: the recent store's `(block_root, index)` index
+        // is filled here, but answering from it means acting on a root a peer chose, and a
+        // forged sidecar naming a real column would have this host serve junk for it to everyone.
+        let RepairReq::Missing { msg_id, missing } = request else {
             return not_found();
         };
-        let Some((topic, payload)) = self.deps.recent.get(&msg_id) else {
+        let Some((topic, payload)) = self.deps.recent.get(msg_id) else {
             return not_found();
         };
         let Ok(split) = Params::for_len(
@@ -850,12 +852,6 @@ impl Ctx {
             self.deps.large.parity_ratio,
         ) else {
             return not_found();
-        };
-        let missing: Vec<u16> = match request {
-            RepairReq::Missing { missing, .. } => missing.clone(),
-            // A peer that asked by identity holds none of the column, so it is owed every data
-            // chunk of it; parity would only cost bytes it has no shortfall to make up (D24).
-            RepairReq::Column { .. } => (0..split.k).collect(),
         };
         if missing.len() > usize::from(split.k) {
             tracing::debug!(
@@ -876,7 +872,7 @@ impl Ctx {
             .map(|(index, data)| Frame::Chunk {
                 flags: ChunkFlags::FORWARDED,
                 chunk: Chunk {
-                    msg_id,
+                    msg_id: *msg_id,
                     topic_id: topic_id.get(),
                     k: split.k,
                     m: split.m,
@@ -888,18 +884,6 @@ impl Ctx {
             .collect();
         answer.push(Frame::RepairResp(RepairResp::Chunks(Vec::new())));
         answer
-    }
-
-    /// Which message a request is about: the one it names, or the one the recent store files
-    /// under the column it names (T-081's index, T-083). A column nothing has indexed is one
-    /// this host cannot answer for, whatever else it holds.
-    fn asked_for(&self, request: &RepairReq) -> Option<MessageId> {
-        match request {
-            RepairReq::Missing { msg_id, .. } => Some(*msg_id),
-            RepairReq::Column { block_root, index } => {
-                self.deps.recent.get_by_column(*block_root, *index)
-            }
-        }
     }
 
     /// The id this host names `topic` by, once this peer has had the `TOPIC_ADD` that binds it
@@ -1141,9 +1125,7 @@ impl Ctx {
                 return None;
             }
         }
-        // One decompression for both the id and, below, the payload's header (T-006, T-083).
-        let (computed, ssz) =
-            msgid::compute_with_bytes(&topic.to_string(), &payload, wire::MAX_PAYLOAD_BYTES);
+        let computed = msgid::compute(&topic.to_string(), &payload, wire::MAX_PAYLOAD_BYTES);
         let refused = match (computed.branch, header_id) {
             (Branch::Valid, Some(claimed)) if claimed != computed.id => {
                 Some("the id does not match the payload")
@@ -1170,20 +1152,10 @@ impl Ctx {
         };
         if wanted {
             self.deps.stats.first_seen(class);
-            // The beacon node first, and everything the sidecar wants to know about the message
-            // after it: the SSZ decode below is milliseconds on a block, and nothing it produces
-            // is owed to the node.
-            self.deps.publish.enqueue(PublishItem {
-                topic: topic.clone(),
-                id: computed.id,
-                payload: payload.clone(),
-                class,
-            });
-            // Insert site 3 of 3 for the recent store (§5.6), and the one T-081 left open: a
-            // message that arrived whole is one this host holds, and column repair asks
-            // in-region peers by round trip whatever they sent it (D23).
-            let now = self.deps.clock.now();
-            let header = self.remember(computed.id, &topic, payload, ssz.as_deref(), class, now);
+            // A message that arrived whole is not kept for repair. Chunk repair never asks such a
+            // host, because it sent nobody a chunk and is nobody's candidate (D23), and the one
+            // thing that would have asked it, column repair, is T-087's under MD-06; storing it
+            // here would only let a peer flush what the store is holding for the chunk path.
             events::emit_first_arrival(&FirstArrival {
                 id: computed.id,
                 class,
@@ -1191,36 +1163,16 @@ impl Ctx {
                 node: &self.deps.node,
                 at: arrived,
                 source: events::Source::Overlay { origin: &self.peer },
-                header,
+                header: None,
+            });
+            self.deps.publish.enqueue(PublishItem {
+                topic,
+                id: computed.id,
+                payload,
+                class,
             });
         }
         owed
-    }
-
-    /// Keeps a large payload for repair and tells the custody tracker what its header said
-    /// (§5.6, §6.4). Small-class messages are never repaired, so they are never decoded either.
-    ///
-    /// The decode runs here, outside the recent store's lock and after whatever the caller owed
-    /// the beacon node, because it is the one place in the sidecar that reads a consensus object
-    /// and a block costs milliseconds (T-083).
-    fn remember(
-        &self,
-        id: MessageId,
-        topic: &Topic,
-        payload: Bytes,
-        ssz: Option<&[u8]>,
-        class: Class,
-        now: Instant,
-    ) -> Option<Header> {
-        if class != Class::Large {
-            return None;
-        }
-        let header = self
-            .deps
-            .recent
-            .insert(id, topic.clone(), payload, ssz, now)?;
-        self.deps.custody.observe(header, now);
-        Some(header)
     }
 
     /// One line per connection about payloads the beacon node would refuse. A peer sending a
@@ -2564,7 +2516,6 @@ mod tests {
                     Arc::new(SystemClock),
                 )),
                 recent: SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)),
-                custody: SharedCustody::new(&crate::testutil::mainnet_spec()),
                 publish: published.clone(),
                 sets: watching,
                 reassembler: Arc::new(Reassembler::new(ReassembleConfig::default())),
@@ -3320,15 +3271,12 @@ mod tests {
         );
     }
 
-    /// The third of the recent store's insert sites (§5.6), and the gap T-081 left open.
-    ///
-    /// A large message that arrives whole rather than striped is one this host is holding and
-    /// can answer for. Chunk repair would never ask such a host, because it sent nobody a chunk
-    /// and is nobody's candidate (D23); column repair asks in-region live peers by round trip
-    /// whatever they sent, so without this insert a host that took the whole message answers
-    /// `not_found` for a column it has, and the requester spends an attempt finding that out.
+    /// A message that arrived whole is not kept for repair, which is where MD-06 left T-081's
+    /// gap. Chunk repair never asks such a host, because it sent nobody a chunk and is nobody's
+    /// candidate (D23), and column repair, the one thing that would have asked it, is T-087's.
+    /// Storing it would only give a peer a way to flush what the store holds for the chunk path.
     #[tokio::test(flavor = "multi_thread")]
-    async fn whole_delivery_inserts_into_the_recent_store() {
+    async fn whole_delivery_is_not_kept_for_repair() {
         let block = topic("beacon_block");
         let payload = Bytes::from(incompressible(4096));
         let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
@@ -3340,14 +3288,10 @@ mod tests {
             cluster.published(1).len() == 1
         })
         .await;
-        assert_eq!(
-            cluster.recent(1).get(&msg_id),
-            Some((block, payload)),
-            "a whole delivery is held for repair like a reassembled one"
-        );
+        assert_eq!(cluster.recent(1).get(&msg_id), None);
     }
 
-    /// The second of the recent store's three insert sites (§5.6): a message this host put back
+    /// The second of the recent store's two insert sites (§5.6): a message this host put back
     /// together is one that a peer which lost the same chunks can now repair from here. There is
     /// no announcement to go with it; the peer already knows this host holds the message,
     /// because it was this host that forwarded it a chunk of it (D23).
@@ -3796,12 +3740,13 @@ mod tests {
         );
     }
 
-    /// The arm T-082 left answering `not_found`. A peer that never saw a column has no message
-    /// id for it, so it names the column and this host resolves it through the recent store's
-    /// index (D23, T-081's hook). Every data chunk comes back, because a requester asking by
-    /// identity holds none of them.
+    /// The arm stays `not_found`, and under MD-06 that is a decision rather than a gap. The
+    /// recent store does index a column by `(block_root, index)`, but a root comes out of a
+    /// 356-byte header nobody verified: answering from it would let one forged sidecar naming a
+    /// real column have this host serve junk for that column to every peer that asks. T-087
+    /// re-lands the answer once the beacon node's event stream says which columns are real.
     #[tokio::test(flavor = "multi_thread")]
-    async fn responder_answers_a_column_request_by_block_root_and_index() {
+    async fn responder_replies_not_found_for_a_column_request() {
         let column = topic("data_column_sidecar_5");
         let (cluster, peer) = peer_of(subscriptions(&[&column], &[]), &[(1, &column)]).await;
         let body = large_payload(8 * 1024);
@@ -3809,26 +3754,10 @@ mod tests {
         cluster.recent(1).index_column([9; 32], 5, msg_id);
         told_about(&cluster, &column).await;
 
-        let answer = ask_column(&peer, [9; 32], 5).await;
-
-        let split = Params::for_len(body.len(), 2048, 0.10).unwrap();
-        let sent: Vec<u16> = answer
-            .iter()
-            .filter_map(|frame| match frame {
-                Frame::Chunk { chunk, .. } => Some(chunk.index),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(sent, (0..split.k).collect::<Vec<u16>>());
         assert_eq!(
-            answer.last(),
-            Some(&Frame::RepairResp(RepairResp::Chunks(Vec::new())))
-        );
-
-        assert_eq!(
-            ask_column(&peer, [8; 32], 5).await,
+            ask_column(&peer, [9; 32], 5).await,
             [Frame::RepairResp(RepairResp::NotFound)],
-            "a column this host does not hold is answered, not left hanging"
+            "a column this host holds and has indexed is still not answered by identity"
         );
     }
 
