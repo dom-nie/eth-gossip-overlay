@@ -37,6 +37,38 @@
 //! and one written for T-093 the same way stays registered in this thread's epoll, where the
 //! lookup below still finds it.
 
+/// `struct epoll_params` from `include/uapi/linux/eventpoll.h`, the argument `EPIOCSPARAMS`
+/// reads and `EPIOCGPARAMS` writes back.
+///
+/// Declared here rather than taken from libc because the ioctl is issued on every build and
+/// only Linux has libc's copy; the test holds this one to the same eight bytes and, on Linux,
+/// to libc's copy beside it.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EpollParams {
+    /// How long `epoll_wait` spins on the queue before it sleeps. §11.1 asks for 50 to 200.
+    pub busy_poll_usecs: u32,
+    /// How many packets one spin may take. Zero leaves the kernel its own default, which is
+    /// also the only value it accepts without `CAP_NET_ADMIN` above `NAPI_POLL_WEIGHT`.
+    pub busy_poll_budget: u16,
+    /// Whether the queue's IRQ stays masked while the core is spinning.
+    pub prefer_busy_poll: u8,
+    /// The kernel rejects a non-zero value here.
+    pad: u8,
+}
+
+impl EpollParams {
+    /// Spin on the queue for `usecs` with the IRQ masked, at the kernel's own budget.
+    pub fn preferring_busy_poll(usecs: u32) -> Self {
+        Self {
+            busy_poll_usecs: usecs,
+            busy_poll_budget: 0,
+            prefer_busy_poll: 1,
+            pad: 0,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::mem::{align_of, offset_of, size_of};
