@@ -308,7 +308,10 @@ mod tests {
 
     use crate::header::{Header, HeaderDecoder};
     use crate::msgid::MessageId;
-    use crate::recent::{RecentLarge, SharedRecentLarge};
+    use crate::recent::{
+        RECENT_MAX_BYTES, RECENT_SLOTS, RECENT_TTL, RecentLarge, SLOT_BYTES, SharedRecentLarge,
+        window_bytes, window_ttl,
+    };
     use crate::time::{Clock, FakeClock};
     use crate::topic::Topic;
 
@@ -355,6 +358,36 @@ mod tests {
         assert_eq!(recent.get(&id(1)), None);
         assert!(recent.get(&id(2)).is_some());
         assert!(recent.get(&id(3)).is_some());
+    }
+
+    /// The window is stated in slots, and both bounds follow it: at two slots a third slot's
+    /// traffic pushes the first out on bytes, and two slots of clock takes the rest on time
+    /// (T-085). Whatever an operator configures is what the store holds.
+    #[test]
+    fn store_window_evicts_beyond_configured_slots() {
+        let clock = FakeClock::new();
+        let mut recent = RecentLarge::new(window_ttl(2), window_bytes(2));
+
+        for byte in [1, 2, 3] {
+            recent.insert(id(byte), topic(), payload(byte, SLOT_BYTES), clock.now());
+        }
+
+        assert_eq!(recent.get(&id(1)), None, "a third slot did not evict the first");
+        assert!(recent.get(&id(2)).is_some());
+        assert!(recent.get(&id(3)).is_some());
+
+        clock.advance(window_ttl(2));
+        recent.gc(clock.now());
+        assert_eq!(recent.get(&id(3)), None);
+    }
+
+    /// The shipped store is five slots, which is what §5.6 asks for and what T-076's table has
+    /// always priced.
+    #[test]
+    fn the_repair_window_is_five_slots() {
+        assert_eq!(RECENT_TTL, window_ttl(RECENT_SLOTS));
+        assert_eq!(RECENT_MAX_BYTES, window_bytes(RECENT_SLOTS));
+        assert_eq!(RECENT_TTL, Duration::from_secs(60));
     }
 
     #[test]
