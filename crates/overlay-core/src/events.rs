@@ -260,6 +260,42 @@ mod tests {
         assert!(line_with(mark, &hex(4)).contains(r#"site="""#));
     }
 
+    /// A block root of one repeated byte, rendered the way the arrival line renders it, so a
+    /// query can join the two events on it.
+    fn root(byte: u8) -> String {
+        format!("{byte:02x}").repeat(32)
+    }
+
+    #[test]
+    fn emits_import_line_with_lag_when_arrival_is_known() {
+        let origin = Hostname("bn-fra1-02".to_owned());
+        let imported_at = UNIX_EPOCH + Duration::from_nanos(AT_NANOS);
+        let mark = LOG.len();
+
+        emit_import(&ImportEvent {
+            slot: 7_654_321,
+            block_root: [0x5a; 32],
+            imported_at,
+            first_arrival_at: Some(imported_at - Duration::from_millis(312)),
+            source: Some(Source::Overlay { origin: &origin }),
+            lag_ms: Some(312),
+        });
+
+        let line = line_with(mark, &root(0x5a));
+        assert!(line.contains("overlay::event"), "{line}");
+        assert!(line.contains(r#"event="import""#), "{line}");
+        assert!(line.contains("slot=7654321"), "{line}");
+        assert!(line.contains("matched=true"), "{line}");
+        assert!(line.contains(&format!("imported_ns={AT_NANOS}")), "{line}");
+        assert!(
+            line.contains(&format!("first_arrival_ns={}", AT_NANOS - 312_000_000)),
+            "{line}"
+        );
+        assert!(line.contains("lag_ms=312"), "{line}");
+        assert!(line.contains(r#"source="overlay""#), "{line}");
+        assert!(line.contains("origin_peer=bn-fra1-02"), "{line}");
+    }
+
     #[test]
     fn a_small_class_arrival_is_not_logged() {
         let node = node();
