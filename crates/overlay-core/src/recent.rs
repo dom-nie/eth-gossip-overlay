@@ -123,14 +123,24 @@ impl RecentLarge {
     /// Records that the message held under `msg_id` is the column `index` of `block_root`, so a
     /// peer that never saw the column can still ask for it (T-083). An id the store no longer
     /// holds is ignored: there would be nothing for the key to resolve to.
+    ///
+    /// A key already pointing at another message is left alone. The root comes from a header a
+    /// peer chose and nothing has proved it, so a second payload claiming a column this host
+    /// already holds is a claim, not a correction; taking it would let one forged sidecar decide
+    /// what every peer is served for that column (MD-06). First writer wins, and the entry goes
+    /// with its payload when the minute or the byte bound takes it.
     pub fn index_column(&mut self, block_root: [u8; 32], index: u8, msg_id: MessageId) {
         let Some(entry) = self.entries.get_mut(&msg_id) else {
             return;
         };
-        if let Some(previous) = entry.column.replace((block_root, index)) {
+        let key = (block_root, index);
+        if self.columns.get(&key).is_some_and(|held| *held != msg_id) {
+            return;
+        }
+        if let Some(previous) = entry.column.replace(key) {
             self.columns.remove(&previous);
         }
-        self.columns.insert((block_root, index), msg_id);
+        self.columns.insert(key, msg_id);
     }
 
     /// Which message is column `index` of `block_root`, for a caller that then reads it with
@@ -418,5 +428,23 @@ mod tests {
             recent.insert(id(1), column, ssz.clone(), Some(&ssz), clock.now()),
             header
         );
+    }
+
+    /// The propagation vector MD-06 named, closed at the one place it opens. A column's root is
+    /// a claim in a header nobody verified, so a second payload claiming a column this host
+    /// already holds must not take the key from the first: whoever holds it answers every peer
+    /// that asks for that column.
+    #[test]
+    fn a_second_claim_on_a_column_does_not_take_it_from_the_first() {
+        let clock = FakeClock::new();
+        let mut recent = store(1024);
+        let root = [7; 32];
+        recent.insert(id(1), topic(), payload(1, 200), clock.now());
+        recent.insert(id(2), topic(), payload(2, 200), clock.now());
+
+        recent.index_column(root, 42, id(1));
+        recent.index_column(root, 42, id(2));
+
+        assert_eq!(recent.get_by_column(root, 42), Some(id(1)));
     }
 }
