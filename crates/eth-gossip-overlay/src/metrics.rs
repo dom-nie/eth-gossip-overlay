@@ -169,6 +169,10 @@ pub const ROSTER_RELOAD_REJECTED_TOTAL: &str = "overlay_roster_reload_rejected_t
 /// 1 while the overlay endpoint is running on the core `overlay.io_thread.pin_cpu` names, 0
 /// when nothing was reserved and 0 when the kernel refused the core (T-091).
 pub const IO_THREAD_PINNED: &str = "overlay_io_thread_pinned";
+/// 1 while the overlay's epoll instance is busy polling and the NIC queue behind it has its
+/// interrupt suspended during bursts, 0 when the tuning is off and 0 when the kernel, the
+/// capabilities or the device would not give one of the two halves (T-092).
+pub const BUSY_POLL_ENABLED: &str = "overlay_busy_poll_enabled";
 /// Always 1; the labels carry the build.
 pub const BUILD_INFO: &str = "overlay_build_info";
 
@@ -315,6 +319,7 @@ pub struct Metrics {
     config_reload: IntCounterVec,
     roster_reload_rejected: IntCounter,
     io_thread_pinned: IntGauge,
+    busy_poll_enabled: IntGauge,
     reconstruct_seconds: HistogramVec,
     registered: BTreeMap<String, Vec<String>>,
 }
@@ -549,6 +554,10 @@ impl Metrics {
             IO_THREAD_PINNED,
             "1 while the overlay endpoint runs on the core io_thread.pin_cpu names.",
         )?;
+        let busy_poll_enabled = b.gauge(
+            BUSY_POLL_ENABLED,
+            "1 while the overlay's epoll is busy polling and its NIC queue suspends its IRQ.",
+        )?;
 
         b.gauge_vec(
             BUILD_INFO,
@@ -614,6 +623,7 @@ impl Metrics {
             config_reload,
             roster_reload_rejected,
             io_thread_pinned,
+            busy_poll_enabled,
             registered: b.registered,
         })
     }
@@ -640,6 +650,13 @@ impl Metrics {
     /// core is restart-required, and nothing moves the endpoint under a running process.
     pub fn set_io_thread_pinned(&self, pinned: bool) {
         self.io_thread_pinned.set(i64::from(pinned));
+    }
+
+    /// Whether the busy-poll path came up whole (T-092). Not set once like the pinning: the
+    /// NAPI id behind the socket only exists after a packet has arrived, so this reads 0 from
+    /// the start and moves the moment the queue is known, or stays there if it never is.
+    pub fn set_busy_poll_enabled(&self, enabled: bool) {
+        self.busy_poll_enabled.set(i64::from(enabled));
     }
 }
 
