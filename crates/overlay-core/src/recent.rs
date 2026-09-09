@@ -388,11 +388,18 @@ mod tests {
 
     impl HeaderDecoder for FakeDecoder {
         fn header(&self, topic: &Topic, _: &[u8]) -> Option<Header> {
-            (topic.to_string() == COLUMN_TOPIC).then_some(Header::Column {
-                slot: 42,
-                index: 5,
-                block_root: [9; 32],
-            })
+            match topic.to_string().as_str() {
+                COLUMN_TOPIC => Some(Header::Column {
+                    slot: 42,
+                    index: 5,
+                    block_root: [9; 32],
+                }),
+                TOPIC => Some(Header::Block {
+                    slot: 42,
+                    root: [8; 32],
+                }),
+                _ => None,
+            }
         }
     }
 
@@ -428,6 +435,27 @@ mod tests {
             recent.insert(id(1), column, ssz.clone(), Some(&ssz), clock.now()),
             header
         );
+    }
+
+    /// A block goes in under its own root, so the by-root cache can answer for it the way it
+    /// answers for a column (T-085). The claim rule is the column's: whoever gets there first
+    /// keeps the key, because nothing here has checked a proposer or a signature (MD-06).
+    #[test]
+    fn recent_store_indexes_block_payloads_by_their_root() {
+        let clock = FakeClock::new();
+        let recent = SharedRecentLarge::new(store(1024)).with_decoder(Arc::new(FakeDecoder));
+        let ssz = payload(1, 200);
+
+        let header = recent.insert(id(1), topic(), ssz.clone(), Some(&ssz), clock.now());
+
+        assert_eq!(header, Some(Header::Block { slot: 42, root: [8; 32] }));
+        assert_eq!(recent.get_by_block([8; 32]), Some(id(1)));
+        assert_eq!(recent.get_by_block([7; 32]), None);
+        // A block root and a column index are different keys, not one namespace.
+        assert_eq!(recent.get_by_column([8; 32], 0), None);
+
+        recent.insert(id(2), topic(), payload(2, 200), Some(&ssz), clock.now());
+        assert_eq!(recent.get_by_block([8; 32]), Some(id(1)));
     }
 
     /// The propagation vector MD-06 named, closed at the one place it opens. A column's root is
