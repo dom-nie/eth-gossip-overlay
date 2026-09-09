@@ -22,8 +22,11 @@ use crate::topic::{Class, Topic};
 /// the target or the `event` field.
 const TARGET: &str = "overlay::event";
 
-/// The `event` field of an arrival. v3 adds `import` (T-084) next to it.
+/// The `event` field of an arrival.
 const FIRST_ARRIVAL: &str = "first_arrival";
+
+/// The `event` field of an import.
+const IMPORT: &str = "import";
 
 /// What a host with no site label logs, matching the metrics convention that an absent label
 /// is the empty string and never a literal like `none`.
@@ -115,6 +118,67 @@ pub fn emit_first_arrival(arrival: &FirstArrival<'_>) {
             slot = header.slot(),
             block_root = %hex(header.block_root()),
         ),
+    }
+}
+
+/// One block the beacon node has imported, and what this host knows about when the block first
+/// went past it.
+///
+/// Telemetry and nothing else. §2's point is that the 200 to 500 ms `newPayload` and column
+/// verification take is time the overlay cannot win back, and an operator who cannot see it per
+/// host cannot tell how much of the gain is being spent there.
+pub struct ImportEvent<'a> {
+    /// The slot the block was proposed for.
+    pub slot: u64,
+    /// The block's root. T-083 puts the same root on the arrival line, in the same rendering, so
+    /// the two events join on it.
+    pub block_root: [u8; 32],
+    /// When the beacon node reported the import, read from the injected clock.
+    pub imported_at: SystemTime,
+    /// When the block first reached this host, if it did. `None` is a block the overlay missed
+    /// entirely, which is worth knowing about.
+    pub first_arrival_at: Option<SystemTime>,
+    /// Which side got there first, when there was an arrival to say.
+    pub source: Option<Source<'a>>,
+    /// Arrival to import in milliseconds, measured on the monotonic clock rather than by
+    /// subtracting the two wall readings, which a clock step would corrupt.
+    pub lag_ms: Option<u64>,
+}
+
+/// Logs `import`.
+///
+/// One arm per combination for the same reason [`emit_first_arrival`] has them: a line from the
+/// beacon node has no `origin_peer` key at all rather than a null one.
+pub fn emit_import(import: &ImportEvent<'_>) {
+    let slot = import.slot;
+    let block_root = hex(import.block_root);
+    let imported_ns = epoch_nanos(import.imported_at);
+    macro_rules! import {
+        ($($rest:tt)*) => {
+            tracing::info!(
+                target: TARGET,
+                event = IMPORT,
+                slot,
+                block_root = %block_root,
+                imported_ns,
+                $($rest)*
+            )
+        };
+    }
+    if let (Some(at), Some(source), Some(lag_ms)) =
+        (import.first_arrival_at, &import.source, import.lag_ms)
+    {
+        let first_arrival_ns = epoch_nanos(at);
+        match source {
+            Source::Bn => import!(matched = true, first_arrival_ns, lag_ms, source = "bn"),
+            Source::Overlay { origin } => import!(
+                matched = true,
+                first_arrival_ns,
+                lag_ms,
+                source = "overlay",
+                origin_peer = %origin,
+            ),
+        }
     }
 }
 
