@@ -220,7 +220,9 @@ mod tests {
     use libp2p::PeerId;
     use libp2p::gossipsub;
     use libp2p::identity::Keypair;
+    use overlay_core::events::Arrivals;
     use overlay_core::fanout::Outbound;
+    use overlay_core::header::{Header, HeaderDecoder};
     use overlay_core::lanes::{ClassLanes, LARGE_LANE_CAPACITY, LanePusher};
     use overlay_core::msgid::{self, MessageId};
     use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
@@ -246,6 +248,22 @@ mod tests {
     const BLOCK: &str = "/eth2/00000000/beacon_block/ssz_snappy";
     /// A name the sidecar does not know, as a future fork might add one.
     const NEW_THING: &str = "/eth2/00000000/new_thing_topic/ssz_snappy";
+
+    /// The block the fake decoder below reads out of whatever it is handed.
+    const DECODED: Header = Header::Block {
+        slot: 8_675_309,
+        root: [0x9c; 32],
+    };
+
+    /// Stands in for T-083's decoder, which needs a real SSZ block. What is under test is the
+    /// inbound path filing what a decoder said, not the decoder.
+    struct OneBlock;
+
+    impl HeaderDecoder for OneBlock {
+        fn header(&self, _: &Topic, _: &[u8]) -> Option<Header> {
+            Some(DECODED)
+        }
+    }
 
     static BN: LazyLock<PeerId> =
         LazyLock::new(|| Keypair::generate_ed25519().public().to_peer_id());
@@ -329,6 +347,7 @@ mod tests {
     /// the lanes when the task begins; pushes after it go through the same pusher the link
     /// would hold.
     struct Harness {
+        arrivals: Arc<Arrivals>,
         lanes: Option<ClassLanes<BnMessage>>,
         pusher: LanePusher<BnMessage>,
         command_tx: mpsc::Sender<BnCommand>,
@@ -349,18 +368,22 @@ mod tests {
             let lanes = ClassLanes::new(Arc::new(()));
             let (command_tx, commands) = mpsc::channel(64);
             let clock = FakeClock::new();
+            // The sender is dropped; a watch still reads the last value it held.
+            let (_, spec) = spec_watch();
             let seen = SharedSeenCache::new(SeenCache::new(
                 Duration::from_secs(60),
                 1024,
                 Arc::new(clock.clone()),
             ));
             Self {
+                arrivals: Arc::new(Arrivals::new(Arc::new(clock.clone()), spec)),
                 pusher: lanes.pusher(),
                 lanes: Some(lanes),
                 command_tx,
                 commands,
                 seen,
-                recent: SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)),
+                recent: SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES))
+                    .with_decoder(Arc::new(OneBlock)),
                 out,
                 clock,
                 stats: Arc::new(Recorded::default()),
@@ -381,6 +404,7 @@ mod tests {
                 Arc::new(node()),
                 Arc::new(self.clock.clone()),
                 self.stats.clone(),
+                self.arrivals.clone(),
             );
         }
 
@@ -391,6 +415,26 @@ mod tests {
                 other => panic!("expected ReportAccept, got {other:?}"),
             }
         }
+    }
+
+    /// The beacon node's own gossip is where most blocks reach a host first, so an import event
+    /// that finds no record of one is the overlay having missed a block it did not miss.
+    /// The beacon node's gossip is snappy, and only bytes that decompress reach a decoder.
+    fn snappy(bytes: &[u8]) -> Vec<u8> {
+        snap::raw::Encoder::new().compress_vec(bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_block_from_the_beacon_node_is_filed_for_its_import() {
+        let mut h = Harness::new();
+        h.push(
+            Class::Large,
+            message(BLOCK, &snappy(b"a block from the beacon node")),
+        );
+        h.start();
+        h.out.recv().await;
+
+        assert!(h.arrivals.imported(DECODED.slot(), DECODED.block_root()));
     }
 
     #[tokio::test]
