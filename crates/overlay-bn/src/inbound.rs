@@ -16,7 +16,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use overlay_core::events::{self, FirstArrival};
+use overlay_core::events::{self, Arrivals, FirstArrival};
 use overlay_core::fanout::Outbound;
 use overlay_core::lanes::{ClassLanes, LanePusher};
 use overlay_core::msgid::{self, MessageId};
@@ -72,6 +72,7 @@ pub struct Inbound {
     node: Arc<SelfIdentity>,
     clock: Arc<dyn Clock>,
     stats: Arc<dyn InboundStats>,
+    arrivals: Arc<Arrivals>,
     /// Unknown topic names and unparsable topic strings already warned about, so a stream
     /// of messages on one costs one line. A name never contains a `/`, so the two cannot
     /// collide.
@@ -81,8 +82,9 @@ pub struct Inbound {
 impl Inbound {
     /// Starts draining `lanes`. Every message is reported `Accept` on `commands`; a new one
     /// becomes an [`Outbound`] on `out`, stamped with `clock`'s time, and a new large one is
-    /// logged as this host's first arrival under `node`'s name (T-044) and kept in `recent` for
-    /// a peer that may have to repair it (§5.6).
+    /// logged as this host's first arrival under `node`'s name (T-044), kept in `recent` for a
+    /// peer that may have to repair it (§5.6), and, when it is a block, filed in `arrivals` so
+    /// the beacon node's own import of it can be timed against this moment (T-084).
     #[expect(
         clippy::too_many_arguments,
         reason = "the inbound path's wiring: where messages come from, the two stores it \
@@ -98,6 +100,7 @@ impl Inbound {
         node: Arc<SelfIdentity>,
         clock: Arc<dyn Clock>,
         stats: Arc<dyn InboundStats>,
+        arrivals: Arc<Arrivals>,
     ) -> JoinHandle<()> {
         let mut inbound = Self {
             lanes,
@@ -108,6 +111,7 @@ impl Inbound {
             node,
             clock,
             stats,
+            arrivals,
             warned: BTreeSet::new(),
         };
         tokio::spawn(async move {
@@ -200,13 +204,15 @@ impl Inbound {
             }
             Class::Small => None,
         };
+        let source = events::Source::Bn;
+        self.arrivals.saw(header, &source);
         events::emit_first_arrival(&FirstArrival {
             id,
             class,
             topic: &topic,
             node: &self.node,
             at: arrived,
-            source: events::Source::Bn,
+            source,
             header,
         });
     }
@@ -220,7 +226,6 @@ mod tests {
     use libp2p::PeerId;
     use libp2p::gossipsub;
     use libp2p::identity::Keypair;
-    use overlay_core::events::Arrivals;
     use overlay_core::fanout::Outbound;
     use overlay_core::header::{Header, HeaderDecoder};
     use overlay_core::lanes::{ClassLanes, LARGE_LANE_CAPACITY, LanePusher};
@@ -711,8 +716,9 @@ mod tests {
             SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)),
             out.pusher(),
             Arc::new(node()),
-            Arc::new(clock),
+            Arc::new(clock.clone()),
             Arc::new(()),
+            Arc::new(Arrivals::new(Arc::new(clock), spec_watch().1)),
         );
         tokio::time::timeout(WAIT, async {
             loop {
