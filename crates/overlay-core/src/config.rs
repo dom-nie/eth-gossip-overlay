@@ -778,8 +778,7 @@ log:
     #[test]
     fn pin_cpu_accepts_null_and_an_integer() {
         let null = Config::from_yaml("overlay: { io_thread: { pin_cpu: null } }").unwrap();
-        let absent =
-            Config::from_yaml("overlay: { io_thread: { busy_poll_usecs: 50 } }").unwrap();
+        let absent = Config::from_yaml("overlay: { io_thread: { busy_poll_usecs: 50 } }").unwrap();
         let pinned = Config::from_yaml("overlay: { io_thread: { pin_cpu: 30 } }").unwrap();
 
         assert_eq!(null.overlay.io_thread.pin_cpu, None);
@@ -867,7 +866,8 @@ log:
             Config::from_yaml("overlay: { io_thread: { prefer_busy_poll: true } }").unwrap_err();
 
         assert!(
-            err.to_string().contains("overlay.io_thread.prefer_busy_poll"),
+            err.to_string()
+                .contains("overlay.io_thread.prefer_busy_poll"),
             "{err}"
         );
         assert!(err.to_string().contains("pin_cpu"), "{err}");
@@ -892,9 +892,7 @@ log:
         );
         // Zero is an operator saying they want the busy polling without the suspension, which
         // is the shape of a host that will not grant CAP_NET_ADMIN.
-        assert!(
-            Config::from_yaml("overlay: { io_thread: { irq_suspend_timeout_ms: 0 } }").is_ok()
-        );
+        assert!(Config::from_yaml("overlay: { io_thread: { irq_suspend_timeout_ms: 0 } }").is_ok());
     }
 
     #[test]
