@@ -1,10 +1,10 @@
 # Configuration
 
-One `config.yaml`, the same on every host, at `/etc/eth-gossip-overlay/config.yaml` unless `--config`
-says otherwise. Every key has a default, so a file naming only what you change is valid, and
-[`deploy/examples/config.yaml`](../deploy/examples/config.yaml) is that file with every default
-written out. A key the sidecar does not know, or a misspelled one, stops the start rather than
-being ignored: run `eth-gossip-overlay check-config` after pushing a file and configuration management
+One `config.yaml`, the same on every host, at `/etc/eth-gossip-overlay/config.yaml` unless
+`--config` says otherwise. Every key has a default, so a file naming only what you change is
+valid, and [`deploy/examples/config.yaml`](../deploy/examples/config.yaml) is that file with
+every default written out. An unknown or misspelled key stops the start rather than being
+ignored: run `eth-gossip-overlay check-config` after pushing a file and configuration management
 finds out before systemd does.
 
 ## Reload or restart
@@ -20,9 +20,9 @@ restart required: overlay.listen
 ```
 
 The table below says which side each key is on. A key marked `restart` is read once at startup:
-changing it in the file and reloading changes nothing until the sidecar restarts, and the report
-names it so the change is not silently lost. A reload applies a key only when its value changed
-in the document, so rewriting the file behind a path a key already names does nothing on its own.
+changing it and reloading does nothing until the sidecar restarts, and the report names it so
+the change is not silently lost. A reload applies a key only when its value changed, so
+rewriting the file behind a path a key already names does nothing on its own.
 
 ## Who this host is
 
@@ -41,18 +41,17 @@ hosts:
     addr: "203.0.113.37:7788"   # where this host's overlay is dialled
 ```
 
-Every host carries the same roster, and `region` is what the fan-out treats as a failure and
-latency domain. Have your discovery tool write `roster.yaml`; the sidecar reads the file's
-modification time every 10 seconds and reloads a file that changed, so membership needs no
-interface beyond the file. Write to a temporary file in the same directory and rename it into
-place: a poll that lands halfway through a direct write reads a file that does not parse, keeps
-the roster it has, and picks the finished one up at the next poll.
+Every host carries the same roster, and `region` is the fan-out's failure and latency domain.
+Have your discovery tool write `roster.yaml`: the sidecar checks the file's modification time
+every 10 seconds and reloads what changed, so membership needs no interface beyond the file.
+Write to a temporary file in the same directory and rename it into place, since a poll landing
+halfway through a direct write reads a file that does not parse, keeps the roster it has, and
+picks up the finished one at the next poll.
 
-Such an automatic reload is refused if it would drop more than half of the hosts the sidecar
-currently has, on the grounds that a truncated file is more likely than half a fleet leaving at
-once. The refusal counts `roster_reload_rejected_total`, which is alerted on.
-`eth-gossip-overlayctl roster reload` applies the file anyway, which is how a genuine shrink is
-done.
+An automatic reload is refused if it would drop more than half the hosts the sidecar has, on the
+grounds that a truncated file is likelier than half a fleet leaving at once. The refusal counts
+`roster_reload_rejected_total`, which is alerted on; `eth-gossip-overlayctl roster reload`
+applies the file anyway, which is how a genuine shrink is done.
 
 ## The seed, the node key and the logs
 
@@ -62,9 +61,9 @@ systemd sets it, which is what the shipped unit's `LoadCredential=` does. Set
 [security.md](security.md) is the procedure.
 
 `bn.node_key_file` holds this host's libp2p identity, created on first start with mode 0600. It
-is the peer id the beacon node trusts, and it is not derived from the seed. Deleting it gives the
+is the peer id the beacon node trusts and is not derived from the seed. Deleting it gives the
 sidecar a new identity on the next start, so `lighthouse.env` changes and the beacon node has to
-be restarted to read it; keep the file, and on a container keep the volume under it.
+be restarted to read it; keep the file, and on a container the volume under it.
 
 The `log` section sets the level and the format of the sidecar's one output stream, which carries
 the events as well. [events.md](events.md) has the fields, the queries, and why
