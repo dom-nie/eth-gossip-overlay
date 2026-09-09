@@ -564,4 +564,68 @@ pub(crate) mod tests {
             1
         );
     }
+
+    /// The one test that needs the kernel this ticket is about.
+    #[cfg(target_os = "linux")]
+    mod kernel {
+        use super::*;
+        use crate::endpoint::{self, tests::*};
+        use crate::io_thread;
+        use crate::tls;
+
+        /// A real endpoint on a real I/O thread, with the parameters read back out of the epoll
+        /// instance the lookup found. Everything above is a fake kernel answering; this is the
+        /// only place the two ioctls, the `/proc` walk and `getsockname` meet a kernel.
+        ///
+        /// The IRQ suspension is left out on purpose: loopback has no NAPI instance to suspend,
+        /// so a timeout of zero is the only honest thing to ask for here and it needs no
+        /// capability. `docs/performance.md` gives an operator the `ethtool -S` procedure for
+        /// the half a loopback test cannot reach.
+        #[tokio::test(flavor = "multi_thread")]
+        #[ignore = "needs Linux 6.13; set ETH_GOSSIP_OVERLAY_TEST_KERNEL_FEATURES=1"]
+        async fn integration_busy_poll_enabled_on_supported_kernel() {
+            if std::env::var_os("ETH_GOSSIP_OVERLAY_TEST_KERNEL_FEATURES").is_none() {
+                eprintln!("skipped: ETH_GOSSIP_OVERLAY_TEST_KERNEL_FEATURES is not set");
+                return;
+            }
+            let cfg = IoThread {
+                pin_cpu: Some(0),
+                prefer_busy_poll: true,
+                // No NAPI instance behind loopback, so asking for a suspension here would only
+                // wait a minute to find that out.
+                irq_suspend_timeout: Duration::ZERO,
+                ..IoThread::default()
+            };
+            let (seeds, pins) = fleet(&["bn-a"]);
+            let overlay = config("127.0.0.1:0");
+            let server = tls::server_config(pins, &own_key(&seeds, "bn-a")).unwrap();
+            let io = io_thread::spawn(&cfg, move || {
+                endpoint::bind(&overlay, TEST_RECEIVE_WINDOW, server)
+            })
+            .unwrap();
+            let listen = io.endpoint().local_addr().unwrap();
+            let reported = Reported::default();
+
+            enable(&cfg, listen, reported.sink());
+
+            assert_eq!(reported.seen(), vec![true], "the gauge would read zero");
+            let (epoll, _socket) = epoll_fd::find(listen).expect("the overlay socket's epoll");
+            let running = detect(epoll)
+                .unwrap()
+                .expect("EPIOCGPARAMS answered nothing");
+            assert_eq!(running.prefer_busy_poll, 1);
+            assert_eq!(running.busy_poll_usecs, cfg.busy_poll_usecs);
+            io.shutdown().await;
+        }
+    }
+
+    /// The name stays in the list on every platform, and off Linux it says why it is not an
+    /// answer rather than passing silently.
+    #[cfg(not(target_os = "linux"))]
+    mod kernel {
+        #[test]
+        fn integration_busy_poll_enabled_on_supported_kernel() {
+            eprintln!("skipped: EPIOCSPARAMS is Linux only");
+        }
+    }
 }
