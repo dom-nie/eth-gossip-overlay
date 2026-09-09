@@ -557,6 +557,34 @@ mod tests {
     }
 
     #[test]
+    fn only_a_block_header_files_an_arrival() {
+        let spec = slots_of(12);
+        let arrivals = Arrivals::new(Arc::new(FakeClock::new()), spec.subscribe());
+
+        arrivals.saw(
+            Some(Header::Block {
+                slot: 7,
+                root: [0x77; 32],
+            }),
+            &Source::Bn,
+        );
+        arrivals.saw(
+            Some(Header::Column {
+                slot: 8,
+                index: 3,
+                block_root: [0x88; 32],
+            }),
+            &Source::Bn,
+        );
+        arrivals.saw(None, &Source::Bn);
+
+        assert!(arrivals.imported(7, [0x77; 32]));
+        // A column is not the block. Measuring the block's lag from a column's arrival would
+        // credit the overlay with a block its beacon node got on its own.
+        assert!(!arrivals.imported(8, [0x88; 32]));
+    }
+
+    #[test]
     fn arrival_records_older_than_eight_slots_are_dropped() {
         let clock = FakeClock::new();
         let spec = slots_of(12);
