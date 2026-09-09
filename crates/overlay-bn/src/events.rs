@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::str::from_utf8;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use overlay_core::backoff::Backoff;
 use overlay_core::events::{ImportEvent, Source, emit_import};
@@ -55,6 +55,10 @@ struct FirstArrival {
     origin: Option<Hostname>,
 }
 
+/// How many slots of arrival records to keep: long enough that a block cannot still be waiting
+/// to be imported, short enough that the map stays a handful of entries.
+const RETENTION_SLOTS: u64 = 8;
+
 /// Which blocks reached this host lately, so an import event can be turned into a lag.
 pub struct Arrivals {
     clock: Arc<dyn Clock>,
@@ -84,13 +88,16 @@ impl Arrivals {
                 Source::Overlay { origin } => Some((*origin).clone()),
             },
         };
-        self.seen().entry(block_root).or_insert(arrival);
+        let mut seen = self.seen();
+        self.prune(&mut seen, arrival.seen);
+        seen.entry(block_root).or_insert(arrival);
     }
 
     /// Logs `event` as an import and says whether an arrival record matched it.
     pub fn imported(&self, event: &BlockEvent) -> bool {
         let now = self.clock.now();
-        let seen = self.seen();
+        let mut seen = self.seen();
+        self.prune(&mut seen, now);
         let arrival = seen.get(&event.block_root);
         emit_import(&ImportEvent {
             slot: event.slot,
@@ -107,6 +114,13 @@ impl Arrivals {
             }),
         });
         arrival.is_some()
+    }
+
+    /// Drops the records the retention window no longer covers. Both entry points call it, so a
+    /// beacon node that has stopped importing still lets the map empty out.
+    fn prune(&self, seen: &mut BTreeMap<[u8; 32], FirstArrival>, now: Instant) {
+        let window = Duration::from_secs(RETENTION_SLOTS * SpecSnapshot::MAINNET.seconds_per_slot);
+        seen.retain(|_, arrival| now.saturating_duration_since(arrival.seen) <= window);
     }
 
     fn seen(&self) -> MutexGuard<'_, BTreeMap<[u8; 32], FirstArrival>> {
@@ -380,7 +394,9 @@ mod tests {
         let (sender, mut imports) = mpsc::unbounded_channel();
 
         let events = BlockEvents::spawn(
-            format!("{}{EVENTS}?topics=block", bn.uri()).parse().unwrap(),
+            format!("{}{EVENTS}?topics=block", bn.uri())
+                .parse()
+                .unwrap(),
             Backoff::new(Duration::from_millis(5), Duration::from_millis(5)),
             arrivals,
             Arc::new(Imports(sender)),
