@@ -23,11 +23,8 @@ use std::time::Duration;
 
 use overlay_core::msgid::MessageId;
 use overlay_core::protocol::{MAX_FRAME_BYTES, features};
-use overlay_core::repair::{
-    ColumnKey, ColumnRequest, Decision, Outcome, REPAIR_TICK, Request, Scheduler,
-};
-use overlay_core::roster::{Hostname, Region};
-use overlay_core::spec::SpecSnapshot;
+use overlay_core::repair::{Decision, Outcome, REPAIR_TICK, Request, Scheduler};
+use overlay_core::roster::Hostname;
 use overlay_core::wire::{self, Frame, Read, RepairReq, RepairResp};
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
@@ -40,39 +37,23 @@ use crate::receive::{Deps, RepairSink};
 ///
 /// `deadline` is `classes.large.repair_deadline_ms` on the channel T-043's reload writes, read
 /// afresh on every tick so a change takes hold on the next one.
-pub fn spawn(
-    deps: Deps,
-    deadline: watch::Receiver<Duration>,
-    spec: watch::Receiver<SpecSnapshot>,
-) -> JoinHandle<()> {
-    tokio::spawn(run(deps, deadline, spec))
+pub fn spawn(deps: Deps, deadline: watch::Receiver<Duration>) -> JoinHandle<()> {
+    tokio::spawn(run(deps, deadline))
 }
 
-/// Which repair an attempt answered, so one [`JoinSet`] carries both forms.
-enum Answered {
-    Message(MessageId, Outcome),
-    Column(ColumnKey, Outcome),
-}
-
-async fn run(deps: Deps, deadline: watch::Receiver<Duration>, spec: watch::Receiver<SpecSnapshot>) {
+async fn run(deps: Deps, deadline: watch::Receiver<Duration>) {
     let mut scheduler = Scheduler::default();
-    let mut attempts: JoinSet<Answered> = JoinSet::new();
+    let mut attempts: JoinSet<(MessageId, Outcome)> = JoinSet::new();
     let mut tick = tokio::time::interval(REPAIR_TICK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
         while let Some(finished) = attempts.try_join_next() {
-            match finished {
-                Ok(Answered::Message(msg_id, outcome)) => {
-                    deps.stats.repair_request(outcome);
-                    scheduler.answered(&msg_id);
-                }
-                Ok(Answered::Column(key, outcome)) => {
-                    deps.stats.repair_request(outcome);
-                    scheduler.answered_column(&key);
-                }
-                Err(_) => continue,
-            }
+            let Ok((msg_id, outcome)) = finished else {
+                continue;
+            };
+            deps.stats.repair_request(outcome);
+            scheduler.answered(&msg_id);
         }
         // One snapshot per tick, which is also one read of every peer's smoothed round trip:
         // the estimate a candidate list is sorted by is the one taken when the list was built.
@@ -84,41 +65,12 @@ async fn run(deps: Deps, deadline: watch::Receiver<Duration>, spec: watch::Recei
             |peer| reachable(&view, peer),
             now,
         );
-        // The columns the beacon node is short of, on the same tick and against the same live
-        // view. `refresh` reads both watches synchronously and leaves the tracker what a block
-        // seen now would be measured against (§6.4, CL-N3).
-        deps.custody
-            .refresh(&spec.borrow(), &deps.sets.borrow().advertised);
-        let in_flight = deps
-            .custody
-            .column_set(deps.reassembler.in_flight_columns());
-        let gaps = deps.custody.gaps(*deadline.borrow(), now, &in_flight);
-        let columns = scheduler.tick_columns(
-            &gaps,
-            deps.custody.threshold(),
-            &in_flight,
-            &in_region_by_rtt(&view, &deps.node.region),
-            now,
-        );
-        for decision in decided.into_iter().chain(columns) {
+        for decision in decided {
             match decision {
                 Decision::GaveUp(msg_id) => {
                     tracing::debug!(%msg_id, "nobody left to ask for this message");
                     deps.stats.repair_request(Outcome::GaveUp);
                 }
-                Decision::GaveUpColumn((_, index)) => {
-                    tracing::debug!(index, "nobody left to ask for this column");
-                    deps.stats.repair_request(Outcome::GaveUp);
-                }
-                Decision::AskColumn(request) => match view.get(&request.peer) {
-                    Some(peer) => {
-                        attempts.spawn(column_attempt(deps.clone(), peer.clone(), request));
-                    }
-                    None => {
-                        deps.stats.repair_request(Outcome::Timeout);
-                        scheduler.answered_column(&(request.block_root, request.index));
-                    }
-                },
                 Decision::Ask(request) => match view.get(&request.peer) {
                     Some(peer) => {
                         attempts.spawn(attempt(deps.clone(), peer.clone(), request));
@@ -136,23 +88,6 @@ async fn run(deps: Deps, deadline: watch::Receiver<Duration>, spec: watch::Recei
     }
 }
 
-/// Who a column can be asked for, in the order to ask them (D23): live in-region peers that
-/// advertised `REPAIR` (D29), by round trip.
-///
-/// Nothing announces who holds a column, so unlike the chunk path there is no shorter list than
-/// this one. A peer that does not hold it answers `not_found` at once rather than costing an
-/// attempt's timeout, which is what makes asking down the list cheap.
-fn in_region_by_rtt(view: &LiveView, region: &Region) -> Vec<(Hostname, Duration)> {
-    let mut peers: Vec<(Hostname, Duration)> = view
-        .in_region(region)
-        .into_iter()
-        .filter(|(_, peer)| peer.negotiated.allows(features::REPAIR))
-        .map(|(hostname, peer)| (hostname.clone(), peer.rtt))
-        .collect();
-    peers.sort_by_key(|(_, rtt)| *rtt);
-    peers
-}
-
 /// The round trip to `peer`, or `None` for one that must not be asked: a peer that has left the
 /// live set, and a peer that never advertised `REPAIR` (D29).
 fn reachable(view: &LiveView, peer: &Hostname) -> Option<Duration> {
@@ -163,7 +98,7 @@ fn reachable(view: &LiveView, peer: &Hostname) -> Option<Duration> {
 /// One attempt, held to the timeout the request carries: four round trips to this peer, clamped
 /// (D24). The timeout covers the whole exchange rather than each read, which is what makes three
 /// attempts fit inside the total budget however the peer behaves.
-async fn attempt(deps: Deps, peer: LivePeer, request: Request) -> Answered {
+async fn attempt(deps: Deps, peer: LivePeer, request: Request) -> (MessageId, Outcome) {
     let asked = Frame::RepairReq(RepairReq::Missing {
         msg_id: request.msg_id,
         missing: request.missing.clone(),
@@ -174,37 +109,7 @@ async fn attempt(deps: Deps, peer: LivePeer, request: Request) -> Answered {
     )
     .await
     .unwrap_or(Outcome::Timeout);
-    Answered::Message(request.msg_id, outcome)
-}
-
-/// One attempt at a column nobody has sent a chunk of, held to the same timeout (D24, T-083).
-///
-/// What comes back is the same `CHUNK` frames a chunk repair is answered with, so it goes
-/// through the same reassembler and the same completion. The requester has no message id for
-/// the column until the chunks name one, and the id it is handed is checked against the payload
-/// like every other (T-074). Nothing ties that payload to the `(block_root, index)` asked for,
-/// though: a peer can answer with some other message it holds, and what stops that mattering is
-/// that the answer still has to be a payload on a topic this beacon node subscribes to, and one
-/// this host would have taken from that peer anyway.
-async fn column_attempt(deps: Deps, peer: LivePeer, request: ColumnRequest) -> Answered {
-    let key = (request.block_root, request.index);
-    // A column index is a subnet index and reaches here from a `data_column_sidecar_{i}` topic,
-    // which parses into a `u8`, so this cannot narrow. One that did would name a column no peer
-    // could be asked for, which is the same to the scheduler as a peer that does not hold it.
-    let Ok(index) = u8::try_from(request.index) else {
-        return Answered::Column(key, Outcome::NotFound);
-    };
-    let asked = Frame::RepairReq(RepairReq::Column {
-        block_root: request.block_root,
-        index,
-    });
-    let outcome = tokio::time::timeout(
-        request.timeout,
-        exchange(&deps, &peer, &request.peer, &asked),
-    )
-    .await
-    .unwrap_or(Outcome::Timeout);
-    Answered::Column(key, outcome)
+    (request.msg_id, outcome)
 }
 
 /// The exchange itself: the request out, the chunks and the trailer back.
@@ -262,12 +167,6 @@ mod tests {
     use overlay_core::rs::{self, Params};
     use overlay_core::topic::{Class, Topic};
     use overlay_core::wire::{ChunkFlags, MAX_PAYLOAD_BYTES, encode_stream};
-
-    use std::sync::Arc;
-    use std::time::Instant;
-
-    use overlay_core::header::{Header, HeaderDecoder};
-    use overlay_core::topic::TopicKind;
 
     use super::*;
     use crate::manager::PeerInfo;
@@ -402,94 +301,5 @@ mod tests {
         let mut fanout = config::Fanout::default();
         fanout.large.stripe_min_recipients = 2;
         fanout
-    }
-
-    /// The one slot the column scenario runs in, and the block every column of it names.
-    const SLOT: u64 = 7;
-    const BLOCK_ROOT: [u8; 32] = [0x5b; 32];
-
-    /// Stands in for `overlay_bn::decode::Headers`, which is behind a feature this crate cannot
-    /// turn on. The scenario is about the tracker, the scheduler and the two ends of the wire;
-    /// what the real decoder reads out of SSZ is T-083's tests in `overlay-bn`.
-    struct TopicHeaders;
-
-    impl HeaderDecoder for TopicHeaders {
-        fn header(&self, topic: &Topic, _: &[u8]) -> Option<Header> {
-            match topic.kind() {
-                TopicKind::BeaconBlock => Some(Header::Block {
-                    slot: SLOT,
-                    root: BLOCK_ROOT,
-                }),
-                TopicKind::DataColumnSidecar(index) => Some(Header::Column {
-                    slot: SLOT,
-                    index: *index,
-                    block_root: BLOCK_ROOT,
-                }),
-                _ => None,
-            }
-        }
-    }
-
-    /// §6.4 end to end. One host's beacon node is handed the block and three of its four custody
-    /// columns; the fourth exists on one peer only and reached this host by no path at all, so
-    /// there is no message id for it anywhere and the chunk path has nothing to work with. Past
-    /// the deadline the host names the column by its block root and its index, asks its region
-    /// in round-trip order until a peer holds it, and hands the column to its beacon node once.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn column_repair_end_to_end_publishes_missing_column() {
-        let block = topic("beacon_block");
-        let columns: Vec<Topic> = (0..4)
-            .map(|i| topic(&format!("data_column_sidecar_{i}")))
-            .collect();
-        let wanted: Vec<&Topic> = std::iter::once(&block).chain(columns.iter()).collect();
-        let mut cluster = Builder::new(&[NodeKind::Manager; 4])
-            .decoder(Arc::new(TopicHeaders))
-            .start()
-            .await;
-        for node in 0..4 {
-            cluster.start_sidecar(node, subscriptions(&wanted, &[]));
-        }
-        eventually("the cluster to pair", || {
-            (0..4).all(|node| cluster.live(node).len() == 3)
-        })
-        .await;
-
-        // The column nobody fanned out: node 1 holds it the way its own beacon node would have
-        // left it, and no other host has ever seen a byte of it.
-        let missing = large_payload(8 * 1024);
-        let missing_id = msgid::compute(&columns[2].to_string(), &missing, MAX_PAYLOAD_BYTES).id;
-        let header = cluster
-            .recent(1)
-            .insert(
-                missing_id,
-                columns[2].clone(),
-                missing.clone(),
-                Some(&missing),
-                Instant::now(),
-            )
-            .expect("the decoder reads a column topic");
-        cluster.custody(1).observe(header, Instant::now());
-        eventually("node 1 to announce its id for the missing column", || {
-            let own = crate::hello::lock(cluster.topics(1));
-            own.table
-                .get(&columns[2])
-                .is_some_and(|id| own.announcer.told(&cluster.hostname(0), id))
-        })
-        .await;
-
-        for column in [&columns[0], &columns[1], &columns[3]] {
-            assert!(cluster.from_bn(0, column, &large_payload(8 * 1024)));
-        }
-        assert!(cluster.from_bn(0, &block, &large_payload(16 * 1024)));
-
-        eventually("node 0 to publish the column it never saw", || {
-            !cluster.published(0).is_empty()
-        })
-        .await;
-        tokio::time::sleep(SETTLE).await;
-        let published = cluster.published(0);
-        assert_eq!(published.len(), 1, "{published:?}");
-        assert_eq!(published[0].payload, missing);
-        assert!(cluster.stats(0).repair_requests(Outcome::Completed) > 0);
     }
 }
