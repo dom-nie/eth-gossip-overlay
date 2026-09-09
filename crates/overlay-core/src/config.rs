@@ -677,6 +677,10 @@ log:
         );
         assert!(cfg.inject);
         assert_eq!(cfg.overlay.io_thread.pin_cpu, None);
+        assert_eq!(
+            cfg.overlay.io_thread.irq_suspend_timeout,
+            Duration::from_millis(20)
+        );
         assert_eq!(cfg.metrics_listen, addr("127.0.0.1:7789"));
         assert_eq!(
             cfg.bn.node_key_file,
@@ -821,6 +825,46 @@ log:
                 "{doc}: {err}"
             );
         }
+    }
+
+    /// Busy polling is set on the epoll instance the I/O thread owns, and there is no such
+    /// thread without a core to pin it to. Turning it on and leaving `pin_cpu` null would set
+    /// nothing and say nothing at startup, so `check-config` refuses it while the operator is
+    /// still at a terminal (§11.1).
+    #[test]
+    fn prefer_busy_poll_without_a_reserved_core_is_rejected() {
+        let err =
+            Config::from_yaml("overlay: { io_thread: { prefer_busy_poll: true } }").unwrap_err();
+
+        assert!(
+            err.to_string().contains("overlay.io_thread.prefer_busy_poll"),
+            "{err}"
+        );
+        assert!(err.to_string().contains("pin_cpu"), "{err}");
+        assert!(
+            Config::from_yaml("overlay: { io_thread: { prefer_busy_poll: true, pin_cpu: 0 } }")
+                .is_ok()
+        );
+    }
+
+    /// The timeout is how long the queue's IRQ stays masked with nothing polling behind it if
+    /// the reserved core ever stops. A second of that is not a tuning, it is an outage, and
+    /// §11.1 asks for twenty milliseconds.
+    #[test]
+    fn irq_suspend_timeout_beyond_a_second_is_rejected() {
+        let err = Config::from_yaml("overlay: { io_thread: { irq_suspend_timeout_ms: 1001 } }")
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("overlay.io_thread.irq_suspend_timeout_ms"),
+            "{err}"
+        );
+        // Zero is an operator saying they want the busy polling without the suspension, which
+        // is the shape of a host that will not grant CAP_NET_ADMIN.
+        assert!(
+            Config::from_yaml("overlay: { io_thread: { irq_suspend_timeout_ms: 0 } }").is_ok()
+        );
     }
 
     #[test]
