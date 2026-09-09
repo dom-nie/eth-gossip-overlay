@@ -75,6 +75,7 @@ const SECTION_12: &[&str] = &[
     "overlay_bn_subscriptions",
     "overlay_bn_trusted",
     "overlay_build_info",
+    "overlay_busy_poll_enabled",
     "overlay_by_root_requests_total",
     "overlay_bytes_total",
     "overlay_chunks_received_total",
@@ -144,6 +145,7 @@ const LABELS: &[(&str, &[&str])] = &[
     ("overlay_bn_subscriptions", &[]),
     ("overlay_bn_trusted", &[]),
     ("overlay_build_info", &["git_sha", "version"]),
+    ("overlay_busy_poll_enabled", &[]),
     ("overlay_by_root_requests_total", &["outcome", "protocol"]),
     (
         "overlay_bytes_total",
