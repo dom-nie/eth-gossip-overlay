@@ -31,6 +31,9 @@ bn:
     large_per_s: 300
     bytes_per_s: 33554432
   idontwant_on_publish: true
+  by_root_cache:
+    enabled: false           # answer the node's by-root lookups from the recent store (§5.8)
+    slots: 16                # slots of blocks and columns held while it is on
 classes:
   small:
     batch_window_ms: 10

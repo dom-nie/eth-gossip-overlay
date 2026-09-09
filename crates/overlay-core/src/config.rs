@@ -184,6 +184,24 @@ pub struct Bn {
     pub publish_rate_limit: PublishRateLimit,
     /// `idontwant_on_publish`: tell the beacon node IDONTWANT for a message as it is published.
     pub idontwant_on_publish: bool,
+    /// `by_root_cache`: answer the beacon node's own by-root lookups out of the recent store.
+    pub by_root_cache: ByRootCache,
+}
+
+/// `bn.by_root_cache`: the optional localhost by-root cache (§5.8). The sidecar answers the
+/// beacon node's `BeaconBlocksByRoot` and `DataColumnSidecarsByRoot` requests from the payloads
+/// it already holds, so a missing-parent recovery that lands on the sidecar is a localhost round
+/// trip instead of a public one. Lighthouse does not prefer trusted peers for a lookup, so it
+/// lands there only sometimes; that is why this ships off and why `docs/performance.md` says
+/// what a slot of it costs before an operator turns it on.
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ByRootCache {
+    /// `enabled`: answer by-root requests from the recent store instead of refusing them.
+    pub enabled: bool,
+    /// `slots`: how many slots of blocks and columns the store holds while the cache is on. Each
+    /// one costs a slot's worth of the memory budget in `docs/performance.md`.
+    pub slots: u32,
 }
 
 /// `bn.publish_rate_limit`: class-aware ceilings on the publish path. A bug guard, not a normal
@@ -358,6 +376,16 @@ impl Default for Bn {
             listen_addr: "/ip4/127.0.0.1/tcp/7787".to_owned(),
             publish_rate_limit: PublishRateLimit::default(),
             idontwant_on_publish: true,
+            by_root_cache: ByRootCache::default(),
+        }
+    }
+}
+
+impl Default for ByRootCache {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            slots: 16,
         }
     }
 }
@@ -612,6 +640,9 @@ bn:
     large_per_s: 300
     bytes_per_s: 33554432
   idontwant_on_publish: true
+  by_root_cache:
+    enabled: false           # answer the node's by-root lookups from the recent store (§5.8)
+    slots: 16                # slots of blocks and columns held while it is on
 classes:
   small:
     batch_window_ms: 10
