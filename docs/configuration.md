@@ -106,7 +106,7 @@ in its own row, since the table is generated from the same doc comments the code
 | `bn.publish_rate_limit.large_per_s` | `300` | reload | large-class messages per second. |
 | `bn.publish_rate_limit.bytes_per_s` | `33554432` | reload | payload bytes per second across both classes. |
 | `bn.idontwant_on_publish` | `true` | restart | tell the beacon node IDONTWANT for a message as it is published. |
-| `bn.by_root_cache.enabled` | `false` | restart | answer by-root requests from the recent store instead of refusing them. |
+| `bn.by_root_cache.enabled` | `false` | reload | answer by-root requests from the recent store instead of refusing them. |
 | `bn.by_root_cache.slots` | `16` | restart | how many slots of blocks and columns the store holds while the cache is on. Each one costs a slot's worth of the memory budget in `docs/performance.md`. |
 | `classes.small.batch_window_ms` | `10` | reload | how long a batch collects entries before it is flushed. |
 | `classes.small.stale_after_ms` | `1000` | reload | a batch older than this is dropped rather than delivered late. |

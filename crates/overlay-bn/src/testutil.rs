@@ -43,6 +43,7 @@
 //! tests that need the protocol code and no beacon node at all.
 
 use std::collections::HashSet;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
@@ -64,12 +65,13 @@ use lighthouse_network::rpc::{
     GoodbyeReason, Protocol, RPC, RPCMessage, RPCReceived, RequestType, StatusMessage,
 };
 use lighthouse_network::types::SnappyTransform;
+use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
 use prometheus_client::registry::Registry;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use ssz::{Decode, Encode};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
-use ssz::{Decode, Encode};
 use types::{
     BeaconBlock, BeaconBlockFulu, BeaconBlockHeader, ChainSpec, DataColumnSidecar,
     DataColumnSidecarFulu, DataColumnsByRootIdentifier, EmptyBlock, EthSpec, ForkContext, ForkName,
@@ -82,6 +84,8 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 use crate::gossip::{BnLinkConfig, GossipBehaviour};
 use crate::link::LinkConfig;
 use crate::node_key::NodeKey;
+use crate::rpc::proto::Protocol as RpcProtocol;
+use crate::rpc::{ByRootCache, ByRootStats};
 
 /// Long enough for a noise handshake plus a few gossipsub round trips on a loaded CI box.
 const WAIT: Duration = Duration::from_secs(5);
@@ -950,6 +954,21 @@ fn fork_context() -> Arc<ForkContext> {
         Hash256::ZERO,
         &spec,
     ))
+}
+
+/// The by-root cache a link that is not under test for §5.8 is handed: a store nothing fills,
+/// the flag off, and nothing counted.
+pub fn by_root_off() -> ByRootCache {
+    struct Uncounted;
+    impl ByRootStats for Uncounted {
+        fn by_root_request(&self, _: RpcProtocol, _: bool) {}
+    }
+
+    ByRootCache::new(
+        SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(Uncounted),
+    )
 }
 
 /// The fork digest the fake's own `ForkContext` computes for Fulu.

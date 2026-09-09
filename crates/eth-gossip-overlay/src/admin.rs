@@ -497,6 +497,8 @@ mod tests {
             .unwrap();
 
             let inject = Arc::new(AtomicBool::new(true));
+
+            let by_root_cache = Arc::new(AtomicBool::new(false));
             let (roster_tx, roster_rx) =
                 watch::channel(Roster::from_yaml(&roster_yaml(3)).unwrap());
             let (seed_tx, _seed_rx) = watch::channel::<Option<FleetSeed>>(None);
@@ -509,6 +511,7 @@ mod tests {
                 config_path.clone(),
                 Deps {
                     inject: inject.clone(),
+                    by_root_cache: by_root_cache.clone(),
                     roster: roster_tx,
                     previous_seed: seed_tx,
                     limits: limits_tx,

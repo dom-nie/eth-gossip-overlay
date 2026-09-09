@@ -36,6 +36,7 @@ use overlay_bn::link::{self, BnCommand, BnEvent, BnLink, LinkConfig};
 use overlay_bn::mirror;
 use overlay_bn::node_key::NodeKey;
 use overlay_bn::publish::Publisher;
+use overlay_bn::rpc::ByRootCache;
 use overlay_bn::spec::spec_watch;
 use overlay_core::backoff::Backoff;
 use overlay_core::budget::{self, FanoutBudget, MemoryBudget, SendLaneBounds};
@@ -44,7 +45,7 @@ use overlay_core::events::Arrivals;
 use overlay_core::identity::{Seeds, derive_tls_keypair};
 use overlay_core::lanes::ClassLanes;
 use overlay_core::reassemble::{ReassembleConfig, Reassembler};
-use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
+use overlay_core::recent::{self, RECENT_SLOTS, RecentLarge, SharedRecentLarge};
 use overlay_core::roster::{Hostname, Roster, SelfIdentity, resolve_self};
 use overlay_core::seen::{SEEN_CAPACITY, SEEN_TTL, SeenCache, SharedSeenCache};
 use overlay_core::time::SystemClock;
@@ -293,9 +294,28 @@ impl App {
         );
         // What a repair request is answered from, filled by the beacon node link and by the
         // reassembler, which is why both are handed the one handle (§5.6). The decoder is what
-        // fills its `(block_root, index)` index as payloads go in (T-083).
-        let recent = SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES))
-            .with_decoder(Arc::new(overlay_bn::decode::Headers));
+        // fills its by-root index as payloads go in (T-083).
+        //
+        // The window is five slots for repair alone, and `bn.by_root_cache.slots` when the
+        // beacon node's own by-root lookups are served out of it too (§5.8). Widening it is
+        // what the `by_root_cache` row of the memory budget above is priced from, so the two
+        // read the same key and cannot disagree.
+        let by_root_cache = &cfg.bn.by_root_cache;
+        let slots = match by_root_cache.enabled {
+            true => by_root_cache.slots.max(RECENT_SLOTS),
+            false => RECENT_SLOTS,
+        };
+        let recent = SharedRecentLarge::new(RecentLarge::new(
+            recent::window_ttl(slots),
+            recent::window_bytes(slots),
+        ))
+        .with_decoder(Arc::new(overlay_bn::decode::Headers));
+        tracing::info!(
+            enabled = by_root_cache.enabled,
+            slots,
+            "by-root cache and recent store window"
+        );
+        let by_root_on = Arc::new(AtomicBool::new(by_root_cache.enabled));
 
         let progress = Progress::default();
         let (spec_tx, spec_rx) = spec_watch();
@@ -315,6 +335,7 @@ impl App {
             sets_rx.clone(),
             commands_rx,
             progress.bn_link.clone(),
+            ByRootCache::new(recent.clone(), by_root_on.clone(), metrics.clone()),
         );
         let bn_connected = link.connected.clone();
         // One consumer may hold the link's events, and both halves of the beacon node's state
@@ -467,6 +488,7 @@ impl App {
             config_path,
             reload::Deps {
                 inject: inject.clone(),
+                by_root_cache: by_root_on,
                 roster: roster_tx,
                 previous_seed: previous_seed_tx,
                 limits: limits_tx,

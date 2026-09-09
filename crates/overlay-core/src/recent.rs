@@ -390,7 +390,11 @@ mod tests {
             recent.insert(id(byte), topic(), payload(byte, SLOT_BYTES), clock.now());
         }
 
-        assert_eq!(recent.get(&id(1)), None, "a third slot did not evict the first");
+        assert_eq!(
+            recent.get(&id(1)),
+            None,
+            "a third slot did not evict the first"
+        );
         assert!(recent.get(&id(2)).is_some());
         assert!(recent.get(&id(3)).is_some());
 
@@ -529,7 +533,13 @@ mod tests {
 
         let header = recent.insert(id(1), topic(), ssz.clone(), Some(&ssz), clock.now());
 
-        assert_eq!(header, Some(Header::Block { slot: 42, root: [8; 32] }));
+        assert_eq!(
+            header,
+            Some(Header::Block {
+                slot: 42,
+                root: [8; 32]
+            })
+        );
         assert_eq!(recent.get_by_block([8; 32]), Some(id(1)));
         assert_eq!(recent.get_by_block([7; 32]), None);
         // A block root and a column index are different keys, not one namespace.

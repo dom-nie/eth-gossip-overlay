@@ -19,11 +19,15 @@
 //! (Architecture.md §12), are for.
 
 use std::collections::BTreeSet;
+use std::fmt;
 use std::io::{self, Read, Write};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use libp2p::StreamProtocol;
 use libp2p::futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use libp2p::request_response::Codec;
+use overlay_core::recent::SharedRecentLarge;
 use overlay_core::topic::{Topic, TopicKind};
 use snap::read::FrameDecoder;
 
@@ -31,12 +35,64 @@ use crate::rpc::msg::{Goodbye, Malformed, MetaData, Ping, Status};
 use crate::rpc::proto::Protocol;
 use crate::spec::SpecSnapshot;
 
+mod by_root;
 pub mod msg;
 pub mod proto;
 
+/// What a by-root request came to, for the `by_root_requests_total{protocol, outcome}` series
+/// §12 names. A hit is a request the store had something for, which is a public round trip the
+/// beacon node did not have to make.
+pub trait ByRootStats: Send + Sync {
+    /// One request answered on `protocol`.
+    fn by_root_request(&self, protocol: Protocol, hit: bool);
+}
+
+/// What the responder answers a by-root request out of: the recent store T-081 fills, the
+/// reloadable `bn.by_root_cache.enabled` flag, and where a hit or a miss is counted.
+///
+/// The flag is read per request rather than captured, so turning the cache off over SIGHUP puts
+/// T-019's `ResourceUnavailable` back without restarting the link.
+/// The store and the counter are read by the handlers, which only the `by-root-cache` feature
+/// compiles in. A build without it still carries the cache so the wiring and the config key are
+/// the same either way; it just always answers `ResourceUnavailable`.
+#[cfg_attr(not(feature = "by-root-cache"), allow(dead_code))]
+#[derive(Clone)]
+pub struct ByRootCache {
+    recent: SharedRecentLarge,
+    enabled: Arc<AtomicBool>,
+    stats: Arc<dyn ByRootStats>,
+}
+
+impl ByRootCache {
+    /// A cache over `recent`, answering while `enabled` is set.
+    pub fn new(
+        recent: SharedRecentLarge,
+        enabled: Arc<AtomicBool>,
+        stats: Arc<dyn ByRootStats>,
+    ) -> Self {
+        Self {
+            recent,
+            enabled,
+            stats,
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::Relaxed)
+    }
+}
+
+impl fmt::Debug for ByRootCache {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ByRootCache")
+            .field("enabled", &self.enabled())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Answers requests from the sidecar's own state and nothing else: no chain, no clock, no
-/// channels, so the swarm loop calls it inline. Its two inputs are the beacon node's
-/// subscriptions and the beacon node's spec.
+/// channels, so the swarm loop calls it inline. Its inputs are the beacon node's subscriptions,
+/// the beacon node's spec, and the recent store where the optional by-root cache reads.
 #[derive(Clone, Debug)]
 pub struct Responder {
     metadata: MetaData,
@@ -46,6 +102,8 @@ pub struct Responder {
     /// The range Lighthouse accepts a custody group count in.
     custody_requirement: u64,
     number_of_custody_groups: u64,
+    /// `None` in a responder nobody handed a store, which is every test of the other protocols.
+    by_root: Option<ByRootCache>,
 }
 
 impl Default for Responder {
@@ -58,6 +116,7 @@ impl Default for Responder {
             columns: BTreeSet::new(),
             custody_requirement: crate::spec::MAINNET.custody_requirement,
             number_of_custody_groups: crate::spec::MAINNET.number_of_custody_groups,
+            by_root: None,
         }
     }
 }
@@ -67,6 +126,12 @@ impl Responder {
     /// beacon node's own arrives.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The store the two by-root protocols are answered out of while the cache is on.
+    pub fn with_by_root(mut self, cache: ByRootCache) -> Self {
+        self.by_root = Some(cache);
+        self
     }
 
     /// What a `MetaData` request is answered with right now.
@@ -182,6 +247,17 @@ impl Responder {
                     Err(Malformed) => Response::InvalidRequest,
                 };
             }
+            // A body the cache cannot read is `ResourceUnavailable` rather than
+            // `InvalidRequest`, which is what these two protocols were answered before the
+            // cache existed: a trusted beacon node does not send a malformed by-root request,
+            // and answering one with the code that costs peer score would be a new way for the
+            // sidecar to lose standing on a protocol it had been refusing for free.
+            Protocol::BlocksByRootV2 | Protocol::ColumnsByRootV1 => {
+                return match &self.by_root {
+                    Some(cache) => by_root::answer(cache, protocol, request),
+                    None => Response::ResourceUnavailable,
+                };
+            }
             Protocol::Unsupported => return Response::ResourceUnavailable,
         };
         match body {
@@ -203,6 +279,10 @@ pub type Request = (Protocol, Result<Vec<u8>, Malformed>);
 pub enum Response {
     /// A success chunk carrying the SSZ body.
     Success(Vec<u8>),
+    /// One success chunk per object a by-root request asked for and this host holds, in the
+    /// order it asked. Empty is never written; a request nothing answered is
+    /// [`ResourceUnavailable`](Self::ResourceUnavailable).
+    Chunks(Vec<Chunk>),
     /// Result code 1: the body did not decode.
     InvalidRequest,
     /// Result code 3: a protocol the sidecar registers but does not serve.
@@ -211,21 +291,49 @@ pub enum Response {
     Goodbye(u64),
 }
 
+/// One success chunk of a by-root answer.
+///
+/// Both by-root protocols the sidecar serves carry context bytes
+/// (`ProtocolId::has_context_bytes` in `rpc/protocol.rs`), so a chunk names the fork its object
+/// belongs to before its length. The digest is the one in the gossip topic the payload arrived
+/// on, which is the fork the beacon node itself put it under.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Chunk {
+    /// The fork digest, written between the result byte and the length prefix.
+    pub context: [u8; 4],
+    /// The uncompressed SSZ of the object.
+    pub ssz: Vec<u8>,
+}
+
 /// `syncnets` is SSZ `Bitvector[4]`; a set bit past that fails Lighthouse's decode.
 const SYNCNETS_BITS: u8 = 4;
 
-/// The largest request body the sidecar accepts, uncompressed: a Status v2. Everything else
-/// it serves is smaller, and nothing it serves is variable length.
-pub const MAX_REQUEST_LEN: usize = Status::V2_LEN;
+/// How many block roots one request may name, `MAX_REQUEST_BLOCKS_DENEB` in the consensus
+/// specs, which is what Lighthouse's `max_request_blocks_deneb` defaults to.
+#[cfg(feature = "by-root-cache")]
+const MAX_REQUEST_BLOCKS: usize = 128;
 
-/// Under 128, so a legal length prefix is a single varint byte with the high bit clear and
-/// [`body`] can refuse every other prefix by comparing one byte.
-const _: () = assert!(MAX_REQUEST_LEN < 0x80);
+/// The largest `DataColumnSidecarsByRoot` body Lighthouse's own inbound codec accepts, which is
+/// the largest of everything the sidecar reads: [`MAX_REQUEST_BLOCKS`] identifiers of a 4-byte
+/// outer offset, a 32-byte root, a 4-byte offset and one 8-byte index per column
+/// (`max_data_columns_by_root_request_common` in `consensus/types/src/core/chain_spec.rs`).
+#[cfg(feature = "by-root-cache")]
+pub const MAX_REQUEST_LEN: usize =
+    MAX_REQUEST_BLOCKS * (4 + 32 + 4 + 8 * crate::spec::MAINNET.number_of_columns as usize);
+
+/// The largest request body the sidecar accepts without the by-root cache built in: a Status v2.
+/// Everything else it serves is smaller, and nothing it serves is variable length.
+#[cfg(not(feature = "by-root-cache"))]
+pub const MAX_REQUEST_LEN: usize = Status::V2_LEN;
 
 /// What is read from an inbound stream before the rest is refused: the length prefix plus
 /// `snap::raw::max_compress_len(MAX_REQUEST_LEN)`, which is `32 + n + n / 6` and is the bound
 /// Lighthouse's inbound codec puts on the framed bytes of a request that long.
-const MAX_REQUEST_BYTES: u64 = 1 + 32 + MAX_REQUEST_LEN as u64 + MAX_REQUEST_LEN as u64 / 6;
+const MAX_REQUEST_BYTES: u64 =
+    VARINT_MAX_BYTES as u64 + 32 + MAX_REQUEST_LEN as u64 + MAX_REQUEST_LEN as u64 / 6;
+
+/// How many bytes a legal length prefix can take: seven bits of [`MAX_REQUEST_LEN`] per byte.
+const VARINT_MAX_BYTES: usize = MAX_REQUEST_LEN.ilog2() as usize / 7 + 1;
 
 /// The result byte of a success chunk (`RpcResponse::as_u8` in `rpc/methods.rs`).
 pub const SUCCESS: u8 = 0;
@@ -276,8 +384,9 @@ impl Codec for Eth2Codec {
         Err(io::ErrorKind::Unsupported.into())
     }
 
-    /// Exactly one chunk; the behaviour closes the write side after it, which is the stream
-    /// end Lighthouse expects after a single response.
+    /// One chunk for every protocol but the two by-root ones, which answer one per object the
+    /// requester asked for and this host holds. The behaviour closes the write side after the
+    /// last of them, which is the stream end Lighthouse reads as the end of the response.
     async fn write_response<T>(
         &mut self,
         _: &StreamProtocol,
@@ -289,6 +398,15 @@ impl Codec for Eth2Codec {
     {
         let (code, payload) = match response {
             Response::Success(payload) => (SUCCESS, payload),
+            Response::Chunks(chunks) => {
+                let mut out = Vec::new();
+                for Chunk { context, ssz } in chunks {
+                    out.extend_from_slice(&[SUCCESS]);
+                    out.extend_from_slice(&context);
+                    out.extend_from_slice(&framed(&ssz)?);
+                }
+                return io.write_all(&out).await;
+            }
             Response::InvalidRequest => (INVALID_REQUEST, b"invalid request".to_vec()),
             Response::ResourceUnavailable => {
                 (RESOURCE_UNAVAILABLE, b"resource unavailable".to_vec())
@@ -304,24 +422,48 @@ impl Codec for Eth2Codec {
 /// Lighthouse sends a `MetaData` request, whose length prefix it omits entirely. A prefix
 /// past the largest legal request is refused before the frame decoder sees a byte.
 fn body(raw: &[u8]) -> Result<Vec<u8>, Malformed> {
-    let Some((&len, framed)) = raw.split_first() else {
+    if raw.is_empty() {
         return Ok(Vec::new());
-    };
-    if usize::from(len) > MAX_REQUEST_LEN {
+    }
+    let (len, framed) = read_varint(raw)?;
+    if len > MAX_REQUEST_LEN {
         return Err(Malformed);
     }
-    let mut out = vec![0; usize::from(len)];
+    let mut out = vec![0; len];
     FrameDecoder::new(framed)
         .read_exact(&mut out)
         .map_err(|_| Malformed)?;
     Ok(out)
 }
 
+/// The unsigned LEB128 at the front of `raw`, and what follows it.
+///
+/// A prefix longer than [`MAX_REQUEST_LEN`] needs, or one that runs off the end, is malformed
+/// before anything is allocated, so a peer cannot make this reserve a buffer by writing a
+/// prefix it has no bytes for.
+fn read_varint(raw: &[u8]) -> Result<(usize, &[u8]), Malformed> {
+    let mut len = 0usize;
+    for (at, byte) in raw.iter().take(VARINT_MAX_BYTES).enumerate() {
+        len |= usize::from(byte & 0x7f) << (7 * at);
+        if byte & 0x80 == 0 {
+            return Ok((len, &raw[at + 1..]));
+        }
+    }
+    Err(Malformed)
+}
+
 /// `<code><varint len(payload)><snappy framed payload>`. An error chunk's payload is the
 /// message as raw bytes, which is how Lighthouse reads its SSZ byte list.
 fn chunk(code: u8, payload: &[u8]) -> io::Result<Vec<u8>> {
     let mut out = vec![code];
-    out.extend_from_slice(&varint(payload.len()));
+    out.extend_from_slice(&framed(payload)?);
+    Ok(out)
+}
+
+/// `<varint len(payload)><snappy framed payload>`, the half of a chunk that follows the result
+/// byte and, on a protocol that carries them, the context bytes.
+fn framed(payload: &[u8]) -> io::Result<Vec<u8>> {
+    let mut out = varint(payload.len());
     let mut encoder = snap::write::FrameEncoder::new(Vec::new());
     encoder.write_all(payload)?;
     encoder.flush()?;
@@ -668,10 +810,10 @@ mod tests {
         );
     }
 
-    /// A body longer than anything the sidecar serves, on a protocol it does not serve: a
-    /// by-root request of three roots is 96 bytes and routine. The protocol decides, not the
-    /// body, because `ResourceUnavailable` on `BlobsByRoot` and `DataColumnsByRoot` carries no
-    /// peer action at all while `InvalidRequest` is a `PeerAction::LowToleranceError`
+    /// The protocol decides, not the body: a `BlobsByRoot` request of three roots is 96 bytes
+    /// and routine, and whether it reads back or not the answer is the same. That matters
+    /// because `ResourceUnavailable` on `BlobsByRoot` and `DataColumnsByRoot` carries no peer
+    /// action at all while `InvalidRequest` is a `PeerAction::LowToleranceError`
     /// (`RPCError::ErrorResponse` in
     /// `beacon_node/lighthouse_network/src/peer_manager/mod.rs:559`).
     #[test]
@@ -679,9 +821,13 @@ mod tests {
         let id = StreamProtocol::new("/eth2/beacon_chain/req/blob_sidecars_by_root/1/ssz_snappy");
         let long = read(&id, &request(&[0xab; 96]));
 
-        assert_eq!(long, (Protocol::Unsupported, Err(Malformed)));
+        assert_eq!(long.0, Protocol::Unsupported);
         assert_eq!(
             Responder::new().answer(&long),
+            Response::ResourceUnavailable
+        );
+        assert_eq!(
+            Responder::new().answer(&(Protocol::Unsupported, Err(Malformed))),
             Response::ResourceUnavailable
         );
         assert_eq!(

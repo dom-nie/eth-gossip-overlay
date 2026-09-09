@@ -25,8 +25,24 @@ pub enum Protocol {
     MetaDataV3,
     /// `goodbye/1`: the connection is closed.
     GoodbyeV1,
+    /// `beacon_blocks_by_root/2`: answered out of the recent store while the by-root cache is
+    /// on, and `ResourceUnavailable` otherwise (§5.8).
+    BlocksByRootV2,
+    /// `data_column_sidecars_by_root/1`: the same.
+    ColumnsByRootV1,
     /// Every other id Lighthouse can negotiate: answered `ResourceUnavailable`.
     Unsupported,
+}
+
+impl Protocol {
+    /// The `protocol` label of `by_root_requests_total`, empty for an id the cache never serves.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::BlocksByRootV2 => "beacon_blocks_by_root",
+            Self::ColumnsByRootV1 => "data_column_sidecars_by_root",
+            _ => "",
+        }
+    }
 }
 
 macro_rules! id {
@@ -48,8 +64,12 @@ static TABLE: [(StreamProtocol, Protocol); 22] = [
     (id!("goodbye", "1"), Protocol::GoodbyeV1),
     (id!("beacon_blocks_by_range", "1"), Protocol::Unsupported),
     (id!("beacon_blocks_by_range", "2"), Protocol::Unsupported),
+    // Version 1 stays unserved. Its response chunks carry no context bytes, so Lighthouse reads
+    // one as a phase-0 block, and every block this sidecar holds is of a later fork; an answer
+    // would be a decode error at the requester rather than the block it asked for. Lighthouse
+    // offers v2 first and its own lookups build v2 requests.
     (id!("beacon_blocks_by_root", "1"), Protocol::Unsupported),
-    (id!("beacon_blocks_by_root", "2"), Protocol::Unsupported),
+    (id!("beacon_blocks_by_root", "2"), Protocol::BlocksByRootV2),
     (id!("beacon_blocks_by_head", "1"), Protocol::Unsupported),
     (
         id!("execution_payload_envelopes_by_range", "1"),
@@ -63,7 +83,7 @@ static TABLE: [(StreamProtocol, Protocol); 22] = [
     (id!("blob_sidecars_by_root", "1"), Protocol::Unsupported),
     (
         id!("data_column_sidecars_by_root", "1"),
-        Protocol::Unsupported,
+        Protocol::ColumnsByRootV1,
     ),
     (
         id!("data_column_sidecars_by_range", "1"),

@@ -703,6 +703,7 @@ mod tests {
             sets,
             commands_rx,
             Arc::default(),
+            crate::testutil::by_root_off(),
         );
         let stats = Arc::new(Recording::default());
         let (task, _info) = Watch::spawn(link.events, spec_rx, stats.clone());

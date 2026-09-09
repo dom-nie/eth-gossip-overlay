@@ -701,6 +701,7 @@ mod tests {
             sets,
             commands_rx,
             Arc::default(),
+            crate::testutil::by_root_off(),
         );
         let clock = FakeClock::new();
         let seen = SharedSeenCache::new(SeenCache::new(

@@ -27,6 +27,10 @@
 //!   on the next message either way it is flipped.
 //! - `bn.publish_rate_limit.*`: one applier for the section, sending the three ceilings to
 //!   T-017's publisher, which rebuilds its token buckets.
+//! - `bn.by_root_cache.enabled`: the `AtomicBool` T-085's responder reads per request, so
+//!   turning the cache off puts T-019's `ResourceUnavailable` back on the next lookup. The
+//!   window `bn.by_root_cache.slots` names is not reloadable: the recent store is sized once,
+//!   against the memory budget the process started under.
 //! - `overlay.fleet_seed_previous_file`: loaded with T-004's reader and published for
 //!   [`spawn_pin_table`], which rebuilds T-021's pin table so the verifier accepts keys from
 //!   the outgoing seed for as long as the file is configured (DX-N2).
@@ -77,6 +81,7 @@ use crate::logging::{LogHandle, directive};
 /// and answered by [`Reloader::config`], which is where the ticket that ships its consumer
 /// reads it. Adding a key means adding its path here and one closure in [`Reloader::new`].
 pub const RELOADABLE: &[&str] = &[
+    "bn.by_root_cache.enabled",
     "bn.publish_rate_limit.bytes_per_s",
     "bn.publish_rate_limit.large_per_s",
     "bn.publish_rate_limit.small_per_s",
@@ -167,6 +172,10 @@ impl ReloadStats for () {
 pub struct Deps {
     /// The kill switch every publish is checked against (T-017).
     pub inject: Arc<AtomicBool>,
+    /// Whether the responder answers the beacon node's by-root lookups out of the recent store
+    /// (§5.8). Only the flag reloads: the store's window is sized once, at startup, because the
+    /// memory budget it is priced in is.
+    pub by_root_cache: Arc<AtomicBool>,
     /// The roster the connection manager (T-023) and the pin table (T-021) follow.
     pub roster: watch::Sender<Roster>,
     /// The outgoing seed while a rotation is in progress (DX-N2).
@@ -371,11 +380,19 @@ impl Reloader {
         let inject = deps.inject;
         let previous_seed = deps.previous_seed;
         let started_with = config.overlay.fanout.large.clone();
+        let by_root_cache = deps.by_root_cache;
         let appliers: Vec<(&'static str, Applier)> = vec![
             (
                 "inject",
                 Box::new(move |cfg: &Config| {
                     inject.store(cfg.inject, Ordering::Relaxed);
+                    Ok(())
+                }),
+            ),
+            (
+                "bn.by_root_cache.enabled",
+                Box::new(move |cfg: &Config| {
+                    by_root_cache.store(cfg.bn.by_root_cache.enabled, Ordering::Relaxed);
                     Ok(())
                 }),
             ),
@@ -835,6 +852,7 @@ mod tests {
             )
             .unwrap();
             let inject = Arc::new(AtomicBool::new(true));
+            let by_root_cache = Arc::new(AtomicBool::new(false));
             let (roster_tx, roster_rx) = watch::channel(Roster::from_yaml(roster).unwrap());
             let (seed_tx, previous_seed) = watch::channel(None);
             let (limits_tx, limits) = watch::channel(PublishRateLimit::default());
@@ -848,6 +866,7 @@ mod tests {
                 config_path.clone(),
                 Deps {
                     inject: inject.clone(),
+                    by_root_cache: by_root_cache.clone(),
                     roster: roster_tx,
                     previous_seed: seed_tx,
                     limits: limits_tx,

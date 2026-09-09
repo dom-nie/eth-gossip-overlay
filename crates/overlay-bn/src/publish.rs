@@ -724,6 +724,7 @@ mod tests {
             sets,
             commands_rx,
             Arc::default(),
+            crate::testutil::by_root_off(),
         );
         let mut received = bn.received();
         bn.subscribe(BLOCK).await;

@@ -198,6 +198,8 @@ impl BnLink {
     /// what the sidecar's `MetaData` answers report.
     /// `progress` is the watchdog counter the swarm loop owns (OPS-N5): it goes up once per
     /// iteration, and the tick arm is what keeps it going up between a beacon node's messages.
+    /// `by_root` is the recent store the two by-root protocols are answered out of while
+    /// `bn.by_root_cache.enabled` is set (§5.8).
     #[expect(
         clippy::too_many_arguments,
         reason = "the link's wiring: its config, its identity, and one channel end per \
@@ -214,11 +216,12 @@ impl BnLink {
         sets: watch::Receiver<SubscriptionSets>,
         commands: mpsc::Receiver<BnCommand>,
         progress: Arc<AtomicU64>,
+        by_root: ByRootCache,
     ) -> Self {
         let connected = Arc::new(AtomicBool::new(false));
         let (control, events) = mpsc::channel(CONTROL_CHANNEL_CAPACITY);
         let (listen_tx, listen) = watch::channel(None);
-        let mut responder = Responder::new();
+        let mut responder = Responder::new().with_by_root(by_root);
         responder.set_spec(&spec.borrow());
         let enr = match node_key.enr(&cfg.listen_addr) {
             Ok(enr) => Some(enr),
@@ -759,7 +762,9 @@ mod tests {
         /// The store the by-root cache answers out of, which a test fills directly rather than
         /// driving payloads through gossip.
         recent: SharedRecentLarge,
-        /// `bn.by_root_cache.enabled`, which SIGHUP flips under a running link.
+        /// `bn.by_root_cache.enabled`, which SIGHUP flips under a running link. Only a build
+        /// with the handlers compiled in has a test that turns it on.
+        #[cfg_attr(not(feature = "by-root-cache"), allow(dead_code))]
         by_root_on: Arc<AtomicBool>,
         by_root_counts: Arc<ByRootCounts>,
     }
@@ -843,6 +848,9 @@ mod tests {
         let lanes = ClassLanes::new(stats.clone());
         let mut registry = Registry::default();
         let recent = SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES));
+        // What fills the store's by-root index, the way T-045 wires it.
+        #[cfg(feature = "column-repair")]
+        let recent = recent.with_decoder(Arc::new(crate::decode::Headers));
         let by_root_on = Arc::new(AtomicBool::new(false));
         let by_root_counts = Arc::new(ByRootCounts::default());
         let link = BnLink::spawn(
@@ -855,11 +863,7 @@ mod tests {
             sets_rx,
             commands_rx,
             Arc::default(),
-            ByRootCache::new(
-                recent.clone(),
-                by_root_on.clone(),
-                by_root_counts.clone(),
-            ),
+            ByRootCache::new(recent.clone(), by_root_on.clone(), by_root_counts.clone()),
         );
         Harness {
             peer_id: node_key.peer_id(),
@@ -1977,6 +1981,7 @@ mod tests {
             sets_rx,
             commands_rx,
             Arc::default(),
+            testutil::by_root_off(),
         );
         let mirror = crate::mirror::run(link.events, commands, sets, spec_rx);
         bn.wait_for(|e| matches!(e, FakeBnEvent::Connected(_)))
@@ -2069,14 +2074,25 @@ mod tests {
         assert!(!Config::default().bn.by_root_cache.enabled);
         let mut bn = FakeBn::start().await;
         let (harness, mut answers) = connected(&mut bn).await;
+        // Held, not served: the refusal is the flag's doing and not an empty store's.
+        let block = testutil::fulu_block(4_096);
+        let column = testutil::column_sidecar(4_096, 3);
+        hold(&harness, fulu_topic("beacon_block"), &block);
+        hold(&harness, fulu_topic("data_column_sidecar_3"), &column);
 
-        bn.request_blocks_by_root(&[Hash256::repeat_byte(1)]).await;
+        bn.request_blocks_by_root(&[block.root]).await;
         assert_unavailable(next_answer(&mut answers).await, "BlocksByRoot");
 
-        bn.request_columns_by_root(Hash256::repeat_byte(1), &[3])
-            .await;
+        bn.request_columns_by_root(column.root, &[3]).await;
         assert_unavailable(next_answer(&mut answers).await, "DataColumnsByRoot");
-        drop(harness);
+
+        let counts = &harness.by_root_counts;
+        assert_eq!(counts.hits.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            counts.misses.load(Ordering::Relaxed),
+            0,
+            "a refusal is not a cache miss"
+        );
     }
 
     /// An error chunk carrying `ResourceUnavailable`, on `protocol`.
@@ -2092,19 +2108,28 @@ mod tests {
     /// digest is where a by-root answer takes its context bytes from.
     fn fulu_topic(name: &str) -> Topic {
         let [a, b, c, d] = testutil::fulu_fork_digest();
-        Topic::parse(&format!("/eth2/{a:02x}{b:02x}{c:02x}{d:02x}/{name}/ssz_snappy"))
-            .expect("a topic in the only shape the parser takes")
+        Topic::parse(&format!(
+            "/eth2/{a:02x}{b:02x}{c:02x}{d:02x}/{name}/ssz_snappy"
+        ))
+        .expect("a topic in the only shape the parser takes")
     }
 
     /// Puts `fixture` into the store the way T-016 does on a first arrival, under the decoder
-    /// that reads its identity, and turns the cache on.
+    /// that reads its identity.
     fn hold(harness: &Harness, topic: Topic, fixture: &testutil::Fixture) {
-        harness.by_root_on.store(true, Ordering::Relaxed);
-        let payload = bytes::Bytes::from(fixture.payload.clone());
-        let id = msgid::of(&topic, &payload);
-        harness
-            .recent
-            .insert(id, topic, payload, Some(&fixture.ssz), Instant::now());
+        let id = msgid::compute(
+            &topic.to_string(),
+            &fixture.payload,
+            overlay_core::wire::MAX_PAYLOAD_BYTES,
+        )
+        .id;
+        harness.recent.insert(
+            id,
+            topic,
+            fixture.payload.clone().into(),
+            Some(&fixture.ssz),
+            Instant::now(),
+        );
     }
 
     /// §5.8's whole point: a block the sidecar already holds comes back over localhost instead
@@ -2116,6 +2141,7 @@ mod tests {
     async fn block_by_root_hit_returns_stored_bytes() {
         let mut bn = FakeBn::start().await;
         let (harness, mut answers) = connected(&mut bn).await;
+        harness.by_root_on.store(true, Ordering::Relaxed);
         let block = testutil::fulu_block(4_096);
         hold(&harness, fulu_topic("beacon_block"), &block);
 
@@ -2138,6 +2164,7 @@ mod tests {
     async fn block_by_root_miss_returns_resource_unavailable() {
         let mut bn = FakeBn::start().await;
         let (harness, mut answers) = connected(&mut bn).await;
+        harness.by_root_on.store(true, Ordering::Relaxed);
         let block = testutil::fulu_block(4_096);
         hold(&harness, fulu_topic("beacon_block"), &block);
 
@@ -2149,6 +2176,36 @@ mod tests {
         assert_eq!(harness.by_root_counts.misses.load(Ordering::Relaxed), 1);
     }
 
+    /// `bn.by_root_cache.enabled` reloads, so turning it off has to put T-019's refusal back on
+    /// the next request without restarting the link. The flag is read per request rather than
+    /// captured when the responder is built, which is what makes that true.
+    #[cfg(feature = "by-root-cache")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn disabling_the_cache_puts_the_refusal_back() {
+        let mut bn = FakeBn::start().await;
+        let (harness, mut answers) = connected(&mut bn).await;
+        harness.by_root_on.store(true, Ordering::Relaxed);
+        let block = testutil::fulu_block(4_096);
+        hold(&harness, fulu_topic("beacon_block"), &block);
+
+        bn.request_blocks_by_root(&[block.root]).await;
+        assert!(matches!(
+            next_answer(&mut answers).await,
+            RpcAnswer::BlockByRoot(_)
+        ));
+
+        harness.by_root_on.store(false, Ordering::Relaxed);
+        bn.request_blocks_by_root(&[block.root]).await;
+
+        assert_unavailable(next_answer(&mut answers).await, "BlocksByRoot");
+        assert_eq!(harness.by_root_counts.hits.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            harness.by_root_counts.misses.load(Ordering::Relaxed),
+            0,
+            "a refusal is not a cache miss"
+        );
+    }
+
     /// A by-root request names the columns it wants, and a host holding more of them than it was
     /// asked for sends only those: a custody set the beacon node did not ask about is bytes over
     /// the link it has no use for.
@@ -2157,6 +2214,7 @@ mod tests {
     async fn columns_by_root_returns_only_requested_indices() {
         let mut bn = FakeBn::start().await;
         let (harness, mut answers) = connected(&mut bn).await;
+        harness.by_root_on.store(true, Ordering::Relaxed);
         let mut root = Hash256::ZERO;
         for index in 0..3u64 {
             let column = testutil::column_sidecar(4_096, index);

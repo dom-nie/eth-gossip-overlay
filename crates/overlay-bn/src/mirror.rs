@@ -351,6 +351,7 @@ mod tests {
             watch.clone(),
             commands_rx,
             Arc::default(),
+            crate::testutil::by_root_off(),
         );
         run(link.events, commands, sets, spec_rx);
         watch

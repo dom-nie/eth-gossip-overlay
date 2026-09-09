@@ -45,6 +45,8 @@ use overlay_bn::compat::{self, CompatStats};
 use overlay_bn::events::BlockEventStats;
 use overlay_bn::inbound::InboundStats;
 use overlay_bn::publish::PublishStats;
+use overlay_bn::rpc::ByRootStats;
+use overlay_bn::rpc::proto::Protocol as ByRootProtocol;
 use overlay_core::budget::FanoutKind;
 use overlay_core::lanes::LaneStats;
 use overlay_core::pubqueue::{DropReason as QueueDropReason, QueueStats};
@@ -147,6 +149,10 @@ pub const CHUNKS_RECEIVED_TOTAL: &str = "overlay_chunks_received_total";
 pub const PARITY_USED_TOTAL: &str = "overlay_parity_used_total";
 /// Repair requests this host sent, by how they ended.
 pub const REPAIR_REQUESTS_TOTAL: &str = "overlay_repair_requests_total";
+
+/// By-root lookups the beacon node made over the localhost link, by whether the recent
+/// store held what it asked for (§5.8).
+pub const BY_ROOT_REQUESTS_TOTAL: &str = "overlay_by_root_requests_total";
 /// Seconds from the first chunk of a message to its reconstruction.
 pub const RECONSTRUCT_SECONDS: &str = "overlay_reconstruct_seconds";
 
@@ -194,6 +200,8 @@ pub const LABEL_KIND: &str = "kind";
 pub const LABEL_UNIT: &str = "unit";
 /// How a reload ended.
 pub const LABEL_OUTCOME: &str = "outcome";
+/// The eth2 req/resp protocol a by-root request arrived on.
+pub const LABEL_PROTOCOL: &str = "protocol";
 /// The commit the binary was built from.
 pub const LABEL_GIT_SHA: &str = "git_sha";
 
@@ -215,6 +223,10 @@ pub const UNIT_BYTES: &str = "bytes";
 pub const OUTCOME_OK: &str = "ok";
 /// The reload kept some or all of the previous values.
 pub const OUTCOME_ERROR: &str = "error";
+/// The store held what a by-root request asked for.
+pub const OUTCOME_HIT: &str = "hit";
+/// It did not, and the beacon node goes to the public network as it always would have.
+pub const OUTCOME_MISS: &str = "miss";
 /// A seen-cache entry went to stay within the bound, not because it expired.
 pub const REASON_CAPACITY: &str = "capacity";
 /// The `inject: false` kill switch.
@@ -292,6 +304,7 @@ pub struct Metrics {
     chunks_received: IntCounter,
     parity_used: IntCounter,
     repair_requests: IntCounterVec,
+    by_root_requests: IntCounterVec,
     reassembly_evicted: IntCounterVec,
     relay_same_region: IntCounterVec,
     unannounced_topic: IntCounter,
@@ -515,6 +528,14 @@ impl Metrics {
             "Repair requests, by how they ended.",
             &[LABEL_OUTCOME],
         )?;
+        // The ratio of the two outcomes is the number that decides whether the optional cache
+        // earns the memory it costs: Lighthouse does not prefer trusted peers for a lookup, so
+        // how often one lands here is what an operator has to measure (§5.8).
+        let by_root_requests = b.counter_vec(
+            BY_ROOT_REQUESTS_TOTAL,
+            "By-root lookups from the local beacon node, by whether the store held the answer.",
+            &[LABEL_PROTOCOL, LABEL_OUTCOME],
+        )?;
         let config_reload = b.counter_vec(
             CONFIG_RELOAD_TOTAL,
             "Configuration reloads.",
@@ -581,6 +602,7 @@ impl Metrics {
             chunks_received,
             parity_used,
             repair_requests,
+            by_root_requests,
             reassembly_evicted,
             relay_same_region,
             unannounced_topic,
@@ -878,6 +900,18 @@ impl ReceiveStats for Metrics {
     fn repair_request(&self, outcome: RepairOutcome) {
         self.repair_requests
             .with_label_values(&[outcome.as_str()])
+            .inc();
+    }
+}
+
+impl ByRootStats for Metrics {
+    fn by_root_request(&self, protocol: ByRootProtocol, hit: bool) {
+        let outcome = match hit {
+            true => OUTCOME_HIT,
+            false => OUTCOME_MISS,
+        };
+        self.by_root_requests
+            .with_label_values(&[protocol.as_label(), outcome])
             .inc();
     }
 }
