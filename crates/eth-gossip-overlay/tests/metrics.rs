@@ -69,6 +69,7 @@ async fn request(addr: SocketAddr, path: &str) -> (String, String) {
 const SECTION_12: &[&str] = &[
     "overlay_bn_compat",
     "overlay_bn_connected",
+    "overlay_bn_events_connected",
     "overlay_bn_events_dropped_total",
     "overlay_bn_info",
     "overlay_bn_subscriptions",
@@ -83,6 +84,7 @@ const SECTION_12: &[&str] = &[
     "overlay_fanout_suppressed_total",
     "overlay_first_seen_total",
     "overlay_handshake_failures_total",
+    "overlay_import_events_total",
     "overlay_invalid_payload_total",
     "overlay_io_thread_pinned",
     "overlay_messages_total",
@@ -135,6 +137,7 @@ fn every_metric_in_section_12_is_registered() {
 const LABELS: &[(&str, &[&str])] = &[
     ("overlay_bn_compat", &["state"]),
     ("overlay_bn_connected", &[]),
+    ("overlay_bn_events_connected", &[]),
     ("overlay_bn_events_dropped_total", &["class"]),
     ("overlay_bn_info", &["version"]),
     ("overlay_bn_subscriptions", &[]),
@@ -152,6 +155,7 @@ const LABELS: &[(&str, &[&str])] = &[
     ("overlay_fanout_suppressed_total", &["kind", "peer"]),
     ("overlay_first_seen_total", &["class", "source"]),
     ("overlay_handshake_failures_total", &["reason", "role"]),
+    ("overlay_import_events_total", &["matched"]),
     ("overlay_invalid_payload_total", &["peer"]),
     ("overlay_io_thread_pinned", &[]),
     (
