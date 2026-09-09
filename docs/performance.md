@@ -173,3 +173,52 @@ $ ps -L -o pid,tid,psr,comm -p "$(pidof eth-gossip-overlay)"
 
 Sample it more than once. Every other thread moves between the cores its cgroup allows;
 `overlay-io` is the one that does not.
+
+## Busy polling with the queue's interrupt suspended
+
+Needs kernel 6.13 or later for the `EPIOCSPARAMS` ioctl, `CAP_NET_ADMIN` for the second half,
+and a `pin_cpu`, which `check-config` enforces.
+
+```yaml
+overlay:
+  io_thread:
+    pin_cpu: 30
+    prefer_busy_poll: true
+    busy_poll_usecs: 100
+    irq_suspend_timeout_ms: 20
+```
+
+The I/O thread's epoll then spins on the queue for `busy_poll_usecs` before it sleeps, and the
+queue's interrupt stays masked for `irq_suspend_timeout_ms` at a time while the spinning keeps
+finding packets. Between bursts the timeout expires and the queue goes back to interrupts, so
+an idle core is not burned.
+
+Masking the interrupt is set over netdev netlink, which is what needs the capability:
+
+```ini
+# eth-gossip-overlay.service.d/busy-poll.conf
+[Service]
+AmbientCapabilities=CAP_NET_ADMIN
+```
+
+`irq_suspend_timeout_ms: 0` takes the busy polling alone and needs no capability.
+
+### Checking that it took
+
+`overlay_busy_poll_enabled` is 1 only when both halves are up. An older kernel, a missing
+capability and a device with no NAPI queue each leave it at 0 and log one line saying which:
+
+```console
+$ curl -s 127.0.0.1:7789/metrics | grep busy_poll
+overlay_busy_poll_enabled 1
+```
+
+The kernel's own answer is the interrupt count on the queue the overlay is steered to. Read it
+twice while blocks are arriving:
+
+```console
+$ ethtool -S eth0 | grep -E 'rx_queue_3_(packets|irqs)'
+```
+
+Packets climbing with the interrupt count flat is the suspension working. Both climbing together
+is busy polling on a queue that still interrupts, which is what a missing capability looks like.
