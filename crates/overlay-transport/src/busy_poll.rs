@@ -72,8 +72,111 @@ impl EpollParams {
 #[cfg(test)]
 mod tests {
     use std::mem::{align_of, offset_of, size_of};
+    use std::sync::Mutex;
 
     use super::*;
+
+    /// Not a descriptor of anything. Every test here goes through [`Fake`], which never touches
+    /// the number, and passing a plausible one would only invite a reader to think it matters.
+    const EPOLL: RawFd = -1;
+
+    /// A kernel that answers whatever the test needs, and records what it was asked.
+    ///
+    /// The three answers worth testing cannot be arranged on a real host: no development
+    /// machine runs a kernel older than the ioctl, and a test cannot take `CAP_NET_ADMIN` away
+    /// from a process that has it or give it to one that has not.
+    #[derive(Default)]
+    struct Fake {
+        /// What `EPIOCSPARAMS` was handed, in order.
+        applied: Mutex<Vec<(RawFd, EpollParams)>>,
+        /// The errno both epoll ioctls fail with, where the test wants them to fail.
+        epoll_errno: Option<i32>,
+        /// What `EPIOCGPARAMS` reads back.
+        holds: EpollParams,
+    }
+
+    impl Kernel for Fake {
+        fn set_epoll_params(&self, epoll: RawFd, params: &EpollParams) -> io::Result<()> {
+            if let Some(errno) = self.epoll_errno {
+                return Err(io::Error::from_raw_os_error(errno));
+            }
+            self.applied.lock().unwrap().push((epoll, *params));
+            Ok(())
+        }
+
+        fn epoll_params(&self, _epoll: RawFd) -> io::Result<EpollParams> {
+            match self.epoll_errno {
+                Some(errno) => Err(io::Error::from_raw_os_error(errno)),
+                None => Ok(self.holds),
+            }
+        }
+    }
+
+    /// The whole point of the ticket's "nothing happens and nothing breaks": on a kernel before
+    /// 6.13 the ioctl number is one nothing answers to, and the sidecar has to read that as an
+    /// answer rather than as a failure. `EINVAL` is the same answer from a kernel that knows the
+    /// number but not on this descriptor.
+    #[test]
+    fn apply_with_enotty_returns_unsupported_and_does_not_error() {
+        for errno in [libc::ENOTTY, libc::EINVAL] {
+            let kernel = Fake {
+                epoll_errno: Some(errno),
+                ..Fake::default()
+            };
+
+            let support = apply_with(&kernel, EPOLL, &EpollParams::preferring_busy_poll(100));
+
+            assert_eq!(support.unwrap(), Support::Unsupported, "errno {errno}");
+            assert!(kernel.applied.lock().unwrap().is_empty());
+        }
+    }
+
+    /// The other half: a kernel that has the ioctl gets exactly the parameters the
+    /// configuration asked for, on the descriptor it was given.
+    #[test]
+    fn apply_hands_the_kernel_the_parameters_it_was_given() {
+        let kernel = Fake::default();
+        let params = EpollParams::preferring_busy_poll(200);
+
+        let support = apply_with(&kernel, EPOLL, &params);
+
+        assert_eq!(support.unwrap(), Support::Enabled);
+        assert_eq!(*kernel.applied.lock().unwrap(), vec![(EPOLL, params)]);
+    }
+
+    /// An errno that is not "no such ioctl" is not an answer, and swallowing it would leave an
+    /// operator with a gauge at zero and no line saying why.
+    #[test]
+    fn apply_passes_on_an_error_that_is_not_a_missing_ioctl() {
+        let kernel = Fake {
+            epoll_errno: Some(libc::EPERM),
+            ..Fake::default()
+        };
+
+        let err = apply_with(&kernel, EPOLL, &EpollParams::preferring_busy_poll(100)).unwrap_err();
+
+        assert_eq!(err.raw_os_error(), Some(libc::EPERM));
+    }
+
+    /// `EPIOCGPARAMS` is how test 5 and `docs/performance.md` confirm the parameters took, and
+    /// how the startup path tells "this kernel is too old" from "the epoll fd was not found".
+    #[test]
+    fn detect_reads_the_parameters_back_and_says_when_there_are_none() {
+        let running = EpollParams::preferring_busy_poll(50);
+        let kernel = Fake {
+            holds: running,
+            ..Fake::default()
+        };
+
+        assert_eq!(detect_with(&kernel, EPOLL).unwrap(), Some(running));
+
+        let old = Fake {
+            epoll_errno: Some(libc::ENOTTY),
+            ..Fake::default()
+        };
+
+        assert_eq!(detect_with(&old, EPOLL).unwrap(), None);
+    }
 
     /// `struct epoll_params` is a kernel ABI. The ioctl reads eight bytes at fixed offsets and
     /// says nothing at all if the layout is wrong: it would take whatever happened to sit at
