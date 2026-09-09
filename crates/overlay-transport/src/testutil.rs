@@ -47,7 +47,6 @@ use ed25519_dalek::SigningKey;
 use overlay_core::budget::{FanoutBudget, FanoutKind, STREAM_RECEIVE_WINDOW};
 use overlay_core::config::{self, Overlay};
 use overlay_core::fanout::Outbound;
-use overlay_core::header::HeaderDecoder;
 use overlay_core::identity::{FleetSeed, Seeds, derive_tls_keypair};
 use overlay_core::lanes::{ClassLanes, LanePusher};
 use overlay_core::msgid;
@@ -569,7 +568,6 @@ pub struct Builder {
     small: config::SmallClass,
     large: config::LargeClass,
     fanout: config::Fanout,
-    decoder: Option<Arc<dyn HeaderDecoder>>,
     in_flight: usize,
     incomplete_ttl: Duration,
     regions: Vec<Region>,
@@ -595,7 +593,6 @@ impl Builder {
             small: config::SmallClass::default(),
             large: config::LargeClass::default(),
             fanout: config::Fanout::default(),
-            decoder: None,
             in_flight: MAX_IN_FLIGHT,
             incomplete_ttl: INCOMPLETE_TTL,
             regions: vec![Region(REGION.to_owned()); kinds.len()],
@@ -665,14 +662,6 @@ impl Builder {
     pub fn reassembly(mut self, max_in_flight: usize, incomplete_ttl: Duration) -> Self {
         self.in_flight = max_in_flight;
         self.incomplete_ttl = incomplete_ttl;
-        self
-    }
-
-    /// What reads the header of every large payload a sidecar stores (T-083). A cluster has no
-    /// beacon node and cannot link `types`, so a test that needs custody column tracking hands
-    /// over a stand-in for `overlay_bn::decode::Headers`.
-    pub fn decoder(mut self, decoder: Arc<dyn HeaderDecoder>) -> Self {
-        self.decoder = Some(decoder);
         self
     }
 
@@ -813,7 +802,6 @@ impl Builder {
             fanout: watch::channel(self.fanout).0,
             repair_deadline: watch::channel(self.large.repair_deadline).0,
             large: self.large,
-            decoder: self.decoder,
             in_flight: self.in_flight,
             incomplete_ttl: self.incomplete_ttl,
             budget: self.budget,
@@ -951,8 +939,6 @@ pub struct TestCluster<A: Admission = HelloAdmission> {
     /// How long every sidecar waits before asking a peer for the chunks it is missing, on the
     /// channel a reload publishes on (T-082, T-043).
     repair_deadline: watch::Sender<Duration>,
-    /// What reads the header of a stored payload, when a test installed one (T-083).
-    decoder: Option<Arc<dyn HeaderDecoder>>,
     /// The bounds every sidecar's reassembler runs under.
     in_flight: usize,
     incomplete_ttl: Duration,
@@ -1276,11 +1262,7 @@ impl<A: Admission> TestCluster<A> {
             Arc::new(SystemClock),
         ));
         published.watching(seen.clone());
-        let store = SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES));
-        let recent = match self.decoder.clone() {
-            Some(decoder) => store.with_decoder(decoder),
-            None => store,
-        };
+        let recent = SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES));
         let (subscriptions, watching) = watch::channel(sets);
         let reassembler = Arc::new(Reassembler::new(ReassembleConfig {
             max_in_flight: self.in_flight,
