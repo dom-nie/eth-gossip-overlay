@@ -94,6 +94,9 @@ pub const BN_TRUSTED: &str = "overlay_bn_trusted";
 pub const BN_EVENTS_CONNECTED: &str = "overlay_bn_events_connected";
 /// Messages the swarm loop could not hand on because the lane was full.
 pub const BN_EVENTS_DROPPED_TOTAL: &str = "overlay_bn_events_dropped_total";
+/// Events the beacon node threw away because the sidecar's reader of its SSE stream fell
+/// behind, which leaves the custody tracker blind until the next block (§6.4).
+pub const BN_EVENTS_LAGGED_TOTAL: &str = "overlay_bn_events_lagged_total";
 /// Messages that crossed the overlay or went into the beacon node.
 pub const MESSAGES_TOTAL: &str = "overlay_messages_total";
 /// Payload bytes that crossed the overlay.
@@ -291,6 +294,7 @@ pub struct Metrics {
     bn_trusted: IntGaugeVec,
     bn_events_connected: IntGauge,
     bn_events_dropped: IntCounterVec,
+    bn_events_lagged: IntCounter,
     messages: IntCounterVec,
     bytes: IntCounterVec,
     first_seen: IntCounterVec,
@@ -387,6 +391,12 @@ impl Metrics {
             BN_EVENTS_DROPPED_TOTAL,
             "Beacon node events dropped because their lane was full.",
             per_class,
+        )?;
+        // The beacon node's own count, off its `error - dropped n messages` comment, not the
+        // sidecar's. Zero while the sidecar keeps up, which it has a whole slot to do.
+        let bn_events_lagged = b.counter(
+            BN_EVENTS_LAGGED_TOTAL,
+            "Events the beacon node threw away because the sidecar fell behind.",
         )?;
         let messages = b.counter_vec(MESSAGES_TOTAL, "Messages accounted for.", peer_traffic)?;
         let bytes = b.counter_vec(BYTES_TOTAL, "Payload bytes accounted for.", peer_traffic)?;
@@ -608,6 +618,7 @@ impl Metrics {
             bn_trusted,
             bn_events_connected,
             bn_events_dropped,
+            bn_events_lagged,
             messages,
             bytes,
             first_seen,
@@ -693,6 +704,12 @@ impl BlockEventStats for Metrics {
     fn imported(&self, matched: bool) {
         let matched = if matched { MATCHED_YES } else { MATCHED_NO };
         self.import_events.with_label_values(&[matched]).inc();
+    }
+
+    /// Events the beacon node threw away because this reader fell behind. Zero on a healthy
+    /// host: past zero the custody tracker has been idled and column repair is blind (§6.4).
+    fn lagged(&self, count: u64) {
+        self.bn_events_lagged.inc_by(count);
     }
 }
 

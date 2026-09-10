@@ -1,28 +1,67 @@
-//! The beacon node's block event stream, which is the only place import time comes from (§12).
+//! The beacon node's event stream, which is where import time comes from (§12) and the only
+//! thing that writes the custody tracker (§6.4, MD-06).
 //!
-//! `GET /eth/v1/events?topics=block` is Server-Sent Events: a frame per event, fields one to a
-//! line, a blank line closing the frame. Lighthouse fires a `block` event when it has imported
-//! the block, which is the moment §2 says arrival is not, so this is where the 200 to 500 ms of
-//! `newPayload` and column verification becomes a number an operator can see.
+//! `GET /eth/v1/events?topics=...` is Server-Sent Events: a frame per event, fields one to a
+//! line, a blank line closing the frame. Three topics are read.
+//!
+//! `block` fires when the node has imported the block, which is the moment §2 says arrival is
+//! not, so this is where the 200 to 500 ms of `newPayload` and column verification becomes a
+//! number an operator can see.
+//!
+//! `block_gossip` fires inside gossip verification, after the proposer-signature check and after
+//! the duplicate check, so it names a block this host's own node accepted. `data_column_sidecar`
+//! fires after KZG verification and covers all four ways a column reaches the node: gossip,
+//! partial-message merges, the execution layer's `getBlobs` and RPC by root. That last set is
+//! why the tracker anchors here and not on the overlay's own receive path: gossipsub never
+//! echoes a message back to whoever published it, so a column the sidecar handed the node
+//! returns on no wire the sidecar watches, and a tracker fed from the receive path would go
+//! blinder the better the overlay worked (MD-06).
+//!
+//! What a peer sends cannot reach any of this. That is the whole point: a payload off the wire
+//! decodes without being authentic, and the state column repair acts on has to come from the
+//! node that validated it.
 
 use std::ops::ControlFlow;
 use std::str::from_utf8;
 use std::sync::Arc;
 
 use overlay_core::backoff::Backoff;
+use overlay_core::custody::SharedCustody;
 use overlay_core::events::Arrivals;
+use overlay_core::time::Clock;
 use reqwest::StatusCode;
 use serde::Deserialize;
 use tokio::task::JoinHandle;
 use url::Url;
 
-/// One `block` event: the beacon node has imported this block.
+/// One event the sidecar reads off the stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BlockEvent {
-    /// The slot the block was proposed for.
-    pub slot: u64,
-    /// Its root, which is what a first-arrival record is filed under.
-    pub block_root: [u8; 32],
+pub enum Event {
+    /// `block`: the beacon node has imported this block.
+    Imported {
+        /// The slot the block was proposed for.
+        slot: u64,
+        /// Its root, which is what a first-arrival record is filed under.
+        block_root: [u8; 32],
+    },
+    /// `block_gossip`: gossip verification accepted this block.
+    Accepted {
+        /// The slot the block was proposed for.
+        slot: u64,
+        /// Its root, which its columns name.
+        block_root: [u8; 32],
+    },
+    /// `data_column_sidecar`: the beacon node has verified this column.
+    Column {
+        /// The slot the column's block is for.
+        slot: u64,
+        /// The column index, which is also its subnet.
+        index: u8,
+        /// The root of the block it belongs to.
+        block_root: [u8; 32],
+    },
+    /// The stream's own notice that it fell behind and threw events away.
+    Dropped(u64),
 }
 
 /// What the sidecar counts about the event stream. The binary implements it on its metrics; a
@@ -32,11 +71,14 @@ pub trait BlockEventStats: Send + Sync {
     fn set_connected(&self, connected: bool);
     /// One import event, and whether this host had a record of the block arriving.
     fn imported(&self, matched: bool);
+    /// Events the beacon node threw away because this reader fell behind.
+    fn lagged(&self, count: u64);
 }
 
 impl BlockEventStats for () {
     fn set_connected(&self, _: bool) {}
     fn imported(&self, _: bool) {}
+    fn lagged(&self, _: u64) {}
 }
 
 /// The task that reads the beacon node's block event stream.
@@ -57,6 +99,8 @@ impl BlockEvents {
         url: Url,
         backoff: Backoff,
         arrivals: Arc<Arrivals>,
+        custody: SharedCustody,
+        clock: Arc<dyn Clock>,
         stats: Arc<dyn BlockEventStats>,
     ) -> Self {
         // No request timeout: this one is meant to stay open between blocks.
@@ -64,7 +108,7 @@ impl BlockEvents {
             .build()
             .expect("plain HTTP client");
         Self {
-            task: tokio::spawn(run(http, url, backoff, arrivals, stats)),
+            task: tokio::spawn(run(http, url, backoff, arrivals, custody, clock, stats)),
         }
     }
 }
@@ -75,10 +119,12 @@ async fn run(
     url: Url,
     mut backoff: Backoff,
     arrivals: Arc<Arrivals>,
+    custody: SharedCustody,
+    clock: Arc<dyn Clock>,
     stats: Arc<dyn BlockEventStats>,
 ) {
     loop {
-        let outcome = read(&http, &url, &arrivals, &stats).await;
+        let outcome = read(&http, &url, &arrivals, &custody, &clock, &stats).await;
         stats.set_connected(false);
         match outcome {
             // The beacon node closed a stream it had been serving, so the next one is worth
@@ -98,13 +144,16 @@ async fn read(
     http: &reqwest::Client,
     url: &Url,
     arrivals: &Arrivals,
+    custody: &SharedCustody,
+    clock: &Arc<dyn Clock>,
     stats: &Arc<dyn BlockEventStats>,
 ) -> Result<ControlFlow<()>, reqwest::Error> {
     let response = http.get(url.clone()).send().await?;
     if response.status() == StatusCode::NOT_FOUND {
         tracing::warn!(
             %url,
-            "the beacon node has no block event stream; import telemetry is off for this host"
+            "the beacon node has no event stream; import telemetry and column repair are off \
+             for this host"
         );
         return Ok(ControlFlow::Break(()));
     }
@@ -114,23 +163,69 @@ async fn read(
     let mut frames = Frames::default();
     while let Some(chunk) = response.chunk().await? {
         for event in frames.feed(&chunk) {
-            stats.imported(arrivals.imported(event.slot, event.block_root));
+            apply(&event, arrivals, custody, clock.as_ref(), stats);
         }
     }
     Ok(ControlFlow::Continue(()))
 }
 
-/// The `data` of a `block` event. Lighthouse writes the slot as a quoted decimal and the root
-/// as `0x`-prefixed hex; `execution_optimistic` rides along and is not read.
+/// Where one event goes. This is the whole write side of the custody tracker; grep the workspace
+/// for `on_block` and `on_column` and the only callers outside tests are here (MD-06).
+fn apply(
+    event: &Event,
+    arrivals: &Arrivals,
+    custody: &SharedCustody,
+    clock: &dyn Clock,
+    stats: &Arc<dyn BlockEventStats>,
+) {
+    match *event {
+        Event::Imported { slot, block_root } => {
+            stats.imported(arrivals.imported(slot, block_root));
+        }
+        Event::Accepted { slot, block_root } => custody.on_block(slot, block_root, clock.now()),
+        Event::Column {
+            slot,
+            index,
+            block_root,
+        } => custody.on_column(slot, index, block_root),
+        Event::Dropped(count) => {
+            tracing::warn!(
+                count,
+                "the beacon node's event stream dropped events; column repair is idle until the \
+                 next block"
+            );
+            stats.lagged(count);
+            custody.forget();
+        }
+    }
+}
+
+/// The `data` of a `block` or `block_gossip` event. Lighthouse writes the slot as a quoted
+/// decimal and the root as `0x`-prefixed hex; `execution_optimistic` rides along on the first
+/// and is not read.
 #[derive(Deserialize)]
 struct BlockData {
     slot: String,
     block: String,
 }
 
-/// The one event name the sidecar reads. Every other topic on the stream, and the comments the
-/// beacon node writes to hold the connection open, are skipped.
+/// The `data` of a `data_column_sidecar` event. The index is quoted like the slot.
+#[derive(Deserialize)]
+struct ColumnData {
+    slot: String,
+    index: String,
+    block_root: String,
+}
+
+/// The event names the sidecar reads. Every other topic on the stream is skipped, and so is
+/// every comment but the one the beacon node writes when it has thrown events away.
 const BLOCK: &str = "block";
+const BLOCK_GOSSIP: &str = "block_gossip";
+const DATA_COLUMN_SIDECAR: &str = "data_column_sidecar";
+
+/// What Lighthouse writes as a comment when its broadcast channel lagged and this reader lost
+/// events. Everything after the prefix is the count and the word `messages`.
+const DROPPED: &str = "error - dropped ";
 
 /// Cuts the beacon node's byte stream into frames and reads the events out of them. A chunk
 /// stops wherever the network put it, so whatever follows the last blank line waits for more.
@@ -141,13 +236,13 @@ struct Frames {
 
 impl Frames {
     /// Every event `chunk` completed, in the order the beacon node wrote them.
-    fn feed(&mut self, chunk: &[u8]) -> Vec<BlockEvent> {
+    fn feed(&mut self, chunk: &[u8]) -> Vec<Event> {
         self.buf.extend_from_slice(chunk);
         let mut events = Vec::new();
         while let Some(blank) = self.buf.windows(2).position(|pair| pair == b"\n\n") {
             let frame: Vec<u8> = self.buf.drain(..blank + 2).collect();
             if let Ok(text) = from_utf8(&frame) {
-                events.extend(block_event(text));
+                events.extend(event(text));
             }
         }
         events
@@ -155,9 +250,10 @@ impl Frames {
 }
 
 /// The event one frame carries, if it is one the sidecar reads.
-fn block_event(frame: &str) -> Option<BlockEvent> {
+fn event(frame: &str) -> Option<Event> {
     let mut name = None;
     let mut data = None;
+    let mut comment = None;
     for line in frame.lines() {
         // A line with no colon is not a field at all, and one whose name is empty is a comment.
         let Some((field, value)) = line.split_once(':') else {
@@ -167,17 +263,44 @@ fn block_event(frame: &str) -> Option<BlockEvent> {
         match field {
             "event" => name = Some(value),
             "data" => data = Some(value),
+            "" => comment = Some(value),
             _ => {}
         }
     }
-    if name != Some(BLOCK) {
-        return None;
+    match name {
+        Some(BLOCK) => {
+            let data: BlockData = serde_json::from_str(data?).ok()?;
+            Some(Event::Imported {
+                slot: data.slot.parse().ok()?,
+                block_root: root(&data.block)?,
+            })
+        }
+        Some(BLOCK_GOSSIP) => {
+            let data: BlockData = serde_json::from_str(data?).ok()?;
+            Some(Event::Accepted {
+                slot: data.slot.parse().ok()?,
+                block_root: root(&data.block)?,
+            })
+        }
+        Some(DATA_COLUMN_SIDECAR) => {
+            let data: ColumnData = serde_json::from_str(data?).ok()?;
+            Some(Event::Column {
+                slot: data.slot.parse().ok()?,
+                index: data.index.parse().ok()?,
+                block_root: root(&data.block_root)?,
+            })
+        }
+        Some(_) => None,
+        None => dropped(comment?),
     }
-    let data: BlockData = serde_json::from_str(data?).ok()?;
-    Some(BlockEvent {
-        slot: data.slot.parse().ok()?,
-        block_root: root(&data.block)?,
-    })
+}
+
+/// The count in the beacon node's own `error - dropped n messages` comment. Every other comment,
+/// the keep-alives included, is nothing to report.
+fn dropped(comment: &str) -> Option<Event> {
+    let rest = comment.strip_prefix(DROPPED)?;
+    let count = rest.split_whitespace().next()?;
+    Some(Event::Dropped(count.parse().ok()?))
 }
 
 /// Reads the `0x`-prefixed 32 bytes the beacon API reports a root as.
@@ -201,7 +324,7 @@ mod tests {
     use overlay_core::backoff::Backoff;
     use overlay_core::events::Source;
     use overlay_core::time::{Clock, FakeClock};
-    use overlay_core::topic::Topic;
+    use overlay_core::topic::{SubscriptionSets, Topic};
     use tokio::sync::{mpsc, watch};
     use tokio::time::timeout;
     use wiremock::matchers::{method, path};
@@ -229,6 +352,16 @@ mod tests {
         fn imported(&self, matched: bool) {
             let _ = self.0.send(matched);
         }
+
+        fn lagged(&self, _: u64) {}
+    }
+
+    /// The whole stream the sidecar asks for, so a test connects the way a sidecar does.
+    const TOPICS: &str = "?topics=block,block_gossip,data_column_sidecar";
+
+    /// A tracker for a test that is not about the tracker.
+    fn untracked() -> SharedCustody {
+        tracking(&[])
     }
 
     /// Whether the next import matched an arrival record, or a failed test if none arrives.
@@ -333,7 +466,7 @@ mod tests {
 
         assert_eq!(
             events,
-            [BlockEvent {
+            [Event::Imported {
                 slot: 7_654_321,
                 block_root: [0xab; 32],
             }]
@@ -353,7 +486,7 @@ mod tests {
 
         assert_eq!(
             events,
-            [BlockEvent {
+            [Event::Imported {
                 slot: 22,
                 block_root: [0x22; 32],
             }]
@@ -384,11 +517,11 @@ mod tests {
         let (sender, mut imports) = mpsc::unbounded_channel();
 
         let events = BlockEvents::spawn(
-            format!("{}{EVENTS}?topics=block", bn.uri())
-                .parse()
-                .unwrap(),
+            format!("{}{EVENTS}{TOPICS}", bn.uri()).parse().unwrap(),
             Backoff::new(Duration::from_millis(5), Duration::from_millis(5)),
             arrivals,
+            untracked(),
+            Arc::new(FakeClock::new()),
             Arc::new(Imports(sender)),
         );
 
@@ -405,11 +538,11 @@ mod tests {
         let arrivals = Arc::new(Arrivals::new(Arc::new(FakeClock::new()), spec));
 
         let events = BlockEvents::spawn(
-            format!("{}{EVENTS}?topics=block", bn.uri())
-                .parse()
-                .unwrap(),
+            format!("{}{EVENTS}{TOPICS}", bn.uri()).parse().unwrap(),
             Backoff::new(Duration::from_millis(5), Duration::from_millis(5)),
             arrivals,
+            untracked(),
+            Arc::new(FakeClock::new()),
             Arc::new(()),
         );
 

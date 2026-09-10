@@ -102,7 +102,7 @@ at startup. Every key below ships in 0.1.0, the first release.
 | `overlay.io_thread.irq_suspend_timeout_ms` | `20` | restart | how long the NIC queue's interrupt stays masked while polling keeps finding packets. Needs `CAP_NET_ADMIN`; `0` asks for the busy polling without the suspension. |
 | `overlay.io_thread.steering` | `off` | restart | how the overlay's packets are steered to the pinned core's NIC queue. One of `auto`, `ntuple`, `rfs`, `off`. |
 | `bn.identity_url` | `http://127.0.0.1:5052/eth/v1/node/identity` | restart | the beacon API endpoint that reports the node's peer id. |
-| `bn.events_url` | `http://127.0.0.1:5052/eth/v1/events?topics=block` | restart | the beacon API event stream. |
+| `bn.events_url` | `http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar` | restart | the beacon API event stream. |
 | `bn.libp2p_addr` | `/ip4/127.0.0.1/tcp/9000` | restart | the multiaddr the sidecar dials to join the beacon node's gossipsub. |
 | `bn.node_key_file` | `/var/lib/eth-gossip-overlay/node.key` | restart | the sidecar's own libp2p identity, per host, created on first start. |
 | `bn.listen_addr` | `/ip4/127.0.0.1/tcp/7787` | restart | where the sidecar listens for the beacon node's own dial. Lighthouse caps inbound connections before it knows who is connecting, so a sidecar that only dialled would wait for peer churn on a busy node (MD-01). Restart-required: the beacon node is given this address in its command line. |

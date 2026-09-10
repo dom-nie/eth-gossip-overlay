@@ -389,6 +389,8 @@ impl App {
             cfg.bn.events_url.clone(),
             Backoff::new(link::BACKOFF_MIN, link::BACKOFF_MAX),
             arrivals.clone(),
+            custody.clone(),
+            clock.clone(),
             metrics.clone(),
         );
 

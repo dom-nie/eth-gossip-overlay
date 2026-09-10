@@ -222,6 +222,17 @@ impl CustodyTracker {
         self.trim();
     }
 
+    /// Drops everything tracked, for a reader whose stream fell behind and lost events.
+    ///
+    /// A `data_column_sidecar` that never arrived leaves a column reported missing that the
+    /// beacon node holds, and repairing it costs the node nothing but wastes the budget the
+    /// columns it really lacks need. Nothing here can tell which events were lost, so the honest
+    /// answer is to know nothing until the next block opens an entry (T-087).
+    pub fn forget(&mut self) {
+        self.blocks.clear();
+        self.order.clear();
+    }
+
     /// Every block whose deadline has passed and which is still missing an expected column, with
     /// the columns to repair in the order to repair them.
     ///
@@ -380,6 +391,11 @@ impl SharedCustody {
         self.lock()
             .tracker
             .on_column(slot, u16::from(index), block_root);
+    }
+
+    /// [`CustodyTracker::forget`] under the lock, for a stream that has lost events.
+    pub fn forget(&self) {
+        self.lock().tracker.forget();
     }
 
     /// [`CustodyTracker::missing_past_deadline`] under the lock.
