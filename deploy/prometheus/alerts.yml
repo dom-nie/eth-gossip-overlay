@@ -135,5 +135,5 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "{{ $labels.instance }} is asking peers to repair chunks it did not receive"
+          summary: "{{ $labels.instance }} is asking peers to repair what it did not receive"
           runbook: docs/troubleshooting.md#overlayrepairraterising
