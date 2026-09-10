@@ -62,6 +62,23 @@ pub struct FirstArrival<'a> {
     pub header: Option<Header>,
 }
 
+/// Which clock a first-arrival time was read from.
+///
+/// Fleet spread is the difference between the first and last host to see one message, and a
+/// host whose reading came out of the kernel carries whatever softirq scheduling did to it that
+/// slot. A reading taken by the NIC does not, so a query that cares about microseconds can
+/// select on this rather than trusting every host equally (§11.1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TsSource {
+    /// The card's own clock, which chrony or ptp4l disciplines to the same time as every other
+    /// card in the fleet.
+    Hw,
+    /// A clock reading taken in the sidecar, which is what every host has and what a host with
+    /// no hardware timestamping reports.
+    #[default]
+    Sw,
+}
+
 /// The side a message arrived from. Win rate is the share of these that are
 /// [`Overlay`](Self::Overlay).
 pub enum Source<'a> {
