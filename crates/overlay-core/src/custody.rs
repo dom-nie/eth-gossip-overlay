@@ -160,6 +160,15 @@ impl CustodyTracker {
         self.conforming
     }
 
+    /// Whether the beacon node has reported holding column `index` of `block_root`, whichever
+    /// slot it named. This is what a responder answers a column request on: the store's bytes
+    /// are a peer's, and this is the beacon node's own word.
+    pub fn holds(&self, block_root: [u8; 32], index: u16) -> bool {
+        self.blocks
+            .iter()
+            .any(|((_, root), block)| *root == block_root && block.have.contains(index))
+    }
+
     /// How many columns the beacon node needs before it can reconstruct and import (§2).
     pub fn threshold(&self) -> usize {
         self.threshold
@@ -376,6 +385,11 @@ impl SharedCustody {
     /// [`CustodyTracker::threshold`] under the lock.
     pub fn threshold(&self) -> usize {
         self.lock().tracker.threshold()
+    }
+
+    /// [`CustodyTracker::holds`] under the lock.
+    pub fn holds(&self, block_root: [u8; 32], index: u8) -> bool {
+        self.lock().tracker.holds(block_root, u16::from(index))
     }
 
     /// [`CustodyTracker::column_set`] under the lock.

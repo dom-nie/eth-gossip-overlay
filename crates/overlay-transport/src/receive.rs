@@ -846,13 +846,10 @@ impl Ctx {
     /// this peer yet (MD-04).
     fn repair(&self, request: &RepairReq) -> Vec<Frame> {
         let not_found = || vec![Frame::RepairResp(RepairResp::NotFound)];
-        // Column identity is T-087's under MD-06: the recent store's `(block_root, index)` index
-        // is filled here, but answering from it means acting on a root a peer chose, and a
-        // forged sidecar naming a real column would have this host serve junk for it to everyone.
-        let RepairReq::Missing { msg_id, missing } = request else {
+        let Some(msg_id) = self.asked_for(request) else {
             return not_found();
         };
-        let Some((topic, payload)) = self.deps.recent.get(msg_id) else {
+        let Some((topic, payload)) = self.deps.recent.get(&msg_id) else {
             return not_found();
         };
         let Ok(split) = Params::for_len(
@@ -861,6 +858,12 @@ impl Ctx {
             self.deps.large.parity_ratio,
         ) else {
             return not_found();
+        };
+        let missing: Vec<u16> = match request {
+            RepairReq::Missing { missing, .. } => missing.clone(),
+            // A peer that asked by identity holds none of the column, so it is owed every data
+            // chunk of it; parity would only cost bytes it has no shortfall to make up (D24).
+            RepairReq::Column { .. } => (0..split.k).collect(),
         };
         if missing.len() > usize::from(split.k) {
             tracing::debug!(
@@ -881,7 +884,7 @@ impl Ctx {
             .map(|(index, data)| Frame::Chunk {
                 flags: ChunkFlags::FORWARDED,
                 chunk: Chunk {
-                    msg_id: *msg_id,
+                    msg_id,
                     topic_id: topic_id.get(),
                     k: split.k,
                     m: split.m,
@@ -893,6 +896,26 @@ impl Ctx {
             .collect();
         answer.push(Frame::RepairResp(RepairResp::Chunks(Vec::new())));
         answer
+    }
+
+    /// Which message a request is about: the one it names, or the one the recent store files
+    /// under the column it names (T-081's index, T-087).
+    ///
+    /// A column is answered only when this host's own beacon node has reported holding it. The
+    /// bytes in the store came off the wire and the root in their header is a claim nothing
+    /// proved, so serving them on the strength of that claim is what let one forged sidecar
+    /// have every host answer for a real column with junk (MD-06). The event stream is the one
+    /// source here a peer cannot write, so it is what decides.
+    fn asked_for(&self, request: &RepairReq) -> Option<MessageId> {
+        match request {
+            RepairReq::Missing { msg_id, .. } => Some(*msg_id),
+            RepairReq::Column { block_root, index } => self
+                .deps
+                .custody
+                .holds(*block_root, *index)
+                .then(|| self.deps.recent.get_by_column(*block_root, *index))
+                .flatten(),
+        }
     }
 
     /// The id this host names `topic` by, once this peer has had the `TOPIC_ADD` that binds it
@@ -3811,13 +3834,13 @@ mod tests {
         );
     }
 
-    /// The arm stays `not_found`, and under MD-06 that is a decision rather than a gap. The
-    /// recent store does index a column by `(block_root, index)`, but a root comes out of a
-    /// 356-byte header nobody verified: answering from it would let one forged sidecar naming a
-    /// real column have this host serve junk for that column to every peer that asks. T-087
-    /// re-lands the answer once the beacon node's event stream says which columns are real.
+    /// The recent store indexes a column by `(block_root, index)`, but that root comes out of a
+    /// 356-byte header nobody verified. A host that answered on the strength of the index alone
+    /// would serve junk for a real column to every peer that asked, which is the propagation
+    /// MD-06 removed the feature over. The beacon node's word is the gate, and here it has not
+    /// given it.
     #[tokio::test(flavor = "multi_thread")]
-    async fn responder_replies_not_found_for_a_column_request() {
+    async fn responder_refuses_a_column_its_beacon_node_never_reported() {
         let column = topic("data_column_sidecar_5");
         let (cluster, peer) = peer_of(subscriptions(&[&column], &[]), &[(1, &column)]).await;
         let body = large_payload(8 * 1024);
@@ -3828,7 +3851,7 @@ mod tests {
         assert_eq!(
             ask_column(&peer, [9; 32], 5).await,
             [Frame::RepairResp(RepairResp::NotFound)],
-            "a column this host holds and has indexed is still not answered by identity"
+            "a column this host holds and has indexed is answered on the index alone"
         );
     }
 
