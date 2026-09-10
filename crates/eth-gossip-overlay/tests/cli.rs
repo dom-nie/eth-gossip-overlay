@@ -286,3 +286,22 @@ fn version_prints_crate_version_sha_build_date_and_protocol_line() {
     );
     assert_eq!(lines.next(), None, "{printed}");
 }
+
+/// The shipped default (D30) all the way out to the command line: an operator who runs the dry
+/// run before turning anything on is told the tuning is off, and no NIC on the host has been
+/// asked anything to produce that answer.
+#[test]
+fn steering_plan_with_steering_off_says_so_and_exits_0() {
+    let fixture = common::Fixture::new();
+
+    let output = fixture
+        .command()
+        .args(["steering", "plan", "--config"])
+        .arg(&fixture.config)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let printed = String::from_utf8(output.stdout).unwrap();
+    assert!(printed.contains("off"), "{printed}");
+}
