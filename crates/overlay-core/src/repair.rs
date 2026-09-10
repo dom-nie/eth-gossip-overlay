@@ -591,4 +591,58 @@ mod tests {
             "{decided:?}"
         );
     }
+
+    /// A gap for one block: `have_count` columns already in, `missing` still wanted.
+    fn gap(missing: &[u16], have_count: usize) -> ColumnGap {
+        ColumnGap {
+            block_root: [3; 32],
+            missing: missing.to_vec(),
+            have_count,
+        }
+    }
+
+    /// Mainnet's threshold, which is the only number `tick_columns` takes from the snapshot.
+    const THRESHOLD: usize = 64;
+
+    /// D23's answer for a column nobody announced: in-region live peers by round trip, and the
+    /// next one the moment the first says it does not hold it.
+    #[test]
+    fn never_seen_column_is_requested_from_in_region_peers_in_rtt_order_and_moves_on_after_not_found()
+     {
+        let clock = FakeClock::new();
+        let candidates = [
+            (host("near"), Duration::from_millis(5)),
+            (host("far"), Duration::from_millis(50)),
+        ];
+        let gaps = [gap(&[4], 0)];
+        let none = BitSet::new(128);
+        let mut scheduler = Scheduler::default();
+
+        let first = scheduler.tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now());
+        assert_eq!(
+            first,
+            vec![Decision::AskColumn(ColumnRequest {
+                block_root: [3; 32],
+                index: 4,
+                peer: host("near"),
+                timeout: REPAIR_ATTEMPT_MIN,
+            })]
+        );
+
+        // Nothing more is asked while the first request is outstanding.
+        assert_eq!(
+            scheduler.tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now()),
+            Vec::new()
+        );
+
+        scheduler.answered_column(&([3; 32], 4));
+        clock.advance(REPAIR_TICK);
+
+        assert!(matches!(
+            scheduler
+                .tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now())
+                .as_slice(),
+            [Decision::AskColumn(request)] if request.peer == host("far")
+        ));
+    }
 }
