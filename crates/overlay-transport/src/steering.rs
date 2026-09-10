@@ -16,7 +16,7 @@
 
 use std::fmt;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use overlay_core::config::{IoThread, Steering};
@@ -255,6 +255,8 @@ pub(crate) trait Nic {
     fn ethtool(&self, args: &[&str]) -> io::Result<String>;
     /// The contents of a `/sys` or `/proc` file.
     fn read(&self, path: &Path) -> io::Result<String>;
+    /// Writes `value` to a `/sys` or `/proc` file.
+    fn write(&self, path: &Path, value: &str) -> io::Result<()>;
 }
 
 /// The NIC this host is running on.
@@ -276,6 +278,10 @@ impl Nic for Host {
 
     fn read(&self, path: &Path) -> io::Result<String> {
         std::fs::read_to_string(path)
+    }
+
+    fn write(&self, path: &Path, value: &str) -> io::Result<()> {
+        std::fs::write(path, value)
     }
 }
 
@@ -311,6 +317,273 @@ fn detect_with(nic: &dyn Nic) -> io::Result<NicCaps> {
         per_queue_coalesce,
         iface,
     })
+}
+
+/// Where a queue's share of the receive flow table is written.
+fn rps_flow_cnt(iface: &str, queue: u32) -> PathBuf {
+    PathBuf::from(format!(
+        "/sys/class/net/{iface}/queues/rx-{queue}/rps_flow_cnt"
+    ))
+}
+
+/// Where threaded NAPI is turned on, per interface.
+fn threaded(iface: &str) -> PathBuf {
+    PathBuf::from(format!("/sys/class/net/{iface}/threaded"))
+}
+
+/// Where an interrupt's affinity is written, in the list form §11 names.
+fn smp_affinity_list(irq: u32) -> PathBuf {
+    PathBuf::from(format!("/proc/irq/{irq}/smp_affinity_list"))
+}
+
+/// The interrupt serving `iface`'s receive queue `queue`, from `/proc/interrupts`.
+///
+/// Drivers name their interrupts differently, so the queue is found by position: the lines
+/// naming this interface, in the order the kernel lists them, are its queues in order. That is
+/// what an operator's own runbook does with `grep`.
+// ponytail: interrupts are matched by interface name and position. Drivers that name theirs
+// after the PCI function instead (mlx5's `mlx5_comp7@pci:…`) match nothing, and the affinity
+// step then reports that it found no interrupt rather than moving the wrong one. Widen the
+// match once a real host says what those names look like.
+fn irq_for(interrupts: &str, iface: &str, queue: u32) -> Option<u32> {
+    interrupts
+        .lines()
+        .filter(|line| line.contains(iface))
+        .nth(queue as usize)?
+        .split_once(':')
+        .and_then(|(number, _)| number.trim().parse().ok())
+}
+
+/// The id `ethtool -N` gave the rule it just added, which is the only thing that deletes it
+/// again.
+fn rule_id(said: &str) -> Option<String> {
+    said.split_whitespace()
+        .next_back()
+        .filter(|id| !id.is_empty() && id.chars().all(|digit| digit.is_ascii_digit()))
+        .map(str::to_owned)
+}
+
+/// What a queue's coalescing is set to now, so a clean shutdown can put it back. A card that
+/// does not say is taken to be adaptive, which is the state §11 asks to be left alone.
+fn coalesce_now(shown: &str) -> (String, String) {
+    let field = |name: &str| {
+        shown.lines().find_map(|line| {
+            let (key, value) = line.trim().split_once(':')?;
+            (key == name).then(|| {
+                value
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned()
+            })
+        })
+    };
+    (
+        field("Adaptive RX").unwrap_or_else(|| "on".to_owned()),
+        field("rx-usecs").unwrap_or_else(|| "0".to_owned()),
+    )
+}
+
+/// One step back to what a host held before the plan ran.
+#[derive(Debug)]
+enum Undo {
+    /// An `ethtool` run, which is how a flow rule is deleted and how coalescing goes back to
+    /// what the card was running.
+    Ethtool(Vec<String>),
+    /// A `/sys` or `/proc` file and what was in it.
+    Write {
+        /// The file.
+        path: PathBuf,
+        /// What it held.
+        value: String,
+    },
+}
+
+/// What applying a plan did to a host.
+#[derive(Debug, Default)]
+pub struct Report {
+    /// The actions the host took, in the order it took them.
+    pub applied: Vec<Action>,
+    /// The actions it refused, each with what it said.
+    pub failed: Vec<(Action, String)>,
+    /// The inverse of everything applied. Private because it is only ever handed straight back
+    /// to [`undo`], and because an operator reading a report wants the two lists above.
+    undo: Vec<Undo>,
+}
+
+/// Applies `plan`, taking every step the host allows.
+///
+/// A refused step is one warning and one entry in the report. §11 wants the overlay's queue
+/// pinned whether or not a flow rule for one address family took, and a card that will not take
+/// a rule should not also cost an operator the interrupt affinity.
+pub fn apply(plan: &[Action]) -> Report {
+    apply_with(&Host, plan)
+}
+
+fn apply_with(nic: &dyn Nic, plan: &[Action]) -> Report {
+    let mut report = Report::default();
+    for action in plan {
+        match step(nic, action) {
+            Ok(undo) => {
+                report.undo.push(undo);
+                report.applied.push(action.clone());
+            }
+            Err(err) => {
+                tracing::warn!(%action, %err, "overlay steering step refused");
+                report.failed.push((action.clone(), err.to_string()));
+            }
+        }
+    }
+    report
+}
+
+/// Makes one change and says what would put it back.
+fn step(nic: &dyn Nic, action: &Action) -> io::Result<Undo> {
+    match action {
+        Action::NtupleRule {
+            iface,
+            flow_type,
+            port,
+            queue,
+        } => {
+            // Cards that have the filter ship with it off (`ethtool -k` says `off` without the
+            // `[fixed]` marker), so the rule needs it turned on first. Idempotent, which is why
+            // it is not an action of its own.
+            nic.ethtool(&["-K", iface, "ntuple", "on"])?;
+            let said = nic.ethtool(&[
+                "-N",
+                iface,
+                "flow-type",
+                flow_type,
+                "dst-port",
+                &port.to_string(),
+                "action",
+                &queue.to_string(),
+            ])?;
+            let id = rule_id(&said).ok_or_else(|| {
+                io::Error::other(format!(
+                    "ethtool did not name the rule it added: {}",
+                    said.trim()
+                ))
+            })?;
+            Ok(Undo::Ethtool(vec![
+                "-N".to_owned(),
+                iface.clone(),
+                "delete".to_owned(),
+                id,
+            ]))
+        }
+        Action::RfsFlowEntries {
+            iface,
+            queue,
+            entries,
+        } => replace(nic, &rps_flow_cnt(iface, *queue), &entries.to_string()),
+        Action::IrqAffinity { iface, queue, cpu } => {
+            let interrupts = nic.read(Path::new("/proc/interrupts"))?;
+            let irq = irq_for(&interrupts, iface, *queue).ok_or_else(|| {
+                io::Error::other(format!(
+                    "no interrupt in /proc/interrupts for {iface} queue {queue}"
+                ))
+            })?;
+            replace(nic, &smp_affinity_list(irq), &cpu.to_string())
+        }
+        Action::ThreadedNapi { iface } => replace(nic, &threaded(iface), "1"),
+        Action::PerQueueCoalesce {
+            iface,
+            queue,
+            rx_usecs,
+        } => {
+            let mask = format!("0x{:x}", 1u64 << queue);
+            let shown =
+                nic.ethtool(&["--per-queue", iface, "queue_mask", &mask, "--show-coalesce"])?;
+            let (adaptive, was) = coalesce_now(&shown);
+            let coalesce = |adaptive: &str, usecs: &str| {
+                vec![
+                    "--per-queue".to_owned(),
+                    iface.clone(),
+                    "queue_mask".to_owned(),
+                    mask.clone(),
+                    "--coalesce".to_owned(),
+                    "adaptive-rx".to_owned(),
+                    adaptive.to_owned(),
+                    "rx-usecs".to_owned(),
+                    usecs.to_owned(),
+                ]
+            };
+            run(nic, &coalesce("off", &rx_usecs.to_string()))?;
+            Ok(Undo::Ethtool(coalesce(&adaptive, &was)))
+        }
+    }
+}
+
+/// `ethtool` with arguments that were built rather than written out.
+fn run(nic: &dyn Nic, args: &[String]) -> io::Result<String> {
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    nic.ethtool(&args)
+}
+
+/// Writes `value`, keeping what was there so a clean shutdown can put it back.
+fn replace(nic: &dyn Nic, path: &Path, value: &str) -> io::Result<Undo> {
+    let previous = nic.read(path)?;
+    nic.write(path, value)?;
+    Ok(Undo::Write {
+        path: path.to_owned(),
+        value: previous,
+    })
+}
+
+/// Puts back everything `report` displaced, newest first: an interrupt cannot go back to a
+/// queue whose rule has already gone.
+///
+/// A step that will not go back is a warning and nothing else. The process is on its way out,
+/// and a host left with one setting of ours is better than a shutdown that hangs on it.
+pub fn undo(report: &Report) {
+    undo_with(&Host, report);
+}
+
+fn undo_with(nic: &dyn Nic, report: &Report) {
+    for step in report.undo.iter().rev() {
+        let done = match step {
+            Undo::Ethtool(args) => run(nic, args).map(|_| ()),
+            Undo::Write { path, value } => nic.write(path, value),
+        };
+        if let Err(err) = done {
+            tracing::warn!(%err, "overlay steering not put back");
+        }
+    }
+}
+
+/// Detects, plans and applies, which is the whole of what a start does.
+///
+/// Nothing here runs unless `steering` names something other than `off`, the shipped default
+/// (D30): a host whose operator never asked for any of this is never spoken to. A card that
+/// cannot be read, or that has nothing this configuration can do to it, costs one warning and
+/// leaves the overlay running exactly as it would have.
+pub fn enable(cfg: &IoThread, port: u16) -> Report {
+    enable_with(&Host, cfg, port)
+}
+
+fn enable_with(nic: &dyn Nic, cfg: &IoThread, port: u16) -> Report {
+    if cfg.steering == Steering::Off {
+        return Report::default();
+    }
+    let caps = match detect_with(nic) {
+        Ok(caps) => caps,
+        Err(err) => {
+            tracing::warn!(%err, "overlay steering not applied");
+            return Report::default();
+        }
+    };
+    let plan = plan(&caps, cfg, port);
+    if plan.is_empty() {
+        tracing::warn!(
+            iface = %caps.iface,
+            ntuple = caps.ntuple,
+            rx_queues = caps.rx_queues,
+            "overlay steering found nothing it could do to this card"
+        );
+    }
+    apply_with(nic, &plan)
 }
 
 #[cfg(test)]
