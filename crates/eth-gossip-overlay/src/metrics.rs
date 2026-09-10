@@ -61,6 +61,7 @@ use overlay_transport::fanout::{Direction, PeerLabels, TrafficStats};
 use overlay_transport::manager::{ManagerStats, PeerCounts};
 use overlay_transport::receive::ReceiveStats;
 use overlay_transport::sender::{DropReason as SendDropReason, SenderStats, StaleReason};
+use overlay_transport::steering::Report;
 use overlay_transport::subs::SubsStats;
 use overlay_transport::tls::HandshakeFailure;
 
@@ -183,6 +184,12 @@ pub const IO_THREAD_PINNED: &str = "overlay_io_thread_pinned";
 /// interrupt suspended during bursts, 0 when the tuning is off and 0 when the kernel, the
 /// capabilities or the device would not give one of the two halves (T-092).
 pub const BUSY_POLL_ENABLED: &str = "overlay_busy_poll_enabled";
+/// 1 for each kind of NIC change `overlay.io_thread.steering` asked for and the host took
+/// (T-093).
+pub const STEERING_APPLIED: &str = "overlay_steering_applied";
+/// 1 while first-arrival times are read off the NIC rather than off a clock in the sidecar
+/// (T-093).
+pub const HW_TIMESTAMPS: &str = "overlay_hw_timestamps";
 /// Always 1; the labels carry the build.
 pub const BUILD_INFO: &str = "overlay_build_info";
 
@@ -220,6 +227,8 @@ pub const LABEL_FORM: &str = "form";
 pub const LABEL_PROTOCOL: &str = "protocol";
 /// The commit the binary was built from.
 pub const LABEL_GIT_SHA: &str = "git_sha";
+/// Which kind of NIC change a steering gauge counts.
+pub const LABEL_ACTION: &str = "action";
 
 /// The beacon node delivered it first.
 pub const SOURCE_BN: &str = "bn";
@@ -335,6 +344,8 @@ pub struct Metrics {
     roster_reload_rejected: IntCounter,
     io_thread_pinned: IntGauge,
     busy_poll_enabled: IntGauge,
+    steering_applied: IntGaugeVec,
+    hw_timestamps: IntGauge,
     reconstruct_seconds: HistogramVec,
     registered: BTreeMap<String, Vec<String>>,
 }
@@ -591,6 +602,15 @@ impl Metrics {
             BUSY_POLL_ENABLED,
             "1 while the overlay's epoll is busy polling and its NIC queue suspends its IRQ.",
         )?;
+        let steering_applied = b.gauge_vec(
+            STEERING_APPLIED,
+            "1 for each kind of NIC change the steering plan asked for and the host took.",
+            &[LABEL_ACTION],
+        )?;
+        let hw_timestamps = b.gauge(
+            HW_TIMESTAMPS,
+            "1 while first-arrival times are read off the NIC rather than off the sidecar's clock.",
+        )?;
 
         b.gauge_vec(
             BUILD_INFO,
@@ -660,6 +680,8 @@ impl Metrics {
             roster_reload_rejected,
             io_thread_pinned,
             busy_poll_enabled,
+            steering_applied,
+            hw_timestamps,
             registered: b.registered,
         })
     }
@@ -693,6 +715,28 @@ impl Metrics {
     /// the start and moves the moment the queue is known, or stays there if it never is.
     pub fn set_busy_poll_enabled(&self, enabled: bool) {
         self.busy_poll_enabled.set(i64::from(enabled));
+    }
+
+    /// What the steering plan actually did to this host (T-093). Every kind the plan named gets
+    /// a series, at 1 where the host took it and 0 where it refused, so a fleet-wide query shows
+    /// which cards would not take a flow rule rather than leaving them out of the answer.
+    pub fn set_steering_applied(&self, report: &Report) {
+        for (action, applied) in report
+            .applied
+            .iter()
+            .map(|action| (action, true))
+            .chain(report.failed.iter().map(|(action, _)| (action, false)))
+        {
+            self.steering_applied
+                .with_label_values(&[action.kind()])
+                .set(i64::from(applied));
+        }
+    }
+
+    /// Whether arrival times are coming off the NIC (T-093). Set once at startup: the socket
+    /// either reads the card's control messages or it does not, and nothing moves it after.
+    pub fn set_hw_timestamps(&self, reading: bool) {
+        self.hw_timestamps.set(i64::from(reading));
     }
 }
 
