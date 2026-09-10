@@ -347,4 +347,22 @@ mod tests {
             }]
         );
     }
+
+    /// A column the beacon node has verified is one no peer needs to be asked for, and it counts
+    /// towards the half a node needs before it can reconstruct the rest (§2).
+    #[test]
+    fn on_column_clears_its_expectation() {
+        let clock = FakeClock::new();
+        let mut tracker = tracking(&clock, &[0, 3, 7]);
+        clock.advance(DEADLINE);
+
+        tracker.on_column(1, 3, ROOT);
+
+        let reported = gaps(&tracker, &clock);
+        let [gap] = reported.as_slice() else {
+            panic!("one block is being tracked");
+        };
+        assert_eq!(gap.missing, vec![0, 7]);
+        assert_eq!(gap.have_count, 1);
+    }
 }
