@@ -267,6 +267,9 @@ pub struct App {
     /// The endpoint's runtime, stopped after the manager: closing the connections politely is
     /// work the endpoint's own driver does, and that driver is what this ends.
     io: IoHandle,
+    /// What a start did to this host's NIC, so a clean shutdown can put it back. Empty on every
+    /// host that ships the default (D30).
+    steering: steering::Report,
     /// The swarm task, stopped last: every other task holds a command sender, and the link's
     /// loop ends when the last one is dropped, which is the swarm's cue to disconnect.
     link: JoinHandle<()>,
@@ -449,6 +452,13 @@ impl App {
             let metrics = metrics.clone();
             move |enabled| metrics.set_busy_poll_enabled(enabled)
         });
+        // The NIC queue the overlay's packets land on and the core its interrupt is served from
+        // (§11). Off in the shipped defaults, and one warning per step a card refuses otherwise.
+        let steering = steering::enable(&cfg.overlay.io_thread, listen.port());
+        metrics.set_steering_applied(&steering);
+        // Deliberately zero rather than unset: nothing reads arrival times off the card yet, and
+        // `overlay_transport::timestamping` records what is left to do before anything does.
+        metrics.set_hw_timestamps(false);
         tracing::info!(listen = %cfg.overlay.listen, "overlay endpoint bound");
 
         let (roster_tx, _) = watch::channel(me.roster.clone());
@@ -587,6 +597,7 @@ impl App {
             progress,
             manager,
             io,
+            steering,
             link: link.task,
             tasks: vec![
                 metrics_task,
@@ -678,6 +689,9 @@ impl App {
         let _ = self.link.await;
         self.manager.shutdown().await;
         self.io.shutdown().await;
+        // Last, and after the socket has gone: a flow rule that outlived the process would
+        // send the next thing to bind that port to a queue nothing told it about.
+        steering::undo(&self.steering);
     }
 }
 
