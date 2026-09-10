@@ -13,6 +13,7 @@ pub mod router;
 pub mod sender;
 pub mod steering;
 pub mod subs;
+pub mod timestamping;
 pub mod tls;
 
 // A harness reports a broken fixture by panicking, which is what its unwraps are.
