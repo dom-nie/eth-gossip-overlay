@@ -157,11 +157,21 @@ impl CustodyTracker {
     /// The threshold is not read here. It is how many of the columns listed are worth asking
     /// for, which is the scheduler's to spend (T-082's `tick_columns`), not a reason to leave a
     /// block out of the answer.
-    pub fn missing_past_deadline(&self, deadline: Duration, now: Instant) -> Vec<ColumnGap> {
+    ///
+    /// `in_flight` is the columns the reassembler already holds chunks of. They are listed first
+    /// because they complete with the fewest bytes, so the first `threshold - have_count` of
+    /// `missing` are the cheapest way to the import threshold; the never-seen ones follow by
+    /// index, which is the only order there is when nothing announces who holds what (D23).
+    pub fn missing_past_deadline(
+        &self,
+        deadline: Duration,
+        now: Instant,
+        in_flight: &BitSet,
+    ) -> Vec<ColumnGap> {
         let mut gaps: Vec<(BlockKey, ColumnGap)> = self
             .blocks
             .iter()
-            .filter_map(|(key, block)| Some((*key, block.gap(key.1, deadline, now)?)))
+            .filter_map(|(key, block)| Some((*key, block.gap(key.1, deadline, now, in_flight)?)))
             .collect();
         gaps.sort_by_key(|(key, _)| *key);
         gaps.into_iter().map(|(_, gap)| gap).collect()
@@ -188,16 +198,30 @@ impl CustodyTracker {
 }
 
 impl Block {
-    fn gap(&self, root: [u8; 32], deadline: Duration, now: Instant) -> Option<ColumnGap> {
+    fn gap(
+        &self,
+        root: [u8; 32],
+        deadline: Duration,
+        now: Instant,
+        in_flight: &BitSet,
+    ) -> Option<ColumnGap> {
         let seen_at = self.seen_at?;
         if now.saturating_duration_since(seen_at) < deadline {
             return None;
         }
-        let missing: Vec<u16> = self
+        let wanted = |index: &u16| !self.have.contains(*index);
+        let mut missing: Vec<u16> = self
             .expected
             .iter()
-            .filter(|index| !self.have.contains(*index))
+            .filter(wanted)
+            .filter(|index| in_flight.contains(*index))
             .collect();
+        missing.extend(
+            self.expected
+                .iter()
+                .filter(wanted)
+                .filter(|index| !in_flight.contains(*index)),
+        );
         (!missing.is_empty()).then_some(ColumnGap {
             block_root: root,
             missing,
@@ -260,8 +284,8 @@ impl SharedCustody {
     }
 
     /// [`CustodyTracker::missing_past_deadline`] under the lock.
-    pub fn gaps(&self, deadline: Duration, now: Instant, _in_flight: &BitSet) -> Vec<ColumnGap> {
-        self.lock().missing_past_deadline(deadline, now)
+    pub fn gaps(&self, deadline: Duration, now: Instant, in_flight: &BitSet) -> Vec<ColumnGap> {
+        self.lock().missing_past_deadline(deadline, now, in_flight)
     }
 
     /// [`CustodyTracker::column_set`] under the lock.
@@ -331,7 +355,8 @@ mod tests {
     }
 
     fn gaps(tracker: &CustodyTracker, clock: &FakeClock) -> Vec<ColumnGap> {
-        tracker.missing_past_deadline(DEADLINE, clock.now())
+        let none = tracker.column_set([]);
+        tracker.missing_past_deadline(DEADLINE, clock.now(), &none)
     }
 
     /// Expected columns are the beacon node's own column subnets and nothing else (T-014, D06):
