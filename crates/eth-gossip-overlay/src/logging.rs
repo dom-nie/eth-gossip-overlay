@@ -250,7 +250,7 @@ mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
     use overlay_core::config::Log;
-    use overlay_core::events::{FirstArrival, Source, emit_first_arrival};
+    use overlay_core::events::{FirstArrival, Source, TsSource, emit_first_arrival};
     use overlay_core::msgid::MessageId;
     use overlay_core::roster::{Hostname, Region, SelfIdentity};
     use overlay_core::topic::{Class, Topic};
@@ -265,7 +265,7 @@ mod tests {
     /// Every field of a `first_arrival` line, as the table in `docs/events.md` lists it. The
     /// queries in that file and T-052's dashboard read these names, so one of them changing
     /// without the document changing leaves a panel silently empty.
-    const SCHEMA: [&str; 12] = [
+    const SCHEMA: [&str; 13] = [
         "timestamp",
         "level",
         "target",
@@ -277,6 +277,7 @@ mod tests {
         "region",
         "site",
         "first_arrival_ns",
+        "ts_source",
         "source",
     ];
 
@@ -328,6 +329,7 @@ mod tests {
             at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
             source,
             header: None,
+            ts_source: TsSource::Sw,
         }
     }
 

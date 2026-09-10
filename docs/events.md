@@ -47,6 +47,7 @@ the count of distinct large messages the host saw.
 | `region` | string | Its region |
 | `site` | string | Its site label, empty when the roster gives none |
 | `first_arrival_ns` | integer | Arrival, in nanoseconds since the Unix epoch, read at receipt from the beacon node or off the socket |
+| `ts_source` | string | `hw` if the NIC timed the arrival, `sw` if the sidecar's own clock did |
 | `source` | string | `bn` if the local beacon node got there first, `overlay` if a fleet peer did |
 | `origin_peer` | string | The peer that sent it. Present only when `source` is `overlay` |
 | `slot` | integer | The slot the block or column belongs to. Present on `beacon_block` and `data_column_sidecar_*` lines |
@@ -54,6 +55,7 @@ the count of distinct large messages the host saw.
 
 Comparing `first_arrival_ns` across hosts is only as good as their clocks: run chrony with
 hardware timestamping (Architecture.md §11), which holds the fleet inside a few microseconds.
+`ts_source` says which clock read the line, and is `sw` on every host today.
 
 `slot` and `block_root` come from the payload's own header, which the sidecar reads only for
 these two topic kinds and only as far as the header, and only where it keeps the payload: as a
@@ -66,7 +68,7 @@ rather than null. When the block root is here, it is what joins this line to the
 ### One line
 
 ```json
-{"timestamp":"2026-09-07T12:00:07.312905Z","level":"INFO","event":"first_arrival","msg_id":"9f3c1d0a77b25e4418c6a2f0d51b3e8c7a409d62","class":"large","topic":"/eth2/6a95a1a9/beacon_block/ssz_snappy","node":"bn-ams1-07","region":"eu","site":"ams1","first_arrival_ns":1757246407312905114,"source":"overlay","origin_peer":"bn-fra1-02","slot":11814923,"block_root":"6f1c4d2b8a09e7f3541c0b6d92a8e35f70bd41c8a2e96d035b7f18c40de2a961","target":"overlay::event"}
+{"timestamp":"2026-09-07T12:00:07.312905Z","level":"INFO","event":"first_arrival","msg_id":"9f3c1d0a77b25e4418c6a2f0d51b3e8c7a409d62","class":"large","topic":"/eth2/6a95a1a9/beacon_block/ssz_snappy","node":"bn-ams1-07","region":"eu","site":"ams1","first_arrival_ns":1757246407312905114,"ts_source":"sw","source":"overlay","origin_peer":"bn-fra1-02","slot":11814923,"block_root":"6f1c4d2b8a09e7f3541c0b6d92a8e35f70bd41c8a2e96d035b7f18c40de2a961","target":"overlay::event"}
 ```
 
 ### Fleet spread
