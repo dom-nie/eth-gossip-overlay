@@ -429,6 +429,53 @@ mod tests {
         assert!(line.contains("origin_peer=bn-fra1-02"), "{line}");
     }
 
+    /// §11.1's hardware timestamps are optional, and most hosts will not have them. A line that
+    /// did not say which clock it came from would leave a fleet-spread query unable to tell a
+    /// reading the card took from one with a softirq's jitter in it, so every line says, and
+    /// the ordinary answer is the software one.
+    #[test]
+    fn event_log_marks_ts_source_sw_when_hw_unavailable() {
+        let node = node();
+        let topic = block();
+        let mark = LOG.len();
+
+        emit_first_arrival(&FirstArrival {
+            id: MessageId([7; 20]),
+            class: Class::Large,
+            topic: &topic,
+            node: &node,
+            at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
+            source: Source::Bn,
+            header: None,
+            ts_source: TsSource::Sw,
+        });
+
+        assert!(
+            line_with(mark, &hex(7)).contains(r#"ts_source="sw""#),
+            "{}",
+            line_with(mark, &hex(7))
+        );
+
+        // The other half on the same key, so one query separates the two.
+        let mark = LOG.len();
+        emit_first_arrival(&FirstArrival {
+            id: MessageId([8; 20]),
+            class: Class::Large,
+            topic: &topic,
+            node: &node,
+            at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
+            source: Source::Bn,
+            header: None,
+            ts_source: TsSource::Hw,
+        });
+
+        assert!(
+            line_with(mark, &hex(8)).contains(r#"ts_source="hw""#),
+            "{}",
+            line_with(mark, &hex(8))
+        );
+    }
+
     /// A host with no site label logs an empty one, the same convention the metrics labels
     /// follow, so nothing has to read a literal like `none` as "absent".
     #[test]
