@@ -288,6 +288,35 @@ mod tests {
         assert!(plan(&caps(true), &cfg(Steering::Off), PORT).is_empty());
     }
 
+    /// `ethtool`'s output is the only thing that says which branch of [`plan`] a host takes, and
+    /// it is a human-readable format with no promise behind it. Two cards, one that can steer a
+    /// flow itself and one that cannot, in whole: a fixture cut down to the two lines the parser
+    /// reads would stop proving that the rest is skipped.
+    #[test]
+    fn parses_ethtool_features_output_fixtures() {
+        // ConnectX-5 ships with the filter off, but not `[fixed]`, so it can be turned on.
+        assert!(supports_ntuple(include_str!(
+            "steering/fixtures/mlx5-connectx5-features.txt"
+        )));
+        // A virtio interface has no filter to turn on, which is what `off [fixed]` means.
+        assert!(!supports_ntuple(include_str!(
+            "steering/fixtures/virtio-net-features.txt"
+        )));
+
+        // The running channel count, not the card's maximum: the queue the overlay takes has to
+        // exist now.
+        assert_eq!(
+            rx_queues(include_str!(
+                "steering/fixtures/mlx5-connectx5-channels.txt"
+            )),
+            Some(16)
+        );
+        assert_eq!(
+            rx_queues(include_str!("steering/fixtures/virtio-net-channels.txt")),
+            Some(4)
+        );
+    }
+
     /// §11 leaves coalescing alone unless it can be changed for one queue: a global change
     /// would raise the interrupt rate for the beacon node's traffic too.
     #[test]

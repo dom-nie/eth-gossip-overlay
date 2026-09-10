@@ -1,0 +1,11 @@
+Channel parameters for enp0s3:
+Pre-set maximums:
+RX:		0
+TX:		0
+Other:		0
+Combined:	4
+Current hardware settings:
+RX:		0
+TX:		0
+Other:		0
+Combined:	4
