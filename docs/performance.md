@@ -101,22 +101,18 @@ That is what loopback should show. The window exists for a path with a round tri
 carrying one block every 12 s never leaves slow start on a real link, and pays several round
 trips per block for it. Loopback has none to amortise, so a 4 MB opening burst can only overrun
 the receive path. The measurement worth having is a canary on real hosts
-([rollout.md](rollout.md)); this pair is here to show that the tuning breaks nothing and that
-the fleet still completes a slot's columns on every host in about a quarter of a second.
+([rollout.md](rollout.md)); this pair only shows that the tuning breaks nothing.
 
 ## The overlay I/O thread on a reserved core
 
-Optional, Linux only, and off unless you set it. Nothing here is needed at the overlay's traffic
-rates (Architecture.md §11.1); it is for operators who already reserve cores per service and
-want the last of the jitter out of arrival times.
+Optional, Linux only, off unless you set it. None of it is needed at the overlay's traffic
+rates (Architecture.md §11.1); it is for operators who already reserve cores per service.
 
-By default the QUIC endpoint shares the tokio runtime that runs the router, the batcher and the
-beacon node link, so a block arriving from a sibling is read by whichever worker thread is free
-— on a busy host, possibly behind a chunk being encoded or a message being handed to the beacon
-node.
+By default the QUIC endpoint shares the tokio runtime that runs everything else, so a block
+from a sibling is read by whichever worker thread is free, possibly behind a chunk being
+encoded.
 
-With a core named in `config.yaml`, the endpoint gets a single-threaded runtime of its own,
-pinned to that core:
+With a core named, the endpoint gets a single-threaded runtime pinned to it:
 
 ```yaml
 overlay:
@@ -124,16 +120,15 @@ overlay:
     pin_cpu: 30
 ```
 
-That runtime owns one epoll instance and nothing else runs on it, so a packet arriving is read
-by a thread that was waiting for it. Frames reach the router through the same channels either
-way.
+That runtime owns one epoll instance and nothing else runs on it, so a packet is read by a
+thread that was waiting for it.
 
 ### When it is worth setting
 
 Set it when all three hold. The host is bare metal, not a container sharing cores with
 neighbours you do not control. The sidecar's cgroup already has cores of its own,
-`AllowedCPUs=30-31` next to the beacon node's `AllowedCPUs=0-29` in the §11 layout. And you are
-measuring arrival times, so you can tell whether it changed anything.
+`AllowedCPUs=30-31` beside the beacon node's `AllowedCPUs=0-29`. And you are measuring arrival
+times, so you can tell whether it helped.
 
 Leave it unset otherwise: a pinned thread on a host whose cores are shared moves the contention
 rather than removing it.
@@ -142,18 +137,16 @@ rather than removing it.
 
 ### Checking that it took
 
-`overlay_io_thread_pinned` is 1 when the endpoint is running on the core that was asked for, and
-0 both when no core was named and when the kernel refused the one that was. A refusal is a
-warning, not a failed start: a narrow cpuset should cost an operator the pinning and not the
-overlay.
+`overlay_io_thread_pinned` is 1 when the endpoint got the core it asked for, and 0 when none was
+named or the kernel refused. A refusal is a warning, not a failed start: a narrow cpuset should
+cost the pinning, not the overlay.
 
 ```console
 $ curl -s 127.0.0.1:7789/metrics | grep io_thread
 overlay_io_thread_pinned 1
 ```
 
-The kernel's own answer is `psr`, the core a thread last ran on; `comm` is its name, which the
-sidecar sets to `overlay-io`:
+`psr` is the core a thread last ran on; `comm` is its name, which the sidecar sets:
 
 ```console
 $ ps -L -o pid,tid,psr,comm -p "$(pidof eth-gossip-overlay)"
@@ -163,8 +156,8 @@ $ ps -L -o pid,tid,psr,comm -p "$(pidof eth-gossip-overlay)"
  118420  118438   7 tokio-runtime-wo
 ```
 
-Sample it more than once. Every other thread moves between the cores its cgroup allows;
-`overlay-io` is the one that does not.
+Sample it more than once: every other thread moves between its cgroup's cores, `overlay-io`
+does not.
 
 ## Busy polling with the queue's interrupt suspended
 
@@ -180,12 +173,11 @@ overlay:
     irq_suspend_timeout_ms: 20
 ```
 
-The I/O thread's epoll then spins on the queue for `busy_poll_usecs` before it sleeps, and the
-queue's interrupt stays masked for `irq_suspend_timeout_ms` at a time while the spinning keeps
-finding packets. Between bursts the timeout expires and the queue goes back to interrupts, so an
-idle core is not burned.
+The epoll then spins on the queue for `busy_poll_usecs` before it sleeps, and the interrupt
+stays masked for `irq_suspend_timeout_ms` at a time while the spinning keeps finding packets.
+Between bursts it goes back to interrupts, so an idle core is not burned.
 
-Masking the interrupt is set over netdev netlink, which is what needs the capability:
+Masking the interrupt goes over netdev netlink, which needs the capability:
 
 ```ini
 # eth-gossip-overlay.service.d/busy-poll.conf
@@ -198,15 +190,15 @@ AmbientCapabilities=CAP_NET_ADMIN
 ### Checking that it took
 
 `overlay_busy_poll_enabled` is 1 only when both halves are up. An older kernel, a missing
-capability and a device with no NAPI queue each leave it at 0 and log which:
+capability or a device with no NAPI queue leaves it at 0 and logs which:
 
 ```console
 $ curl -s 127.0.0.1:7789/metrics | grep busy_poll
 overlay_busy_poll_enabled 1
 ```
 
-The kernel's own answer is the interrupt count on the steered queue. Read it twice while blocks
-are arriving:
+The kernel's own answer is the steered queue's interrupt count. Read it twice while blocks
+arrive:
 
 ```console
 $ ethtool -S eth0 | grep -E 'rx_queue_3_(packets|irqs)'
@@ -214,3 +206,50 @@ $ ethtool -S eth0 | grep -E 'rx_queue_3_(packets|irqs)'
 
 Packets climbing with the interrupt count flat is the suspension working. Both climbing together
 is busy polling on a queue that still interrupts — what a missing capability looks like.
+## Steering the overlay to its own NIC queue
+
+Needs `ethtool` and `CAP_NET_ADMIN`. Off unless you set it:
+
+```yaml
+overlay:
+  io_thread:
+    pin_cpu: 30
+    steering: auto
+```
+
+`auto` takes a flow rule where the card has one and receive flow steering where it does not;
+`ntuple` and `rfs` name one. See what it decides on this host first:
+
+```console
+$ eth-gossip-overlay steering plan
+enp1s0f0np0: 16 receive queues, ntuple filters yes, per-queue coalescing no
+
+ntuple rule: enp1s0f0np0 udp4 dst-port 7788 to queue 15
+ntuple rule: enp1s0f0np0 udp6 dst-port 7788 to queue 15
+irq affinity: enp1s0f0np0 queue 15 to cpu 30
+threaded napi: on for enp1s0f0np0
+```
+
+A card with no flow filter gets the kernel's instead:
+
+```console
+$ eth-gossip-overlay steering plan
+enp0s3: 4 receive queues, ntuple filters no, per-queue coalescing no
+
+rfs: enp0s3 queue 3 tracks 8192 flows
+irq affinity: enp0s3 queue 3 to cpu 30
+threaded napi: on for enp0s3
+```
+
+Steps are taken at startup and put back at a clean shutdown. One the card refuses is a warning
+and the rest still runs:
+
+```console
+$ curl -s 127.0.0.1:7789/metrics | grep steering
+overlay_steering_applied{action="ntuple"} 1
+overlay_steering_applied{action="irq_affinity"} 1
+overlay_steering_applied{action="threaded_napi"} 0
+```
+
+`overlay_hw_timestamps` is 0 on every host today: arrival times come from the sidecar's clock,
+which every `first_arrival` line says with `ts_source`.
