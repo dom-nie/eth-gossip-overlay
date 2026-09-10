@@ -41,6 +41,7 @@ use overlay_bn::spec::spec_watch;
 use overlay_core::backoff::Backoff;
 use overlay_core::budget::{self, FanoutBudget, MemoryBudget, SendLaneBounds};
 use overlay_core::config::Config;
+use overlay_core::custody::SharedCustody;
 use overlay_core::events::Arrivals;
 use overlay_core::identity::{Seeds, derive_tls_keypair};
 use overlay_core::lanes::ClassLanes;
@@ -324,6 +325,10 @@ impl App {
         // reads it (T-084). The retention window comes off the same snapshot the rest does.
         let arrivals = Arc::new(Arrivals::new(clock.clone(), spec_rx.clone()));
         let (sets_tx, sets_rx) = watch::channel(SubscriptionSets::default());
+        // Which columns the beacon node wants and which it has. The event stream below is the
+        // only thing that writes it, which is what makes the state something no peer can
+        // reach (§6.4, MD-06).
+        let custody = SharedCustody::new(spec_rx.clone(), sets_rx.clone());
         let (commands, commands_rx) = mpsc::channel(COMMAND_QUEUE);
         let bn_lanes = ClassLanes::new(metrics.clone());
         let link = BnLink::spawn(
@@ -444,6 +449,7 @@ impl App {
         let receive_deps = ReceiveDeps {
             seen,
             recent,
+            custody: custody.clone(),
             arrivals,
             publish: Arc::new(publish),
             sets: sets_rx.clone(),

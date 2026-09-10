@@ -1,0 +1,277 @@
+//! Which data columns this host's beacon node wants for a slot, which have arrived, and which
+//! to ask a peer for first once the deadline has passed (§5.6, §6.4, D23, MD-06).
+//!
+//! Every fact in here comes from the beacon node's own event stream and from nowhere else:
+//! `block_gossip` for a block the node accepted, `data_column_sidecar` for a column it holds.
+//! `overlay_bn::events` is the only writer, which is what MD-06 asks for. A payload a peer sent
+//! decodes without being authentic, so a tracker fed from the receive path is a tracker a roster
+//! peer writes, and column repair's inputs would be exactly the bytes an attacker controls.
+//!
+//! Expected columns are the beacon node's own column subnets (T-014, D06), which only names a
+//! set of columns while one subnet is one column.
+//!
+//! Nothing here is a socket or a channel: one call answers what is missing and in what order,
+//! and T-082's scheduler turns that into requests.
+
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, Instant};
+
+use tokio::sync::watch;
+
+use crate::spec::SpecSnapshot;
+use crate::topic::{SubscriptionSets, TopicKind};
+
+/// How many blocks of column state a host keeps.
+///
+/// Long enough that a block still under repair is still tracked (repair gives up 1.5 s after the
+/// deadline, D24) and short enough that the whole structure is a handful of bitsets. The beacon
+/// node opens every entry, so nothing a peer sends can push the newest ones out and one bound
+/// over all of them is enough.
+pub const TRACKED_BLOCKS: usize = 4;
+
+/// A set of column indices.
+///
+/// A `bool` per index rather than packed bits: at the largest `NUMBER_OF_COLUMNS` anyone runs
+/// the whole set is a few hundred bytes and a host holds [`TRACKED_BLOCKS`] of them, so packing
+/// would buy nothing a reader does not pay for.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BitSet(Vec<bool>);
+
+impl BitSet {
+    /// An empty set with room for indices `0..len`, which is `NUMBER_OF_COLUMNS` everywhere but
+    /// a test.
+    pub fn new(len: usize) -> Self {
+        Self(vec![false; len])
+    }
+
+    /// Adds `index`. An index past the set's size is not a column this host can hold and is
+    /// dropped rather than growing the set.
+    pub fn insert(&mut self, index: u16) {
+        if let Some(slot) = self.0.get_mut(usize::from(index)) {
+            *slot = true;
+        }
+    }
+
+    /// Whether `index` is in the set.
+    pub fn contains(&self, index: u16) -> bool {
+        self.0.get(usize::from(index)).copied().unwrap_or(false)
+    }
+
+    /// The indices in the set, ascending.
+    pub fn iter(&self) -> impl Iterator<Item = u16> + '_ {
+        self.0
+            .iter()
+            .enumerate()
+            .filter(|(_, held)| **held)
+            .filter_map(|(index, _)| u16::try_from(index).ok())
+    }
+}
+
+/// The columns of one block this host is still short of, in the order to repair them (D23).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColumnGap {
+    /// The block the columns belong to, which is how a peer that never saw them is asked.
+    pub block_root: [u8; 32],
+    /// Every expected column that has not arrived, in repair order.
+    pub missing: Vec<u16>,
+    /// How many expected columns have arrived, which is what the threshold is counted against.
+    pub have_count: usize,
+}
+
+/// A block, as everything here names one: its slot and its root together.
+///
+/// Two blocks can exist for one slot, from a reorg or from a proposer that equivocated, and the
+/// root is what a column belongs to. Keying on both is what stops one block's columns clearing
+/// what the other is owed.
+type BlockKey = (u64, [u8; 32]);
+
+/// What one host knows about the columns of the blocks its beacon node has seen.
+pub struct CustodyTracker {
+    columns: usize,
+    blocks: HashMap<BlockKey, Block>,
+    /// The keys of `blocks` in the order they were opened, so the bound takes the oldest.
+    order: VecDeque<BlockKey>,
+}
+
+struct Block {
+    expected: BitSet,
+    have: BitSet,
+    seen_at: Option<Instant>,
+}
+
+impl CustodyTracker {
+    /// A tracker sized by `spec`, which is mainnet until the beacon node answers (CL-N3).
+    pub fn new(spec: &SpecSnapshot) -> Self {
+        Self {
+            columns: usize::try_from(spec.number_of_columns).unwrap_or(0),
+            blocks: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    /// The columns the beacon node is subscribed to, as a set this tracker's size (T-014, D06).
+    pub fn expected_columns(&self, sets: &SubscriptionSets) -> BitSet {
+        self.column_set(
+            sets.advertised
+                .iter()
+                .filter_map(|topic| match topic.kind() {
+                    TopicKind::DataColumnSidecar(index) => Some(u16::from(*index)),
+                    _ => None,
+                }),
+        )
+    }
+
+    /// `indices` as a set sized by the snapshot, which is how the reassembler's open columns
+    /// reach [`missing_past_deadline`](Self::missing_past_deadline).
+    pub fn column_set(&self, indices: impl IntoIterator<Item = u16>) -> BitSet {
+        let mut set = BitSet::new(self.columns);
+        for index in indices {
+            set.insert(index);
+        }
+        set
+    }
+
+    /// Records that the beacon node accepted a block for `slot` at `now` and that `expected`
+    /// columns are owed for it. The deadline every gap is measured from starts here.
+    pub fn on_block(&mut self, slot: u64, root: [u8; 32], expected: BitSet, now: Instant) {
+        let block = self.open((slot, root));
+        block.expected = expected;
+        block.seen_at = Some(now);
+        self.trim();
+    }
+
+    /// Records that the beacon node holds column `index` of `block_root` for `slot`.
+    ///
+    /// A column that arrives before its block opens the entry, because the beacon node verifies
+    /// a column on its own and does not wait for the block; the block is what puts a deadline on
+    /// it, so nothing is repaired until one has been seen.
+    pub fn on_column(&mut self, slot: u64, index: u16, block_root: [u8; 32]) {
+        self.open((slot, block_root)).have.insert(index);
+        self.trim();
+    }
+
+    /// Every block whose deadline has passed and which is still missing an expected column, with
+    /// the columns to repair in the order to repair them.
+    ///
+    /// The threshold is not read here. It is how many of the columns listed are worth asking
+    /// for, which is the scheduler's to spend (T-082's `tick_columns`), not a reason to leave a
+    /// block out of the answer.
+    pub fn missing_past_deadline(&self, deadline: Duration, now: Instant) -> Vec<ColumnGap> {
+        let mut gaps: Vec<(BlockKey, ColumnGap)> = self
+            .blocks
+            .iter()
+            .filter_map(|(key, block)| Some((*key, block.gap(key.1, deadline, now)?)))
+            .collect();
+        gaps.sort_by_key(|(key, _)| *key);
+        gaps.into_iter().map(|(_, gap)| gap).collect()
+    }
+
+    /// The entry for `key`, opening one if this host has none.
+    fn open(&mut self, key: BlockKey) -> &mut Block {
+        let columns = self.columns;
+        self.blocks.entry(key).or_insert_with(|| {
+            self.order.push_back(key);
+            Block::new(columns)
+        })
+    }
+
+    /// Keeps the newest [`TRACKED_BLOCKS`] entries by the order they were opened.
+    fn trim(&mut self) {
+        while self.blocks.len() > TRACKED_BLOCKS {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            self.blocks.remove(&oldest);
+        }
+    }
+}
+
+impl Block {
+    fn gap(&self, root: [u8; 32], deadline: Duration, now: Instant) -> Option<ColumnGap> {
+        let seen_at = self.seen_at?;
+        if now.saturating_duration_since(seen_at) < deadline {
+            return None;
+        }
+        let missing: Vec<u16> = self.expected.iter().collect();
+        (!missing.is_empty()).then_some(ColumnGap {
+            block_root: root,
+            missing,
+            have_count: 0,
+        })
+    }
+
+    fn new(columns: usize) -> Self {
+        Self {
+            expected: BitSet::new(columns),
+            have: BitSet::new(columns),
+            seen_at: None,
+        }
+    }
+}
+
+/// One [`CustodyTracker`] shared by the event-stream task that writes it and the repair task
+/// that reads it.
+///
+/// Every method takes the lock for one call and gives it back, so nothing here is held across an
+/// `await`, the same rule [`SharedRecentLarge`](crate::recent::SharedRecentLarge) keeps.
+///
+/// The write side is [`on_block`](Self::on_block) and [`on_column`](Self::on_column), and
+/// `overlay_bn::events` is the only caller of either. Reading the beacon node's subscriptions
+/// here rather than at the call site is what keeps that true: the writer needs nothing but the
+/// two numbers the event carried.
+#[derive(Clone)]
+pub struct SharedCustody(Arc<Shared>);
+
+struct Shared {
+    sets: watch::Receiver<SubscriptionSets>,
+    tracker: Mutex<CustodyTracker>,
+}
+
+impl SharedCustody {
+    /// A tracker sized by whatever `spec` holds now, expecting whatever `sets` says the beacon
+    /// node is subscribed to when a block arrives.
+    pub fn new(
+        spec: watch::Receiver<SpecSnapshot>,
+        sets: watch::Receiver<SubscriptionSets>,
+    ) -> Self {
+        let tracker = CustodyTracker::new(&spec.borrow());
+        Self(Arc::new(Shared {
+            sets,
+            tracker: Mutex::new(tracker),
+        }))
+    }
+
+    /// One `block_gossip` event: the beacon node's gossip verification accepted this block.
+    pub fn on_block(&self, slot: u64, root: [u8; 32], now: Instant) {
+        let sets = self.0.sets.borrow().clone();
+        let mut tracker = self.lock();
+        let expected = tracker.expected_columns(&sets);
+        tracker.on_block(slot, root, expected, now);
+    }
+
+    /// One `data_column_sidecar` event: the beacon node has verified this column.
+    pub fn on_column(&self, slot: u64, index: u8, block_root: [u8; 32]) {
+        self.lock().on_column(slot, u16::from(index), block_root);
+    }
+
+    /// [`CustodyTracker::missing_past_deadline`] under the lock.
+    pub fn gaps(&self, deadline: Duration, now: Instant, _in_flight: &BitSet) -> Vec<ColumnGap> {
+        self.lock().missing_past_deadline(deadline, now)
+    }
+
+    /// [`CustodyTracker::column_set`] under the lock.
+    pub fn column_set(&self, indices: impl IntoIterator<Item = u16>) -> BitSet {
+        self.lock().column_set(indices)
+    }
+
+    fn lock(&self) -> MutexGuard<'_, CustodyTracker> {
+        // Nothing that runs under this lock can panic, so a poisoned tracker cannot happen; if
+        // one ever did, its sets would still be consistent and idling column repair for the life
+        // of the process would be the worse failure.
+        self.0
+            .tracker
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+}

@@ -46,6 +46,7 @@ use bytes::Bytes;
 use ed25519_dalek::SigningKey;
 use overlay_core::budget::{FanoutBudget, FanoutKind, STREAM_RECEIVE_WINDOW};
 use overlay_core::config::{self, Overlay};
+use overlay_core::custody::SharedCustody;
 use overlay_core::events::Arrivals;
 use overlay_core::fanout::Outbound;
 use overlay_core::header::{Header, HeaderDecoder};
@@ -85,6 +86,21 @@ use crate::sender::{
 };
 use crate::subs::SubsStats;
 use crate::tls::{self, FailureReason, HandshakeFailure, PinTable, Role};
+
+/// What `overlay_bn::spec::MAINNET` holds. A cluster has no beacon node to answer
+/// `/eth/v1/config/spec` and this crate does not carry the compiled defaults, so a test that
+/// needs a custody tracker sized like a real one writes the two numbers it uses.
+pub fn mainnet_spec() -> SpecSnapshot {
+    SpecSnapshot {
+        data_column_sidecar_subnet_count: 128,
+        number_of_columns: 128,
+        number_of_custody_groups: 128,
+        custody_requirement: 4,
+        max_payload_size: 10_485_760,
+        seconds_per_slot: 12,
+        slots_per_epoch: 32,
+    }
+}
 
 /// Long enough for a handshake, an admission and a reconnect on a loaded machine, and short
 /// enough that a test which will never pass fails instead of hanging.
@@ -1293,6 +1309,12 @@ impl<A: Admission> TestCluster<A> {
             .subscribe(),
         ));
         let (subscriptions, watching) = watch::channel(sets);
+        // A cluster has no beacon node, so a test that wants a column tracked writes the tracker
+        // itself through `custody`, which is what the event stream does on a real host.
+        let custody = SharedCustody::new(
+            watch::Sender::new(mainnet_spec()).subscribe(),
+            watching.clone(),
+        );
         let reassembler = Arc::new(Reassembler::new(ReassembleConfig {
             max_in_flight: self.in_flight,
             incomplete_ttl: self.incomplete_ttl,
@@ -1307,6 +1329,7 @@ impl<A: Admission> TestCluster<A> {
         let deps = Deps {
             seen: seen.clone(),
             recent: recent.clone(),
+            custody: custody.clone(),
             arrivals: arrivals.clone(),
             publish: published.clone(),
             sets: watching.clone(),
@@ -1355,6 +1378,7 @@ impl<A: Admission> TestCluster<A> {
         self.nodes[index].sidecar = Some(Sidecar {
             seen,
             recent,
+            custody,
             arrivals,
             reassembler,
             to_fanout,
@@ -1425,6 +1449,12 @@ impl<A: Admission> TestCluster<A> {
     /// (§5.6).
     pub fn recent(&self, index: usize) -> &SharedRecentLarge {
         &self.sidecar(index).recent
+    }
+
+    /// Node `index`'s custody tracker. A test writes it where a real host's beacon node event
+    /// stream would, which is the only writer there is (§6.4, MD-06).
+    pub fn custody(&self, index: usize) -> &SharedCustody {
+        &self.sidecar(index).custody
     }
 
     /// What node `index` has queued for its beacon node, oldest first.
@@ -1524,6 +1554,8 @@ struct Sidecar {
     seen: SharedSeenCache,
     /// The large payloads a peer could still ask this node to repair (§5.6).
     recent: SharedRecentLarge,
+    /// Which of this node's columns are owed and which have arrived (§6.4, T-087).
+    custody: SharedCustody,
     arrivals: Arc<Arrivals>,
     /// What the receive path asks whether a chunk is owed to the region (D19).
     reassembler: Arc<Reassembler>,

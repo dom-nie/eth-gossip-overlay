@@ -60,6 +60,7 @@ use std::time::{Duration, Instant, SystemTime};
 use bytes::Bytes;
 use overlay_core::budget::{Charge, FanoutBudget, FanoutKind};
 use overlay_core::config::LargeClass;
+use overlay_core::custody::SharedCustody;
 use overlay_core::events::{self, Arrivals, FirstArrival};
 use overlay_core::msgid::{self, Branch, MessageId};
 use overlay_core::protocol::{MAX_FRAME_BYTES, features};
@@ -194,6 +195,9 @@ pub struct Deps {
     /// Where a message this host reassembled is kept so a peer can repair it from here (§5.6).
     /// The beacon node link (T-016) holds the other handle to the same store.
     pub recent: SharedRecentLarge,
+    /// Which of the beacon node's columns are owed and which have arrived (§6.4, T-087). Read
+    /// here and written only by the beacon node's event stream, which is the whole of MD-06.
+    pub custody: SharedCustody,
     /// When each block reached this host, so the beacon node's own import of it can be timed
     /// against that (T-084). The link holds the other handle, and only blocks are filed.
     pub arrivals: Arc<Arrivals>,
@@ -2522,6 +2526,10 @@ mod tests {
                     Arc::new(SystemClock),
                 )),
                 recent: SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)),
+                custody: SharedCustody::new(
+                    watch::Sender::new(SpecSnapshot::default()).subscribe(),
+                    watch::Sender::new(SubscriptionSets::default()).subscribe(),
+                ),
                 arrivals: Arc::new(Arrivals::new(
                     Arc::new(SystemClock),
                     watch::Sender::new(SpecSnapshot::default()).subscribe(),
