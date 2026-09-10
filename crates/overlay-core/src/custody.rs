@@ -193,11 +193,15 @@ impl Block {
         if now.saturating_duration_since(seen_at) < deadline {
             return None;
         }
-        let missing: Vec<u16> = self.expected.iter().collect();
+        let missing: Vec<u16> = self
+            .expected
+            .iter()
+            .filter(|index| !self.have.contains(*index))
+            .collect();
         (!missing.is_empty()).then_some(ColumnGap {
             block_root: root,
             missing,
-            have_count: 0,
+            have_count: self.have.iter().count(),
         })
     }
 
