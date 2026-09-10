@@ -89,6 +89,7 @@ type BlockKey = (u64, [u8; 32]);
 /// What one host knows about the columns of the blocks its beacon node has seen.
 pub struct CustodyTracker {
     columns: usize,
+    threshold: usize,
     blocks: HashMap<BlockKey, Block>,
     /// The keys of `blocks` in the order they were opened, so the bound takes the oldest.
     order: VecDeque<BlockKey>,
@@ -103,11 +104,31 @@ struct Block {
 impl CustodyTracker {
     /// A tracker sized by `spec`, which is mainnet until the beacon node answers (CL-N3).
     pub fn new(spec: &SpecSnapshot) -> Self {
-        Self {
-            columns: usize::try_from(spec.number_of_columns).unwrap_or(0),
+        let mut tracker = Self {
+            columns: 0,
+            threshold: 0,
             blocks: HashMap::new(),
             order: VecDeque::new(),
+        };
+        tracker.on_spec(spec);
+        tracker
+    }
+
+    /// Resizes to a new snapshot. A column count that moved makes every set the wrong shape, so
+    /// what is tracked goes with it rather than being reinterpreted under the new size.
+    pub fn on_spec(&mut self, spec: &SpecSnapshot) {
+        let columns = usize::try_from(spec.number_of_columns).unwrap_or(0);
+        if columns != self.columns {
+            self.blocks.clear();
+            self.order.clear();
         }
+        self.columns = columns;
+        self.threshold = columns / 2;
+    }
+
+    /// How many columns the beacon node needs before it can reconstruct and import (§2).
+    pub fn threshold(&self) -> usize {
+        self.threshold
     }
 
     /// The columns the beacon node is subscribed to, as a set this tracker's size (T-014, D06).
@@ -256,8 +277,16 @@ impl Block {
 pub struct SharedCustody(Arc<Shared>);
 
 struct Shared {
+    spec: watch::Receiver<SpecSnapshot>,
     sets: watch::Receiver<SubscriptionSets>,
-    tracker: Mutex<CustodyTracker>,
+    state: Mutex<State>,
+}
+
+/// The tracker and the snapshot it was last sized by, so a resize happens once per change
+/// rather than once per call.
+struct State {
+    spec: SpecSnapshot,
+    tracker: CustodyTracker,
 }
 
 impl SharedCustody {
@@ -267,44 +296,65 @@ impl SharedCustody {
         spec: watch::Receiver<SpecSnapshot>,
         sets: watch::Receiver<SubscriptionSets>,
     ) -> Self {
-        let tracker = CustodyTracker::new(&spec.borrow());
+        let snapshot = *spec.borrow();
+        let state = State {
+            spec: snapshot,
+            tracker: CustodyTracker::new(&snapshot),
+        };
         Self(Arc::new(Shared {
+            spec,
             sets,
-            tracker: Mutex::new(tracker),
+            state: Mutex::new(state),
         }))
     }
 
     /// One `block_gossip` event: the beacon node's gossip verification accepted this block.
     pub fn on_block(&self, slot: u64, root: [u8; 32], now: Instant) {
         let sets = self.0.sets.borrow().clone();
-        let mut tracker = self.lock();
-        let expected = tracker.expected_columns(&sets);
-        tracker.on_block(slot, root, expected, now);
+        let mut state = self.lock();
+        let expected = state.tracker.expected_columns(&sets);
+        state.tracker.on_block(slot, root, expected, now);
     }
 
     /// One `data_column_sidecar` event: the beacon node has verified this column.
     pub fn on_column(&self, slot: u64, index: u8, block_root: [u8; 32]) {
-        self.lock().on_column(slot, u16::from(index), block_root);
+        self.lock()
+            .tracker
+            .on_column(slot, u16::from(index), block_root);
     }
 
     /// [`CustodyTracker::missing_past_deadline`] under the lock.
     pub fn gaps(&self, deadline: Duration, now: Instant, in_flight: &BitSet) -> Vec<ColumnGap> {
-        self.lock().missing_past_deadline(deadline, now, in_flight)
+        self.lock()
+            .tracker
+            .missing_past_deadline(deadline, now, in_flight)
+    }
+
+    /// [`CustodyTracker::threshold`] under the lock.
+    pub fn threshold(&self) -> usize {
+        self.lock().tracker.threshold()
     }
 
     /// [`CustodyTracker::column_set`] under the lock.
     pub fn column_set(&self, indices: impl IntoIterator<Item = u16>) -> BitSet {
-        self.lock().column_set(indices)
+        self.lock().tracker.column_set(indices)
     }
 
-    fn lock(&self) -> MutexGuard<'_, CustodyTracker> {
+    /// The state, resized first if the beacon node has reported a different snapshot since it
+    /// was last touched. Every method goes through here, so a network whose column count moves
+    /// under a running sidecar is noticed on the next event or the next tick, whichever comes
+    /// first.
+    fn lock(&self) -> MutexGuard<'_, State> {
         // Nothing that runs under this lock can panic, so a poisoned tracker cannot happen; if
         // one ever did, its sets would still be consistent and idling column repair for the life
         // of the process would be the worse failure.
-        self.0
-            .tracker
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        let mut state = self.0.state.lock().unwrap_or_else(PoisonError::into_inner);
+        let snapshot = *self.0.spec.borrow();
+        if state.spec != snapshot {
+            state.spec = snapshot;
+            state.tracker.on_spec(&snapshot);
+        }
+        state
     }
 }
 
