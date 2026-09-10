@@ -440,4 +440,65 @@ mod tests {
         assert_eq!(published.len(), 1, "{published:?}");
         assert_eq!(published[0].payload, real);
     }
+
+    /// §6.4 end to end. One host's beacon node has the block and three of its four custody
+    /// columns; the fourth exists on one peer only and reached this host by no path at all, so
+    /// there is no message id for it anywhere and the chunk path has nothing to work with. Past
+    /// the deadline the host names the column by its block root and its index, asks its region
+    /// in round-trip order until a peer holds it, and hands the column to its beacon node once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn column_repair_end_to_end_publishes_missing_column() {
+        let block = topic("beacon_block");
+        let columns: Vec<Topic> = (0..4)
+            .map(|i| topic(&format!("data_column_sidecar_{i}")))
+            .collect();
+        let wanted: Vec<&Topic> = std::iter::once(&block).chain(columns.iter()).collect();
+        let mut cluster = Builder::new(&[NodeKind::Manager; 4]).start().await;
+        for node in 0..4 {
+            cluster.start_sidecar(node, subscriptions(&wanted, &[]));
+        }
+        eventually("the cluster to pair", || {
+            (0..4).all(|node| cluster.live(node).len() == 3)
+        })
+        .await;
+
+        // The column nobody fanned out: node 1's beacon node handed it over, and no other host
+        // has ever seen a byte of it.
+        let root = DECODED_BLOCK.block_root();
+        let missing = large_payload(8 * 1024);
+        let missing_id = msgid::compute(&columns[2].to_string(), &missing, MAX_PAYLOAD_BYTES).id;
+        cluster.recent(1).insert(
+            missing_id,
+            columns[2].clone(),
+            missing.clone(),
+            Some(&missing),
+            Instant::now(),
+        );
+        cluster.custody(1).on_column(DECODED_SLOT, 2, root);
+        eventually("node 1 to announce its id for the missing column", || {
+            let own = crate::hello::lock(cluster.topics(1));
+            own.table
+                .get(&columns[2])
+                .is_some_and(|id| own.announcer.told(&cluster.hostname(0), id))
+        })
+        .await;
+
+        // Node 0's beacon node accepted the block and has three of the four columns.
+        cluster
+            .custody(0)
+            .on_block(DECODED_SLOT, root, Instant::now());
+        for index in [0, 1, 3] {
+            cluster.custody(0).on_column(DECODED_SLOT, index, root);
+        }
+
+        eventually("node 0 to publish the column it never saw", || {
+            !cluster.published(0).is_empty()
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        let published = cluster.published(0);
+        assert_eq!(published.len(), 1, "{published:?}");
+        assert_eq!(published[0].payload, missing);
+        assert!(cluster.stats(0).repair_requests(Outcome::Completed) > 0);
+    }
 }
