@@ -44,8 +44,10 @@
 //!   the fanout task, so a file that changed keys in one section carries the other's too.
 //!   `large.in_region` and `large.cross_region` keep the values the process started with,
 //!   because they need a restart and this must not smuggle them in.
-//! - `classes.large.repair_deadline_ms`: the channel T-082's repair scheduler reads its deadline
-//!   from on every tick, so a change takes hold on the next one (D24).
+//! - `classes.large.repair_deadline_ms` and `classes.large.column_repair`: the channels T-082's
+//!   repair scheduler reads on every tick, so a change takes hold on the next one (D24, T-087).
+//!   Turning column repair off leaves the beacon node fetching its own columns, which is what it
+//!   did before the feature existed.
 //!
 //! The roster is not a config key and has no applier. It goes on its own watch channel, which
 //! T-023's connection manager and [`spawn_pin_table`] follow, and is the one entry in
@@ -85,6 +87,7 @@ pub const RELOADABLE: &[&str] = &[
     "bn.publish_rate_limit.bytes_per_s",
     "bn.publish_rate_limit.large_per_s",
     "bn.publish_rate_limit.small_per_s",
+    "classes.large.column_repair",
     "classes.large.repair_deadline_ms",
     "classes.small.batch_window_ms",
     "classes.small.stale_after_ms",
@@ -189,6 +192,9 @@ pub struct Deps {
     /// How long T-082's repair scheduler waits after a message's first chunk before asking a
     /// peer for what is missing (D24).
     pub repair_deadline: watch::Sender<Duration>,
+    /// Whether that scheduler also asks for the custody columns the beacon node is short of
+    /// (§6.4, T-087).
+    pub column_repair: watch::Sender<bool>,
     /// The running subscriber, whose level and format are reloadable (D32).
     pub log: Arc<LogHandle>,
     /// Where the two reload counters live.
@@ -381,11 +387,19 @@ impl Reloader {
         let previous_seed = deps.previous_seed;
         let started_with = config.overlay.fanout.large.clone();
         let by_root_cache = deps.by_root_cache;
+        let column_repair = deps.column_repair;
         let appliers: Vec<(&'static str, Applier)> = vec![
             (
                 "inject",
                 Box::new(move |cfg: &Config| {
                     inject.store(cfg.inject, Ordering::Relaxed);
+                    Ok(())
+                }),
+            ),
+            (
+                "classes.large.column_repair",
+                Box::new(move |cfg: &Config| {
+                    let _ = column_repair.send(cfg.classes.large.column_repair);
                     Ok(())
                 }),
             ),
@@ -825,6 +839,7 @@ mod tests {
         small: watch::Receiver<SmallClass>,
         fanout: watch::Receiver<Fanout>,
         repair_deadline: watch::Receiver<Duration>,
+        column_repair: watch::Receiver<bool>,
         stats: Arc<Recorded>,
         reloader: Reloader,
     }
@@ -860,6 +875,8 @@ mod tests {
             let (fanout_tx, fanout) = watch::channel(Fanout::default());
             let (deadline_tx, repair_deadline) =
                 watch::channel(LargeClass::default().repair_deadline);
+            let (column_repair_tx, column_repair) =
+                watch::channel(LargeClass::default().column_repair);
             let (sink, dispatch, log) = testing::subscriber(log_cfg, false, rust_log);
             let stats = Arc::new(Recorded::default());
             let reloader = Reloader::new(
@@ -873,6 +890,7 @@ mod tests {
                     small: small_tx,
                     fanout: fanout_tx,
                     repair_deadline: deadline_tx,
+                    column_repair: column_repair_tx,
                     log: Arc::new(log),
                     stats: stats.clone(),
                 },
@@ -889,6 +907,7 @@ mod tests {
                 small,
                 fanout,
                 repair_deadline,
+                column_repair,
                 stats,
                 reloader,
             };
@@ -1065,6 +1084,26 @@ mod tests {
             *h.repair_deadline.borrow_and_update(),
             Duration::from_millis(400)
         );
+    }
+
+    /// The switch an operator throws when column repair is costing more than it returns. SIGHUP
+    /// and the scheduler stops asking on the next tick, with no restart and no rebuild (T-087).
+    #[test]
+    fn changed_column_repair_reaches_the_scheduler() {
+        let mut h = Fixture::new(
+            "overlay:\n  roster_file: ROSTER\nclasses:\n  large:\n    column_repair: true\ninject: true\n",
+            &roster_yaml(3),
+        );
+        h.write_config(
+            "overlay:\n  roster_file: ROSTER\nclasses:\n  large:\n    column_repair: false\ninject: true\n",
+        );
+
+        let report = h.reloader.reload(Trigger::Manual);
+
+        assert_eq!(report.applied, ["classes.large.column_repair"]);
+        assert!(report.restart_required.is_empty(), "{report:?}");
+        assert!(!h.reloader.config().classes.large.column_repair);
+        assert!(!*h.column_repair.borrow_and_update());
     }
 
     #[test]

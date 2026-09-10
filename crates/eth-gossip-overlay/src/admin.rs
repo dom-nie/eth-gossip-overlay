@@ -506,6 +506,7 @@ mod tests {
             let (small_tx, _small_rx) = watch::channel(Default::default());
             let (fanout_tx, _fanout_rx) = watch::channel(Default::default());
             let (deadline_tx, _deadline_rx) = watch::channel(Default::default());
+            let (column_repair_tx, _column_repair_rx) = watch::channel(true);
             let (_sink, _dispatch, log) = testing::subscriber(&Log::default(), false, None);
             let reloader = Reloader::new(
                 config_path.clone(),
@@ -518,6 +519,7 @@ mod tests {
                     small: small_tx,
                     fanout: fanout_tx,
                     repair_deadline: deadline_tx,
+                    column_repair: column_repair_tx,
                     log: Arc::new(log),
                     stats: Arc::new(()),
                 },

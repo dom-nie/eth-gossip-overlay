@@ -43,6 +43,7 @@ classes:
     chunk_bytes: 2048
     parity_ratio: 0.10
     repair_deadline_ms: 250     # measured from the first chunk
+    column_repair: true         # ask peers for the custody columns the node is short of
 inject: true
 admin_socket: /run/eth-gossip-overlay/admin.sock
 metrics_listen: 127.0.0.1:7789

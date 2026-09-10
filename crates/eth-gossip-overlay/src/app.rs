@@ -445,6 +445,7 @@ impl App {
         let (fanout_tx, fanout_rx) = watch::channel(cfg.overlay.fanout.clone());
         let (repair_deadline_tx, repair_deadline_rx) =
             watch::channel(cfg.classes.large.repair_deadline);
+        let (column_repair_tx, column_repair_rx) = watch::channel(cfg.classes.large.column_repair);
         let (batches, batching) = Batching::spawn(small_rx, metrics.clone());
         let (to_exchange, exchanged) = mpsc::channel(PEER_EVENT_QUEUE);
         let reassembler =
@@ -477,7 +478,7 @@ impl App {
         };
         // The repair scheduler reads the same reassembler the receive path fills and answers on
         // the same connections, so it takes the same dependencies (§5.6, T-082).
-        let repair = repair::spawn(receive_deps.clone(), repair_deadline_rx);
+        let repair = repair::spawn(receive_deps.clone(), repair_deadline_rx, column_repair_rx);
         let receivers = tokio::spawn(receive_peers(peer_events_rx, to_exchange, receive_deps));
         let exchange = subs::spawn(exchanged, sets_rx.clone(), topics.clone(), metrics.clone());
         let fanout = Fanout::spawn(
@@ -512,6 +513,7 @@ impl App {
                 small: small_tx,
                 fanout: fanout_tx,
                 repair_deadline: repair_deadline_tx,
+                column_repair: column_repair_tx,
                 log: log.clone(),
                 stats: metrics.clone(),
             },

@@ -20,15 +20,14 @@ restart required: overlay.listen
 ```
 
 The table below says which side each key is on. A key marked `restart` is read once at startup:
-changing it and reloading does nothing until the sidecar restarts, and the report names it so
-the change is not silently lost. A reload applies a key only when its value changed, so
-rewriting the file behind a path a key already names does nothing on its own.
+changing it does nothing until the sidecar restarts, and the report names it so the change is
+not silently lost. A reload applies a key only when its value changed.
 
 ## Who this host is
 
 The hostname is the identity everywhere: the roster key, the input to the overlay TLS key, the
-connection tie-break. It is `gethostname()` unless `ETH_GOSSIP_OVERLAY_HOSTNAME` says otherwise, and
-configuration management should always set it from the inventory name so the two cannot drift.
+connection tie-break. It is `gethostname()` unless `ETH_GOSSIP_OVERLAY_HOSTNAME` says otherwise;
+set it from the inventory name so the two cannot drift.
 `ETH_GOSSIP_OVERLAY_REGION` and `ETH_GOSSIP_OVERLAY_SITE` override the roster's answer for this host.
 
 `roster.yaml` is the fleet, one entry per host, and is not part of `config.yaml`:
@@ -44,12 +43,12 @@ hosts:
 Every host carries the same roster, and `region` is the fan-out's failure and latency domain.
 Have your discovery tool write `roster.yaml`: the sidecar checks the file's modification time
 every 10 seconds and reloads what changed, so membership needs no interface beyond the file.
-Write to a temporary file in the same directory and rename it into place, since a poll landing
-halfway through a direct write reads a file that does not parse, keeps the roster it has, and
-picks up the finished one at the next poll.
+Write to a temporary file in the same directory and rename it into place: a poll landing halfway
+through a direct write reads a file that does not parse, keeps the roster it has, and picks up
+the finished one next poll.
 
-An automatic reload is refused if it would drop more than half the hosts the sidecar has, on the
-grounds that a truncated file is likelier than half a fleet leaving at once. The refusal counts
+An automatic reload is refused if it would drop more than half the sidecar's hosts, since a
+truncated file is likelier than half a fleet leaving at once. The refusal counts
 `roster_reload_rejected_total`, which is alerted on; `eth-gossip-overlayctl roster reload`
 applies the file anyway, which is how a genuine shrink is done.
 
@@ -117,6 +116,7 @@ at startup. Every key below ships in 0.1.0, the first release.
 | `classes.large.chunk_bytes` | `2048` | restart | the fixed chunk size. The Reed-Solomon shards need an even length; a multiple of 64 is the stricter rule the sidecar holds them to, so a chunk lands on a cache line and the SIMD paths run at their widest stride. |
 | `classes.large.parity_ratio` | `0.1` | restart | parity chunks as a fraction of data chunks. |
 | `classes.large.repair_deadline_ms` | `250` | reload | how long after the first chunk a receiver waits before asking peers for the missing ones. |
+| `classes.large.column_repair` | `true` | reload | ask in-region peers for the custody columns the beacon node is still short of past the same deadline. Off, the node fetches them itself as it always has. |
 | `inject` | `true` | reload | whether the sidecar publishes what it receives into the beacon node. `false` is the kill switch: the sidecar keeps observing and reporting but changes nothing. |
 | `admin_socket` | `/run/eth-gossip-overlay/admin.sock` | restart | the Unix socket `eth-gossip-overlayctl` connects to. |
 | `metrics_listen` | `127.0.0.1:7789` | restart | where the Prometheus scrape endpoint binds. |

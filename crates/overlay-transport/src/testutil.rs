@@ -722,6 +722,13 @@ impl Builder {
         self
     }
 
+    /// What every sidecar starts with for `classes.large.column_repair`, which a test then
+    /// changes under them with [`TestCluster::set_column_repair`].
+    pub fn column_repair(mut self, on: bool) -> Self {
+        self.large.column_repair = on;
+        self
+    }
+
     /// The batching window and stale bound every sidecar in the cluster runs under. The shipped
     /// defaults otherwise; a test that has to put several payloads in one window widens it
     /// rather than racing the scheduler for 10 ms.
@@ -850,6 +857,7 @@ impl Builder {
             small: watch::channel(self.small).0,
             fanout: watch::channel(self.fanout).0,
             repair_deadline: watch::channel(self.large.repair_deadline).0,
+            column_repair: watch::channel(self.large.column_repair).0,
             large: self.large,
             in_flight: self.in_flight,
             incomplete_ttl: self.incomplete_ttl,
@@ -988,6 +996,9 @@ pub struct TestCluster<A: Admission = HelloAdmission> {
     /// How long every sidecar waits before asking a peer for the chunks it is missing, on the
     /// channel a reload publishes on (T-082, T-043).
     repair_deadline: watch::Sender<Duration>,
+    /// Whether every sidecar asks peers for the columns its beacon node is short of, on the
+    /// same kind of channel (T-087, T-043).
+    column_repair: watch::Sender<bool>,
     /// The bounds every sidecar's reassembler runs under.
     in_flight: usize,
     incomplete_ttl: Duration,
@@ -1374,7 +1385,11 @@ impl<A: Admission> TestCluster<A> {
         let to_fanout = lanes.pusher();
         let tasks = vec![
             crate::subs::spawn(exchanged, watching, node.topics.clone(), stats.clone()),
-            crate::repair::spawn(deps.clone(), self.repair_deadline.subscribe()),
+            crate::repair::spawn(
+                deps.clone(),
+                self.repair_deadline.subscribe(),
+                self.column_repair.subscribe(),
+            ),
             tokio::spawn(receive_peers(events, to_exchange, deps, receivers.clone())),
             Fanout::spawn(
                 lanes,
@@ -1457,6 +1472,12 @@ impl<A: Admission> TestCluster<A> {
     /// Node `index`'s arrival keeper, which the import event is matched against (T-084).
     pub fn arrivals(&self, index: usize) -> &Arc<Arrivals> {
         &self.sidecar(index).arrivals
+    }
+
+    /// Turns column repair on or off under every running sidecar, the way a reload does
+    /// (T-087, T-043).
+    pub fn set_column_repair(&self, on: bool) {
+        let _ = self.column_repair.send(on);
     }
 
     /// Node `index`'s recent store, which is what a repair request would be answered from

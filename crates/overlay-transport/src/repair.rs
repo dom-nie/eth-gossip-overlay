@@ -37,10 +37,15 @@ use crate::receive::{Deps, RepairSink};
 /// Starts the repair scheduler for this host. It ends when the task is aborted, which is what a
 /// shutdown does to every other task the sidecar owns.
 ///
-/// `deadline` is `classes.large.repair_deadline_ms` on the channel T-043's reload writes, read
-/// afresh on every tick so a change takes hold on the next one.
-pub fn spawn(deps: Deps, deadline: watch::Receiver<Duration>) -> JoinHandle<()> {
-    tokio::spawn(run(deps, deadline))
+/// `deadline` is `classes.large.repair_deadline_ms` and `columns` is
+/// `classes.large.column_repair`, both on the channels T-043's reload writes and both read
+/// afresh on every tick, so a change takes hold on the next one.
+pub fn spawn(
+    deps: Deps,
+    deadline: watch::Receiver<Duration>,
+    columns: watch::Receiver<bool>,
+) -> JoinHandle<()> {
+    tokio::spawn(run(deps, deadline, columns))
 }
 
 /// Which repair an attempt answered, so one [`JoinSet`] carries both forms.
@@ -49,7 +54,7 @@ enum Answered {
     Column(ColumnKey, Outcome),
 }
 
-async fn run(deps: Deps, deadline: watch::Receiver<Duration>) {
+async fn run(deps: Deps, deadline: watch::Receiver<Duration>, columns: watch::Receiver<bool>) {
     let mut scheduler = Scheduler::default();
     let mut attempts: JoinSet<Answered> = JoinSet::new();
     let mut tick = tokio::time::interval(REPAIR_TICK);
@@ -82,18 +87,23 @@ async fn run(deps: Deps, deadline: watch::Receiver<Duration>) {
         // The columns the beacon node is short of, on the same tick and against the same live
         // view. What the tracker holds came from the node's own event stream, so this is the one
         // read in the loop that no peer can influence (§6.4, MD-06).
-        let in_flight = deps
-            .custody
-            .column_set(deps.reassembler.in_flight_columns());
-        let gaps = deps.custody.gaps(*deadline.borrow(), now, &in_flight);
-        let columns = scheduler.tick_columns(
-            &gaps,
-            deps.custody.threshold(),
-            &in_flight,
-            &in_region_by_rtt(&view, &deps.node.region),
-            now,
-        );
-        for decision in decided.into_iter().chain(columns) {
+        let wanted = match *columns.borrow() {
+            false => Vec::new(),
+            true => {
+                let in_flight = deps
+                    .custody
+                    .column_set(deps.reassembler.in_flight_columns());
+                let gaps = deps.custody.gaps(*deadline.borrow(), now, &in_flight);
+                scheduler.tick_columns(
+                    &gaps,
+                    deps.custody.threshold(),
+                    &in_flight,
+                    &in_region_by_rtt(&view, &deps.node.region),
+                    now,
+                )
+            }
+        };
+        for decision in decided.into_iter().chain(wanted) {
             match decision {
                 Decision::GaveUp(msg_id) => {
                     tracing::debug!(%msg_id, "nobody left to ask for this message");

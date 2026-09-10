@@ -262,6 +262,9 @@ pub struct LargeClass {
     /// for the missing ones.
     #[serde(rename = "repair_deadline_ms", deserialize_with = "millis")]
     pub repair_deadline: Duration,
+    /// `column_repair`: ask in-region peers for the custody columns the beacon node is still
+    /// short of past the same deadline. Off, the node fetches them itself as it always has.
+    pub column_repair: bool,
 }
 
 /// `log`.
@@ -427,6 +430,7 @@ impl Default for LargeClass {
             chunk_bytes: 2048,
             parity_ratio: 0.10,
             repair_deadline: Duration::from_millis(250),
+            column_repair: true,
         }
     }
 }
@@ -683,6 +687,7 @@ classes:
     chunk_bytes: 2048
     parity_ratio: 0.10
     repair_deadline_ms: 250     # measured from the first chunk
+    column_repair: true         # ask peers for the custody columns the node is short of
 inject: true
 admin_socket: /run/eth-gossip-overlay/admin.sock
 metrics_listen: 127.0.0.1:7789
