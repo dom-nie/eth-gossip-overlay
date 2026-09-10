@@ -360,7 +360,10 @@ impl SharedCustody {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     use super::*;
+    use crate::testlog::LOG;
     use crate::time::{Clock, FakeClock};
     use crate::topic::Topic;
 
@@ -549,5 +552,54 @@ mod tests {
         let mainnet = CustodyTracker::new(&mainnet());
         assert_eq!(mainnet.threshold(), 64);
         assert!(!mainnet.expected_columns(&subscribed(&[200])).contains(200));
+    }
+
+    /// CL-N3's assertion. Expected columns are the beacon node's column subnets, so a network
+    /// where a subnet is not a column leaves nothing to derive them from. The tracker says so
+    /// once and reports nothing rather than repairing columns it guessed at.
+    #[test]
+    fn subnet_count_mismatch_logs_an_error_and_idles_column_repair() {
+        let clock = FakeClock::new();
+        let mark = LOG.len();
+        let stats = Arc::new(CountingColumns::default());
+        let custody = SharedCustody::new(
+            watch::Sender::new(SpecSnapshot {
+                data_column_sidecar_subnet_count: 64,
+                number_of_columns: 128,
+                ..mainnet()
+            })
+            .subscribe(),
+            watch::Sender::new(subscribed(&[0, 3, 7])).subscribe(),
+            stats.clone(),
+        );
+        custody.on_block(1, ROOT, clock.now());
+        clock.advance(DEADLINE);
+
+        let none = custody.column_set([]);
+        assert_eq!(custody.gaps(DEADLINE, clock.now(), &none), Vec::new());
+
+        let errors = LOG
+            .since(mark)
+            .lines()
+            .filter(|line| line.contains("column repair is idle"))
+            .count();
+        assert_eq!(errors, 1);
+        assert_eq!(stats.mismatches(), 1);
+    }
+
+    /// Counts the two series column repair adds, which are zero on an honest fleet (§12).
+    #[derive(Default)]
+    struct CountingColumns(AtomicU64);
+
+    impl CountingColumns {
+        fn mismatches(&self) -> u64 {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    impl ColumnStats for CountingColumns {
+        fn topic_mismatch(&self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
