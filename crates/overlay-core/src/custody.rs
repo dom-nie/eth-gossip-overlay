@@ -449,4 +449,25 @@ mod tests {
         assert_eq!(gap.missing[..3], [5, 17, 90]);
         assert_eq!(gap.missing[3..], never_seen);
     }
+
+    /// The count the scheduler spends its budget against is how far this beacon node is from
+    /// reconstructing, and that is counted in the columns it custodies. A beacon node holds
+    /// columns outside its own subnets too, from its execution layer and from its own proposals;
+    /// counting those would have the scheduler stop repairing before the node can import.
+    #[test]
+    fn have_count_ignores_columns_outside_the_expected_set() {
+        let clock = FakeClock::new();
+        let mut tracker = tracking(&clock, &[0, 3, 7]);
+        clock.advance(DEADLINE);
+
+        tracker.on_column(1, 3, ROOT);
+        tracker.on_column(1, 42, ROOT);
+
+        let reported = gaps(&tracker, &clock);
+        let [gap] = reported.as_slice() else {
+            panic!("one block is being tracked");
+        };
+        assert_eq!(gap.have_count, 1);
+        assert_eq!(gap.missing, vec![0, 7]);
+    }
 }
