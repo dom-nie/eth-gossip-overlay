@@ -689,9 +689,12 @@ impl App {
         let _ = self.link.await;
         self.manager.shutdown().await;
         self.io.shutdown().await;
-        // Last, and after the socket has gone: a flow rule that outlived the process would
-        // send the next thing to bind that port to a queue nothing told it about.
-        steering::undo(&self.steering);
+        // Last, and after the socket has gone: a flow rule that outlived the process would send
+        // the next thing to bind that port to a queue nothing told it about. On the blocking
+        // pool because it runs `ethtool`, and the shutdown deadline can only fire over a task
+        // that yields.
+        let steering = self.steering;
+        let _ = tokio::task::spawn_blocking(move || steering::undo(&steering)).await;
     }
 }
 
