@@ -251,6 +251,8 @@ async fn exchange(deps: &Deps, peer: &LivePeer, name: &Hostname, asked: &Frame) 
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use bytes::{Bytes, BytesMut};
     use overlay_core::config;
     use overlay_core::msgid;
@@ -261,7 +263,8 @@ mod tests {
     use super::*;
     use crate::manager::PeerInfo;
     use crate::testutil::{
-        Builder, NodeKind, SETTLE, TestCluster, eventually, subscriptions, topic,
+        Builder, DECODED_BLOCK, DECODED_SLOT, NodeKind, SETTLE, TestCluster, eventually,
+        subscriptions, topic,
     };
     use overlay_core::topic::table::TopicId;
 
@@ -391,5 +394,50 @@ mod tests {
         let mut fanout = config::Fanout::default();
         fanout.large.stripe_min_recipients = 2;
         fanout
+    }
+
+    /// The propagation vector MD-06 named, closed at the responder. Node 1 holds two payloads
+    /// that both claim to be a column of one block: one its own beacon node reported verifying,
+    /// and one that is nothing but bytes a peer sent it. Node 0 is genuinely short of both and
+    /// asks for both. It gets the real one and publishes it, and it never sees the forgery, so
+    /// a forged sidecar cannot travel host to host on the back of a repair request.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_repair_answer_cannot_be_a_payload_a_peer_minted() {
+        let verified = topic("data_column_sidecar_0");
+        let minted = topic("data_column_sidecar_1");
+        let root = DECODED_BLOCK.block_root();
+        let mut cluster = Builder::new(&[NodeKind::Manager; 2]).start().await;
+        for node in 0..2 {
+            cluster.start_sidecar(node, subscriptions(&[&verified, &minted], &[]));
+        }
+        eventually("the pair to connect", || cluster.live(0).len() == 1).await;
+
+        let real = large_payload(8 * 1024);
+        let forged = large_payload(8 * 1024);
+        for (column, payload) in [(&verified, &real), (&minted, &forged)] {
+            let id = msgid::compute(&column.to_string(), payload, MAX_PAYLOAD_BYTES).id;
+            cluster.recent(1).insert(
+                id,
+                column.clone(),
+                payload.clone(),
+                Some(payload),
+                Instant::now(),
+            );
+        }
+        // Node 1's beacon node verified column 0 of this block and has never mentioned column 1.
+        cluster.custody(1).on_column(DECODED_SLOT, 0, root);
+        // Node 0's beacon node accepted the block and is short of both columns.
+        cluster
+            .custody(0)
+            .on_block(DECODED_SLOT, root, Instant::now());
+
+        eventually("node 0 to publish the column node 1 can vouch for", || {
+            !cluster.published(0).is_empty()
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        let published = cluster.published(0);
+        assert_eq!(published.len(), 1, "{published:?}");
+        assert_eq!(published[0].payload, real);
     }
 }

@@ -65,7 +65,7 @@ use overlay_core::subs::{Bitmap, PeerState};
 use overlay_core::time::{Clock, SystemClock};
 use overlay_core::topic::Topic;
 use overlay_core::topic::table::{PeerTopicTable, TopicId};
-use overlay_core::topic::{Class, SubscriptionSets};
+use overlay_core::topic::{Class, SubscriptionSets, TopicKind};
 use overlay_core::wire::MAX_PAYLOAD_BYTES;
 use overlay_core::wire::{Chunk, ChunkFlags, Frame};
 use tokio::sync::{mpsc, watch};
@@ -125,20 +125,33 @@ const RECEIVE_WINDOW: u64 = STREAM_RECEIVE_WINDOW;
 
 /// The seen cache every sidecar in a cluster runs, at §5.5's TTL and a capacity sized for a
 /// test rather than for a fleet.
-/// The block every node's decoder reads out of whatever payload it is handed. A cluster has no
-/// beacon node and no real SSZ, and what the tests need is a header, not a decoder.
+/// The block every node's decoder reads out of a payload on a topic that is not a column. A
+/// cluster has no beacon node and no real SSZ, and what the tests need is a header, not a
+/// decoder.
 pub const DECODED_BLOCK: Header = Header::Block {
     slot: 8_675_309,
     root: [0x9c; 32],
 };
 
-/// Stands in for T-083's `overlay_bn::decode::Headers`, which `overlay-transport` cannot reach
-/// and which would need a real block to answer anyway.
-struct OneBlock;
+/// The block a column payload names, which is the same one, so a block and its columns file
+/// under one root the way a real slot's do.
+pub const DECODED_SLOT: u64 = 8_675_309;
 
-impl HeaderDecoder for OneBlock {
-    fn header(&self, _: &Topic, _: &[u8]) -> Option<Header> {
-        Some(DECODED_BLOCK)
+/// Stands in for T-083's `overlay_bn::decode::Headers`, which `overlay-transport` cannot reach
+/// and which would need a real block to answer anyway. The column index comes from the topic,
+/// which is where a real column's index comes from too.
+struct TopicHeaders;
+
+impl HeaderDecoder for TopicHeaders {
+    fn header(&self, topic: &Topic, _: &[u8]) -> Option<Header> {
+        match topic.kind() {
+            TopicKind::DataColumnSidecar(index) => Some(Header::Column {
+                slot: DECODED_SLOT,
+                index: *index,
+                block_root: DECODED_BLOCK.block_root(),
+            }),
+            _ => Some(DECODED_BLOCK),
+        }
     }
 }
 
@@ -1299,7 +1312,7 @@ impl<A: Admission> TestCluster<A> {
         ));
         published.watching(seen.clone());
         let recent = SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES))
-            .with_decoder(Arc::new(OneBlock));
+            .with_decoder(Arc::new(TopicHeaders));
         let arrivals = Arc::new(Arrivals::new(
             self.clock.clone(),
             watch::Sender::new(SpecSnapshot {
