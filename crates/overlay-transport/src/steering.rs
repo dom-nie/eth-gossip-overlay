@@ -315,6 +315,9 @@ fn detect_with(nic: &dyn Nic) -> io::Result<NicCaps> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+    use std::sync::Mutex;
+
     use overlay_core::config::{IoThread, Steering};
 
     use super::*;
@@ -330,6 +333,15 @@ mod tests {
         per_queue: bool,
         /// The default route table, in `/proc/net/route`'s columns.
         routes: &'static str,
+        /// `/proc/interrupts`, which is where a queue's interrupt number comes from.
+        interrupts: &'static str,
+        /// Every `ethtool` run and every file written, in order.
+        calls: Mutex<Vec<String>>,
+        /// A call whose text contains this fails. Every failure worth testing is one no host
+        /// can be asked for: a card that refuses a rule, a `/proc/irq` entry that will not move.
+        fails: Option<&'static str>,
+        /// What the `/sys` and `/proc` files hold.
+        files: Mutex<BTreeMap<PathBuf, String>>,
     }
 
     /// A route table with one default route, which is what §11's single-interface host has.
@@ -339,6 +351,20 @@ mod tests {
         "eth0\t00000000\t0102A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n",
     );
 
+    /// Eight receive interrupts named the way the Intel drivers name them, which is the naming
+    /// [`irq_for`] can follow.
+    const INTERRUPTS: &str = concat!(
+        "           CPU0       CPU1\n",
+        " 124:       1000          0  IR-PCI-MSI-524288-edge      eth0-TxRx-0\n",
+        " 125:       1000          0  IR-PCI-MSI-524289-edge      eth0-TxRx-1\n",
+        " 126:       1000          0  IR-PCI-MSI-524290-edge      eth0-TxRx-2\n",
+        " 127:       1000          0  IR-PCI-MSI-524291-edge      eth0-TxRx-3\n",
+        " 128:       1000          0  IR-PCI-MSI-524292-edge      eth0-TxRx-4\n",
+        " 129:       1000          0  IR-PCI-MSI-524293-edge      eth0-TxRx-5\n",
+        " 130:       1000          0  IR-PCI-MSI-524294-edge      eth0-TxRx-6\n",
+        " 131:       1000          0  IR-PCI-MSI-524295-edge      eth0-TxRx-7\n",
+    );
+
     impl Default for Fake {
         fn default() -> Self {
             Self {
@@ -346,18 +372,47 @@ mod tests {
                 channels: include_str!("steering/fixtures/mlx5-connectx5-channels.txt"),
                 per_queue: false,
                 routes: ROUTES,
+                interrupts: INTERRUPTS,
+                calls: Mutex::new(Vec::new()),
+                fails: None,
+                files: Mutex::new(BTreeMap::new()),
             }
         }
     }
 
+    #[allow(clippy::unwrap_used)]
+    impl Fake {
+        /// Every `ethtool` run and file write, in the order they were made.
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        /// Records `call` and refuses it where the test asked for a refusal.
+        fn refuse(&self, call: &str) -> io::Result<()> {
+            self.calls.lock().unwrap().push(call.to_owned());
+            match self.fails {
+                Some(needle) if call.contains(needle) => {
+                    Err(io::Error::other(format!("device refused {needle}")))
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+
+    #[allow(clippy::unwrap_used)]
     impl Nic for Fake {
         fn ethtool(&self, args: &[&str]) -> io::Result<String> {
+            self.refuse(&format!("ethtool {}", args.join(" ")))?;
             match args.first().copied() {
                 Some("-k") => Ok(self.features.to_owned()),
                 Some("-l") => Ok(self.channels.to_owned()),
                 Some("--per-queue") if !self.per_queue => {
                     Err(io::Error::other("Cannot get device per queue parameters"))
                 }
+                Some("--per-queue") => {
+                    Ok("Queue: 0\nAdaptive RX: on  TX: on\nrx-usecs: 32\n".to_owned())
+                }
+                Some("-N") => Ok("Added rule with ID 1023\n".to_owned()),
                 _ => Ok(String::new()),
             }
         }
@@ -366,8 +421,123 @@ mod tests {
             if path == Path::new("/proc/net/route") {
                 return Ok(self.routes.to_owned());
             }
-            Err(io::Error::other(format!("no {}", path.display())))
+            if path == Path::new("/proc/interrupts") {
+                return Ok(self.interrupts.to_owned());
+            }
+            // A `/sys` file that no test seeded holds whatever the kernel shipped, which for
+            // every file this module writes is zero.
+            Ok(self
+                .files
+                .lock()
+                .unwrap()
+                .get(path)
+                .cloned()
+                .unwrap_or_else(|| "0\n".to_owned()))
         }
+
+        fn write(&self, path: &Path, value: &str) -> io::Result<()> {
+            self.refuse(&format!("write {} {value}", path.display()))?;
+            self.files
+                .lock()
+                .unwrap()
+                .insert(path.to_owned(), value.to_owned());
+            Ok(())
+        }
+    }
+
+    /// A card that refuses one step is a card, not a broken host. §11 wants the overlay's queue
+    /// pinned whether or not the flow rule for one address family took, so the plan runs to the
+    /// end and the report names what did not happen.
+    #[test]
+    fn apply_failure_of_one_action_reports_it_and_continues_with_the_rest() {
+        let nic = Fake {
+            fails: Some("flow-type udp6"),
+            ..Fake::default()
+        };
+        let plan = plan(&caps(true), &cfg(Steering::Auto), PORT);
+
+        let report = apply_with(&nic, &plan);
+
+        assert_eq!(
+            report.applied,
+            vec![
+                Action::NtupleRule {
+                    iface: "eth0".to_owned(),
+                    flow_type: "udp4",
+                    port: PORT,
+                    queue: 7,
+                },
+                Action::IrqAffinity {
+                    iface: "eth0".to_owned(),
+                    queue: 7,
+                    cpu: 31,
+                },
+                Action::ThreadedNapi {
+                    iface: "eth0".to_owned(),
+                },
+            ]
+        );
+        let (refused, said) = report.failed.first().expect("the udp6 rule");
+        assert_eq!(
+            *refused,
+            Action::NtupleRule {
+                iface: "eth0".to_owned(),
+                flow_type: "udp6",
+                port: PORT,
+                queue: 7,
+            }
+        );
+        assert!(said.contains("device refused"), "{said}");
+        assert_eq!(report.failed.len(), 1);
+
+        // The interrupt moved and threaded NAPI came on, which is the point of carrying on.
+        assert_eq!(
+            nic.read(Path::new("/proc/irq/131/smp_affinity_list")).ok(),
+            Some("31".to_owned())
+        );
+        assert_eq!(
+            nic.read(Path::new("/sys/class/net/eth0/threaded")).ok(),
+            Some("1".to_owned())
+        );
+    }
+
+    /// Undo is what keeps a host from being left tuned by a sidecar that has stopped: every
+    /// applied action goes back to what it displaced, newest first.
+    #[test]
+    fn undo_puts_back_what_the_plan_displaced() {
+        let nic = Fake::default();
+        let report = apply_with(&nic, &plan(&caps(true), &cfg(Steering::Auto), PORT));
+
+        undo_with(&nic, &report);
+
+        assert_eq!(
+            nic.read(Path::new("/proc/irq/131/smp_affinity_list")).ok(),
+            Some("0\n".to_owned())
+        );
+        assert_eq!(
+            nic.read(Path::new("/sys/class/net/eth0/threaded")).ok(),
+            Some("0\n".to_owned())
+        );
+        assert!(
+            nic.calls()
+                .iter()
+                .any(|call| call == "ethtool -N eth0 delete 1023"),
+            "{:?}",
+            nic.calls()
+        );
+    }
+
+    /// The shipped default (D30), all the way down: an operator who never set `steering` has a
+    /// host nothing here has spoken to. Not one `ethtool` run, not one file written.
+    #[test]
+    fn steering_off_asks_the_host_for_nothing() {
+        let nic = Fake::default();
+
+        let report = enable_with(&nic, &cfg(Steering::Off), PORT);
+
+        assert!(nic.calls().is_empty(), "{:?}", nic.calls());
+        assert!(report.applied.is_empty());
+        assert!(report.failed.is_empty());
     }
 
     /// The three questions a plan is computed from, asked of one card and answered from its own
