@@ -499,6 +499,11 @@ mod tests {
         let published = cluster.published(0);
         assert_eq!(published.len(), 1, "{published:?}");
         assert_eq!(published[0].payload, missing);
-        assert!(cluster.stats(0).repair_requests(Outcome::Completed) > 0);
+        assert!(
+            cluster
+                .stats(0)
+                .repair_requests(Form::Column, Outcome::Completed)
+                > 0
+        );
     }
 }
