@@ -15,6 +15,9 @@
 //! `io_thread.steering`.
 
 use std::fmt;
+use std::io;
+use std::path::Path;
+use std::process::Command;
 
 use overlay_core::config::{IoThread, Steering};
 
@@ -142,6 +145,54 @@ impl fmt::Display for Action {
     }
 }
 
+/// Whether the card can steer a flow to a queue itself, from `ethtool -k`.
+///
+/// "On" is not the question. Cards that have the filter ship with it off, and `ethtool -K` turns
+/// it on; what says a card has no filter at all is the `[fixed]` marker beside an `off`.
+fn supports_ntuple(features: &str) -> bool {
+    features.lines().any(|line| {
+        let Some((key, state)) = line.split_once(':') else {
+            return false;
+        };
+        if !matches!(key.trim(), "ntuple-filters" | "ntuple") {
+            return false;
+        }
+        let state = state.trim();
+        state.starts_with("on") || !state.contains("[fixed]")
+    })
+}
+
+/// How many receive queues the card is running with, from `ethtool -l`.
+///
+/// The current settings and not the card's maximums, because the queue the overlay takes has to
+/// exist now. `Combined` where the card pairs its receive and transmit rings, `RX` where it
+/// keeps them apart; `n/a` and `0` are the card saying it has none of that kind.
+fn rx_queues(channels: &str) -> Option<u32> {
+    let current = channels.split_once("Current hardware settings:")?.1;
+    let count = |name: &str| {
+        current
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(key, _)| key.trim() == name)
+            .and_then(|(_, value)| value.trim().parse::<u32>().ok())
+            .filter(|queues| *queues > 0)
+    };
+    count("Combined").or_else(|| count("RX"))
+}
+
+/// The interface carrying the default route, from `/proc/net/route`.
+///
+/// §11 gives a host one interface and the beacon node already uses it, so there is no interface
+/// to configure anywhere: the overlay steers whichever one the packets are coming in on.
+fn default_iface(routes: &str) -> Option<String> {
+    routes.lines().skip(1).find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let iface = fields.next()?;
+        let destination = fields.next()?;
+        (destination == "00000000").then(|| iface.to_owned())
+    })
+}
+
 /// What `cfg` asks for on a card with these capabilities, in the order it should be applied.
 ///
 /// Pure, so the dry run and the startup path compute the same list and an operator who read one
@@ -192,11 +243,151 @@ pub fn plan(caps: &NicCaps, cfg: &IoThread, port: u16) -> Vec<Action> {
     plan
 }
 
+/// What this module asks of the host it is running on.
+///
+/// Behind a trait for the same reason T-092's kernel calls are: no test can arrange a card with
+/// no ntuple support, a `/proc/irq` entry that refuses a write, or the privileges any of it
+/// needs. [`Host`] is the one implementation that reaches a real NIC.
+pub(crate) trait Nic {
+    /// `ethtool <args>`, with its own output as the error where it exits non-zero. `ethtool`
+    /// rather than the ioctls behind it: the same command an operator runs by hand, so a plan
+    /// that failed can be reproduced from the log line that reports it.
+    fn ethtool(&self, args: &[&str]) -> io::Result<String>;
+    /// The contents of a `/sys` or `/proc` file.
+    fn read(&self, path: &Path) -> io::Result<String>;
+}
+
+/// The NIC this host is running on.
+pub(crate) struct Host;
+
+impl Nic for Host {
+    fn ethtool(&self, args: &[&str]) -> io::Result<String> {
+        let done = Command::new("ethtool").args(args).output()?;
+        if !done.status.success() {
+            let said = String::from_utf8_lossy(&done.stderr);
+            return Err(io::Error::other(format!(
+                "ethtool {}: {}",
+                args.join(" "),
+                said.trim()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&done.stdout).into_owned())
+    }
+
+    fn read(&self, path: &Path) -> io::Result<String> {
+        std::fs::read_to_string(path)
+    }
+}
+
+/// What the card behind the default route can be asked to do.
+///
+/// Three `ethtool` runs at startup and never again: the capabilities decide the plan and none of
+/// them change under a running process.
+pub fn detect() -> io::Result<NicCaps> {
+    detect_with(&Host)
+}
+
+fn detect_with(nic: &dyn Nic) -> io::Result<NicCaps> {
+    let routes = nic.read(Path::new("/proc/net/route"))?;
+    let iface = default_iface(&routes)
+        .ok_or_else(|| io::Error::other("no default route to name an interface"))?;
+    let features = nic.ethtool(&["-k", &iface])?;
+    let channels = nic.ethtool(&["-l", &iface])?;
+    // A card that answers the per-queue form at all can take a per-queue coalesce setting; one
+    // that cannot prints an error and exits non-zero, which is the whole of the question §11
+    // asks before it touches coalescing at all.
+    let per_queue_coalesce = nic
+        .ethtool(&[
+            "--per-queue",
+            &iface,
+            "queue_mask",
+            "0x1",
+            "--show-coalesce",
+        ])
+        .is_ok();
+    Ok(NicCaps {
+        rx_queues: rx_queues(&channels).unwrap_or_default(),
+        ntuple: supports_ntuple(&features),
+        per_queue_coalesce,
+        iface,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use overlay_core::config::{IoThread, Steering};
 
     use super::*;
+
+    /// A host whose `ethtool` and `/proc` answer whatever the test needs, recording what it was
+    /// asked in the order it was asked.
+    struct Fake {
+        /// `ethtool -k` output.
+        features: &'static str,
+        /// `ethtool -l` output.
+        channels: &'static str,
+        /// Whether `ethtool --per-queue` is answered at all.
+        per_queue: bool,
+        /// The default route table, in `/proc/net/route`'s columns.
+        routes: &'static str,
+    }
+
+    /// A route table with one default route, which is what §11's single-interface host has.
+    const ROUTES: &str = concat!(
+        "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n",
+        "eth0\t0000FEA9\t00000000\t0001\t0\t0\t1000\t0000FFFF\t0\t0\t0\n",
+        "eth0\t00000000\t0102A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n",
+    );
+
+    impl Default for Fake {
+        fn default() -> Self {
+            Self {
+                features: include_str!("steering/fixtures/mlx5-connectx5-features.txt"),
+                channels: include_str!("steering/fixtures/mlx5-connectx5-channels.txt"),
+                per_queue: false,
+                routes: ROUTES,
+            }
+        }
+    }
+
+    impl Nic for Fake {
+        fn ethtool(&self, args: &[&str]) -> io::Result<String> {
+            match args.first().copied() {
+                Some("-k") => Ok(self.features.to_owned()),
+                Some("-l") => Ok(self.channels.to_owned()),
+                Some("--per-queue") if !self.per_queue => {
+                    Err(io::Error::other("Cannot get device per queue parameters"))
+                }
+                _ => Ok(String::new()),
+            }
+        }
+
+        fn read(&self, path: &Path) -> io::Result<String> {
+            if path == Path::new("/proc/net/route") {
+                return Ok(self.routes.to_owned());
+            }
+            Err(io::Error::other(format!("no {}", path.display())))
+        }
+    }
+
+    /// The three questions a plan is computed from, asked of one card and answered from its own
+    /// `ethtool` output.
+    #[test]
+    fn detect_reads_the_card_behind_the_default_route() {
+        let nic = Fake::default();
+
+        let caps = detect_with(&nic).expect("the fixture card");
+
+        assert_eq!(
+            caps,
+            NicCaps {
+                iface: "eth0".to_owned(),
+                rx_queues: 16,
+                ntuple: true,
+                per_queue_coalesce: false,
+            }
+        );
+    }
 
     /// The port the overlay listens on everywhere in the shipped configuration. Nothing in
     /// `plan` reads it apart from putting it in the rule, so one value is enough.
