@@ -200,8 +200,9 @@ mod tests {
 
     use overlay_core::backoff::Backoff;
     use overlay_core::events::Source;
-    use overlay_core::time::FakeClock;
-    use tokio::sync::mpsc;
+    use overlay_core::time::{Clock, FakeClock};
+    use overlay_core::topic::Topic;
+    use tokio::sync::{mpsc, watch};
     use tokio::time::timeout;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -246,6 +247,82 @@ mod tests {
     /// A block root of one repeated byte, in the `0x`-prefixed form the beacon API reports.
     fn root(byte: u8) -> String {
         format!("0x{}", format!("{byte:02x}").repeat(32))
+    }
+
+    /// The frame Lighthouse writes when gossip verification accepts a block, which is after the
+    /// proposer-signature check and after the duplicate check.
+    fn gossip_frame(slot: u64, root: &str) -> String {
+        format!("event: block_gossip\ndata: {{\"slot\":\"{slot}\",\"block\":\"{root}\"}}\n\n")
+    }
+
+    /// The frame it writes when a data column sidecar passes KZG verification, whichever of the
+    /// four sources it came from.
+    fn column_frame(slot: u64, index: u8, root: &str) -> String {
+        format!(
+            "event: data_column_sidecar\ndata: {{\"block_root\":\"{root}\",\"index\":\"{index}\",\"slot\":\"{slot}\"}}\n\n"
+        )
+    }
+
+    /// A beacon node subscribed to the column subnets `indices` names.
+    fn subscribed(indices: &[u8]) -> SubscriptionSets {
+        let advertised = indices
+            .iter()
+            .map(|index| {
+                Topic::parse(&format!(
+                    "/eth2/6a95a1a9/data_column_sidecar_{index}/ssz_snappy"
+                ))
+                .expect("a topic in the only shape the parser takes")
+            })
+            .collect();
+        SubscriptionSets {
+            advertised,
+            ..SubscriptionSets::default()
+        }
+    }
+
+    /// A tracker over `indices`, with the two watches a real one reads.
+    fn tracking(indices: &[u8]) -> SharedCustody {
+        SharedCustody::new(
+            spec_watch().1,
+            watch::Sender::new(subscribed(indices)).subscribe(),
+            Arc::new(()),
+        )
+    }
+
+    /// Feeds `stream` through the reassembler and the dispatch, as one connection would.
+    fn consume(stream: &str, custody: &SharedCustody, clock: &FakeClock) {
+        let (_spec, spec) = spec_watch();
+        let arrivals = Arc::new(Arrivals::new(Arc::new(clock.clone()), spec));
+        let stats: Arc<dyn BlockEventStats> = Arc::new(());
+        for event in Frames::default().feed(stream.as_bytes()) {
+            apply(&event, &arrivals, custody, clock, &stats);
+        }
+    }
+
+    /// The two events the tracker is built on. `block_gossip` opens the entry and fixes what the
+    /// beacon node is owed; `data_column_sidecar` takes a column back out of it.
+    #[test]
+    fn block_gossip_and_data_column_events_reach_the_tracker() {
+        let clock = FakeClock::new();
+        let custody = tracking(&[0, 1]);
+
+        consume(
+            &format!(
+                "{}{}",
+                gossip_frame(9, &root(0xaa)),
+                column_frame(9, 1, &root(0xaa))
+            ),
+            &custody,
+            &clock,
+        );
+
+        let none = custody.column_set([]);
+        let gaps = custody.gaps(Duration::ZERO, clock.now(), &none);
+        assert_eq!(
+            gaps.first().map(|gap| gap.missing.clone()),
+            Some(vec![0]),
+            "{gaps:?}"
+        );
     }
 
     #[test]
