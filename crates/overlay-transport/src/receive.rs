@@ -3281,6 +3281,34 @@ mod tests {
         );
     }
 
+    /// MD-06's rule, as a test that fails the moment a receive path writes the tracker again.
+    /// What this host is owed comes from its own beacon node and from nowhere else, so a column
+    /// a peer delivers over the overlay leaves the gap exactly as the beacon node left it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tracker_is_written_only_by_event_stream_facts() {
+        let column = topic("data_column_sidecar_5");
+        let payload = Bytes::from(incompressible(4096));
+        let (cluster, peer) = peer_of(subscriptions(&[&column], &[]), &[(0, &column)]).await;
+        // Standing in for the beacon node's event stream: it has accepted a block and has said
+        // nothing about column 5 of it.
+        let custody = cluster.custody(1);
+        custody.on_block(7, [0x5b; 32], Instant::now());
+
+        send(&peer, &[whole(0, &column, &payload)]).await;
+
+        eventually("the column to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        let none = custody.column_set([]);
+        let gaps = custody.gaps(Duration::ZERO, Instant::now(), &none);
+        assert_eq!(
+            gaps.first().map(|gap| gap.missing.clone()),
+            Some(vec![5]),
+            "a peer's payload cleared what only the beacon node may clear"
+        );
+    }
+
     /// A message that arrived whole is not kept for repair, which is where MD-06 left T-081's
     /// gap. Chunk repair never asks such a host, because it sent nobody a chunk and is nobody's
     /// candidate (D23), and column repair, the one thing that would have asked it, is T-087's.
