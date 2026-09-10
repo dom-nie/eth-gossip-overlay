@@ -780,4 +780,32 @@ mod tests {
             [Decision::AskColumn(request)] if request.index == 9
         ));
     }
+
+    /// The two paths share one peer's streams because the peer has one set of them. A chunk
+    /// repair already outstanding to a host costs that host one of the three column requests it
+    /// would otherwise have taken.
+    #[test]
+    fn a_chunk_repair_outstanding_costs_the_same_peer_a_column_slot() {
+        let clock = FakeClock::new();
+        let reassembler = collecting(4, &[(0, "near", true)], clock.now());
+        let candidates = [(host("near"), Duration::from_millis(5))];
+        let gaps = [gap(&[1, 2, 3, 4, 5], 0)];
+        let none = BitSet::new(128);
+        let mut scheduler = Scheduler::default();
+        clock.advance(DEADLINE);
+
+        assert!(matches!(
+            scheduler
+                .tick(&reassembler, DEADLINE, reachable, clock.now())
+                .as_slice(),
+            [Decision::Ask(request)] if request.peer == host("near")
+        ));
+        let decided = scheduler.tick_columns(&gaps, THRESHOLD, &none, &candidates, clock.now());
+
+        let asks = decided
+            .into_iter()
+            .filter(|decision| matches!(decision, Decision::AskColumn(_)))
+            .count();
+        assert_eq!(asks, MAX_REPAIR_IN_FLIGHT_PER_PEER - 1);
+    }
 }
