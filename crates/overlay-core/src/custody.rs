@@ -369,4 +369,18 @@ mod tests {
         assert_eq!(gap.missing, vec![0, 7]);
         assert_eq!(gap.have_count, 1);
     }
+
+    /// The deadline is what makes repair a tail backstop rather than a second delivery path: a
+    /// column still on its way is one no peer should be asked for yet (§5.6, D24).
+    #[test]
+    fn missing_past_deadline_lists_gaps_only_after_deadline() {
+        let clock = FakeClock::new();
+        let tracker = tracking(&clock, &[0, 3, 7]);
+
+        clock.advance(DEADLINE - Duration::from_millis(1));
+        assert_eq!(gaps(&tracker, &clock), Vec::new());
+
+        clock.advance(Duration::from_millis(1));
+        assert_eq!(gaps(&tracker, &clock).len(), 1);
+    }
 }
