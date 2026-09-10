@@ -978,4 +978,67 @@ mod tests {
             })
         );
     }
+
+    /// The one test that needs a real card and the privileges to change it. Everything above is
+    /// a fake host answering; this is the only place `ethtool`, `/proc/interrupts` and `/sys`
+    /// meet a kernel, and the only thing that can tell whether the naming [`irq_for`] follows
+    /// is the naming a driver actually uses.
+    #[cfg(target_os = "linux")]
+    mod privileged {
+        use super::*;
+
+        /// The reserved core is core 0 here rather than §11's 31: a runner has whatever cores
+        /// it has, and this test is about the rule and not about which core took it.
+        fn runner() -> IoThread {
+            IoThread {
+                pin_cpu: Some(0),
+                steering: Steering::Auto,
+                ..IoThread::default()
+            }
+        }
+
+        /// The flow rules the card is holding, or nothing where it holds none.
+        fn rules(iface: &str) -> String {
+            Host.ethtool(&["-n", iface]).unwrap_or_default()
+        }
+
+        #[test]
+        #[ignore = "needs CAP_NET_ADMIN and a real NIC; set ETH_GOSSIP_OVERLAY_TEST_STEERING=1"]
+        fn integration_apply_and_undo_on_a_privileged_runner() {
+            if std::env::var_os("ETH_GOSSIP_OVERLAY_TEST_STEERING").is_none() {
+                eprintln!("skipped: ETH_GOSSIP_OVERLAY_TEST_STEERING is not set");
+                return;
+            }
+            let caps = detect().expect("the card behind the default route");
+            let plan = plan(&caps, &runner(), PORT);
+            assert!(!plan.is_empty(), "nothing to do to {caps:?}");
+
+            let report = apply(&plan);
+
+            assert!(report.failed.is_empty(), "{:?}", report.failed);
+            if caps.ntuple {
+                assert!(
+                    rules(&caps.iface).contains(&PORT.to_string()),
+                    "the card took the rule but does not list it"
+                );
+            }
+
+            undo(&report);
+
+            assert!(
+                !rules(&caps.iface).contains(&PORT.to_string()),
+                "the rule outlived the process that made it"
+            );
+        }
+    }
+
+    /// The name stays in the list on every platform, and off Linux it says why it is not an
+    /// answer rather than passing silently.
+    #[cfg(not(target_os = "linux"))]
+    mod privileged {
+        #[test]
+        fn integration_apply_and_undo_on_a_privileged_runner() {
+            eprintln!("skipped: ethtool and /proc/interrupts are Linux only");
+        }
+    }
 }
