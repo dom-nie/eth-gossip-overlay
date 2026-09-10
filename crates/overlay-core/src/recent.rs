@@ -320,10 +320,12 @@ impl SharedRecentLarge {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
 
     use bytes::Bytes;
 
+    use crate::custody::ColumnStats;
     use crate::header::{Header, HeaderDecoder};
     use crate::msgid::MessageId;
     use crate::recent::{
@@ -615,18 +617,39 @@ mod tests {
     /// The propagation vector MD-06 named, closed at the one place it opens. A column's root is
     /// a claim in a header nobody verified, so a second payload claiming a column this host
     /// already holds must not take the key from the first: whoever holds it answers every peer
-    /// that asks for that column.
+    /// that asks for that column. Two payloads claiming one column is nothing an honest fleet
+    /// produces, so the refusal is counted as well as made.
     #[test]
-    fn a_second_claim_on_a_column_does_not_take_it_from_the_first() {
+    fn index_column_refuses_to_replace_a_live_mapping_with_a_different_id() {
         let clock = FakeClock::new();
-        let mut recent = store(1024);
+        let conflicts = Arc::new(Conflicts::default());
+        let recent = SharedRecentLarge::new(store(1024)).with_column_stats(conflicts.clone());
         let root = [7; 32];
-        recent.insert(id(1), topic(), payload(1, 200), clock.now());
-        recent.insert(id(2), topic(), payload(2, 200), clock.now());
+        recent.insert(id(1), topic(), payload(1, 200), None, clock.now());
+        recent.insert(id(2), topic(), payload(2, 200), None, clock.now());
 
         recent.index_column(root, 42, id(1));
         recent.index_column(root, 42, id(2));
 
         assert_eq!(recent.get_by_column(root, 42), Some(id(1)));
+        assert_eq!(conflicts.count(), 1);
+    }
+
+    /// Counts the refusals, which is `column_index_conflict_total` (§12).
+    #[derive(Default)]
+    struct Conflicts(AtomicU64);
+
+    impl Conflicts {
+        fn count(&self) -> u64 {
+            self.0.load(Ordering::Relaxed)
+        }
+    }
+
+    impl ColumnStats for Conflicts {
+        fn topic_mismatch(&self) {}
+
+        fn index_conflict(&self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
