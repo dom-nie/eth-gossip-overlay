@@ -275,3 +275,76 @@ impl SharedCustody {
             .unwrap_or_else(PoisonError::into_inner)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::time::{Clock, FakeClock};
+    use crate::topic::Topic;
+
+    const DEADLINE: Duration = Duration::from_millis(250);
+
+    /// The block every test here tracks.
+    const ROOT: [u8; 32] = [7; 32];
+
+    /// What `overlay_bn::spec::MAINNET` holds, written out here because this crate does not
+    /// carry the beacon node's compiled defaults and a tracker has to be sized by something.
+    fn mainnet() -> SpecSnapshot {
+        SpecSnapshot {
+            data_column_sidecar_subnet_count: 128,
+            number_of_columns: 128,
+            number_of_custody_groups: 128,
+            custody_requirement: 4,
+            max_payload_size: 10_485_760,
+            seconds_per_slot: 12,
+            slots_per_epoch: 32,
+        }
+    }
+
+    /// A beacon node subscribed to the column subnets `indices` names and to nothing else.
+    fn subscribed(indices: &[u16]) -> SubscriptionSets {
+        let advertised = indices
+            .iter()
+            .map(|index| {
+                Topic::parse(&format!(
+                    "/eth2/6a95a1a9/data_column_sidecar_{index}/ssz_snappy"
+                ))
+                .expect("a topic in the only shape the parser takes")
+            })
+            .collect();
+        SubscriptionSets {
+            advertised,
+            ..SubscriptionSets::default()
+        }
+    }
+
+    /// A tracker at mainnet with a block for slot 1 seen now, expecting `indices`.
+    fn tracking(clock: &FakeClock, indices: &[u16]) -> CustodyTracker {
+        let mut tracker = CustodyTracker::new(&mainnet());
+        let expected = tracker.expected_columns(&subscribed(indices));
+        tracker.on_block(1, ROOT, expected, clock.now());
+        tracker
+    }
+
+    fn gaps(tracker: &CustodyTracker, clock: &FakeClock) -> Vec<ColumnGap> {
+        tracker.missing_past_deadline(DEADLINE, clock.now())
+    }
+
+    /// Expected columns are the beacon node's own column subnets and nothing else (T-014, D06):
+    /// a subnet it does not subscribe to is a column no repair should ever ask for.
+    #[test]
+    fn on_block_sets_expected_columns_from_subscriptions() {
+        let clock = FakeClock::new();
+        let tracker = tracking(&clock, &[0, 3, 7]);
+        clock.advance(DEADLINE);
+
+        assert_eq!(
+            gaps(&tracker, &clock),
+            vec![ColumnGap {
+                block_root: ROOT,
+                missing: vec![0, 3, 7],
+                have_count: 0,
+            }]
+        );
+    }
+}
