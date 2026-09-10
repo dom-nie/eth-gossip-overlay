@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
+use crate::custody::{BitSet, ColumnGap};
 use crate::msgid::MessageId;
 use crate::reassemble::{Incomplete, Reassembler};
 use crate::roster::Hostname;
@@ -29,13 +30,17 @@ pub const REPAIR_ATTEMPT_MIN: Duration = Duration::from_millis(100);
 /// [`REPAIR_TOTAL_BUDGET`] (D24).
 pub const REPAIR_ATTEMPT_MAX: Duration = Duration::from_millis(500);
 
-/// How many repair requests one host has outstanding to one peer at once.
+/// How many repair requests one host has outstanding to one peer at once, chunks and columns
+/// together (T-082, T-087).
 ///
 /// `overlay_transport::receive::MAX_REPAIR_STREAMS_PER_PEER` is four and HELLO's control stream
 /// permanently holds one of them, so a conforming peer answers three at a time and a fourth is
-/// dropped. Several messages can be short of chunks the same peer sent, so without this a host
-/// would open a stream per message against it; a peer at its cap is passed over for the tick and
-/// the next candidate takes the work. `overlay-transport` holds the drift test.
+/// dropped. Every column request goes to the same lowest-round-trip peer first, unlike a chunk
+/// repair, whose candidates are whoever sent that message a chunk, so without this a host short
+/// of a slot's columns would open a stream per column against one peer. The two paths count
+/// against one budget because the peer's streams are one budget; a peer at its cap is skipped
+/// for this tick and the next candidate takes the work, which is what keeps the rest of the
+/// region busy instead of idle. `overlay-transport` holds the drift test.
 pub const MAX_REPAIR_IN_FLIGHT_PER_PEER: usize = 3;
 
 /// How long a message is repaired for, measured from its deadline. Past it the message is given
@@ -88,13 +93,34 @@ pub struct Request {
     pub timeout: Duration,
 }
 
-/// What one tick decided about one message.
+/// How a column is named where no message id exists: the block it belongs to and its index
+/// (D23, T-087).
+pub type ColumnKey = ([u8; 32], u16);
+
+/// One column the scheduler decided to ask a peer for by identity (T-087).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ColumnRequest {
+    /// The block the column belongs to.
+    pub block_root: [u8; 32],
+    /// The column index, which is also its subnet.
+    pub index: u16,
+    /// Who to ask: an in-region live peer, by round trip.
+    pub peer: Hostname,
+    /// How long the answer is waited for, from [`attempt_timeout`].
+    pub timeout: Duration,
+}
+
+/// What one tick decided about one message or one column.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Decision {
     /// Open a stream to the peer and ask it for these indices.
     Ask(Request),
+    /// Open a stream to the peer and ask it for this column by identity (T-087).
+    AskColumn(ColumnRequest),
     /// Stop asking about this message and count [`Outcome::GaveUp`].
     GaveUp(MessageId),
+    /// Stop asking about this column and count [`Outcome::GaveUp`].
+    GaveUpColumn(ColumnKey),
 }
 
 /// Which indices to ask for, given a split of `k` data chunks, the `held` chunks of any kind
@@ -171,6 +197,7 @@ where
 #[derive(Default)]
 pub struct Scheduler {
     messages: HashMap<MessageId, Repair>,
+    columns: HashMap<ColumnKey, Repair>,
 }
 
 /// One message's repair: when it became due, who has been asked, and whether an answer is still
@@ -248,7 +275,12 @@ impl Scheduler {
     /// A repair that is asking has the peer it is asking at the end of its `tried` list.
     fn outstanding(&self) -> HashMap<Hostname, usize> {
         let mut counts: HashMap<Hostname, usize> = HashMap::new();
-        for repair in self.messages.values().filter(|repair| repair.asking) {
+        for repair in self
+            .messages
+            .values()
+            .chain(self.columns.values())
+            .filter(|repair| repair.asking)
+        {
             if let Some(peer) = repair.tried.last() {
                 *counts.entry(peer.clone()).or_default() += 1;
             }
@@ -262,6 +294,88 @@ impl Scheduler {
         if let Some(repair) = self.messages.get_mut(msg_id) {
             repair.asking = false;
         }
+    }
+
+    /// What to do now about the columns of every block past its deadline (T-087).
+    ///
+    /// `gaps` arrive from the custody tracker already in priority order, so this walks each
+    /// one's `missing` from the front and stops at `threshold - have_count`: past that the
+    /// beacon node can reconstruct the rest and another request buys nothing (§2).
+    ///
+    /// A column the reassembler already holds chunks of is left to [`Scheduler::tick`] above:
+    /// the chunk path knows which indices are missing and which peers sent the rest, and asking
+    /// for the whole column by identity would fetch what this host already has.
+    pub fn tick_columns(
+        &mut self,
+        gaps: &[ColumnGap],
+        threshold: usize,
+        in_flight: &BitSet,
+        candidates: &[(Hostname, Duration)],
+        now: Instant,
+    ) -> Vec<Decision> {
+        let live: HashSet<ColumnKey> = gaps
+            .iter()
+            .flat_map(|gap| gap.missing.iter().map(|index| (gap.block_root, *index)))
+            .collect();
+        self.columns.retain(|key, _| live.contains(key));
+        let wanted = gaps.iter().flat_map(|gap| {
+            let budget = threshold.saturating_sub(gap.have_count);
+            gap.missing
+                .iter()
+                .take(budget)
+                .map(|index| (gap.block_root, *index))
+        });
+        let mut outstanding = self.outstanding();
+        let mut decided = Vec::new();
+        for key in wanted.filter(|(_, index)| !in_flight.contains(*index)) {
+            if let Some(decision) = self.decide_column(key, candidates, &mut outstanding, now) {
+                decided.push(decision);
+            }
+        }
+        decided
+    }
+
+    /// Records that the request for `key` has been answered, one way or another, so the next
+    /// tick may ask the next candidate.
+    pub fn answered_column(&mut self, key: &ColumnKey) {
+        if let Some(repair) = self.columns.get_mut(key) {
+            repair.asking = false;
+        }
+    }
+
+    fn decide_column(
+        &mut self,
+        key: ColumnKey,
+        candidates: &[(Hostname, Duration)],
+        outstanding: &mut HashMap<Hostname, usize>,
+        now: Instant,
+    ) -> Option<Decision> {
+        let repair = self.columns.entry(key).or_insert_with(|| Repair::new(now));
+        if repair.asking || repair.gave_up {
+            return None;
+        }
+        let untried: Vec<&(Hostname, Duration)> = candidates
+            .iter()
+            .filter(|(peer, _)| !repair.tried.contains(peer))
+            .collect();
+        if repair.exhausted(untried.is_empty(), now) {
+            return Some(Decision::GaveUpColumn(key));
+        }
+        // A peer with three requests outstanding would have a fourth stream dropped, so it is
+        // passed over and the next candidate takes the column; nothing is marked tried, because
+        // this peer has not been asked and is still owed its turn.
+        let (peer, rtt) = untried
+            .into_iter()
+            .find(|(peer, _)| !at_cap(outstanding, peer))?;
+        repair.asking = true;
+        repair.tried.push(peer.clone());
+        *outstanding.entry(peer.clone()).or_default() += 1;
+        Some(Decision::AskColumn(ColumnRequest {
+            block_root: key.0,
+            index: key.1,
+            peer: peer.clone(),
+            timeout: attempt_timeout(*rtt),
+        }))
     }
 
     fn decide<R>(
@@ -503,6 +617,7 @@ mod tests {
                 match decision {
                     Decision::Ask(request) => asked.push(request.peer),
                     Decision::GaveUp(_) => asked.push(host("gave up")),
+                    other => panic!("the chunk path decided {other:?}"),
                 }
             }
             scheduler.answered(&MessageId([9; 20]));
