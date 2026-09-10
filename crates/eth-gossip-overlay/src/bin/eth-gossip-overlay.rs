@@ -58,6 +58,22 @@ enum Command {
         #[arg(long, default_value = "/etc/eth-gossip-overlay/seed")]
         out: PathBuf,
     },
+    /// Look at what NIC queue steering would do to this host.
+    Steering {
+        /// Which part of it.
+        #[command(subcommand)]
+        command: SteeringCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SteeringCommand {
+    /// Print the changes `overlay.io_thread.steering` would make to this host's NIC, and make
+    /// none of them.
+    ///
+    /// The way to see what `auto` decides about a card before a start acts on it. Reads the
+    /// card with `ethtool`, so it needs `ethtool` on the path but no privileges.
+    Plan,
 }
 
 fn main() -> ExitCode {
@@ -91,6 +107,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::GenSeed { out } => {
             create_secret_file(&out)?;
         }
+        Command::Steering {
+            command: SteeringCommand::Plan,
+        } => print!("{}", app::steering_plan(&cli.config)?),
     }
     Ok(())
 }

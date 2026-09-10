@@ -21,6 +21,7 @@
 //! closing, so the join is a courtesy and the deadline is what makes it one.
 
 use std::collections::BTreeMap;
+use std::fmt::Write;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
@@ -40,7 +41,7 @@ use overlay_bn::rpc::ByRootCache;
 use overlay_bn::spec::spec_watch;
 use overlay_core::backoff::Backoff;
 use overlay_core::budget::{self, FanoutBudget, MemoryBudget, SendLaneBounds};
-use overlay_core::config::Config;
+use overlay_core::config::{Config, Steering};
 use overlay_core::custody::SharedCustody;
 use overlay_core::events::Arrivals;
 use overlay_core::identity::{Seeds, derive_tls_keypair};
@@ -63,6 +64,7 @@ use overlay_transport::repair;
 use overlay_transport::sender::{
     self, LARGE_LANE_BYTES, LARGE_QUEUED_BYTES_MAX, LargeLedger, SMALL_LANE_FRAMES,
 };
+use overlay_transport::steering;
 use overlay_transport::subs;
 use overlay_transport::tls::{self, PinTable};
 use tokio::sync::{mpsc, watch};
@@ -178,6 +180,41 @@ impl Identity {
             node_key,
         })
     }
+}
+
+/// What the steering dry run prints: the changes `overlay.io_thread.steering` would make to
+/// this host's NIC, and none of them made.
+///
+/// The one way to see what `auto` decides about a card before a start acts on it (§11). With
+/// `steering: off`, the shipped default (D30), it says so and asks the NIC nothing at all.
+pub fn steering_plan(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let cfg = Config::load(path)?;
+    let io = &cfg.overlay.io_thread;
+    if io.steering == Steering::Off {
+        return Ok("overlay.io_thread.steering is off, so there is nothing to do\n".to_owned());
+    }
+    let caps = steering::detect()?;
+    let plan = steering::plan(&caps, io, cfg.overlay.listen.port());
+    let mut out = format!(
+        "{}: {} receive queues, ntuple filters {}, per-queue coalescing {}\n\n",
+        caps.iface,
+        caps.rx_queues,
+        yes_no(caps.ntuple),
+        yes_no(caps.per_queue_coalesce),
+    );
+    if plan.is_empty() {
+        out.push_str("nothing this configuration can ask of this card\n");
+    }
+    for action in &plan {
+        let _ = writeln!(out, "{action}");
+    }
+    Ok(out)
+}
+
+/// How the plan's first line renders a capability, since `true` and `false` are not what an
+/// operator reading a card's report is looking for.
+fn yes_no(has: bool) -> &'static str {
+    if has { "yes" } else { "no" }
 }
 
 /// What `check-config` prints: the identity a start would run under and the memory budget it
