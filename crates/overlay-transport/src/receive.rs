@@ -2529,6 +2529,7 @@ mod tests {
                 custody: SharedCustody::new(
                     watch::Sender::new(SpecSnapshot::default()).subscribe(),
                     watch::Sender::new(SubscriptionSets::default()).subscribe(),
+                    Arc::new(()),
                 ),
                 arrivals: Arc::new(Arrivals::new(
                     Arc::new(SystemClock),

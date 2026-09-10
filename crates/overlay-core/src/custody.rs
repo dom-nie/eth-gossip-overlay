@@ -30,6 +30,18 @@ use crate::topic::{SubscriptionSets, TopicKind};
 /// over all of them is enough.
 pub const TRACKED_BLOCKS: usize = 4;
 
+/// The counters column repair adds, all of which read zero on an honest fleet (§12). The binary
+/// implements this on its metrics; a caller that wants no series passes `()`.
+pub trait ColumnStats: Send + Sync {
+    /// A beacon node whose column subnets do not name its columns, so nothing says which columns
+    /// it wants and column repair idles.
+    fn topic_mismatch(&self);
+}
+
+impl ColumnStats for () {
+    fn topic_mismatch(&self) {}
+}
+
 /// A set of column indices.
 ///
 /// A `bool` per index rather than packed bits: at the largest `NUMBER_OF_COLUMNS` anyone runs
@@ -90,6 +102,7 @@ type BlockKey = (u64, [u8; 32]);
 pub struct CustodyTracker {
     columns: usize,
     threshold: usize,
+    conforming: bool,
     blocks: HashMap<BlockKey, Block>,
     /// The keys of `blocks` in the order they were opened, so the bound takes the oldest.
     order: VecDeque<BlockKey>,
@@ -107,6 +120,7 @@ impl CustodyTracker {
         let mut tracker = Self {
             columns: 0,
             threshold: 0,
+            conforming: false,
             blocks: HashMap::new(),
             order: VecDeque::new(),
         };
@@ -114,16 +128,36 @@ impl CustodyTracker {
         tracker
     }
 
-    /// Resizes to a new snapshot. A column count that moved makes every set the wrong shape, so
-    /// what is tracked goes with it rather than being reinterpreted under the new size.
+    /// Resizes to a new snapshot and rechecks that one column subnet is one column.
+    ///
+    /// A column count that moved makes every set the wrong shape, so what is tracked goes with
+    /// it rather than being reinterpreted under the new size.
+    ///
+    /// A snapshot where the two counts disagree makes "the subnets the beacon node subscribes
+    /// to" stop naming a set of columns, and there is nothing to guess from, so column repair
+    /// idles until a conforming snapshot arrives and says so once at error level.
     pub fn on_spec(&mut self, spec: &SpecSnapshot) {
         let columns = usize::try_from(spec.number_of_columns).unwrap_or(0);
+        self.conforming = spec.data_column_sidecar_subnet_count == spec.number_of_columns;
+        if !self.conforming {
+            tracing::error!(
+                number_of_columns = spec.number_of_columns,
+                data_column_sidecar_subnet_count = spec.data_column_sidecar_subnet_count,
+                "column repair is idle: a column subnet is not a column on this network"
+            );
+        }
         if columns != self.columns {
             self.blocks.clear();
             self.order.clear();
         }
         self.columns = columns;
         self.threshold = columns / 2;
+    }
+
+    /// Whether the last snapshot named one column per subnet, which is what makes the beacon
+    /// node's subscriptions a set of columns at all.
+    pub fn conforming(&self) -> bool {
+        self.conforming
     }
 
     /// How many columns the beacon node needs before it can reconstruct and import (§2).
@@ -189,6 +223,9 @@ impl CustodyTracker {
         now: Instant,
         in_flight: &BitSet,
     ) -> Vec<ColumnGap> {
+        if !self.conforming {
+            return Vec::new();
+        }
         let mut gaps: Vec<(BlockKey, ColumnGap)> = self
             .blocks
             .iter()
@@ -279,6 +316,7 @@ pub struct SharedCustody(Arc<Shared>);
 struct Shared {
     spec: watch::Receiver<SpecSnapshot>,
     sets: watch::Receiver<SubscriptionSets>,
+    stats: Arc<dyn ColumnStats>,
     state: Mutex<State>,
 }
 
@@ -295,15 +333,20 @@ impl SharedCustody {
     pub fn new(
         spec: watch::Receiver<SpecSnapshot>,
         sets: watch::Receiver<SubscriptionSets>,
+        stats: Arc<dyn ColumnStats>,
     ) -> Self {
         let snapshot = *spec.borrow();
         let state = State {
             spec: snapshot,
             tracker: CustodyTracker::new(&snapshot),
         };
+        if !state.tracker.conforming() {
+            stats.topic_mismatch();
+        }
         Self(Arc::new(Shared {
             spec,
             sets,
+            stats,
             state: Mutex::new(state),
         }))
     }
@@ -353,6 +396,9 @@ impl SharedCustody {
         if state.spec != snapshot {
             state.spec = snapshot;
             state.tracker.on_spec(&snapshot);
+            if !state.tracker.conforming() {
+                self.0.stats.topic_mismatch();
+            }
         }
         state
     }

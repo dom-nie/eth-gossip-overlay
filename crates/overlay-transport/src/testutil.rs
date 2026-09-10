@@ -1314,6 +1314,7 @@ impl<A: Admission> TestCluster<A> {
         let custody = SharedCustody::new(
             watch::Sender::new(mainnet_spec()).subscribe(),
             watching.clone(),
+            Arc::new(()),
         );
         let reassembler = Arc::new(Reassembler::new(ReassembleConfig {
             max_in_flight: self.in_flight,

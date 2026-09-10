@@ -48,6 +48,7 @@ use overlay_bn::publish::PublishStats;
 use overlay_bn::rpc::ByRootStats;
 use overlay_bn::rpc::proto::Protocol as ByRootProtocol;
 use overlay_core::budget::FanoutKind;
+use overlay_core::custody::ColumnStats;
 use overlay_core::lanes::LaneStats;
 use overlay_core::pubqueue::{DropReason as QueueDropReason, QueueStats};
 use overlay_core::reassemble::{Evicted, ReassembleStats};
@@ -149,6 +150,9 @@ pub const CHUNKS_RECEIVED_TOTAL: &str = "overlay_chunks_received_total";
 pub const PARITY_USED_TOTAL: &str = "overlay_parity_used_total";
 /// Repair requests this host sent, by how they ended.
 pub const REPAIR_REQUESTS_TOTAL: &str = "overlay_repair_requests_total";
+/// Spec snapshots whose column subnets do not name the network's columns, which leaves column
+/// repair with nothing to derive the expected set from (§6.4, CL-N3).
+pub const COLUMN_TOPIC_MISMATCH_TOTAL: &str = "overlay_column_topic_mismatch_total";
 
 /// By-root lookups the beacon node made over the localhost link, by whether the recent
 /// store held what it asked for (§5.8).
@@ -308,6 +312,7 @@ pub struct Metrics {
     chunks_received: IntCounter,
     parity_used: IntCounter,
     repair_requests: IntCounterVec,
+    column_topic_mismatch: IntCounter,
     by_root_requests: IntCounterVec,
     reassembly_evicted: IntCounterVec,
     relay_same_region: IntCounterVec,
@@ -533,6 +538,12 @@ impl Metrics {
             "Repair requests, by how they ended.",
             &[LABEL_OUTCOME],
         )?;
+        // Zero on every network anyone runs, which is what makes it worth an alert: past zero,
+        // the beacon node's subnets have stopped naming its columns and column repair is idle.
+        let column_topic_mismatch = b.counter(
+            COLUMN_TOPIC_MISMATCH_TOTAL,
+            "Spec snapshots whose column subnet count is not the column count.",
+        )?;
         // The ratio of the two outcomes is the number that decides whether the optional cache
         // earns the memory it costs: Lighthouse does not prefer trusted peers for a lookup, so
         // how often one lands here is what an operator has to measure (§5.8).
@@ -611,6 +622,7 @@ impl Metrics {
             chunks_received,
             parity_used,
             repair_requests,
+            column_topic_mismatch,
             by_root_requests,
             reassembly_evicted,
             relay_same_region,
@@ -670,6 +682,12 @@ impl BlockEventStats for Metrics {
     fn imported(&self, matched: bool) {
         let matched = if matched { MATCHED_YES } else { MATCHED_NO };
         self.import_events.with_label_values(&[matched]).inc();
+    }
+}
+
+impl ColumnStats for Metrics {
+    fn topic_mismatch(&self) {
+        self.column_topic_mismatch.inc();
     }
 }
 

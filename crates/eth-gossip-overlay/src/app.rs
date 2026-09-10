@@ -328,7 +328,7 @@ impl App {
         // Which columns the beacon node wants and which it has. The event stream below is the
         // only thing that writes it, which is what makes the state something no peer can
         // reach (§6.4, MD-06).
-        let custody = SharedCustody::new(spec_rx.clone(), sets_rx.clone());
+        let custody = SharedCustody::new(spec_rx.clone(), sets_rx.clone(), metrics.clone());
         let (commands, commands_rx) = mpsc::channel(COMMAND_QUEUE);
         let bn_lanes = ClassLanes::new(metrics.clone());
         let link = BnLink::spawn(
