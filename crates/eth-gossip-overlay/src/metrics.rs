@@ -52,7 +52,7 @@ use overlay_core::custody::ColumnStats;
 use overlay_core::lanes::LaneStats;
 use overlay_core::pubqueue::{DropReason as QueueDropReason, QueueStats};
 use overlay_core::reassemble::{Evicted, ReassembleStats};
-use overlay_core::repair::Outcome as RepairOutcome;
+use overlay_core::repair::{Form as RepairForm, Outcome as RepairOutcome};
 use overlay_core::roster::Hostname;
 use overlay_core::seen::SeenStats;
 use overlay_core::topic::Class;
@@ -214,6 +214,8 @@ pub const LABEL_KIND: &str = "kind";
 pub const LABEL_UNIT: &str = "unit";
 /// How a reload ended.
 pub const LABEL_OUTCOME: &str = "outcome";
+/// What a repair asked for, `chunk` or `column`.
+pub const LABEL_FORM: &str = "form";
 /// The eth2 req/resp protocol a by-root request arrived on.
 pub const LABEL_PROTOCOL: &str = "protocol";
 /// The commit the binary was built from.
@@ -549,8 +551,8 @@ impl Metrics {
         // cannot answer (§12, D24).
         let repair_requests = b.counter_vec(
             REPAIR_REQUESTS_TOTAL,
-            "Repair requests, by how they ended.",
-            &[LABEL_OUTCOME],
+            "Repair requests, by what they asked for and how they ended.",
+            &[LABEL_FORM, LABEL_OUTCOME],
         )?;
         // Zero on every network anyone runs, which is what makes it worth an alert: past zero,
         // the beacon node's subnets have stopped naming its columns and column repair is idle.
@@ -964,9 +966,9 @@ impl ReceiveStats for Metrics {
             .observe(took.as_secs_f64());
     }
 
-    fn repair_request(&self, outcome: RepairOutcome) {
+    fn repair_request(&self, form: RepairForm, outcome: RepairOutcome) {
         self.repair_requests
-            .with_label_values(&[outcome.as_str()])
+            .with_label_values(&[form.as_str(), outcome.as_str()])
             .inc();
     }
 }

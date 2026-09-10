@@ -67,7 +67,7 @@ use overlay_core::protocol::{MAX_FRAME_BYTES, features};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
 use overlay_core::reassemble::{Outcome, Reason, Reassembler};
 use overlay_core::recent::SharedRecentLarge;
-use overlay_core::repair::Outcome as RepairOutcome;
+use overlay_core::repair::{Form as RepairForm, Outcome as RepairOutcome};
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
 use overlay_core::rs::{self, Params};
 use overlay_core::seen::SharedSeenCache;
@@ -156,9 +156,10 @@ pub trait ReceiveStats: ManagerStats + TrafficStats {
     /// it was queued for the beacon node.
     fn reconstructed(&self, class: Class, took: Duration);
 
-    /// `repair_requests_total{outcome}`: one repair request and what it came to, `gave_up`
-    /// included, which is the one that stands for a request nobody was left to send (§12, D24).
-    fn repair_request(&self, outcome: RepairOutcome);
+    /// `repair_requests_total{form, outcome}`: one repair request, what it asked for and what
+    /// it came to, `gave_up` included, which is the one that stands for a request nobody was
+    /// left to send (§12, D24).
+    fn repair_request(&self, form: RepairForm, outcome: RepairOutcome);
 }
 
 impl ReceiveStats for () {
@@ -173,7 +174,7 @@ impl ReceiveStats for () {
     fn chunk_received(&self, _: &Hostname, _: ChunkFlags, _: &Chunk) {}
     fn parity_used(&self) {}
     fn reconstructed(&self, _: Class, _: Duration) {}
-    fn repair_request(&self, _: RepairOutcome) {}
+    fn repair_request(&self, _: RepairForm, _: RepairOutcome) {}
 }
 
 /// What a payload's arrival owes.

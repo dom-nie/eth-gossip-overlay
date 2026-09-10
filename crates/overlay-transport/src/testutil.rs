@@ -57,7 +57,7 @@ use overlay_core::protocol::{MAX_FRAME_BYTES, SUPPORTED_FEATURES};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
 use overlay_core::reassemble::{INCOMPLETE_TTL, MAX_IN_FLIGHT, ReassembleConfig, Reassembler};
 use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
-use overlay_core::repair::Outcome as RepairOutcome;
+use overlay_core::repair::{Form as RepairForm, Outcome as RepairOutcome};
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::seen::{SeenCache, SharedSeenCache};
 use overlay_core::spec::SpecSnapshot;
@@ -233,7 +233,7 @@ pub struct CountingStats {
     queue_depths: Mutex<HashMap<(Hostname, Class), (usize, usize)>>,
     queue_drops: Mutex<HashMap<(Hostname, Class, DropReason), u64>>,
     stale_dropped: Mutex<HashMap<StaleReason, u64>>,
-    repair_requests: Mutex<HashMap<RepairOutcome, u64>>,
+    repair_requests: Mutex<HashMap<(RepairForm, RepairOutcome), u64>>,
 }
 
 impl CountingStats {
@@ -375,12 +375,12 @@ impl CountingStats {
             .unwrap_or_default()
     }
 
-    /// `repair_requests_total{outcome}`.
-    pub fn repair_requests(&self, outcome: RepairOutcome) -> u64 {
+    /// `repair_requests_total{form, outcome}`.
+    pub fn repair_requests(&self, form: RepairForm, outcome: RepairOutcome) -> u64 {
         self.repair_requests
             .lock()
             .unwrap()
-            .get(&outcome)
+            .get(&(form, outcome))
             .copied()
             .unwrap_or_default()
     }
@@ -562,12 +562,12 @@ impl ReceiveStats for CountingStats {
             .push(took);
     }
 
-    fn repair_request(&self, outcome: RepairOutcome) {
+    fn repair_request(&self, form: RepairForm, outcome: RepairOutcome) {
         *self
             .repair_requests
             .lock()
             .unwrap()
-            .entry(outcome)
+            .entry((form, outcome))
             .or_default() += 1;
     }
 

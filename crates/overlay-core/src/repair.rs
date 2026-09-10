@@ -54,6 +54,29 @@ pub fn attempt_timeout(rtt: Duration) -> Duration {
     (4 * rtt).clamp(REPAIR_ATTEMPT_MIN, REPAIR_ATTEMPT_MAX)
 }
 
+/// What a repair asked for, as the `form` label on `repair_requests_total` (§12).
+///
+/// The two paths have different candidates, different budgets and different failure modes, and
+/// on a healthy fleet both read zero. Told apart, a fleet losing chunks and a fleet whose beacon
+/// nodes are short of columns are two different alerts.
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum Form {
+    /// Indices of a message this host is already collecting.
+    Chunk,
+    /// A whole column, named by the block it belongs to and its index.
+    Column,
+}
+
+impl Form {
+    /// The `form` label this carries (§12).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chunk => "chunk",
+            Self::Column => "column",
+        }
+    }
+}
+
 /// How one repair request ended, as the `outcome` label on `repair_requests_total` (§12).
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub enum Outcome {

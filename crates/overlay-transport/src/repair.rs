@@ -24,7 +24,7 @@ use std::time::Duration;
 use overlay_core::msgid::MessageId;
 use overlay_core::protocol::{MAX_FRAME_BYTES, features};
 use overlay_core::repair::{
-    ColumnKey, ColumnRequest, Decision, Outcome, REPAIR_TICK, Request, Scheduler,
+    ColumnKey, ColumnRequest, Decision, Form, Outcome, REPAIR_TICK, Request, Scheduler,
 };
 use overlay_core::roster::{Hostname, Region};
 use overlay_core::wire::{self, Frame, Read, RepairReq, RepairResp};
@@ -59,11 +59,11 @@ async fn run(deps: Deps, deadline: watch::Receiver<Duration>) {
         while let Some(finished) = attempts.try_join_next() {
             match finished {
                 Ok(Answered::Message(msg_id, outcome)) => {
-                    deps.stats.repair_request(outcome);
+                    deps.stats.repair_request(Form::Chunk, outcome);
                     scheduler.answered(&msg_id);
                 }
                 Ok(Answered::Column(key, outcome)) => {
-                    deps.stats.repair_request(outcome);
+                    deps.stats.repair_request(Form::Column, outcome);
                     scheduler.answered_column(&key);
                 }
                 Err(_) => continue,
@@ -97,18 +97,18 @@ async fn run(deps: Deps, deadline: watch::Receiver<Duration>) {
             match decision {
                 Decision::GaveUp(msg_id) => {
                     tracing::debug!(%msg_id, "nobody left to ask for this message");
-                    deps.stats.repair_request(Outcome::GaveUp);
+                    deps.stats.repair_request(Form::Chunk, Outcome::GaveUp);
                 }
                 Decision::GaveUpColumn((_, index)) => {
                     tracing::debug!(index, "nobody left to ask for this column");
-                    deps.stats.repair_request(Outcome::GaveUp);
+                    deps.stats.repair_request(Form::Column, Outcome::GaveUp);
                 }
                 Decision::AskColumn(request) => match view.get(&request.peer) {
                     Some(peer) => {
                         attempts.spawn(column_attempt(deps.clone(), peer.clone(), request));
                     }
                     None => {
-                        deps.stats.repair_request(Outcome::Timeout);
+                        deps.stats.repair_request(Form::Column, Outcome::Timeout);
                         scheduler.answered_column(&(request.block_root, request.index));
                     }
                 },
@@ -120,7 +120,7 @@ async fn run(deps: Deps, deadline: watch::Receiver<Duration>) {
                     // today; treating it as an attempt that answered nothing keeps the message
                     // moving to the next candidate if that ever stops being true.
                     None => {
-                        deps.stats.repair_request(Outcome::Timeout);
+                        deps.stats.repair_request(Form::Chunk, Outcome::Timeout);
                         scheduler.answered(&request.msg_id);
                     }
                 },
@@ -333,7 +333,10 @@ mod tests {
         let (cluster, _peer) = one_chunk_short(&block).await;
 
         eventually("the attempt to time out", || {
-            cluster.stats(1).repair_requests(Outcome::Timeout) > 0
+            cluster
+                .stats(1)
+                .repair_requests(Form::Chunk, Outcome::Timeout)
+                > 0
         })
         .await;
     }
@@ -377,7 +380,10 @@ mod tests {
             assert_eq!(cluster.published(node).len(), 1, "node {node}");
             assert_eq!(cluster.published(node)[0].payload, payload, "node {node}");
             assert!(
-                cluster.stats(node).repair_requests(Outcome::Completed) > 0,
+                cluster
+                    .stats(node)
+                    .repair_requests(Form::Chunk, Outcome::Completed)
+                    > 0,
                 "node {node} completed without asking anyone"
             );
         }
