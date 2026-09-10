@@ -14,6 +14,11 @@
 # syncs nothing, which is all the tests need. --ten-minutes (or MATRIX_TEN_MINUTES=1) turns on
 # the ten-minute assertion T-019 owns.
 #
+# T-087's event-stream assumption is the one test this node cannot show: a node at genesis with
+# no execution layer never accepts a block or verifies a column, so nothing reaches the stream.
+# Point LIGHTHOUSE_HTTP at a beacon node that is following the chain and set
+# MATRIX_FOLLOWING_CHAIN=1 to run it; without that it prints why it did nothing and passes.
+#
 # LIGHTHOUSE_TARGET_PEERS is the beacon node's --target-peers, 1 by default (MD-01): at 0
 # v8.2.2 denies every inbound connection before it knows the peer, trusted or not, with
 # `Exceeded { limit: 0, kind: EstablishedIncoming }`, because libp2p's connection limit is

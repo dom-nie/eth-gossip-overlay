@@ -270,9 +270,9 @@ impl Watch {
     }
 }
 
-/// The six Lighthouse behaviours the design leans on that no specification promises (CL-N2),
+/// The seven Lighthouse behaviours the design leans on that no specification promises (CL-N2),
 /// each with the test that fails by name when a release changes it.
-const ASSUMPTIONS: [(&str, &str); 6] = [
+const ASSUMPTIONS: [(&str, &str); 7] = [
     (
         "A trusted peer is admitted whenever the beacon node is under its inbound cap, is dialled by the beacon node through `--libp2p-addresses` at startup and through `add_peer` on demand under the outbound cap, and is never pruned once connected (MD-01)",
         "under the cap and never pruned: `matrix_trusted_peer_is_admitted_under_the_inbound_cap_and_never_pruned` (matrix); the beacon node dialling a sidecar it has no inbound room for: `matrix_bn_dials_the_listening_sidecar_when_its_inbound_cap_is_full` (matrix); the startup flag: `matrix_bn_startup_flags_dial_the_listening_sidecar` (matrix)",
@@ -297,6 +297,10 @@ const ASSUMPTIONS: [(&str, &str); 6] = [
         "The beacon node's message id equals the sidecar's for the same topic and payload",
         "`published_message_id_matches_fake_bn_for_random_payloads`",
     ),
+    (
+        "The event stream fires `block_gossip` inside gossip verification, after the proposer-signature and duplicate checks, and `data_column_sidecar` after KZG verification for a column from any of its four sources: gossip, partial-message merges, the execution layer's `getBlobs` and RPC by root (MD-06)",
+        "`matrix_event_stream_reports_accepted_blocks_and_verified_columns` (matrix), which pins that both events reach the custody tracker on a running node; which of the four sources a column came from is not in the payload and is not asserted",
+    ),
 ];
 
 /// The Lighthouse section of `COMPATIBILITY.md`, so the file follows the constants instead
@@ -317,7 +321,7 @@ pub fn render_compatibility_section() -> String {
          through the `[patch]` table. A beacon node above the range is reported `untested` \
          and one below it `unsupported`, on every connect, in the log and in \
          `overlay_bn_compat{{state}}`; the sidecar keeps running either way.\n\n\
-         The design leans on six Lighthouse behaviours that no specification promises. Each \
+         The design leans on seven Lighthouse behaviours that no specification promises. Each \
          has a named test, so a release that changes one fails the matrix by name instead of \
          degrading the fleet quietly. Tests marked matrix need a real beacon node and run in \
          the nightly matrix; the others run on every pull request against `FakeBn`.\n\n\

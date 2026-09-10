@@ -5,7 +5,9 @@
 //! `--trusted-peers`); the tests the beacon node has to dial into also read `SIDECAR_LISTEN`,
 //! the address it was given in `--libp2p-addresses`. The ten-minute test also reads
 //! `LIGHTHOUSE_LOG`, the beacon node's debug-level file log, and runs only under
-//! `MATRIX_TEN_MINUTES=1`, which the nightly job sets.
+//! `MATRIX_TEN_MINUTES=1`, which the nightly job sets. The event-stream test needs a beacon
+//! node that is following the chain rather than the script's genesis-only node, and runs only
+//! under `MATRIX_FOLLOWING_CHAIN=1`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -16,14 +18,19 @@ use std::time::{Duration, Instant};
 use libp2p::gossipsub::PublishError;
 use libp2p::{Multiaddr, PeerId};
 use overlay_bn::bn_http::BnClient;
+use overlay_bn::events::BlockEvents;
 use overlay_bn::gossip::BnLinkConfig;
 use overlay_bn::link::{
     BACKOFF_MAX, BACKOFF_MIN, BnCommand, BnEvent, BnLink, BnMessage, LinkConfig,
 };
 use overlay_bn::node_key::NodeKey;
 use overlay_bn::spec::spec_watch;
+use overlay_core::backoff::Backoff;
+use overlay_core::custody::SharedCustody;
+use overlay_core::events::Arrivals;
 use overlay_core::lanes::ClassLanes;
-use overlay_core::topic::SubscriptionSets;
+use overlay_core::time::SystemClock;
+use overlay_core::topic::{SubscriptionSets, Topic};
 use prometheus_client::registry::Registry;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -416,4 +423,83 @@ async fn matrix_bn_startup_flags_dial_the_listening_sidecar() {
 
     let peer = lighthouse_peer(&env, sidecar.peer_id).await.unwrap();
     assert_eq!(peer["connection_direction"], "Outgoing", "{peer}");
+}
+
+/// CL-N2 (7), the assumption T-087's custody tracker rests on. Two event names carry the whole
+/// of what column repair knows, and neither is promised by the beacon API specification:
+/// `block_gossip` fires inside gossip verification, after the proposer-signature check and after
+/// the duplicate check, so a block on it is one this node accepted; `data_column_sidecar` fires
+/// after KZG verification, whichever of the four sources the column came from.
+///
+/// What a running node can show is that both reach the tracker: a block opens an entry, and
+/// columns clear expectations inside it. The expected set here is every column on the network,
+/// which no node custodies, so the entry keeps a gap to read `have_count` off. Which of the four
+/// sources a column came from is not in the payload and cannot be asserted from the API; a
+/// release that stopped firing either event fails this test by name.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a Lighthouse beacon node following the chain: MATRIX_FOLLOWING_CHAIN=1"]
+async fn matrix_event_stream_reports_accepted_blocks_and_verified_columns() {
+    if std::env::var("MATRIX_FOLLOWING_CHAIN").as_deref() != Ok("1") {
+        println!("MATRIX_FOLLOWING_CHAIN is not 1; this one needs a node following the chain");
+        return;
+    }
+    let env = env();
+    let (_spec_tx, spec) = spec_watch();
+    let columns = spec.borrow().number_of_columns;
+    let (_sets_tx, sets) = watch::channel(every_column_topic(columns));
+    let custody = SharedCustody::new(spec, sets, Arc::new(()));
+
+    let events = BlockEvents::spawn(
+        format!(
+            "{}/eth/v1/events?topics=block,block_gossip,data_column_sidecar",
+            env.http
+        )
+        .parse()
+        .unwrap(),
+        Backoff::new(BACKOFF_MIN, BACKOFF_MAX),
+        Arc::new(Arrivals::new(Arc::new(SystemClock), spec_watch().1)),
+        custody.clone(),
+        Arc::new(SystemClock),
+        Arc::new(()),
+    );
+
+    let none = custody.column_set([]);
+    let deadline = Instant::now() + THREE_SLOTS;
+    let held = loop {
+        assert!(
+            Instant::now() < deadline,
+            "no block and columns within three slots"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let gaps = custody.gaps(Duration::ZERO, Instant::now(), &none);
+        let Some(gap) = gaps.first() else { continue };
+        if gap.have_count > 0 {
+            break gap.have_count;
+        }
+    };
+
+    println!("columns verified for the block this node accepted: {held}");
+    events.task.abort();
+}
+
+/// Long enough that a block and its columns cannot all have been missed, short enough that a
+/// beacon node which has stopped firing the events fails rather than hangs the nightly job.
+const THREE_SLOTS: Duration = Duration::from_secs(40);
+
+/// Every column topic there is, which is the widest expected set: no node custodies all of them,
+/// so the tracker always has a gap to report `have_count` from. The digest is a placeholder,
+/// because the tracker reads only the column index out of a topic.
+fn every_column_topic(columns: u64) -> SubscriptionSets {
+    let advertised = (0..columns)
+        .filter_map(|index| {
+            Topic::parse(&format!(
+                "/eth2/6a95a1a9/data_column_sidecar_{index}/ssz_snappy"
+            ))
+            .ok()
+        })
+        .collect();
+    SubscriptionSets {
+        advertised,
+        ..SubscriptionSets::default()
+    }
 }
