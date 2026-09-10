@@ -15,8 +15,8 @@ true, `curl -s 127.0.0.1:7789/metrics` says what it is reporting, and
 ## OverlayPeersLow
 
 Fewer than 80% of the roster's other hosts have a live overlay connection, for five minutes. The
-sidecar keeps dialling the missing ones with a jittered backoff throughout, so this is about why
-those dials are not landing rather than about the sidecar giving up.
+sidecar keeps dialling the missing ones with a jittered backoff, so this is about why those dials
+are not landing.
 
 Start with `eth-gossip-overlayctl status` on the host that alerted and on one of the hosts missing
 from its list. If both sides agree they cannot see each other, the path is the suspect: UDP 7788
@@ -28,16 +28,14 @@ usually one firewall change; a single host missing from everyone's view is usual
 
 ## OverlayBnDisconnected
 
-The link to the local beacon node has been down for two minutes. Nothing crosses the overlay into
-this node while it lasts, and nothing this node validates leaves over the overlay, so the host is
-running on public gossip alone. Its validators are not at risk, but it is getting none of the
-overlay's benefit.
+The link to the local beacon node has been down for two minutes. Nothing crosses the overlay in
+either direction while it lasts, so the host runs on public gossip alone. Its validators are not
+at risk, but it gets none of the overlay's benefit.
 
-Check the beacon node is up and its libp2p port is where `bn.libp2p_addr` says. The sidecar dials
-it and reconnects on its own, so a beacon node that was restarted comes back without help. If the
-beacon node is up and the link still will not form, read the sidecar's log: the dial error names
-the cause, and the common one is a beacon node listening somewhere other than the configured
-address. A beacon node whose datadir was rebuilt has a new libp2p key and takes one backoff cycle
+Check the beacon node is up and its libp2p port is where `bn.libp2p_addr` says. The sidecar
+reconnects on its own, so a restarted beacon node comes back without help. If the link still will
+not form, read the sidecar's log: the dial error names the cause, usually a beacon node listening
+somewhere other than the configured address. A beacon node whose datadir was rebuilt has a new libp2p key and takes one backoff cycle
 longer, which [symptoms.md](symptoms.md#the-beacon-node-came-back-with-a-new-identity) explains.
 
 ## OverlayNotTrustedByBn
@@ -131,20 +129,26 @@ startup rather than looping it, and `eth-gossip-overlay check-config` says so in
 
 ## OverlayRepairRateRising
 
-This host is asking peers to resend chunks it did not receive, at a rate that is not incidental.
-[rollout.md](rollout.md) says where the threshold comes from. A rising rate is loss on the overlay
-path rather than a fault in the sidecar: one host or one link dropping chunks, or a region whose
-stripes do not arrive inside `classes.large.repair_deadline_ms`. Read it next to
-`overlay_peer_queue_drops_total` on the sending side, which says whether the chunks were dropped
-before they were ever sent.
-
-The `outcome` label says which half to look at:
+This host is asking peers to resend what it did not receive, at a rate that is not incidental.
+[rollout.md](rollout.md) says where the threshold comes from. Split it two ways first:
 
 ```promql
-sum by (instance, outcome) (rate(overlay_repair_requests_total[15m]))
+sum by (instance, form, outcome) (rate(overlay_repair_requests_total[15m]))
 ```
 
-`completed` rising means chunks are being lost and repair is covering it. `not_found` and
-`timeout` mean the peers that held the message could not answer. `gave_up` means no request went
-out, because no peer that sent a chunk was live and advertising the repair feature bit, which
-during a rolling upgrade is expected and passes.
+`form="chunk"` is loss on the overlay path, not a fault in the sidecar: one host or one link
+dropping chunks, or a region whose stripes miss `classes.large.repair_deadline_ms`. Read it next
+to `overlay_peer_queue_drops_total`, which says whether the chunks were dropped before they were
+sent.
+
+`form="column"` is this beacon node short of custody columns past the same deadline, which is
+rarer. Setting `classes.large.column_repair: false` and reloading turns it off; the node then
+fetches its own columns as it did before.
+
+The `outcome` label splits either form. `completed` is loss that repair covered. `not_found` and
+`timeout` are peers that could not answer. `gave_up` is no request sent, because no candidate was
+live and advertising the repair feature bit, which during a rolling upgrade is expected.
+
+Two counters beside it read zero on a healthy fleet:
+`overlay_column_index_conflict_total`, two payloads claiming one column, and
+`overlay_column_topic_mismatch_total`, a network whose subnets do not name its columns.
