@@ -458,6 +458,46 @@ mod tests {
         );
     }
 
+    /// A reader that falls behind loses events the beacon node will not send again, so a column
+    /// it holds can go on being reported missing for the rest of the slot and spend the budget
+    /// the columns it really lacks need. Nothing says which events went, so the tracker forgets
+    /// what it had and waits for the next block, and the beacon node's own count of what it
+    /// threw away is a series rather than a line nobody reads.
+    #[test]
+    fn a_lagging_event_stream_idles_the_tracker_loudly() {
+        let clock = FakeClock::new();
+        let custody = tracking(&[0, 1]);
+        let (sender, mut lagged) = mpsc::unbounded_channel();
+        let stats: Arc<dyn BlockEventStats> = Arc::new(Lags(sender));
+        let (_spec, spec) = spec_watch();
+        let arrivals = Arc::new(Arrivals::new(Arc::new(clock.clone()), spec));
+        let stream = format!(
+            "{}:error - dropped 12 messages\n\n",
+            gossip_frame(9, &root(0xaa))
+        );
+
+        for event in Frames::default().feed(stream.as_bytes()) {
+            apply(&event, &arrivals, &custody, &clock, &stats);
+        }
+
+        let none = custody.column_set([]);
+        assert_eq!(custody.gaps(Duration::ZERO, clock.now(), &none), Vec::new());
+        assert_eq!(lagged.try_recv(), Ok(12));
+    }
+
+    /// A stats sink that hands every lag straight back to the test.
+    struct Lags(mpsc::UnboundedSender<u64>);
+
+    impl BlockEventStats for Lags {
+        fn set_connected(&self, _: bool) {}
+
+        fn imported(&self, _: bool) {}
+
+        fn lagged(&self, count: u64) {
+            let _ = self.0.send(count);
+        }
+    }
+
     #[test]
     fn parses_block_event_slot_and_root() {
         let mut frames = Frames::default();
