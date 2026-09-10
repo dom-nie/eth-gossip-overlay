@@ -311,7 +311,8 @@ impl App {
             recent::window_ttl(slots),
             recent::window_bytes(slots),
         ))
-        .with_decoder(Arc::new(overlay_bn::decode::Headers));
+        .with_decoder(Arc::new(overlay_bn::decode::Headers))
+        .with_column_stats(metrics.clone());
         tracing::info!(
             enabled = by_root_cache.enabled,
             slots,

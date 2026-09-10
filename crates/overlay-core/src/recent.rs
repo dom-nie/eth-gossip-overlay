@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 
+use crate::custody::ColumnStats;
 use crate::header::{Header, HeaderDecoder};
 use crate::msgid::MessageId;
 use crate::topic::Topic;
@@ -140,15 +141,16 @@ impl RecentLarge {
     }
 
     /// Records that the message held under `msg_id` is the column `index` of `block_root`, so a
-    /// peer that never saw the column can still ask for it (T-083).
-    pub fn index_column(&mut self, block_root: [u8; 32], index: u8, msg_id: MessageId) {
-        self.index((block_root, Some(index)), msg_id);
+    /// peer that never saw the column can still ask for it (T-083). Answers whether the key was
+    /// taken; `false` is another message already holding it, which a caller counts (T-087).
+    pub fn index_column(&mut self, block_root: [u8; 32], index: u8, msg_id: MessageId) -> bool {
+        self.index((block_root, Some(index)), msg_id)
     }
 
     /// Records that the message held under `msg_id` is the block whose root is `block_root`, which
     /// is how the beacon node's own by-root lookups name one (T-085).
-    pub fn index_block(&mut self, block_root: [u8; 32], msg_id: MessageId) {
-        self.index((block_root, None), msg_id);
+    pub fn index_block(&mut self, block_root: [u8; 32], msg_id: MessageId) -> bool {
+        self.index((block_root, None), msg_id)
     }
 
     /// Which message is column `index` of `block_root`, for a caller that then reads it with
@@ -170,17 +172,18 @@ impl RecentLarge {
     /// already holds is a claim, not a correction; taking it would let one forged sidecar decide
     /// what every peer is served under that name (MD-06). First writer wins, and the entry goes
     /// with its payload when the minute or the byte bound takes it.
-    fn index(&mut self, key: RootKey, msg_id: MessageId) {
+    fn index(&mut self, key: RootKey, msg_id: MessageId) -> bool {
         let Some(entry) = self.entries.get_mut(&msg_id) else {
-            return;
+            return true;
         };
         if self.by_root.get(&key).is_some_and(|held| *held != msg_id) {
-            return;
+            return false;
         }
         if let Some(previous) = entry.by_root.replace(key) {
             self.by_root.remove(&previous);
         }
         self.by_root.insert(key, msg_id);
+        true
     }
 
     /// Drops every entry past its minute now, for a caller that wants the memory back between
@@ -228,6 +231,7 @@ pub struct SharedRecentLarge {
     store: Arc<Mutex<RecentLarge>>,
     /// Beside the mutex rather than inside it, so a decode never runs under the lock (T-083).
     decoder: Option<Arc<dyn HeaderDecoder>>,
+    stats: Arc<dyn ColumnStats>,
 }
 
 impl SharedRecentLarge {
@@ -236,7 +240,15 @@ impl SharedRecentLarge {
         Self {
             store: Arc::new(Mutex::new(store)),
             decoder: None,
+            stats: Arc::new(()),
         }
+    }
+
+    /// Counts the refusals the column index makes, which is one of the two series column repair
+    /// adds (§12, T-087). Without one the refusal still happens and nothing is counted.
+    pub fn with_column_stats(mut self, stats: Arc<dyn ColumnStats>) -> Self {
+        self.stats = stats;
+        self
     }
 
     /// Reads the header of every payload stored through this handle, which is what fills the
@@ -273,8 +285,8 @@ impl SharedRecentLarge {
         match header {
             Header::Column {
                 index, block_root, ..
-            } => self.lock().index_column(block_root, index, msg_id),
-            Header::Block { root, .. } => self.lock().index_block(root, msg_id),
+            } => self.index_column(block_root, index, msg_id),
+            Header::Block { root, .. } => self.index_block(root, msg_id),
         }
         Some(header)
     }
@@ -286,7 +298,9 @@ impl SharedRecentLarge {
 
     /// [`RecentLarge::index_column`] under the lock.
     pub fn index_column(&self, block_root: [u8; 32], index: u8, msg_id: MessageId) {
-        self.lock().index_column(block_root, index, msg_id);
+        if !self.lock().index_column(block_root, index, msg_id) {
+            self.stats.index_conflict();
+        }
     }
 
     /// [`RecentLarge::index_block`] under the lock.

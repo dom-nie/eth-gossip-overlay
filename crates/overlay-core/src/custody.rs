@@ -36,10 +36,17 @@ pub trait ColumnStats: Send + Sync {
     /// A beacon node whose column subnets do not name its columns, so nothing says which columns
     /// it wants and column repair idles.
     fn topic_mismatch(&self);
+
+    /// A second payload claiming a `(block_root, index)` the recent store already holds another
+    /// message under. Nothing honest produces one; a forged sidecar naming a real column does
+    /// (MD-06).
+    fn index_conflict(&self);
 }
 
 impl ColumnStats for () {
     fn topic_mismatch(&self) {}
+
+    fn index_conflict(&self) {}
 }
 
 /// A set of column indices.
@@ -661,5 +668,7 @@ mod tests {
         fn topic_mismatch(&self) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
+
+        fn index_conflict(&self) {}
     }
 }

@@ -153,6 +153,9 @@ pub const REPAIR_REQUESTS_TOTAL: &str = "overlay_repair_requests_total";
 /// Spec snapshots whose column subnets do not name the network's columns, which leaves column
 /// repair with nothing to derive the expected set from (§6.4, CL-N3).
 pub const COLUMN_TOPIC_MISMATCH_TOTAL: &str = "overlay_column_topic_mismatch_total";
+/// Payloads claiming a `(block_root, index)` the recent store already holds another message
+/// under, which the store refuses (§6.4, MD-06).
+pub const COLUMN_INDEX_CONFLICT_TOTAL: &str = "overlay_column_index_conflict_total";
 
 /// By-root lookups the beacon node made over the localhost link, by whether the recent
 /// store held what it asked for (§5.8).
@@ -313,6 +316,7 @@ pub struct Metrics {
     parity_used: IntCounter,
     repair_requests: IntCounterVec,
     column_topic_mismatch: IntCounter,
+    column_index_conflict: IntCounter,
     by_root_requests: IntCounterVec,
     reassembly_evicted: IntCounterVec,
     relay_same_region: IntCounterVec,
@@ -544,6 +548,12 @@ impl Metrics {
             COLUMN_TOPIC_MISMATCH_TOTAL,
             "Spec snapshots whose column subnet count is not the column count.",
         )?;
+        // Also zero on an honest fleet: two payloads claiming one column is a forged sidecar,
+        // and the store refusing the second is what keeps it from spreading (MD-06).
+        let column_index_conflict = b.counter(
+            COLUMN_INDEX_CONFLICT_TOTAL,
+            "Payloads refused a column index another message already holds.",
+        )?;
         // The ratio of the two outcomes is the number that decides whether the optional cache
         // earns the memory it costs: Lighthouse does not prefer trusted peers for a lookup, so
         // how often one lands here is what an operator has to measure (§5.8).
@@ -623,6 +633,7 @@ impl Metrics {
             parity_used,
             repair_requests,
             column_topic_mismatch,
+            column_index_conflict,
             by_root_requests,
             reassembly_evicted,
             relay_same_region,
@@ -688,6 +699,10 @@ impl BlockEventStats for Metrics {
 impl ColumnStats for Metrics {
     fn topic_mismatch(&self) {
         self.column_topic_mismatch.inc();
+    }
+
+    fn index_conflict(&self) {
+        self.column_index_conflict.inc();
     }
 }
 
