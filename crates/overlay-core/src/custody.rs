@@ -225,7 +225,11 @@ impl Block {
         (!missing.is_empty()).then_some(ColumnGap {
             block_root: root,
             missing,
-            have_count: self.have.iter().count(),
+            have_count: self
+                .have
+                .iter()
+                .filter(|index| self.expected.contains(*index))
+                .count(),
         })
     }
 
