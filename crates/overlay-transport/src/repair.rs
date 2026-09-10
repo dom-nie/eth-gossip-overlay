@@ -512,4 +512,49 @@ mod tests {
                 > 0
         );
     }
+
+    /// `classes.large.column_repair` is a switch an operator throws with SIGHUP, not a rebuild.
+    /// Off, a host short of a column asks nobody and its beacon node fetches the column the way
+    /// it did before this feature existed; on, the next tick picks the gap up.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn column_repair_stops_and_starts_on_a_reloaded_key() {
+        let column = topic("data_column_sidecar_0");
+        let root = DECODED_BLOCK.block_root();
+        let mut cluster = Builder::new(&[NodeKind::Manager; 2])
+            .column_repair(false)
+            .start()
+            .await;
+        for node in 0..2 {
+            cluster.start_sidecar(node, subscriptions(&[&column], &[]));
+        }
+        eventually("the pair to connect", || cluster.live(0).len() == 1).await;
+
+        let payload = large_payload(8 * 1024);
+        let id = msgid::compute(&column.to_string(), &payload, MAX_PAYLOAD_BYTES).id;
+        cluster.recent(1).insert(
+            id,
+            column.clone(),
+            payload.clone(),
+            Some(&payload),
+            Instant::now(),
+        );
+        cluster.custody(1).on_column(DECODED_SLOT, 0, root);
+        cluster
+            .custody(0)
+            .on_block(DECODED_SLOT, root, Instant::now());
+
+        tokio::time::sleep(SETTLE).await;
+        assert!(
+            cluster.published(0).is_empty(),
+            "a host with column repair off asked for a column anyway"
+        );
+
+        cluster.set_column_repair(true);
+
+        eventually("node 0 to publish once the key is back on", || {
+            !cluster.published(0).is_empty()
+        })
+        .await;
+        assert_eq!(cluster.published(0)[0].payload, payload);
+    }
 }
