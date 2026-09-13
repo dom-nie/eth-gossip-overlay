@@ -1527,11 +1527,17 @@ mod tests {
             ..link_config(&bn)
         };
         let harness = spawn(cfg, &bn);
+        identity_requests_reach(&bn, 2).await;
 
+        // Stages a negative claim: half a second holds a dozen attempts at most. Load can
+        // only make them fewer, so this cannot fail on a busy machine.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         let attempts = identity_requests(bn.http()).await;
-        assert!((2..=20).contains(&attempts), "{attempts} identity requests");
+        assert!(
+            attempts <= 20,
+            "{attempts} identity requests in half a second"
+        );
         drop(harness);
     }
 
