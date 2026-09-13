@@ -294,7 +294,7 @@ impl Arrivals {
 
 /// A root as the 64 hex characters every other tool prints it as, without the `0x` the log's
 /// other identifiers do not carry either.
-fn hex(root: [u8; 32]) -> String {
+pub(crate) fn hex(root: [u8; 32]) -> String {
     root.iter()
         .fold(String::with_capacity(64), |mut out, byte| {
             let _ = write!(out, "{byte:02x}");

@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 
 use crate::custody::ColumnStats;
+use crate::events::hex;
 use crate::header::{Header, HeaderDecoder};
 use crate::msgid::MessageId;
 use crate::topic::Topic;
@@ -140,15 +141,22 @@ impl RecentLarge {
     }
 
     /// Records that the message held under `msg_id` is the column `index` of `block_root`, so a
-    /// peer that never saw the column can still ask for it (T-083). Answers whether the key was
-    /// taken; `false` is another message already holding it, which a caller counts (T-087).
-    pub fn index_column(&mut self, block_root: [u8; 32], index: u8, msg_id: MessageId) -> bool {
+    /// peer that never saw the column can still ask for it (T-083). Answers the message already
+    /// holding the key when the claim is refused, which a caller counts and names (T-087,
+    /// T-090); `None` is the key taken.
+    pub fn index_column(
+        &mut self,
+        block_root: [u8; 32],
+        index: u8,
+        msg_id: MessageId,
+    ) -> Option<MessageId> {
         self.index((block_root, Some(index)), msg_id)
     }
 
     /// Records that the message held under `msg_id` is the block whose root is `block_root`, which
-    /// is how the beacon node's own by-root lookups name one (T-085).
-    pub fn index_block(&mut self, block_root: [u8; 32], msg_id: MessageId) -> bool {
+    /// is how the beacon node's own by-root lookups name one (T-085). Answers as
+    /// [`index_column`](Self::index_column) does.
+    pub fn index_block(&mut self, block_root: [u8; 32], msg_id: MessageId) -> Option<MessageId> {
         self.index((block_root, None), msg_id)
     }
 
@@ -171,18 +179,16 @@ impl RecentLarge {
     /// already holds is a claim, not a correction; taking it would let one forged sidecar decide
     /// what every peer is served under that name (MD-06). First writer wins, and the entry goes
     /// with its payload when the minute or the byte bound takes it.
-    fn index(&mut self, key: RootKey, msg_id: MessageId) -> bool {
-        let Some(entry) = self.entries.get_mut(&msg_id) else {
-            return true;
-        };
-        if self.by_root.get(&key).is_some_and(|held| *held != msg_id) {
-            return false;
+    fn index(&mut self, key: RootKey, msg_id: MessageId) -> Option<MessageId> {
+        let entry = self.entries.get_mut(&msg_id)?;
+        if let Some(held) = self.by_root.get(&key).filter(|held| **held != msg_id) {
+            return Some(*held);
         }
         if let Some(previous) = entry.by_root.replace(key) {
             self.by_root.remove(&previous);
         }
         self.by_root.insert(key, msg_id);
-        true
+        None
     }
 
     /// Drops every entry past its minute now, for a caller that wants the memory back between
@@ -303,11 +309,21 @@ impl SharedRecentLarge {
         self.lock().get(msg_id)
     }
 
-    /// [`RecentLarge::index_column`] under the lock.
+    /// [`RecentLarge::index_column`] under the lock. A refusal is counted and named: `held` is
+    /// the id this host goes on answering with, and its `first_arrival` line says which peer
+    /// sent it, which is what the roster fence needs and a counter cannot give (T-090).
     pub fn index_column(&self, block_root: [u8; 32], index: u8, msg_id: MessageId) {
-        if !self.lock().index_column(block_root, index, msg_id) {
-            self.stats.index_conflict();
-        }
+        let Some(held) = self.lock().index_column(block_root, index, msg_id) else {
+            return;
+        };
+        tracing::warn!(
+            block_root = %hex(block_root),
+            index,
+            %held,
+            refused = %msg_id,
+            "a second payload claims a column this host already holds"
+        );
+        self.stats.index_conflict();
     }
 
     /// [`RecentLarge::index_block`] under the lock.
