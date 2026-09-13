@@ -28,6 +28,11 @@ use crate::topic::{SubscriptionSets, TopicKind};
 /// deadline, D24) and short enough that the whole structure is a handful of bitsets. The beacon
 /// node opens every entry, so nothing a peer sends can push the newest ones out and one bound
 /// over all of them is enough.
+///
+/// Shorter than the recent store's five slots and the by-root cache's sixteen, which is
+/// deliberate: `holds` is what column repair serves by, so a column of a block older than the
+/// four most recently opened is refused by identity whatever the store still has. The store's
+/// longer window is for chunk repair and the node's own lookups, which never ask this.
 pub const TRACKED_BLOCKS: usize = 4;
 
 /// The counters column repair adds, all of which read zero on an honest fleet (§12). The binary
