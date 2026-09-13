@@ -736,7 +736,7 @@ mod tests {
     use crate::spec::spec_watch;
     use crate::testutil::{
         self, FakeBn, FakeBnEvent, IDLE_TIMEOUT, LOG, PublicPeer, Received, RpcAnswer, link_config,
-        node_key, ok_json,
+        node_key, ok_json, wait_until,
     };
 
     /// Long enough for a dial, a noise handshake and a gossipsub exchange on a loaded CI box,
@@ -925,13 +925,9 @@ mod tests {
     /// request is only armed once the previous answer has been handled, so `n` of them mean
     /// `n - 1` answers are in: that is how a test knows the link knows who the beacon node is.
     async fn identity_requests_reach(bn: &FakeBn, n: usize) {
-        tokio::time::timeout(WAIT, async {
-            while identity_requests(bn.http()).await < n {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("the link never asked for the beacon node's identity often enough");
+        wait_until(WAIT, async || identity_requests(bn.http()).await >= n)
+            .await
+            .expect("the link never asked for the beacon node's identity often enough");
     }
 
     async fn next_event(control: &mut mpsc::Receiver<BnEvent>) -> BnEvent {
@@ -1846,14 +1842,9 @@ mod tests {
     /// Pings until the sidecar answers with `seq`, so a test never races a subscription on
     /// its way to the responder against the request that reads it.
     async fn ping_until(bn: &FakeBn, answers: &mut mpsc::Receiver<RpcAnswer>, seq: u64) {
-        tokio::time::timeout(WAIT, async {
-            loop {
-                bn.send_ping(0).await;
-                if next_answer(answers).await == RpcAnswer::Pong(seq) {
-                    return;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
+        wait_until(WAIT, async || {
+            bn.send_ping(0).await;
+            next_answer(answers).await == RpcAnswer::Pong(seq)
         })
         .await
         .unwrap_or_else(|_| panic!("the sidecar never reported sequence number {seq}"));
@@ -2387,10 +2378,8 @@ mod tests {
         }
         let mut harness = spawn(link_config(&bn), &bn);
 
-        tokio::time::timeout(WAIT, async {
-            while harness.stats.control.load(Ordering::Relaxed) == 0 {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
+        wait_until(WAIT, async || {
+            harness.stats.control.load(Ordering::Relaxed) > 0
         })
         .await
         .expect("no control drop was counted");

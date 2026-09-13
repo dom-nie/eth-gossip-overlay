@@ -756,6 +756,23 @@ async fn wait_for(
     .expect("the awaited swarm event never happened")
 }
 
+/// Polls `holds` until it is true, or gives up after `within`. The caller's `expect` says
+/// what it was waiting for, which a bare `timeout` cannot. This is how a test waits for
+/// something it can only see by asking, a counter or a gauge, without deciding the answer by
+/// how much wall clock passed: load makes the wait longer, not the test fail.
+pub async fn wait_until(
+    within: Duration,
+    mut holds: impl AsyncFnMut() -> bool,
+) -> Result<(), tokio::time::error::Elapsed> {
+    tokio::time::timeout(within, async {
+        while !holds().await {
+            // The poll cadence, not a budget: `within` is the bound.
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+}
+
 fn tcp_port(addr: &Multiaddr) -> u16 {
     addr.iter()
         .find_map(|p| match p {

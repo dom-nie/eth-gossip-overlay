@@ -456,7 +456,7 @@ mod tests {
     use overlay_core::topic::SubscriptionSets;
 
     use crate::spec::spec_watch;
-    use crate::testutil::{FakeBn, LOG, link_config, node_key, ok_json};
+    use crate::testutil::{FakeBn, LOG, link_config, node_key, ok_json, wait_until};
 
     /// Long enough for a dial and the connect probe on a loaded CI box.
     const WAIT: Duration = Duration::from_secs(3);
@@ -717,13 +717,9 @@ mod tests {
             info: Some("Lighthouse/v8.2.2-e423a66/x86_64-linux".to_owned()),
             trusted: Some(true),
         };
-        tokio::time::timeout(WAIT, async {
-            while stats.gauges() != expected {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("gauges never reached {expected:?}: {:?}", stats.gauges()));
+        wait_until(WAIT, async || stats.gauges() == expected)
+            .await
+            .unwrap_or_else(|_| panic!("gauges never reached {expected:?}: {:?}", stats.gauges()));
         assert!(!task.is_finished());
         drop(commands);
     }

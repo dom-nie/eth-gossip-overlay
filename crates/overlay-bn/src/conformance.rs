@@ -29,7 +29,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use crate::bn_http::BnClient;
 use crate::link::{BnCommand, BnEvent, BnLink, BnMessage};
 use crate::spec::spec_watch;
-use crate::testutil::{FakeBn, FakeBnEvent, link_config, node_key};
+use crate::testutil::{FakeBn, FakeBnEvent, link_config, node_key, wait_until};
 
 /// Long enough for a dial, a heartbeat and a gossipsub exchange on a loaded CI box.
 const WAIT: Duration = Duration::from_secs(5);
@@ -147,10 +147,8 @@ async fn bn_forwards_validated_message_to_a_subscribed_explicit_peer_outside_its
     bn.subscribe(BLOCK).await;
     sidecar.subscribe(&mut bn, BLOCK).await;
     let public = bn.attach_public_peer(BLOCK).await;
-    tokio::time::timeout(WAIT, async {
-        while !bn.mesh_peers(BLOCK).await.contains(&public.peer_id()) {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
+    wait_until(WAIT, async || {
+        bn.mesh_peers(BLOCK).await.contains(&public.peer_id())
     })
     .await
     .expect("the fake never grafted its public peer");
