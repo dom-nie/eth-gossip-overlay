@@ -170,8 +170,9 @@ impl Inbound {
             tracing::error!(id = %msg.id, topic = msg.topic, "gossipsub id is not 20 bytes");
             return;
         };
-        // Insert site 1 of 3 (D08). The other two are T-032's receiver, for what arrives whole
-        // from the overlay, and T-074's completion, for what the reassembler puts together.
+        // Seen-cache insert site 1 of 3 (D08). The other two are T-032's receiver, for what
+        // arrives whole from the overlay, and T-074's completion, for what the reassembler puts
+        // together.
         if !self.seen.insert(id) {
             self.stats.duplicate(class);
             return;
@@ -192,10 +193,10 @@ impl Inbound {
         if self.out.push(class, outbound).is_err() {
             self.stats.dropped_full(class);
         }
-        // Insert site 1 of 3 for the recent store (§5.6); T-074's completion and T-032's whole
-        // delivery are the others. Only the large class is ever repaired, so only the large
-        // class is worth the bytes or the decode. The beacon node validated this payload before
-        // it forwarded it, so the decompression is what its own gossipsub already did.
+        // Insert site 1 of 2 for the recent store (§5.6); T-074's completion is the other. Only
+        // the large class is ever repaired, so only the large class is worth the bytes or the
+        // decode. The beacon node validated this payload before it forwarded it, so the
+        // decompression is what its own gossipsub already did.
         let header = match class {
             Class::Large => {
                 let ssz = msgid::decompressed(&payload, MAX_PAYLOAD_BYTES);

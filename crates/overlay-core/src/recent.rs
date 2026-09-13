@@ -6,12 +6,11 @@
 //! host holds and there is no `HAVE` frame. What is left is the bytes, and the seen cache keeps
 //! only ids, so a large message is kept whole here for as long as a peer can still ask for it.
 //!
-//! Three places insert, all on a large-class first arrival: T-016 as a message arrives from the
-//! beacon node, T-074's reassembler when a striped message completes, and T-032's whole-message
-//! delivery. The third is T-083's: chunk repair never asks a whole-delivery host, because it
-//! sent nobody a chunk and is nobody's candidate (D23), but column repair asks in-region live
-//! peers by round trip whatever they sent, so a host that answered `not_found` for a column it
-//! was holding would send the requester on to the next peer for nothing.
+//! Two places insert, both on a large-class first arrival: T-016 as a message arrives from the
+//! beacon node, and T-074's reassembler when a striped message completes. T-032's whole-message
+//! delivery does not. Chunk repair never asks such a host, because it sent nobody a chunk and is
+//! nobody's candidate (D23), and `receive.rs` says at that site why column repair under MD-06
+//! does not change that.
 //!
 //! A column is asked for by `(block_root, index)` rather than by message id, because a host that
 //! never saw the column has no id for it (T-083). A block is asked for by its root alone, which is
