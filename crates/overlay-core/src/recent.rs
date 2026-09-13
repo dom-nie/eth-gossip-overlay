@@ -227,9 +227,10 @@ impl RecentLarge {
     }
 }
 
-/// One [`RecentLarge`] shared by the three insert sites, which are in different crates: T-016's
-/// inbound path in `overlay-bn`, and T-074's completion and T-032's whole delivery in
-/// `overlay-transport`. Every method takes the lock for that one call and releases it before
+/// One [`RecentLarge`] shared by the two insert sites, which are in different crates: T-016's
+/// inbound path in `overlay-bn` and T-074's completion in `overlay-transport`. T-032's whole
+/// delivery reads a header through [`SharedRecentLarge::header_of`] and inserts nothing
+/// (T-088, D39). Every method takes the lock for that one call and releases it before
 /// returning, so the store is never held across an `await` and no decode runs under it.
 #[derive(Clone)]
 pub struct SharedRecentLarge {
