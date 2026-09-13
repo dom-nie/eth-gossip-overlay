@@ -137,3 +137,15 @@ groups:
         annotations:
           summary: "{{ $labels.instance }} is asking peers to repair what it did not receive"
           runbook: docs/troubleshooting.md#overlayrepairraterising
+
+      # D39: any increase. Two payloads claiming one column of one block is nothing an honest
+      # fleet produces, so the counter stays at zero until a roster peer sends a forged sidecar.
+      # The host keeps its first claim, and the warn line beside the counter names both ids.
+      - alert: OverlayColumnIndexConflict
+        expr: increase(overlay_column_index_conflict_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} saw two payloads claim one custody column"
+          runbook: docs/troubleshooting.md#overlaycolumnindexconflict

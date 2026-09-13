@@ -765,7 +765,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Fan-out budget and rejected roster reloads",
+      "title": "Fan-out budget, rejected roster reloads and column conflicts",
       "id": 16,
       "gridPos": {
         "x": 0,
@@ -795,6 +795,15 @@
           "expr": "sum by (instance) (rate(overlay_roster_reload_rejected_total{instance=~\"$instance\"}[5m]))",
           "refId": "B",
           "legendFormat": "{{instance}} roster reload rejected"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${prom}"
+          },
+          "expr": "sum by (instance) (rate(overlay_column_index_conflict_total{instance=~\"$instance\"}[5m]))",
+          "refId": "C",
+          "legendFormat": "{{instance}} column index conflict"
         }
       ],
       "fieldConfig": {
@@ -821,7 +830,7 @@
           "sort": "desc"
         }
       },
-      "description": "Neither line should move on a healthy fleet. Both have an alert on any increase at all."
+      "description": "None of these lines should move on a healthy fleet. Each has an alert on any increase at all."
     },
     {
       "type": "row",
