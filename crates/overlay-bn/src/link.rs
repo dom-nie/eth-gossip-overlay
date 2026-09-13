@@ -1553,22 +1553,31 @@ mod tests {
         assert!(!gauge.load(Ordering::Relaxed));
     }
 
-    /// The first outage runs the backoff up to its 100 ms ceiling; after the reconnect, the
-    /// second outage must redial within the 10 ms minimum again, jittered down to 5 ms.
+    /// The first outage runs the backoff up past half a second; after the beacon node dials
+    /// in, the outage that follows must redial within the 10 ms minimum again, jittered down
+    /// to 5 ms.
+    ///
+    /// The link's own dials go to a closed port, so the first outage is counted in attempts
+    /// rather than slept through, and the connect that resets the backoff is the beacon
+    /// node's own (MD-01), which `on_connected` treats the same as a dial of the link's. A
+    /// fake restarted on the port the link is mid-dial to is what a loaded machine turns into
+    /// a stale dial closed by the link, whose 4-tuple then sits in TIME_WAIT and refuses every
+    /// redial from the reused listen port with EADDRINUSE for seconds.
     #[tokio::test(flavor = "multi_thread")]
     async fn backoff_resets_after_a_successful_connect_so_the_next_outage_starts_at_min() {
         let bn = FakeBn::start().await;
-        let port = bn.port();
-        let mut harness = spawn(link_config(&bn), &bn);
-        wait_for(&mut harness.link.events, |e| {
-            matches!(e, BnEvent::Connected { .. })
-        })
-        .await;
-
-        let http = bn.shutdown().await;
-        wait_for(&mut harness.link.events, |e| *e == BnEvent::Disconnected).await;
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        let bn = FakeBn::start_on(port, http).await;
+        let cfg = LinkConfig {
+            libp2p_addr: closed_port(),
+            backoff_max: Duration::from_secs(2),
+            ..link_config(&bn)
+        };
+        let mut harness = spawn(cfg, &bn);
+        let addr = listen_addr(&harness).await;
+        // Six failed dials double 10 ms up to a next delay of 1.28 s, which the ceiling above
+        // leaves room for: without the reset, the redial after the outage below comes no
+        // sooner than the 640 ms that jitter can cut it to.
+        identity_requests_reach(&bn, 7).await;
+        bn.dial(addr).await;
         wait_for(&mut harness.link.events, |e| {
             matches!(e, BnEvent::Connected { .. })
         })
@@ -1577,13 +1586,15 @@ mod tests {
         let http = bn.shutdown().await;
         wait_for(&mut harness.link.events, |e| *e == BnEvent::Disconnected).await;
         let before = identity_requests(&http).await;
-        tokio::time::sleep(Duration::from_millis(40)).await;
-        let after = identity_requests(&http).await;
 
-        assert!(
-            after > before,
-            "no redial within 40 ms of the second outage"
-        );
+        // 300 ms is thirty times the 10 ms floor a reset gives and under half the 640 ms a
+        // backoff left at 1.28 s could redial at, so load can make this wait longer but cannot
+        // make it pass without the reset.
+        wait_until(Duration::from_millis(300), async || {
+            identity_requests(&http).await > before
+        })
+        .await
+        .expect("no redial within 300 ms of the outage, so the backoff did not reset");
     }
 
     /// Two links from the same key file show the beacon node the same peer id, which is the
