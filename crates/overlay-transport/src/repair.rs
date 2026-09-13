@@ -567,4 +567,113 @@ mod tests {
         .await;
         assert_eq!(cluster.published(0)[0].payload, payload);
     }
+
+    /// D39's first hop, staged. Node 1 holds a forgery under `(R, 0)` and its beacon node has
+    /// verified the real column 0 of `R`, so it answers for that identity with the forgery.
+    /// Node 0's beacon node accepted the block and is short of column 0, so node 0 asks its
+    /// region and is served the forgery, which it publishes to its node once. Nodes 1 and 2
+    /// cannot see each other, so when node 2 comes to ask, node 0 is the only host it can ask.
+    async fn a_forgery_served_to_node_0() -> (TestCluster, Topic, Bytes, MessageId) {
+        let column = topic("data_column_sidecar_0");
+        let root = DECODED_BLOCK.block_root();
+        let mut cluster = Builder::new(&[NodeKind::Manager; 3]).start().await;
+        cluster.set_roster_for(1, &[0, 1]);
+        cluster.set_roster_for(2, &[0, 2]);
+        for node in 0..3 {
+            cluster.start_sidecar(node, subscriptions(&[&column], &[]));
+        }
+        eventually("node 0 to pair with both of the others", || {
+            cluster.live(0).len() == 2 && cluster.live(1).len() == 1 && cluster.live(2).len() == 1
+        })
+        .await;
+
+        let forged = large_payload(8 * 1024);
+        let forged_id = msgid::compute(&column.to_string(), &forged, MAX_PAYLOAD_BYTES).id;
+        cluster.recent(1).insert(
+            forged_id,
+            column.clone(),
+            forged.clone(),
+            Some(&forged),
+            Instant::now(),
+        );
+        cluster.custody(1).on_column(DECODED_SLOT, 0, root);
+        eventually("node 1 to announce its column id to node 0", || {
+            announced(&cluster, 1, 0, &column)
+        })
+        .await;
+        cluster
+            .custody(0)
+            .on_block(DECODED_SLOT, root, Instant::now());
+
+        eventually("node 0 to publish what it was served", || {
+            !cluster.published(0).is_empty()
+        })
+        .await;
+        assert_eq!(cluster.published(0)[0].payload, forged);
+        (cluster, column, forged, forged_id)
+    }
+
+    /// Whether node `from` has told node `to` the id it names `topic` by, without which it
+    /// answers `not_found` for a payload it holds (MD-04).
+    fn announced(cluster: &TestCluster, from: usize, to: usize, topic: &Topic) -> bool {
+        let own = crate::hello::lock(cluster.topics(from));
+        own.table
+            .get(topic)
+            .is_some_and(|id| own.announcer.told(&cluster.hostname(to), id))
+    }
+
+    /// T-087's test 15, the chain D39 found. After the first hop, node 0's beacon node verifies
+    /// the real column from some other source, so node 0 now answers for `(R, 0)` by identity.
+    /// Node 2's node then accepts the block and is short of column 0, and the only host it can
+    /// ask is node 0. Node 0 must answer `not_found`: what it holds for that identity is nothing
+    /// its own node handed it, and a payload a host was served must never be served on (MD-06).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_served_column_is_never_re_served() {
+        let (cluster, column, forged, _) = a_forgery_served_to_node_0().await;
+        let root = DECODED_BLOCK.block_root();
+        cluster.custody(0).on_column(DECODED_SLOT, 0, root);
+        eventually("node 0 to announce its column id to node 2", || {
+            announced(&cluster, 0, 2, &column)
+        })
+        .await;
+        cluster
+            .custody(2)
+            .on_block(DECODED_SLOT, root, Instant::now());
+
+        eventually("node 2's ask of node 0 to be answered", || {
+            let stats = cluster.stats(2);
+            stats.repair_requests(Form::Column, Outcome::NotFound)
+                + stats.repair_requests(Form::Column, Outcome::Completed)
+                > 0
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        let published = cluster.published(2);
+        assert!(
+            !published.iter().any(|item| item.payload == forged),
+            "node 2 was served the payload node 0 was itself served: {published:?}"
+        );
+        assert!(published.is_empty(), "{published:?}");
+        assert!(
+            cluster
+                .stats(2)
+                .repair_requests(Form::Column, Outcome::NotFound)
+                > 0
+        );
+    }
+
+    /// The mechanism behind it: a repair answer is published to the beacon node and never kept,
+    /// so node 0's store has neither the served bytes nor a claim on the column they named.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_repair_answer_is_not_in_the_recent_store() {
+        let (cluster, _, _, forged_id) = a_forgery_served_to_node_0().await;
+
+        assert_eq!(cluster.recent(0).get(&forged_id), None);
+        assert_eq!(
+            cluster
+                .recent(0)
+                .get_by_column(DECODED_BLOCK.block_root(), 0),
+            None
+        );
+    }
 }
