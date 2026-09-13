@@ -1171,7 +1171,8 @@ impl Ctx {
                 return None;
             }
         }
-        let computed = msgid::compute(&topic.to_string(), &payload, wire::MAX_PAYLOAD_BYTES);
+        let (computed, ssz) =
+            msgid::compute_with_bytes(&topic.to_string(), &payload, wire::MAX_PAYLOAD_BYTES);
         let refused = match (computed.branch, header_id) {
             (Branch::Valid, Some(claimed)) if claimed != computed.id => {
                 Some("the id does not match the payload")
@@ -1202,13 +1203,25 @@ impl Ctx {
             // host, because it sent nobody a chunk and is nobody's candidate (D23), and the one
             // thing that would have asked it, column repair, is T-087's under MD-06; storing it
             // here would only let a peer flush what the store is holding for the chunk path.
+            //
+            // Its header is still read, from the bytes the id was computed over above, so a
+            // block is filed for its import like one from the other two paths (T-088). Only the
+            // large class is worth the read: nothing below logs a small one.
+            let header = match class {
+                Class::Large => ssz
+                    .as_deref()
+                    .and_then(|ssz| self.deps.recent.header_of(&topic, ssz)),
+                Class::Small => None,
+            };
+            let source = events::Source::Overlay { origin: &self.peer };
+            self.deps.arrivals.saw(header, &source);
             events::emit_first_arrival(&FirstArrival {
                 id: computed.id,
                 class,
                 topic: &topic,
                 node: &self.deps.node,
                 at: arrived,
-                source: events::Source::Overlay { origin: &self.peer },
+                source,
                 header: None,
             });
             self.deps.publish.enqueue(PublishItem {
