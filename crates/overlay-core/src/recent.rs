@@ -258,6 +258,14 @@ impl SharedRecentLarge {
         self
     }
 
+    /// The header of `ssz` as this handle's decoder reads it, with nothing stored: the read
+    /// [`insert`](Self::insert) makes once the lock is back, for a payload that must not go in.
+    /// A repair answer takes this path, so the line naming its slot is still written while the
+    /// served bytes can never claim a column on the host they were served to (D39).
+    pub fn header_of(&self, topic: &Topic, ssz: &[u8]) -> Option<Header> {
+        self.decoder.as_ref()?.header(topic, ssz)
+    }
+
     /// [`RecentLarge::insert`] under the lock, then the header of `ssz` outside it.
     ///
     /// `ssz` is the decompressed payload, which every caller already has: the overlay receive
@@ -278,7 +286,7 @@ impl SharedRecentLarge {
         now: Instant,
     ) -> Option<Header> {
         self.lock().insert(msg_id, topic.clone(), payload, now);
-        let header = self.decoder.as_ref()?.header(&topic, ssz?)?;
+        let header = self.header_of(&topic, ssz?)?;
         // A no-op for an id the store no longer holds, which is what an entry the byte bound took
         // comes to.
         match header {

@@ -263,6 +263,7 @@ impl PeerReceiver {
             state: peer.state.clone(),
             budget: Mutex::new(deps.budget.clone()),
             deps,
+            repair: false,
             warned_invalid: AtomicBool::new(false),
         });
         Self {
@@ -329,6 +330,7 @@ impl RepairSink {
             state: live.state.clone(),
             budget: Mutex::new(deps.budget.clone()),
             deps: deps.clone(),
+            repair: true,
             warned_invalid: AtomicBool::new(false),
         })
     }
@@ -353,6 +355,9 @@ struct Ctx {
     /// What this peer may make this host fan out (DX-N3), one bucket per connection.
     budget: Mutex<FanoutBudget>,
     deps: Deps,
+    /// Whether what arrives here was asked for (T-082). A repair answer is published and read
+    /// but never kept, so nothing a host was served can be served on (D39).
+    repair: bool,
     /// Whether this connection has already had its line about a payload that did not check out.
     /// A peer sending a stream of them costs one line, and a reconnect gets a fresh one.
     warned_invalid: AtomicBool,
@@ -753,10 +758,18 @@ impl Ctx {
         // decompressed to check this payload against its id, handed on rather than produced
         // again, and the header it yields fills the column index and names the slot on the line
         // below (T-074, T-083).
-        let header = self
-            .deps
-            .recent
-            .insert(id, topic.clone(), payload, Some(&ssz), now);
+        //
+        // A repair answer is read and not kept. Its header is a claim a peer chose, and a served
+        // payload that took `(block_root, index)` here would be what this host answered the next
+        // requester with once its own node verified the real column (MD-06, D39). The hosts that
+        // fanned the message out still hold it for anyone short of a chunk.
+        let header = match self.repair {
+            true => self.deps.recent.header_of(topic, &ssz),
+            false => self
+                .deps
+                .recent
+                .insert(id, topic.clone(), payload, Some(&ssz), now),
+        };
         let source = events::Source::Overlay { origin };
         self.deps.arrivals.saw(header, &source);
         events::emit_first_arrival(&FirstArrival {
@@ -2543,6 +2556,7 @@ mod tests {
             site: None,
             state: Arc::new(Mutex::new(PeerState::default())),
             budget: Mutex::new(FanoutBudget::default_for(2, 2048, 12, Instant::now())),
+            repair: false,
             deps: Deps {
                 seen: SharedSeenCache::new(SeenCache::new(
                     Duration::from_secs(60),
