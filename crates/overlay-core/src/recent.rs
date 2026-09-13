@@ -353,6 +353,7 @@ mod tests {
         RECENT_MAX_BYTES, RECENT_SLOTS, RECENT_TTL, RecentLarge, SLOT, SLOT_BYTES,
         SharedRecentLarge, window_bytes, window_ttl,
     };
+    use crate::testlog::LOG;
     use crate::time::{Clock, FakeClock};
     use crate::topic::Topic;
 
@@ -654,6 +655,35 @@ mod tests {
 
         assert_eq!(recent.get_by_column(root, 42), Some(id(1)));
         assert_eq!(conflicts.count(), 1);
+    }
+
+    /// The refusal names both ids, so an operator can join `held` to its `first_arrival` line
+    /// and read which peer sent the payload this host answers for the column with (T-090).
+    #[test]
+    fn index_column_refusal_names_both_ids() {
+        let mark = LOG.len();
+        let clock = FakeClock::new();
+        let recent = SharedRecentLarge::new(store(1024));
+        let root = [0x33; 32];
+        recent.insert(id(0x11), topic(), payload(0x11, 200), None, clock.now());
+        recent.insert(id(0x22), topic(), payload(0x22, 200), None, clock.now());
+
+        recent.index_column(root, 42, id(0x11));
+        recent.index_column(root, 42, id(0x22));
+
+        let line = LOG
+            .since(mark)
+            .lines()
+            .find(|line| line.contains(&format!("refused={}", id(0x22))))
+            .unwrap_or_default()
+            .to_owned();
+        assert!(line.contains("WARN"), "{line}");
+        assert!(line.contains(&format!("held={}", id(0x11))), "{line}");
+        assert!(
+            line.contains(&format!("block_root={}", "33".repeat(32))),
+            "{line}"
+        );
+        assert!(line.contains("index=42"), "{line}");
     }
 
     /// Counts the refusals, which is `column_index_conflict_total` (§12).
