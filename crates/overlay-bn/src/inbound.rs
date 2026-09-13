@@ -214,8 +214,6 @@ impl Inbound {
             at: arrived,
             source,
             header,
-            // The beacon node forwards over localhost gossipsub, which no NIC ever timed.
-            ts_source: events::TsSource::Sw,
         });
     }
 }

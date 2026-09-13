@@ -767,9 +767,6 @@ impl Ctx {
             at: arrived,
             source,
             header,
-            // The clock, until the socket that reads the card's own reading exists
-            // (`timestamping`).
-            ts_source: events::TsSource::Sw,
         });
         true
     }
@@ -1200,7 +1197,6 @@ impl Ctx {
                 at: arrived,
                 source: events::Source::Overlay { origin: &self.peer },
                 header: None,
-                ts_source: events::TsSource::Sw,
             });
             self.deps.publish.enqueue(PublishItem {
                 topic,

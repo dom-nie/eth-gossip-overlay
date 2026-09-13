@@ -60,37 +60,6 @@ pub struct FirstArrival<'a> {
     /// What the payload's header said, when there was a decoder to read it (T-083). A build
     /// without the `column-repair` feature has none, and the line carries no slot.
     pub header: Option<Header>,
-    /// Which clock `at` was read from. [`TsSource::Sw`] on every path the beacon node feeds,
-    /// which never touches a NIC, and on every host whose card does not timestamp what it
-    /// receives (§11.1).
-    pub ts_source: TsSource,
-}
-
-/// Which clock a first-arrival time was read from.
-///
-/// Fleet spread is the difference between the first and last host to see one message, and a
-/// host whose reading came out of the kernel carries whatever softirq scheduling did to it that
-/// slot. A reading taken by the NIC does not, so a query that cares about microseconds can
-/// select on this rather than trusting every host equally (§11.1).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum TsSource {
-    /// The card's own clock, which chrony or ptp4l disciplines to the same time as every other
-    /// card in the fleet.
-    Hw,
-    /// A clock reading taken in the sidecar, which is what every host has and what a host with
-    /// no hardware timestamping reports.
-    #[default]
-    Sw,
-}
-
-impl TsSource {
-    /// The word the event log carries, which `docs/events.md` documents and Loki selects on.
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Hw => "hw",
-            Self::Sw => "sw",
-        }
-    }
 }
 
 /// The side a message arrived from. Win rate is the share of these that are
@@ -119,7 +88,6 @@ pub fn emit_first_arrival(arrival: &FirstArrival<'_>) {
     let node = arrival.node;
     let site = node.site.as_deref().unwrap_or(ABSENT_SITE);
     let first_arrival_ns = epoch_nanos(arrival.at);
-    let ts_source = arrival.ts_source.as_str();
     // One arm per combination of what the line carries, rather than one call with `Option`
     // fields: a line from the beacon node has no `origin_peer` key at all instead of a null one
     // every query would have to filter, and a payload with no header carries no `slot` key.
@@ -135,7 +103,6 @@ pub fn emit_first_arrival(arrival: &FirstArrival<'_>) {
                 region = %node.region,
                 site,
                 first_arrival_ns,
-                ts_source,
                 $($rest)*
             )
         };
@@ -402,7 +369,6 @@ mod tests {
             at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
             source: Source::Bn,
             header: None,
-            ts_source: TsSource::Sw,
         });
 
         let line = line_with(mark, &hex(1));
@@ -439,59 +405,11 @@ mod tests {
             at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
             source: Source::Overlay { origin: &origin },
             header: None,
-            ts_source: TsSource::Sw,
         });
 
         let line = line_with(mark, &hex(3));
         assert!(line.contains(r#"source="overlay""#), "{line}");
         assert!(line.contains("origin_peer=bn-fra1-02"), "{line}");
-    }
-
-    /// §11.1's hardware timestamps are optional, and most hosts will not have them. A line that
-    /// did not say which clock it came from would leave a fleet-spread query unable to tell a
-    /// reading the card took from one with a softirq's jitter in it, so every line says, and
-    /// the ordinary answer is the software one.
-    #[test]
-    fn event_log_marks_ts_source_sw_when_hw_unavailable() {
-        let node = node();
-        let topic = block();
-        let mark = LOG.len();
-
-        emit_first_arrival(&FirstArrival {
-            id: MessageId([7; 20]),
-            class: Class::Large,
-            topic: &topic,
-            node: &node,
-            at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
-            source: Source::Bn,
-            header: None,
-            ts_source: TsSource::Sw,
-        });
-
-        assert!(
-            line_with(mark, &hex(7)).contains(r#"ts_source="sw""#),
-            "{}",
-            line_with(mark, &hex(7))
-        );
-
-        // The other half on the same key, so one query separates the two.
-        let mark = LOG.len();
-        emit_first_arrival(&FirstArrival {
-            id: MessageId([8; 20]),
-            class: Class::Large,
-            topic: &topic,
-            node: &node,
-            at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
-            source: Source::Bn,
-            header: None,
-            ts_source: TsSource::Hw,
-        });
-
-        assert!(
-            line_with(mark, &hex(8)).contains(r#"ts_source="hw""#),
-            "{}",
-            line_with(mark, &hex(8))
-        );
     }
 
     /// A host with no site label logs an empty one, the same convention the metrics labels
@@ -513,7 +431,6 @@ mod tests {
             at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
             source: Source::Bn,
             header: None,
-            ts_source: TsSource::Sw,
         });
 
         assert!(line_with(mark, &hex(4)).contains(r#"site="""#));
@@ -591,7 +508,6 @@ mod tests {
             at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
             source: Source::Bn,
             header: None,
-            ts_source: TsSource::Sw,
         });
 
         // Another test's line may land in the same slice, so the id is what rules this one out.
@@ -618,7 +534,6 @@ mod tests {
                 slot: 9_876,
                 root: [0xab; 32],
             }),
-            ts_source: TsSource::Sw,
         });
 
         let line = line_with(mark, &hex(5));
@@ -638,7 +553,6 @@ mod tests {
             at: UNIX_EPOCH + Duration::from_nanos(AT_NANOS),
             source: Source::Bn,
             header: None,
-            ts_source: TsSource::Sw,
         });
         let line = line_with(mark, &hex(6));
         assert!(!line.contains("slot="), "{line}");
