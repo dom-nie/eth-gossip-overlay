@@ -1059,6 +1059,9 @@ mod tests {
         .await;
         let on_connect = identity_requests(bn.http()).await;
 
+        // Stages a negative claim: no identity request beyond the one in flight lands while
+        // the beacon node holds the connection. Load can delay a stray request past the
+        // window, never invent one, so this cannot fail on a busy machine.
         tokio::time::sleep(Duration::from_millis(500)).await;
 
         let later = identity_requests(bn.http()).await;
@@ -2302,6 +2305,8 @@ mod tests {
         bn.send_status(bn_status()).await;
         next_answer(&mut answers).await;
 
+        // Stages a negative claim: two seconds in which the sidecar sends the beacon node no
+        // request. Load can delay one past the window, never invent one.
         tokio::time::sleep(Duration::from_secs(2)).await;
 
         assert_eq!(inbound.try_recv().ok(), None);
@@ -2316,6 +2321,9 @@ mod tests {
         let mut bn = FakeBn::start().await;
         let (harness, mut answers) = connected(&mut bn).await;
 
+        // Stages a negative claim: the fake's idle timer gets its ten seconds and two more to
+        // close a link nothing but the handler holds open, and does not. Load only gives it
+        // longer.
         tokio::time::sleep(IDLE_TIMEOUT + Duration::from_secs(2)).await;
 
         assert!(harness.link.connected.load(Ordering::Relaxed));
