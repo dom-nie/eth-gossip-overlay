@@ -210,6 +210,11 @@ async fn bn_honours_idontwant_from_explicit_peer_and_sends_full_messages_without
     let mut received = bn.received();
     let mut sidecar = connected_sidecar(&bn).await;
     bn.subscribe(BLOCK).await;
+    // The fake's SUBSCRIBE is on its way to the sidecar once `subscribe` returns, not
+    // necessarily there: a publish before it lands has no recipient and is refused.
+    sidecar
+        .wait_for(|e| matches!(e, BnEvent::Subscribed { topic, .. } if topic == BLOCK))
+        .await;
     sidecar.subscribe(&mut bn, BLOCK).await;
     let incompressible: Vec<u8> = (0..4096u32)
         .map(|i| (i.wrapping_mul(2_654_435_761) >> 13) as u8)
