@@ -20,7 +20,15 @@
 //! forged sidecar could make this host answer for a root it never saw. That costs the beacon
 //! node one failed lookup: it verifies everything the sidecar hands it, the same as it verifies
 //! what a public peer hands it, and a block that does not check out is dropped. The store's
-//! first-writer-wins rule is what keeps a forgery from displacing a real payload.
+//! first-claim rule keeps whichever payload claimed the root first, a forgery included; what it
+//! rules out is a later arrival, real or forged, taking the claim over.
+//!
+//! Repair serves a column to a peer only once `custody.holds` says this host's own node
+//! verified it (T-087). Nothing gates this path the same way, and D39 left it so on purpose:
+//! the consumer is the node itself, which validates what it is handed and has no path back into
+//! the store, so a forgery served here costs one failed localhost lookup and goes no further.
+//! That is the whole cost, which is why the cache keeps first-claim as it is rather than taking
+//! D39's option B, a node claim displacing a peer claim, for it.
 
 #[cfg(feature = "by-root-cache")]
 mod on {
