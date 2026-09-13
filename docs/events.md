@@ -46,7 +46,7 @@ the count of distinct large messages the host saw.
 | `node` | string | The host's roster hostname |
 | `region` | string | Its region |
 | `site` | string | Its site label, empty when the roster gives none |
-| `first_arrival_ns` | integer | Arrival, in nanoseconds since the Unix epoch, read at receipt from the beacon node or off the socket |
+| `first_arrival_ns` | integer | Arrival, in nanoseconds since the Unix epoch: off the socket for `overlay`, and for `bn` when the node's gossipsub forwards the message, after it has validated it |
 | `source` | string | `bn` if the local beacon node got there first, `overlay` if a fleet peer did |
 | `origin_peer` | string | The peer that sent it. Present only when `source` is `overlay` |
 | `slot` | integer | The slot the block or column belongs to. Present on `beacon_block` and `data_column_sidecar_*` lines |
