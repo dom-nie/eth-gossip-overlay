@@ -129,3 +129,22 @@ mod on {
 }
 
 pub use on::answer;
+
+#[cfg(test)]
+mod tests {
+    use types::{EthSpec, GnosisEthSpec, MainnetEthSpec, MinimalEthSpec};
+
+    /// `columns` reads a `DataColumnsByRootIdentifier<MainnetEthSpec>` whatever network the
+    /// beacon node runs, which is sound only while `NumberOfColumns` is the same on every
+    /// preset: it is the one type parameter the request's shape depends on. It is U128 on all
+    /// three at v8.2.2, and this is where a Lighthouse bump that changes that fails, rather
+    /// than in a lookup (D38).
+    #[test]
+    fn number_of_columns_agrees_across_the_three_presets() {
+        let mainnet = MainnetEthSpec::number_of_columns();
+
+        assert_eq!(mainnet as u64, crate::spec::MAINNET.number_of_columns);
+        assert_eq!(MinimalEthSpec::number_of_columns(), mainnet);
+        assert_eq!(GnosisEthSpec::number_of_columns(), mainnet);
+    }
+}
