@@ -250,6 +250,3 @@ overlay_steering_applied{action="ntuple"} 1
 overlay_steering_applied{action="irq_affinity"} 1
 overlay_steering_applied{action="threaded_napi"} 0
 ```
-
-`overlay_hw_timestamps` is 0 on every host today: arrival times come from the sidecar's clock,
-which every `first_arrival` line says with `ts_source`.
