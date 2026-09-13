@@ -56,12 +56,12 @@ Comparing `first_arrival_ns` across hosts is only as good as their clocks: run c
 hardware timestamping (Architecture.md §11), which holds the fleet inside a few microseconds.
 
 `slot` and `block_root` come from the payload's own header, which the sidecar reads only for
-these two topic kinds and only as far as the header, and only where it keeps the payload: as a
-message arrives from the beacon node, and as one it reassembled from chunks comes back. A message
-a sibling delivered whole is not kept and carries neither key, and neither does a line for any
-other large topic or a line from a build without the `column-repair` feature. The keys are absent
-rather than null. When the block root is here, it is what joins this line to the
-[`import`](#import) event for the same block, in the same rendering on both.
+these two topic kinds and only as far as the header, on every path a large message arrives by:
+from the beacon node, put back together from chunks, or sent whole by a sibling. A line for any
+other large topic carries neither key, and neither does a line from a build without the
+`column-repair` feature. The keys are absent rather than null. When the block root is here, it is
+what joins this line to the [`import`](#import) event for the same block, in the same rendering
+on both.
 
 ### One line
 
@@ -126,9 +126,8 @@ the sidecar decides anything on it.
 A `matched` of false is a block the beacon node imported that this host has no arrival for at
 all, which is the overlay missing a block rather than nothing happening. Arrival records are
 kept for eight slots of whatever `SECONDS_PER_SLOT` the beacon node reports, so a block imported
-more than eight slots after it arrived also reads as unmatched, and so does one whose
-`first_arrival` line carried no root: a build without the `column-repair` feature, or a block a
-sibling delivered whole.
+more than eight slots after it arrived also reads as unmatched, and so does every block on a
+build without the `column-repair` feature, whose `first_arrival` lines carry no root.
 
 `lag_ms` is measured on the monotonic clock rather than by subtracting the two nanosecond
 fields. Those two are wall readings, for comparing across hosts; a clock stepped between them
