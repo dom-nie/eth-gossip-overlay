@@ -31,11 +31,7 @@
 //! of a hand-written reactor — readiness registration, waker plumbing, write readiness, GSO and
 //! GRO segment handling — replacing code quinn maintains, on the receive path of the only
 //! transport this product has, for a feature that is off by default. The failure mode of (a) is
-//! a missing gauge; the failure mode of (b) is a broken overlay. T-093 wants a socket that
-//! exposes control messages for `SO_TIMESTAMPING`, which does need an `AsyncUdpSocket` of our
-//! own, but not an epoll of our own: quinn's stock one is built on `tokio::io::unix::AsyncFd`,
-//! and one written for T-093 the same way stays registered in this thread's epoll, where the
-//! lookup below still finds it.
+//! a missing gauge; the failure mode of (b) is a broken overlay.
 
 mod epoll_fd;
 pub mod napi;
