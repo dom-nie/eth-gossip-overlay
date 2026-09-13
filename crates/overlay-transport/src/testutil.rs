@@ -1390,7 +1390,12 @@ impl<A: Admission> TestCluster<A> {
                 self.repair_deadline.subscribe(),
                 self.column_repair.subscribe(),
             ),
-            tokio::spawn(receive_peers(events, to_exchange, deps, receivers.clone())),
+            tokio::spawn(receive_peers(
+                events,
+                to_exchange,
+                deps.clone(),
+                receivers.clone(),
+            )),
             Fanout::spawn(
                 lanes,
                 live,
@@ -1414,6 +1419,7 @@ impl<A: Admission> TestCluster<A> {
             published,
             subscriptions,
             receivers,
+            deps,
             tasks,
         });
     }
@@ -1490,6 +1496,12 @@ impl<A: Admission> TestCluster<A> {
     /// stream would, which is the only writer there is (§6.4, MD-06).
     pub fn custody(&self, index: usize) -> &SharedCustody {
         &self.sidecar(index).custody
+    }
+
+    /// What node `index`'s receive paths share, for a test that drives one of them directly
+    /// rather than over a socket.
+    pub fn deps(&self, index: usize) -> &Deps {
+        &self.sidecar(index).deps
     }
 
     /// What node `index` has queued for its beacon node, oldest first.
@@ -1598,6 +1610,8 @@ struct Sidecar {
     published: Arc<PublishSpy>,
     subscriptions: watch::Sender<SubscriptionSets>,
     receivers: Receivers,
+    /// What every receiver of this node was started with, so a test can build one of its own.
+    deps: Deps,
     tasks: Vec<JoinHandle<()>>,
 }
 

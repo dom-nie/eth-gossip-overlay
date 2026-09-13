@@ -3471,6 +3471,63 @@ mod tests {
         );
     }
 
+    /// The same record and the same line when the chunks were asked for (T-082). A repair
+    /// answer reads its header without storing the payload (T-090), and what the header feeds
+    /// is unchanged: the block is filed for its import, and the `first_arrival` line names its
+    /// slot and root.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_repair_answer_still_files_its_import_arrival() {
+        let mark = LOG.len();
+        let block = topic("beacon_block");
+        let payload = payload(b"a block only the repair arrival test is served");
+        let (cluster, _peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        let origin = cluster.hostname(0);
+        eventually("the peer to be live on the sidecar", || {
+            cluster.live(1).get(&origin).is_some()
+        })
+        .await;
+        let msg_id = msgid::compute(&block.to_string(), &payload, wire::MAX_PAYLOAD_BYTES).id;
+        let params = Params::for_len(payload.len(), 64, 0.25).expect("a split");
+        let view = cluster.live(1);
+        let live = view.get(&origin).expect("the peer is live");
+        let sink = RepairSink::new(cluster.deps(1), &origin, live);
+
+        let served = overlay_core::rs::encode(&payload, params);
+        for (index, data) in served.into_iter().take(usize::from(params.k)).enumerate() {
+            sink.take(Chunk {
+                msg_id,
+                topic_id: 0,
+                k: params.k,
+                m: params.m,
+                index: index as u16,
+                total_len: params.total_len,
+                data,
+            });
+        }
+
+        assert_eq!(cluster.published(1).len(), 1);
+        assert!(
+            cluster
+                .arrivals(1)
+                .imported(DECODED_BLOCK.slot(), DECODED_BLOCK.block_root())
+        );
+        let line = LOG
+            .since(mark)
+            .lines()
+            .find(|line| line.contains(&msg_id.to_string()))
+            .unwrap_or_default()
+            .to_owned();
+        assert!(line.contains(r#"event="first_arrival""#), "{line}");
+        assert!(
+            line.contains(&format!("slot={}", DECODED_BLOCK.slot())),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!("block_root={}", "9c".repeat(32))),
+            "{line}"
+        );
+    }
+
     /// DX-N1 at the third ingress site: a host reassembles a message for a topic its own beacon
     /// node never asked for, and publishes nothing. The chunks were still worth taking in, since
     /// the region was owed them.
