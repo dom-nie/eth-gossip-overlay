@@ -372,6 +372,9 @@ impl App {
         let custody = SharedCustody::new(spec_rx.clone(), sets_rx.clone(), metrics.clone());
         let (commands, commands_rx) = mpsc::channel(COMMAND_QUEUE);
         let bn_lanes = ClassLanes::new(metrics.clone());
+        // The kill switch the publisher reads per item and the by-root cache reads per request:
+        // one flag, so `inject: false` stops everything the sidecar hands its node (§5.7, §5.8).
+        let inject = Arc::new(AtomicBool::new(cfg.inject));
         let link = BnLink::spawn(
             link_cfg,
             &me.node_key,
@@ -382,7 +385,12 @@ impl App {
             sets_rx.clone(),
             commands_rx,
             progress.bn_link.clone(),
-            ByRootCache::new(recent.clone(), by_root_on.clone(), metrics.clone()),
+            ByRootCache::new(
+                recent.clone(),
+                by_root_on.clone(),
+                inject.clone(),
+                metrics.clone(),
+            ),
         );
         let bn_connected = link.connected.clone();
         // One consumer may hold the link's events, and both halves of the beacon node's state
@@ -400,7 +408,6 @@ impl App {
             compat::Watch::spawn(compat_events, spec_rx.clone(), metrics.clone());
         tracing::info!(url = %cfg.bn.identity_url, "beacon node link started");
 
-        let inject = Arc::new(AtomicBool::new(cfg.inject));
         let (limits_tx, limits_rx) = watch::channel(cfg.bn.publish_rate_limit.clone());
         let (publish, publisher) = Publisher::spawn(
             commands.clone(),

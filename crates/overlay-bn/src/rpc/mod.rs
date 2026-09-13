@@ -62,19 +62,22 @@ pub trait ByRootStats: Send + Sync {
 pub struct ByRootCache {
     recent: SharedRecentLarge,
     enabled: Arc<AtomicBool>,
+    inject: Arc<AtomicBool>,
     stats: Arc<dyn ByRootStats>,
 }
 
 impl ByRootCache {
-    /// A cache over `recent`, answering while `enabled` is set.
+    /// A cache over `recent`, answering while `enabled` and `inject` are both set.
     pub fn new(
         recent: SharedRecentLarge,
         enabled: Arc<AtomicBool>,
+        inject: Arc<AtomicBool>,
         stats: Arc<dyn ByRootStats>,
     ) -> Self {
         Self {
             recent,
             enabled,
+            inject,
             stats,
         }
     }
@@ -82,12 +85,17 @@ impl ByRootCache {
     fn enabled(&self) -> bool {
         self.enabled.load(Ordering::Relaxed)
     }
+
+    fn inject(&self) -> bool {
+        self.inject.load(Ordering::Relaxed)
+    }
 }
 
 impl fmt::Debug for ByRootCache {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ByRootCache")
             .field("enabled", &self.enabled())
+            .field("inject", &self.inject())
             .finish_non_exhaustive()
     }
 }

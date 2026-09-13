@@ -957,7 +957,7 @@ fn fork_context() -> Arc<ForkContext> {
 }
 
 /// The by-root cache a link that is not under test for §5.8 is handed: a store nothing fills,
-/// the flag off, and nothing counted.
+/// the cache flag off, inject on, and nothing counted.
 pub fn by_root_off() -> ByRootCache {
     struct Uncounted;
     impl ByRootStats for Uncounted {
@@ -967,6 +967,7 @@ pub fn by_root_off() -> ByRootCache {
     ByRootCache::new(
         SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)),
         Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(true)),
         Arc::new(Uncounted),
     )
 }

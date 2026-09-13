@@ -767,6 +767,9 @@ mod tests {
         #[cfg_attr(not(feature = "by-root-cache"), allow(dead_code))]
         by_root_on: Arc<AtomicBool>,
         by_root_counts: Arc<ByRootCounts>,
+        /// The inject kill switch, the one flag the publisher and the by-root cache share.
+        #[cfg_attr(not(feature = "by-root-cache"), allow(dead_code))]
+        inject: Arc<AtomicBool>,
     }
 
     #[derive(Default)]
@@ -853,6 +856,7 @@ mod tests {
         let recent = recent.with_decoder(Arc::new(crate::decode::Headers));
         let by_root_on = Arc::new(AtomicBool::new(false));
         let by_root_counts = Arc::new(ByRootCounts::default());
+        let inject = Arc::new(AtomicBool::new(true));
         let link = BnLink::spawn(
             cfg,
             node_key,
@@ -863,7 +867,12 @@ mod tests {
             sets_rx,
             commands_rx,
             Arc::default(),
-            ByRootCache::new(recent.clone(), by_root_on.clone(), by_root_counts.clone()),
+            ByRootCache::new(
+                recent.clone(),
+                by_root_on.clone(),
+                inject.clone(),
+                by_root_counts.clone(),
+            ),
         );
         Harness {
             peer_id: node_key.peer_id(),
@@ -877,6 +886,7 @@ mod tests {
             recent,
             by_root_on,
             by_root_counts,
+            inject,
         }
     }
 
@@ -2204,6 +2214,39 @@ mod tests {
             0,
             "a refusal is not a cache miss"
         );
+    }
+
+    /// `inject` off means the sidecar stops feeding its beacon node, and a by-root answer feeds
+    /// it as surely as a publish does: overlay-delivered bytes over the same link, only on the
+    /// node's own request. So the switch refuses here too, whatever `bn.by_root_cache.enabled`
+    /// says, and it is the flag the publisher reads rather than a second one.
+    #[cfg(feature = "by-root-cache")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn by_root_answers_nothing_while_inject_is_off() {
+        let mut bn = FakeBn::start().await;
+        let (harness, mut answers) = connected(&mut bn).await;
+        harness.by_root_on.store(true, Ordering::Relaxed);
+        let block = testutil::fulu_block(4_096);
+        hold(&harness, fulu_topic("beacon_block"), &block);
+
+        harness.inject.store(false, Ordering::Relaxed);
+        bn.request_blocks_by_root(&[block.root]).await;
+
+        assert_unavailable(next_answer(&mut answers).await, "BlocksByRoot");
+        assert_eq!(
+            harness.by_root_counts.hits.load(Ordering::Relaxed),
+            0,
+            "a refusal is not a hit"
+        );
+
+        harness.inject.store(true, Ordering::Relaxed);
+        bn.request_blocks_by_root(&[block.root]).await;
+
+        assert!(matches!(
+            next_answer(&mut answers).await,
+            RpcAnswer::BlockByRoot(_)
+        ));
+        assert_eq!(harness.by_root_counts.hits.load(Ordering::Relaxed), 1);
     }
 
     /// A by-root request names the columns it wants, and a host holding more of them than it was
