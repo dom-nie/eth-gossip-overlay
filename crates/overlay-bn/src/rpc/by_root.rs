@@ -6,6 +6,10 @@
 //! a public one, and when it does not, the beacon node is exactly where it was. That is why the
 //! whole thing is behind `bn.by_root_cache.enabled` and ships off.
 //!
+//! It is behind the inject kill switch as well (§5.7). An answer here is overlay-delivered bytes
+//! handed to the beacon node, the same as a publish, only on the node's own request, so
+//! `inject: false` refuses it. The flag is the one the publisher reads, not a second switch.
+//!
 //! Nothing here is served to overlay peers. The recent store answers a sibling's repair request
 //! by message id or by column identity (T-082, T-083); this answers the one peer on the other
 //! end of the localhost link, in the beacon node's own protocol.
@@ -36,8 +40,10 @@ mod on {
     /// answered before the cache existed, so a beacon node whose lookup misses is no worse off
     /// than it was. A request that names more than one object is answered with a chunk for each
     /// one found, in the order it asked, which is what Lighthouse reads a partial answer as.
+    /// While the cache or inject is off every request is refused the same way, uncounted: a
+    /// refusal is neither a hit nor a miss.
     pub fn answer(cache: &ByRootCache, protocol: Protocol, request: &[u8]) -> Response {
-        if !cache.enabled() {
+        if !cache.enabled() || !cache.inject() {
             return Response::ResourceUnavailable;
         }
         let chunks = match protocol {

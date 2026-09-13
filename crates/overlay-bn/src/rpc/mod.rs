@@ -50,10 +50,12 @@ pub trait ByRootStats: Send + Sync {
 }
 
 /// What the responder answers a by-root request out of: the recent store T-081 fills, the
-/// reloadable `bn.by_root_cache.enabled` flag, and where a hit or a miss is counted.
+/// reloadable `bn.by_root_cache.enabled` flag, the inject kill switch the publisher reads, and
+/// where a hit or a miss is counted.
 ///
-/// The flag is read per request rather than captured, so turning the cache off over SIGHUP puts
-/// T-019's `ResourceUnavailable` back without restarting the link.
+/// Both flags are read per request rather than captured, so turning the cache off over SIGHUP,
+/// or inject off over the admin socket, puts T-019's `ResourceUnavailable` back without
+/// restarting the link.
 /// The store and the counter are read by the handlers, which only the `by-root-cache` feature
 /// compiles in. A build without it still carries the cache so the wiring and the config key are
 /// the same either way; it just always answers `ResourceUnavailable`.
