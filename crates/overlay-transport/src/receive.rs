@@ -3599,6 +3599,29 @@ mod tests {
         );
     }
 
+    /// What reading the header must not change: a block sent whole is still not held for
+    /// repair, and the read claims no root here either. Nothing in the store resolves to it, by
+    /// id or by block root, which is the same footing a repair answer is kept on (D39, T-090).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_whole_delivery_is_still_not_held_for_repair() {
+        let block = topic("beacon_block");
+        let payload = payload(b"a whole block only the not-held test sends");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        let msg_id = msgid::compute(&block.to_string(), &payload, wire::MAX_PAYLOAD_BYTES).id;
+
+        send(&peer, &[whole(0, &block, &payload)]).await;
+
+        eventually("the message to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert_eq!(cluster.recent(1).get(&msg_id), None);
+        assert_eq!(
+            cluster.recent(1).get_by_block(DECODED_BLOCK.block_root()),
+            None
+        );
+    }
+
     /// DX-N1 at the third ingress site: a host reassembles a message for a topic its own beacon
     /// node never asked for, and publishes nothing. The chunks were still worth taking in, since
     /// the region was owed them.
