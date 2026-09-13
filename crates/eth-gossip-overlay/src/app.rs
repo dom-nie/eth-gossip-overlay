@@ -456,9 +456,6 @@ impl App {
         // (§11). Off in the shipped defaults, and one warning per step a card refuses otherwise.
         let steering = steering::enable(&cfg.overlay.io_thread, listen.port());
         metrics.set_steering_applied(&steering);
-        // Deliberately zero rather than unset: nothing reads arrival times off the card yet, and
-        // `overlay_transport::timestamping` records what is left to do before anything does.
-        metrics.set_hw_timestamps(false);
         tracing::info!(listen = %cfg.overlay.listen, "overlay endpoint bound");
 
         let (roster_tx, _) = watch::channel(me.roster.clone());

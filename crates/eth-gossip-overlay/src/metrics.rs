@@ -187,9 +187,6 @@ pub const BUSY_POLL_ENABLED: &str = "overlay_busy_poll_enabled";
 /// 1 for each kind of NIC change `overlay.io_thread.steering` asked for and the host took
 /// (T-093).
 pub const STEERING_APPLIED: &str = "overlay_steering_applied";
-/// 1 while first-arrival times are read off the NIC rather than off a clock in the sidecar
-/// (T-093).
-pub const HW_TIMESTAMPS: &str = "overlay_hw_timestamps";
 /// Always 1; the labels carry the build.
 pub const BUILD_INFO: &str = "overlay_build_info";
 
@@ -345,7 +342,6 @@ pub struct Metrics {
     io_thread_pinned: IntGauge,
     busy_poll_enabled: IntGauge,
     steering_applied: IntGaugeVec,
-    hw_timestamps: IntGauge,
     reconstruct_seconds: HistogramVec,
     registered: BTreeMap<String, Vec<String>>,
 }
@@ -607,10 +603,6 @@ impl Metrics {
             "1 for each kind of NIC change the steering plan asked for and the host took.",
             &[LABEL_ACTION],
         )?;
-        let hw_timestamps = b.gauge(
-            HW_TIMESTAMPS,
-            "1 while first-arrival times are read off the NIC rather than off the sidecar's clock.",
-        )?;
 
         b.gauge_vec(
             BUILD_INFO,
@@ -681,7 +673,6 @@ impl Metrics {
             io_thread_pinned,
             busy_poll_enabled,
             steering_applied,
-            hw_timestamps,
             registered: b.registered,
         })
     }
@@ -731,12 +722,6 @@ impl Metrics {
                 .with_label_values(&[action.kind()])
                 .set(i64::from(applied));
         }
-    }
-
-    /// Whether arrival times are coming off the NIC (T-093). Set once at startup: the socket
-    /// either reads the card's control messages or it does not, and nothing moves it after.
-    pub fn set_hw_timestamps(&self, reading: bool) {
-        self.hw_timestamps.set(i64::from(reading));
     }
 }
 
