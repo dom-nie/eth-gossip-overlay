@@ -140,11 +140,16 @@ pub const DECODED_SLOT: u64 = 8_675_309;
 /// and which would need a real block to answer anyway. The column index comes from the topic,
 /// which is where a real column's index comes from too. It answers the two topic kinds the real
 /// one does and refuses a payload with no bytes in it, which is the one thing a test can send on
-/// the block topic that is not a block.
-struct TopicHeaders;
+/// the block topic that is not a block. Every read is counted, for the test that holds a
+/// message to one.
+#[derive(Default)]
+struct TopicHeaders {
+    reads: AtomicU64,
+}
 
 impl HeaderDecoder for TopicHeaders {
     fn header(&self, topic: &Topic, ssz: &[u8]) -> Option<Header> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
         if ssz.is_empty() {
             return None;
         }
@@ -1327,8 +1332,9 @@ impl<A: Admission> TestCluster<A> {
             Arc::new(SystemClock),
         ));
         published.watching(seen.clone());
+        let decoder = Arc::new(TopicHeaders::default());
         let recent = SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES))
-            .with_decoder(Arc::new(TopicHeaders));
+            .with_decoder(decoder.clone());
         let arrivals = Arc::new(Arrivals::new(
             self.clock.clone(),
             watch::Sender::new(SpecSnapshot {
@@ -1417,6 +1423,7 @@ impl<A: Admission> TestCluster<A> {
         self.nodes[index].sidecar = Some(Sidecar {
             seen,
             recent,
+            decoder,
             custody,
             arrivals,
             reassembler,
@@ -1483,6 +1490,11 @@ impl<A: Admission> TestCluster<A> {
     /// Node `index`'s arrival keeper, which the import event is matched against (T-084).
     pub fn arrivals(&self, index: usize) -> &Arc<Arrivals> {
         &self.sidecar(index).arrivals
+    }
+
+    /// How many payloads node `index`'s decoder has been asked to read a header out of.
+    pub fn header_reads(&self, index: usize) -> u64 {
+        self.sidecar(index).decoder.reads.load(Ordering::Relaxed)
     }
 
     /// Turns column repair on or off under every running sidecar, the way a reload does
@@ -1606,6 +1618,8 @@ struct Sidecar {
     seen: SharedSeenCache,
     /// The large payloads a peer could still ask this node to repair (§5.6).
     recent: SharedRecentLarge,
+    /// What `recent` reads headers with, kept so a test can count the reads.
+    decoder: Arc<TopicHeaders>,
     /// Which of this node's columns are owed and which have arrived (§6.4, T-087).
     custody: SharedCustody,
     arrivals: Arc<Arrivals>,

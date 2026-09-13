@@ -3656,6 +3656,24 @@ mod tests {
         );
     }
 
+    /// One decompression per message: the id is computed over the decompressed bytes and the
+    /// header is read from those same bytes, which `compute_with_bytes` hands back for it. The
+    /// decoder is asked once, and its count is the one thing on the path a test can watch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_payload_is_decompressed_once() {
+        let block = topic("beacon_block");
+        let payload = payload(b"a whole block only the one-decompression test sends");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+
+        send(&peer, &[whole(0, &block, &payload)]).await;
+
+        eventually("the message to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert_eq!(cluster.header_reads(1), 1);
+    }
+
     /// DX-N1 at the third ingress site: a host reassembles a message for a topic its own beacon
     /// node never asked for, and publishes nothing. The chunks were still worth taking in, since
     /// the region was owed them.
