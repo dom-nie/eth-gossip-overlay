@@ -290,8 +290,8 @@ fn alert_rules_reference_only_metric_names_exported_by_the_binary() {
     }
 }
 
-/// The ten alerts §12 and the design panel asked for, each holding for a window and pointing at
-/// the section of the troubleshooting guide that says what to do about it.
+/// The eleven alerts §12 and the design panel asked for, each holding for a window and pointing
+/// at the section of the troubleshooting guide that says what to do about it.
 #[test]
 fn every_alert_holds_for_a_window_and_carries_a_summary_and_a_runbook() {
     let rules = alert_rules();
@@ -310,6 +310,7 @@ fn every_alert_holds_for_a_window_and_carries_a_summary_and_a_runbook() {
             "OverlayMemoryHigh",
             "OverlaySidecarRestarting",
             "OverlayRepairRateRising",
+            "OverlayColumnIndexConflict",
         ]
     );
 
