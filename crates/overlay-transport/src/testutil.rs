@@ -125,9 +125,8 @@ const RECEIVE_WINDOW: u64 = STREAM_RECEIVE_WINDOW;
 
 /// The seen cache every sidecar in a cluster runs, at §5.5's TTL and a capacity sized for a
 /// test rather than for a fleet.
-/// The block every node's decoder reads out of a payload on a topic that is not a column. A
-/// cluster has no beacon node and no real SSZ, and what the tests need is a header, not a
-/// decoder.
+/// The block every node's decoder reads out of a payload on the block topic. A cluster has no
+/// beacon node and no real SSZ, and what the tests need is a header, not a decoder.
 pub const DECODED_BLOCK: Header = Header::Block {
     slot: 8_675_309,
     root: [0x9c; 32],
@@ -139,18 +138,24 @@ pub const DECODED_SLOT: u64 = 8_675_309;
 
 /// Stands in for T-083's `overlay_bn::decode::Headers`, which `overlay-transport` cannot reach
 /// and which would need a real block to answer anyway. The column index comes from the topic,
-/// which is where a real column's index comes from too.
+/// which is where a real column's index comes from too. It answers the two topic kinds the real
+/// one does and refuses a payload with no bytes in it, which is the one thing a test can send on
+/// the block topic that is not a block.
 struct TopicHeaders;
 
 impl HeaderDecoder for TopicHeaders {
-    fn header(&self, topic: &Topic, _: &[u8]) -> Option<Header> {
+    fn header(&self, topic: &Topic, ssz: &[u8]) -> Option<Header> {
+        if ssz.is_empty() {
+            return None;
+        }
         match topic.kind() {
+            TopicKind::BeaconBlock => Some(DECODED_BLOCK),
             TopicKind::DataColumnSidecar(index) => Some(Header::Column {
                 slot: DECODED_SLOT,
                 index: *index,
                 block_root: DECODED_BLOCK.block_root(),
             }),
-            _ => Some(DECODED_BLOCK),
+            _ => None,
         }
     }
 }

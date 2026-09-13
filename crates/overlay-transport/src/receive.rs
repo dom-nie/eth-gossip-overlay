@@ -3622,6 +3622,40 @@ mod tests {
         );
     }
 
+    /// A header the decoder cannot read is no header, and the delivery never depended on one: a
+    /// large topic with nothing to read on it and a block topic whose bytes are not a block both
+    /// reach the beacon node, and neither is filed as a block arriving.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_whole_delivered_payload_that_does_not_decode_files_nothing_and_does_not_fail_the_delivery()
+     {
+        let blob = topic("blob_sidecar_0");
+        let block = topic("beacon_block");
+        let (cluster, peer) = peer_of(
+            subscriptions(&[&blob, &block], &[]),
+            &[(0, &blob), (1, &block)],
+        )
+        .await;
+
+        send(
+            &peer,
+            &[
+                whole(0, &blob, &payload(b"a blob only the no-header test sends")),
+                whole(1, &block, &payload(b"")),
+            ],
+        )
+        .await;
+
+        eventually("both messages to be queued for the beacon node", || {
+            cluster.published(1).len() == 2
+        })
+        .await;
+        assert!(
+            !cluster
+                .arrivals(1)
+                .imported(DECODED_BLOCK.slot(), DECODED_BLOCK.block_root())
+        );
+    }
+
     /// DX-N1 at the third ingress site: a host reassembles a message for a topic its own beacon
     /// node never asked for, and publishes nothing. The chunks were still worth taking in, since
     /// the region was owed them.
