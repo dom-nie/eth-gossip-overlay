@@ -3564,6 +3564,41 @@ mod tests {
         );
     }
 
+    /// The same block on the event line: `slot` and `block_root` are what an operator follows
+    /// one block across the fleet by, and the line for a block sent whole carries them the way
+    /// a line from the other two paths does (T-088).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_whole_delivered_block_carries_its_slot_and_root_on_the_first_arrival_line() {
+        let mark = LOG.len();
+        let block = topic("beacon_block");
+        let payload = payload(b"a whole block only the event line test sends");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        let msg_id = msgid::compute(&block.to_string(), &payload, wire::MAX_PAYLOAD_BYTES).id;
+
+        send(&peer, &[whole(0, &block, &payload)]).await;
+
+        eventually("the message to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        let line = LOG
+            .since(mark)
+            .lines()
+            .find(|line| line.contains(&msg_id.to_string()))
+            .unwrap_or_default()
+            .to_owned();
+        assert!(line.contains(r#"event="first_arrival""#), "{line}");
+        assert!(line.contains(r#"source="overlay""#), "{line}");
+        assert!(
+            line.contains(&format!("slot={}", DECODED_BLOCK.slot())),
+            "{line}"
+        );
+        assert!(
+            line.contains(&format!("block_root={}", "9c".repeat(32))),
+            "{line}"
+        );
+    }
+
     /// DX-N1 at the third ingress site: a host reassembles a message for a topic its own beacon
     /// node never asked for, and publishes nothing. The chunks were still worth taking in, since
     /// the region was owed them.
