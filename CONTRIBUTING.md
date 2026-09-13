@@ -2,7 +2,9 @@
 
 ## Tests first
 
-Every change starts with a failing test. Commit the test on its own, watch it fail, then commit the code that makes it pass; a reviewer reads the two commits to see that the test drove the code. Each test checks one behaviour and is named after it: `entry_expires_after_ttl`, not `test_cache_2`. Anything that depends on the current time takes the `Clock` trait from `overlay-core` and is tested with `FakeClock`; async timers use `tokio::time::pause()`. There are no sleeps in the suite.
+Every change starts with a failing test. Commit the test on its own, watch it fail, then commit the code that makes it pass; a reviewer reads the two commits to see that the test drove the code. Each test checks one behaviour and is named after it: `entry_expires_after_ttl`, not `test_cache_2`. Anything that depends on the current time takes the `Clock` trait from `overlay-core` and is tested with `FakeClock`; async timers use `tokio::time::pause()`.
+
+The tests in `overlay-bn` that drive a real libp2p swarm over loopback cannot pause time, so they wait for what they assert rather than sleeping past it: `wait_for` on an event channel, or `testutil::wait_until` for anything a test can only see by asking, such as a request count or a gauge. A sleep followed by an assertion that something has happened is a bet on the machine being idle, and it loses under a parallel `cargo test --workspace`; the fix is a wait with a bound well above the interval the test is ruling out, and a comment naming both numbers. The one sleep that is sound is the one that stages a negative claim, that nothing arrived in a window: a busy machine can delay an event past the window but cannot invent one, so the test may miss a bug under load but never fails without one. Keep those, and say in a comment which claim each one stages.
 
 ## Running the suite
 
