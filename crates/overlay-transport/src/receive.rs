@@ -1222,7 +1222,7 @@ impl Ctx {
                 node: &self.deps.node,
                 at: arrived,
                 source,
-                header: None,
+                header,
             });
             self.deps.publish.enqueue(PublishItem {
                 topic,
