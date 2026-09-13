@@ -3528,6 +3528,29 @@ mod tests {
         );
     }
 
+    /// The third path a block reaches a host by: a sibling that advertised no `STRIPING` sent it
+    /// whole. It is not kept for repair, but the overlay did carry it, and the beacon node's
+    /// import of it has to find that record here or the block reads as one the overlay missed
+    /// (T-088).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_whole_delivered_block_is_filed_for_its_import() {
+        let block = topic("beacon_block");
+        let payload = payload(b"a whole block only the import telemetry test sends");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+
+        send(&peer, &[whole(0, &block, &payload)]).await;
+
+        eventually("the message to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert!(
+            cluster
+                .arrivals(1)
+                .imported(DECODED_BLOCK.slot(), DECODED_BLOCK.block_root())
+        );
+    }
+
     /// DX-N1 at the third ingress site: a host reassembles a message for a topic its own beacon
     /// node never asked for, and publishes nothing. The chunks were still worth taking in, since
     /// the region was owed them.
