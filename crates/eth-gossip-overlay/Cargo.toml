@@ -13,13 +13,7 @@ http-body-util.workspace = true
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util.workspace = true
 nix = { workspace = true, features = ["hostname"] }
-# `column-repair` promotes `types` to a production dependency of `overlay-bn` and turns on the
-# gossip payload decoder custody column repair needs (D05, T-083). `by-root-cache` adds the two
-# handlers §5.8's optional cache serves and the SSZ decoder they read requests with, so a shipped
-# binary can serve it and `bn.by_root_cache.enabled` is a reload rather than a rebuild; it is off
-# in the shipped configuration. This is the only crate that asks for either;
-# `cargo tree -p overlay-bn -e normal` lists their dependencies only when they are on.
-overlay-bn = { workspace = true, features = ["by-root-cache", "column-repair"] }
+overlay-bn.workspace = true
 overlay-core.workspace = true
 overlay-transport.workspace = true
 prometheus = { workspace = true, features = ["process"] }

@@ -762,13 +762,10 @@ mod tests {
         /// The store the by-root cache answers out of, which a test fills directly rather than
         /// driving payloads through gossip.
         recent: SharedRecentLarge,
-        /// `bn.by_root_cache.enabled`, which SIGHUP flips under a running link. Only a build
-        /// with the handlers compiled in has a test that turns it on.
-        #[cfg_attr(not(feature = "by-root-cache"), allow(dead_code))]
+        /// `bn.by_root_cache.enabled`, which SIGHUP flips under a running link.
         by_root_on: Arc<AtomicBool>,
         by_root_counts: Arc<ByRootCounts>,
         /// The inject kill switch, the one flag the publisher and the by-root cache share.
-        #[cfg_attr(not(feature = "by-root-cache"), allow(dead_code))]
         inject: Arc<AtomicBool>,
     }
 
@@ -852,7 +849,6 @@ mod tests {
         let mut registry = Registry::default();
         let recent = SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES));
         // What fills the store's by-root index, the way T-045 wires it.
-        #[cfg(feature = "column-repair")]
         let recent = recent.with_decoder(Arc::new(crate::decode::Headers));
         let by_root_on = Arc::new(AtomicBool::new(false));
         let by_root_counts = Arc::new(ByRootCounts::default());
@@ -2157,7 +2153,6 @@ mod tests {
     /// of the beacon node going to the public network for it. The bytes are the ones the store
     /// holds, so the block Lighthouse's own outbound codec reads back is the block that was
     /// gossiped, fork context bytes and all.
-    #[cfg(feature = "by-root-cache")]
     #[tokio::test(flavor = "multi_thread")]
     async fn block_by_root_hit_returns_stored_bytes() {
         let mut bn = FakeBn::start().await;
@@ -2180,7 +2175,6 @@ mod tests {
     /// A root the store never held is refused exactly as it was before the cache existed, so a
     /// beacon node whose lookup misses is no worse off than it was and goes to the public
     /// network as it always would have.
-    #[cfg(feature = "by-root-cache")]
     #[tokio::test(flavor = "multi_thread")]
     async fn block_by_root_miss_returns_resource_unavailable() {
         let mut bn = FakeBn::start().await;
@@ -2200,7 +2194,6 @@ mod tests {
     /// `bn.by_root_cache.enabled` reloads, so turning it off has to put T-019's refusal back on
     /// the next request without restarting the link. The flag is read per request rather than
     /// captured when the responder is built, which is what makes that true.
-    #[cfg(feature = "by-root-cache")]
     #[tokio::test(flavor = "multi_thread")]
     async fn disabling_the_cache_puts_the_refusal_back() {
         let mut bn = FakeBn::start().await;
@@ -2231,7 +2224,6 @@ mod tests {
     /// it as surely as a publish does: overlay-delivered bytes over the same link, only on the
     /// node's own request. So the switch refuses here too, whatever `bn.by_root_cache.enabled`
     /// says, and it is the flag the publisher reads rather than a second one.
-    #[cfg(feature = "by-root-cache")]
     #[tokio::test(flavor = "multi_thread")]
     async fn by_root_answers_nothing_while_inject_is_off() {
         let mut bn = FakeBn::start().await;
@@ -2263,7 +2255,6 @@ mod tests {
     /// A by-root request names the columns it wants, and a host holding more of them than it was
     /// asked for sends only those: a custody set the beacon node did not ask about is bytes over
     /// the link it has no use for.
-    #[cfg(feature = "by-root-cache")]
     #[tokio::test(flavor = "multi_thread")]
     async fn columns_by_root_returns_only_requested_indices() {
         let mut bn = FakeBn::start().await;

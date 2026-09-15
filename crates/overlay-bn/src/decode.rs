@@ -4,9 +4,6 @@
 //! host that never saw the column has no id for it (D23). Only the payload knows those two
 //! numbers, so this module exists and nothing else in the workspace decodes a payload.
 //!
-//! `types` is a dev-dependency everywhere else (D05); the `column-repair` feature is what makes
-//! it a production one, and it is what this module is behind.
-//!
 //! # How little is read
 //!
 //! [`column_header`] reads the fixed part of a `DataColumnSidecar` and stops: the index, and the

@@ -30,113 +30,97 @@
 //! That is the whole cost, which is why the cache keeps first-claim as it is rather than taking
 //! D39's option B, a node claim displacing a peer claim, for it.
 
-#[cfg(feature = "by-root-cache")]
-mod on {
-    use overlay_core::msgid::MessageId;
-    use overlay_core::recent::SharedRecentLarge;
-    use overlay_core::wire::MAX_PAYLOAD_BYTES;
-    use ssz::Decode;
-    use types::{DataColumnsByRootIdentifier, Hash256, MainnetEthSpec};
+use overlay_core::msgid::MessageId;
+use overlay_core::recent::SharedRecentLarge;
+use overlay_core::wire::MAX_PAYLOAD_BYTES;
+use ssz::Decode;
+use types::{DataColumnsByRootIdentifier, Hash256, MainnetEthSpec};
 
-    use crate::rpc::proto::Protocol;
-    use crate::rpc::{ByRootCache, Chunk, MAX_REQUEST_BLOCKS, Response};
+use crate::rpc::proto::Protocol;
+use crate::rpc::{ByRootCache, Chunk, MAX_REQUEST_BLOCKS, Response};
 
-    /// The answer to a by-root `request` received on `protocol`.
-    ///
-    /// A request that names nothing this host holds, and a body that is not the request its
-    /// protocol carries, both come back `ResourceUnavailable`: that is what these two protocols
-    /// answered before the cache existed, so a beacon node whose lookup misses is no worse off
-    /// than it was. A request that names more than one object is answered with a chunk for each
-    /// one found, in the order it asked, which is what Lighthouse reads a partial answer as.
-    /// While the cache or inject is off every request is refused the same way, uncounted: a
-    /// refusal is neither a hit nor a miss.
-    pub fn answer(cache: &ByRootCache, protocol: Protocol, request: &[u8]) -> Response {
-        if !cache.enabled() || !cache.inject() {
-            return Response::ResourceUnavailable;
-        }
-        let chunks = match protocol {
-            Protocol::BlocksByRootV2 => blocks(&cache.recent, request),
-            Protocol::ColumnsByRootV1 => columns(&cache.recent, request),
-            _ => return Response::ResourceUnavailable,
-        };
-        cache.stats.by_root_request(protocol, !chunks.is_empty());
-        match chunks.is_empty() {
-            true => Response::ResourceUnavailable,
-            false => Response::Chunks(chunks),
-        }
+/// The answer to a by-root `request` received on `protocol`.
+///
+/// A request that names nothing this host holds, and a body that is not the request its
+/// protocol carries, both come back `ResourceUnavailable`: that is what these two protocols
+/// answered before the cache existed, so a beacon node whose lookup misses is no worse off
+/// than it was. A request that names more than one object is answered with a chunk for each
+/// one found, in the order it asked, which is what Lighthouse reads a partial answer as.
+/// While the cache or inject is off every request is refused the same way, uncounted: a
+/// refusal is neither a hit nor a miss.
+pub fn answer(cache: &ByRootCache, protocol: Protocol, request: &[u8]) -> Response {
+    if !cache.enabled() || !cache.inject() {
+        return Response::ResourceUnavailable;
     }
-
-    /// `BlocksByRootRequest`: an SSZ list of block roots, which is a fixed-size element type and
-    /// so is the roots one after another.
-    fn blocks(recent: &SharedRecentLarge, request: &[u8]) -> Vec<Chunk> {
-        let Ok(roots) = Vec::<Hash256>::from_ssz_bytes(request) else {
-            return Vec::new();
-        };
-        roots
-            .iter()
-            .take(MAX_REQUEST_BLOCKS)
-            .filter_map(|root| chunk(recent, recent.get_by_block(bytes32(root))?))
-            .collect()
+    let chunks = match protocol {
+        Protocol::BlocksByRootV2 => blocks(&cache.recent, request),
+        Protocol::ColumnsByRootV1 => columns(&cache.recent, request),
+        _ => return Response::ResourceUnavailable,
+    };
+    cache.stats.by_root_request(protocol, !chunks.is_empty());
+    match chunks.is_empty() {
+        true => Response::ResourceUnavailable,
+        false => Response::Chunks(chunks),
     }
+}
 
-    /// `DataColumnsByRootRequest`: an SSZ list of `(block_root, indices)`, whose elements are
-    /// variable-size and so are offset-prefixed. `types` owns both shapes, so the request the
-    /// beacon node built and the request this reads cannot drift apart.
-    ///
-    /// Only the indices asked for are served. A host in full custody holds all 128 columns of a
-    /// block, and sending the ones the beacon node did not ask about would be five megabytes
-    /// over the link for nothing.
-    fn columns(recent: &SharedRecentLarge, request: &[u8]) -> Vec<Chunk> {
-        let Ok(ids) = Vec::<DataColumnsByRootIdentifier<MainnetEthSpec>>::from_ssz_bytes(request)
-        else {
-            return Vec::new();
-        };
-        ids.iter()
-            .take(MAX_REQUEST_BLOCKS)
-            .flat_map(|id| {
-                let root = bytes32(&id.block_root);
-                id.columns.iter().filter_map(move |index| {
-                    let index = u8::try_from(*index).ok()?;
-                    Some((root, index))
-                })
+/// `BlocksByRootRequest`: an SSZ list of block roots, which is a fixed-size element type and
+/// so is the roots one after another.
+fn blocks(recent: &SharedRecentLarge, request: &[u8]) -> Vec<Chunk> {
+    let Ok(roots) = Vec::<Hash256>::from_ssz_bytes(request) else {
+        return Vec::new();
+    };
+    roots
+        .iter()
+        .take(MAX_REQUEST_BLOCKS)
+        .filter_map(|root| chunk(recent, recent.get_by_block(bytes32(root))?))
+        .collect()
+}
+
+/// `DataColumnsByRootRequest`: an SSZ list of `(block_root, indices)`, whose elements are
+/// variable-size and so are offset-prefixed. `types` owns both shapes, so the request the
+/// beacon node built and the request this reads cannot drift apart.
+///
+/// Only the indices asked for are served. A host in full custody holds all 128 columns of a
+/// block, and sending the ones the beacon node did not ask about would be five megabytes
+/// over the link for nothing.
+fn columns(recent: &SharedRecentLarge, request: &[u8]) -> Vec<Chunk> {
+    let Ok(ids) = Vec::<DataColumnsByRootIdentifier<MainnetEthSpec>>::from_ssz_bytes(request)
+    else {
+        return Vec::new();
+    };
+    ids.iter()
+        .take(MAX_REQUEST_BLOCKS)
+        .flat_map(|id| {
+            let root = bytes32(&id.block_root);
+            id.columns.iter().filter_map(move |index| {
+                let index = u8::try_from(*index).ok()?;
+                Some((root, index))
             })
-            .filter_map(|(root, index)| chunk(recent, recent.get_by_column(root, index)?))
-            .collect()
-    }
-
-    /// The chunk for the payload held under `msg_id`: its SSZ, and the fork digest of the topic
-    /// it arrived on, which is the fork the beacon node itself put the object under.
-    ///
-    /// The store keeps the compressed form every other consumer wants, so a served object is
-    /// decompressed here. That is tens of microseconds against the tens of milliseconds a
-    /// public round trip would have cost, and it happens only on a hit.
-    fn chunk(recent: &SharedRecentLarge, msg_id: MessageId) -> Option<Chunk> {
-        let (topic, payload) = recent.get(&msg_id)?;
-        Some(Chunk {
-            context: topic.fork_digest(),
-            ssz: overlay_core::msgid::decompressed(&payload, MAX_PAYLOAD_BYTES)?,
         })
-    }
-
-    fn bytes32(root: &Hash256) -> [u8; 32] {
-        let mut out = [0; 32];
-        out.copy_from_slice(root.as_slice());
-        out
-    }
+        .filter_map(|(root, index)| chunk(recent, recent.get_by_column(root, index)?))
+        .collect()
 }
 
-#[cfg(not(feature = "by-root-cache"))]
-mod on {
-    use crate::rpc::proto::Protocol;
-    use crate::rpc::{ByRootCache, Response};
-
-    /// The refusal T-019 gives, for a build without the cache compiled in.
-    pub fn answer(_: &ByRootCache, _: Protocol, _: &[u8]) -> Response {
-        Response::ResourceUnavailable
-    }
+/// The chunk for the payload held under `msg_id`: its SSZ, and the fork digest of the topic
+/// it arrived on, which is the fork the beacon node itself put the object under.
+///
+/// The store keeps the compressed form every other consumer wants, so a served object is
+/// decompressed here. That is tens of microseconds against the tens of milliseconds a
+/// public round trip would have cost, and it happens only on a hit.
+fn chunk(recent: &SharedRecentLarge, msg_id: MessageId) -> Option<Chunk> {
+    let (topic, payload) = recent.get(&msg_id)?;
+    Some(Chunk {
+        context: topic.fork_digest(),
+        ssz: overlay_core::msgid::decompressed(&payload, MAX_PAYLOAD_BYTES)?,
+    })
 }
 
-pub use on::answer;
+fn bytes32(root: &Hash256) -> [u8; 32] {
+    let mut out = [0; 32];
+    out.copy_from_slice(root.as_slice());
+    out
+}
 
 #[cfg(test)]
 mod tests {

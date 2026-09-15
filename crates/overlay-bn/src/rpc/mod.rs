@@ -56,10 +56,6 @@ pub trait ByRootStats: Send + Sync {
 /// Both flags are read per request rather than captured, so turning the cache off over SIGHUP,
 /// or inject off over the admin socket, puts T-019's `ResourceUnavailable` back without
 /// restarting the link.
-/// The store and the counter are read by the handlers, which only the `by-root-cache` feature
-/// compiles in. A build without it still carries the cache so the wiring and the config key are
-/// the same either way; it just always answers `ResourceUnavailable`.
-#[cfg_attr(not(feature = "by-root-cache"), allow(dead_code))]
 #[derive(Clone)]
 pub struct ByRootCache {
     recent: SharedRecentLarge,
@@ -326,21 +322,14 @@ const SYNCNETS_BITS: u8 = 4;
 
 /// How many block roots one request may name, `MAX_REQUEST_BLOCKS_DENEB` in the consensus
 /// specs, which is what Lighthouse's `max_request_blocks_deneb` defaults to.
-#[cfg(feature = "by-root-cache")]
 const MAX_REQUEST_BLOCKS: usize = 128;
 
 /// The largest `DataColumnSidecarsByRoot` body Lighthouse's own inbound codec accepts, which is
 /// the largest of everything the sidecar reads: [`MAX_REQUEST_BLOCKS`] identifiers of a 4-byte
 /// outer offset, a 32-byte root, a 4-byte offset and one 8-byte index per column
 /// (`max_data_columns_by_root_request_common` in `consensus/types/src/core/chain_spec.rs`).
-#[cfg(feature = "by-root-cache")]
 pub const MAX_REQUEST_LEN: usize =
     MAX_REQUEST_BLOCKS * (4 + 32 + 4 + 8 * crate::spec::MAINNET.number_of_columns as usize);
-
-/// The largest request body the sidecar accepts without the by-root cache built in: a Status v2.
-/// Everything else it serves is smaller, and nothing it serves is variable length.
-#[cfg(not(feature = "by-root-cache"))]
-pub const MAX_REQUEST_LEN: usize = Status::V2_LEN;
 
 /// What is read from an inbound stream before the rest is refused: the length prefix plus
 /// `snap::raw::max_compress_len(MAX_REQUEST_LEN)`, which is `32 + n + n / 6` and is the bound

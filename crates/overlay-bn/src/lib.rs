@@ -4,7 +4,6 @@ pub mod bn_http;
 pub mod compat;
 #[cfg(test)]
 mod conformance;
-#[cfg(feature = "column-repair")]
 pub mod decode;
 pub mod events;
 pub mod gossip;
