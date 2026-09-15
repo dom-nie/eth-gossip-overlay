@@ -349,8 +349,8 @@ fn sample(registry: &Registry, name: &str, labels: &[(&str, &str)]) -> Option<f6
             })
     })?;
     Some(match family.get_field_type() {
-        prometheus::proto::MetricType::GAUGE => metric.get_gauge().value(),
-        _ => metric.get_counter().value(),
+        prometheus::proto::MetricType::GAUGE => metric.get_gauge().get_value(),
+        _ => metric.get_counter().get_value(),
     })
 }
 

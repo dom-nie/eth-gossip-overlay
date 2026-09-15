@@ -57,7 +57,7 @@ hkdf = "0.13"
 ed25519-dalek = "3"
 zeroize = "1"
 reed-solomon-simd = "3"
-prometheus = "0.14"
+prometheus = { version = "0.14", default-features = false, features = ["process"] }
 prometheus-client = "0.24"
 # hyper 1 ships its runtime bridge and its body helpers as separate crates and is not usable
 # as a server without them.
