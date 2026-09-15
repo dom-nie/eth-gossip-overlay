@@ -11,10 +11,9 @@
 //! that took the wire form would decompress a second time, once per large message, on the path
 //! this project exists to shorten.
 //!
-//! The decoder itself is `overlay_bn::decode::Headers` behind the `column-repair` feature, and
-//! the binary is what installs it. Nothing here requires one: without a decoder every payload is
-//! stored and forwarded exactly as before, no column is indexed by identity and no event carries
-//! a slot, which is what lets `overlay-bn` build and emit that event with the feature off.
+//! The decoder itself is `overlay_bn::decode::Headers`, and the binary is what installs it.
+//! Nothing here requires one: without a decoder every payload is stored and forwarded exactly as
+//! before, no column is indexed by identity and no event carries a slot.
 
 use crate::topic::Topic;
 

@@ -57,8 +57,8 @@ pub struct FirstArrival<'a> {
     pub at: SystemTime,
     /// Which side it came in on.
     pub source: Source<'a>,
-    /// What the payload's header said, when there was a decoder to read it (T-083). A build
-    /// without the `column-repair` feature has none, and the line carries no slot.
+    /// What the payload's header said, when there was a decoder to read it (T-083). A store
+    /// with no decoder installed gives none, and the line carries no slot.
     pub header: Option<Header>,
 }
 
