@@ -798,6 +798,32 @@ mod tests {
         });
     }
 
+    /// Lighthouse frames its requests with `unsigned_varint`, whose decoder refuses a length
+    /// that is not the shortest encoding of itself, and the sidecar reads them the same way: a
+    /// prefix padded out with a continuation byte is refused even though it spells a legal
+    /// length and a good body follows it.
+    #[test]
+    fn a_non_minimal_length_prefix_is_refused() {
+        let good = request(&status().encode(2));
+        let padded = [vec![Status::V2_LEN as u8 | 0x80, 0x00], good[1..].to_vec()].concat();
+
+        let response = Responder::new().answer(&read(&STATUS_V2, &padded));
+
+        assert_eq!(response, Response::InvalidRequest);
+    }
+
+    /// A prefix that never terminates is refused where the decoder's own bound cuts it off,
+    /// past the ten bytes a `usize` can take, rather than read on into what follows it.
+    #[test]
+    fn eleven_continuation_bytes_are_refused() {
+        let good = request(&status().encode(2));
+        let endless = [vec![0x80; 11], good[1..].to_vec()].concat();
+
+        let response = Responder::new().answer(&read(&STATUS_V2, &endless));
+
+        assert_eq!(response, Response::InvalidRequest);
+    }
+
     /// What a response to random bytes may be: an error, or a success whose body is the one
     /// its protocol calls for. A `Goodbye` only ever comes from the goodbye protocol.
     fn plausible(protocol: Protocol, response: &Response) -> bool {
