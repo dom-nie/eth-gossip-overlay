@@ -50,6 +50,9 @@ url = { version = "2", features = ["serde"] }
 bytes = "1"
 sha2 = "0.11"
 snap = "1"
+# The length prefix on req/resp, decoded the way Lighthouse decodes it. The copy libp2p-core
+# already resolves; a Lighthouse bump that moves it shows up in `cargo tree -d`.
+unsigned-varint = "0.8"
 hkdf = "0.13"
 ed25519-dalek = "3"
 zeroize = "1"

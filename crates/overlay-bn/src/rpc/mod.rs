@@ -435,13 +435,18 @@ impl Codec for Eth2Codec {
 
 /// The body of a request: `<varint uncompressed length><snappy framed ssz>`, the framing
 /// `SSZSnappyInboundCodec::decode` reads. An empty stream is an empty body, which is how
-/// Lighthouse sends a `MetaData` request, whose length prefix it omits entirely. A prefix
-/// past the largest legal request is refused before the frame decoder sees a byte.
+/// Lighthouse sends a `MetaData` request, whose length prefix it omits entirely.
+///
+/// The prefix is read by the crate Lighthouse frames with, so what it refuses is what the
+/// beacon node's own codec refuses: a prefix that runs off the end, one past ten bytes, and
+/// one that is not the shortest encoding of its value. Those and a length past the largest
+/// legal request are all malformed before anything is allocated, so a peer cannot make this
+/// reserve a buffer by writing a prefix it has no bytes for.
 fn body(raw: &[u8]) -> Result<Vec<u8>, Malformed> {
     if raw.is_empty() {
         return Ok(Vec::new());
     }
-    let (len, framed) = read_varint(raw)?;
+    let (len, framed) = unsigned_varint::decode::usize(raw).map_err(|_| Malformed)?;
     if len > MAX_REQUEST_LEN {
         return Err(Malformed);
     }
@@ -450,22 +455,6 @@ fn body(raw: &[u8]) -> Result<Vec<u8>, Malformed> {
         .read_exact(&mut out)
         .map_err(|_| Malformed)?;
     Ok(out)
-}
-
-/// The unsigned LEB128 at the front of `raw`, and what follows it.
-///
-/// A prefix longer than [`MAX_REQUEST_LEN`] needs, or one that runs off the end, is malformed
-/// before anything is allocated, so a peer cannot make this reserve a buffer by writing a
-/// prefix it has no bytes for.
-fn read_varint(raw: &[u8]) -> Result<(usize, &[u8]), Malformed> {
-    let mut len = 0usize;
-    for (at, byte) in raw.iter().take(VARINT_MAX_BYTES).enumerate() {
-        len |= usize::from(byte & 0x7f) << (7 * at);
-        if byte & 0x80 == 0 {
-            return Ok((len, &raw[at + 1..]));
-        }
-    }
-    Err(Malformed)
 }
 
 /// `<code><varint len(payload)><snappy framed payload>`. An error chunk's payload is the
@@ -479,23 +468,13 @@ fn chunk(code: u8, payload: &[u8]) -> io::Result<Vec<u8>> {
 /// `<varint len(payload)><snappy framed payload>`, the half of a chunk that follows the result
 /// byte and, on a protocol that carries them, the context bytes.
 fn framed(payload: &[u8]) -> io::Result<Vec<u8>> {
-    let mut out = varint(payload.len());
+    let mut prefix = unsigned_varint::encode::usize_buffer();
+    let mut out = unsigned_varint::encode::usize(payload.len(), &mut prefix).to_vec();
     let mut encoder = snap::write::FrameEncoder::new(Vec::new());
     encoder.write_all(payload)?;
     encoder.flush()?;
     out.extend_from_slice(encoder.get_ref());
     Ok(out)
-}
-
-/// Unsigned LEB128, the length prefix `unsigned_varint` writes for Lighthouse.
-fn varint(mut value: usize) -> Vec<u8> {
-    let mut out = Vec::with_capacity(2);
-    while value >= 0x80 {
-        out.push((value as u8) | 0x80);
-        value >>= 7;
-    }
-    out.push(value as u8);
-    out
 }
 
 #[cfg(test)]
@@ -749,6 +728,11 @@ mod tests {
     /// The request framing without the result byte a response carries.
     fn request(body: &[u8]) -> Vec<u8> {
         chunk(SUCCESS, body).unwrap()[1..].to_vec()
+    }
+
+    fn varint(value: usize) -> Vec<u8> {
+        let mut buf = unsigned_varint::encode::usize_buffer();
+        unsigned_varint::encode::usize(value, &mut buf).to_vec()
     }
 
     fn read(id: &StreamProtocol, bytes: &[u8]) -> (Protocol, Result<Vec<u8>, Malformed>) {

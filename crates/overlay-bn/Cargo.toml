@@ -48,6 +48,7 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["sync", "time", "rt", "macros"] }
 tracing.workspace = true
 types = { workspace = true, optional = true }
+unsigned-varint.workspace = true
 url.workspace = true
 wiremock = { workspace = true, optional = true }
 
