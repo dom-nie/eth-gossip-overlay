@@ -43,7 +43,7 @@ use ssz::Decode;
 use types::{DataColumnsByRootIdentifier, Hash256, MainnetEthSpec};
 
 use crate::rpc::proto::Protocol;
-use crate::rpc::{ByRootCache, Chunk, MAX_REQUEST_BLOCKS, Response};
+use crate::rpc::{ByRootCache, ByRootOutcome, Chunk, MAX_REQUEST_BLOCKS, Response};
 
 /// The answer to a by-root `request` received on `protocol`.
 ///
@@ -63,10 +63,15 @@ pub fn answer(cache: &ByRootCache, protocol: Protocol, request: &[u8]) -> Respon
         Protocol::ColumnsByRootV1 => columns(&cache.recent, request),
         _ => return Response::ResourceUnavailable,
     };
-    cache.stats.by_root_request(protocol, !chunks.is_empty());
     match chunks.is_empty() {
-        true => Response::ResourceUnavailable,
-        false => Response::Chunks(chunks),
+        true => {
+            cache.stats.by_root_request(protocol, ByRootOutcome::Miss);
+            Response::ResourceUnavailable
+        }
+        false => {
+            cache.stats.by_root_request(protocol, ByRootOutcome::Hit);
+            Response::Chunks(chunks)
+        }
     }
 }
 

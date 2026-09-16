@@ -729,8 +729,8 @@ mod tests {
     use crate::bn_http::BnClient;
     use crate::gossip::wire;
     use crate::node_key::NodeKey;
-    use crate::rpc::ByRootStats;
     use crate::rpc::proto::Protocol as RpcProtocol;
+    use crate::rpc::{ByRootOutcome, ByRootStats};
     use crate::spec::spec_watch;
     use crate::testutil::{
         self, FakeBn, FakeBnEvent, IDLE_TIMEOUT, LOG, PublicPeer, Received, RpcAnswer, link_config,
@@ -876,13 +876,15 @@ mod tests {
     struct ByRootCounts {
         hits: AtomicUsize,
         misses: AtomicUsize,
+        refused: AtomicUsize,
     }
 
     impl ByRootStats for ByRootCounts {
-        fn by_root_request(&self, _: RpcProtocol, hit: bool) {
-            match hit {
-                true => &self.hits,
-                false => &self.misses,
+        fn by_root_request(&self, _: RpcProtocol, outcome: ByRootOutcome) {
+            match outcome {
+                ByRootOutcome::Hit => &self.hits,
+                ByRootOutcome::Miss => &self.misses,
+                ByRootOutcome::Refused => &self.refused,
             }
             .fetch_add(1, Ordering::Relaxed);
         }
@@ -2050,6 +2052,27 @@ mod tests {
             0,
             "a refusal is not a cache miss"
         );
+    }
+
+    /// T-101 test 5: a refusal with the cache off is counted, under
+    /// `by_root_requests_total{outcome="refused"}`, so the lookups that land on the sidecar
+    /// while it serves nothing are visible. Four inside a millisecond on `beacon_blocks_by_root`
+    /// is one parent lookup the beacon node gave up on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_by_root_refusal_with_the_cache_off_is_counted() {
+        let mut bn = FakeBn::start().await;
+        let (harness, mut answers) = connected(&mut bn).await;
+        let block = testutil::fulu_block(4_096);
+
+        bn.request_blocks_by_root(&[block.root]).await;
+        assert_unavailable(next_answer(&mut answers).await, "BlocksByRoot");
+        bn.request_columns_by_root(block.root, &[3]).await;
+        assert_unavailable(next_answer(&mut answers).await, "DataColumnsByRoot");
+
+        let counts = &harness.by_root_counts;
+        assert_eq!(counts.refused.load(Ordering::Relaxed), 2);
+        assert_eq!(counts.hits.load(Ordering::Relaxed), 0);
+        assert_eq!(counts.misses.load(Ordering::Relaxed), 0);
     }
 
     /// An error chunk carrying `ResourceUnavailable`, on `protocol`.

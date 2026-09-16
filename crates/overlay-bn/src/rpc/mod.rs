@@ -40,12 +40,25 @@ mod by_root;
 pub mod msg;
 pub mod proto;
 
-/// What a by-root request came to, for the `by_root_requests_total{protocol, outcome}` series
-/// §12 names. A hit is a request the store had something for, which is a public round trip the
-/// beacon node did not have to make.
+/// What a by-root request came to: the `outcome` label of the
+/// `by_root_requests_total{protocol, outcome}` series §12 names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ByRootOutcome {
+    /// The store held what was asked for, which is a public round trip the beacon node did not
+    /// have to make.
+    Hit,
+    /// It did not, and the beacon node goes to the public network as it always would have.
+    Miss,
+    /// The cache or inject is off, so the request was refused unread. With the cache off, the
+    /// shipped default, every lookup that lands here is one of these; four inside a millisecond
+    /// on `beacon_blocks_by_root` is one parent lookup the beacon node gave up on (T-101).
+    Refused,
+}
+
+/// Where a by-root request is counted.
 pub trait ByRootStats: Send + Sync {
     /// One request answered on `protocol`.
-    fn by_root_request(&self, protocol: Protocol, hit: bool);
+    fn by_root_request(&self, protocol: Protocol, outcome: ByRootOutcome);
 }
 
 /// What the responder answers a by-root request out of: the recent store T-081 fills, the

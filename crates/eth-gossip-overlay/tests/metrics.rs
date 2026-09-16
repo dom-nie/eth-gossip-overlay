@@ -13,6 +13,8 @@ use eth_gossip_overlay::reload::{ReloadError, ReloadReport, ReloadStats, Trigger
 use overlay_bn::compat::{self, CompatStats};
 use overlay_bn::inbound::InboundStats;
 use overlay_bn::publish::PublishStats;
+use overlay_bn::rpc::proto::Protocol;
+use overlay_bn::rpc::{ByRootOutcome, ByRootStats};
 use overlay_core::budget::FanoutKind;
 use overlay_core::lanes::LaneStats;
 use overlay_core::pubqueue::{DropReason as QueueDropReason, QueueStats};
@@ -415,6 +417,36 @@ fn queue_stats_counts_a_publish_queue_drop() {
         &[("class", "small"), ("reason", "full")],
     );
     assert_eq!(dropped, Some(1.0));
+}
+
+/// The three things a by-root request can come to, on the label §12 names each by. `refused`
+/// is every lookup that lands on the sidecar while the cache is off (T-101).
+#[test]
+fn by_root_stats_count_hits_misses_and_refusals() {
+    let registry = Registry::new();
+    let metrics = Metrics::new(&registry).unwrap();
+
+    ByRootStats::by_root_request(&metrics, Protocol::BlocksByRootV2, ByRootOutcome::Hit);
+    ByRootStats::by_root_request(&metrics, Protocol::BlocksByRootV2, ByRootOutcome::Miss);
+    ByRootStats::by_root_request(&metrics, Protocol::BlocksByRootV2, ByRootOutcome::Refused);
+    ByRootStats::by_root_request(&metrics, Protocol::ColumnsByRootV1, ByRootOutcome::Refused);
+
+    for (protocol, outcome) in [
+        ("beacon_blocks_by_root", "hit"),
+        ("beacon_blocks_by_root", "miss"),
+        ("beacon_blocks_by_root", "refused"),
+        ("data_column_sidecars_by_root", "refused"),
+    ] {
+        assert_eq!(
+            sample(
+                &registry,
+                "overlay_by_root_requests_total",
+                &[("protocol", protocol), ("outcome", outcome)]
+            ),
+            Some(1.0),
+            "{protocol} {outcome}"
+        );
+    }
 }
 
 #[test]

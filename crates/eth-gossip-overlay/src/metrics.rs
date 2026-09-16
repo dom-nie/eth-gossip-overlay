@@ -45,8 +45,8 @@ use overlay_bn::compat::{self, CompatStats};
 use overlay_bn::events::BlockEventStats;
 use overlay_bn::inbound::InboundStats;
 use overlay_bn::publish::PublishStats;
-use overlay_bn::rpc::ByRootStats;
 use overlay_bn::rpc::proto::Protocol as ByRootProtocol;
+use overlay_bn::rpc::{ByRootOutcome, ByRootStats};
 use overlay_core::budget::FanoutKind;
 use overlay_core::custody::ColumnStats;
 use overlay_core::lanes::LaneStats;
@@ -249,6 +249,9 @@ pub const OUTCOME_ERROR: &str = "error";
 pub const OUTCOME_HIT: &str = "hit";
 /// It did not, and the beacon node goes to the public network as it always would have.
 pub const OUTCOME_MISS: &str = "miss";
+/// The cache or inject is off, so the request was refused unread; with the cache off, the
+/// shipped default, this is every lookup that lands on the sidecar (T-101).
+pub const OUTCOME_REFUSED: &str = "refused";
 /// A seen-cache entry went to stay within the bound, not because it expired.
 pub const REASON_CAPACITY: &str = "capacity";
 /// The `inject: false` kill switch.
@@ -1012,10 +1015,11 @@ impl ReceiveStats for Metrics {
 }
 
 impl ByRootStats for Metrics {
-    fn by_root_request(&self, protocol: ByRootProtocol, hit: bool) {
-        let outcome = match hit {
-            true => OUTCOME_HIT,
-            false => OUTCOME_MISS,
+    fn by_root_request(&self, protocol: ByRootProtocol, outcome: ByRootOutcome) {
+        let outcome = match outcome {
+            ByRootOutcome::Hit => OUTCOME_HIT,
+            ByRootOutcome::Miss => OUTCOME_MISS,
+            ByRootOutcome::Refused => OUTCOME_REFUSED,
         };
         self.by_root_requests
             .with_label_values(&[protocol.as_label(), outcome])

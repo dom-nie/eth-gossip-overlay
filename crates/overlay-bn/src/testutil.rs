@@ -85,7 +85,7 @@ use crate::gossip::{BnLinkConfig, GossipBehaviour};
 use crate::link::LinkConfig;
 use crate::node_key::NodeKey;
 use crate::rpc::proto::Protocol as RpcProtocol;
-use crate::rpc::{ByRootCache, ByRootStats};
+use crate::rpc::{ByRootCache, ByRootOutcome, ByRootStats};
 
 /// Long enough for a noise handshake plus a few gossipsub round trips on a loaded CI box.
 const WAIT: Duration = Duration::from_secs(5);
@@ -978,7 +978,7 @@ fn fork_context() -> Arc<ForkContext> {
 pub fn by_root_off() -> ByRootCache {
     struct Uncounted;
     impl ByRootStats for Uncounted {
-        fn by_root_request(&self, _: RpcProtocol, _: bool) {}
+        fn by_root_request(&self, _: RpcProtocol, _: ByRootOutcome) {}
     }
 
     ByRootCache::new(
