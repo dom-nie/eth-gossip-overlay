@@ -20,9 +20,11 @@ log:
 ```
 
 `auto` is JSON when stdout is not a terminal and text when it is, so a service writes JSON and
-a person running the binary by hand reads text. `RUST_LOG` overrides the level and is the only
-way to filter per target; while it is set, a reloaded `log.level` is ignored and the sidecar
-logs that it was, with the ignored value as `configured_level`. Both keys reload on SIGHUP.
+a person running the binary by hand reads text. A `level` of `warn` or `error` quiets the
+sidecar's own lines and keeps the events, which stay at `INFO` whatever the level says; only
+`RUST_LOG` can drop them. `RUST_LOG` overrides the level and is the only way to filter per
+target; while it is set, a reloaded `log.level` is ignored and the sidecar logs that it was,
+with the ignored value as `configured_level`. Both keys reload on SIGHUP.
 
 Queries below assume JSON. They select the unit's stream first; `{unit="eth-gossip-overlay.service"}`
 is what journald's Loki shipper labels it, and any selector that reaches the sidecar's lines

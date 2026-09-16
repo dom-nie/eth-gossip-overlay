@@ -144,14 +144,16 @@ impl LogHandle {
 }
 
 /// The `EnvFilter` directive for a configured level. `log.level` is a closed enum, so this is
-/// the whole filter; anything per-target comes from `RUST_LOG`.
+/// the whole filter, and anything else per target comes from `RUST_LOG`. The events at
+/// `overlay::event` stay at `info` whatever the level says: a `warn` that quiets the journal
+/// must not also empty the panels the canary is judged on. `RUST_LOG` can still drop them.
 pub(crate) fn directive(level: LogLevel) -> &'static str {
     match level {
-        LogLevel::Trace => "trace",
-        LogLevel::Debug => "debug",
-        LogLevel::Info => "info",
-        LogLevel::Warn => "warn",
-        LogLevel::Error => "error",
+        LogLevel::Trace => "trace,overlay::event=info",
+        LogLevel::Debug => "debug,overlay::event=info",
+        LogLevel::Info => "info,overlay::event=info",
+        LogLevel::Warn => "warn,overlay::event=info",
+        LogLevel::Error => "error,overlay::event=info",
     }
 }
 
