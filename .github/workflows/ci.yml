@@ -117,7 +117,7 @@ jobs:
   changelog:
     name: changelog
     if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     steps:
       # The whole history, because the check is a diff against the base commit.
       - uses: actions/checkout@v4
@@ -135,16 +135,36 @@ jobs:
 
   deny:
     name: cargo deny
-    runs-on: ubuntu-latest
+    # One vCPU and a fifteen-minute cap. Nothing here compiles, but cargo metadata still fetches
+    # the registry and the Lighthouse checkout, which the cache keeps between runs, and the
+    # image ships no rustup, so the toolchain goes on by hand. A run that hits the cap sends
+    # the job back to ubuntu-latest.
+    runs-on: ubuntu-slim
+    timeout-minutes: 14
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-deny-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-deny-
+
+      - name: Install rustup and the toolchain pinned in rust-toolchain.toml
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          "$HOME/.cargo/bin/rustup" toolchain install
+
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check licenses advisories bans sources
 
   links:
     name: markdown links
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     steps:
       - uses: actions/checkout@v4
       - uses: lycheeverse/lychee-action@v2
