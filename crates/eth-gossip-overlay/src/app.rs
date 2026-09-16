@@ -226,6 +226,7 @@ pub fn check_config(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     // Deriving the key is the check: a seed that reads as 32 bytes but cannot make a keypair
     // would otherwise only fail at the first handshake.
     tls::identity(&derive_tls_keypair(&me.seeds.current, &me.self_id.hostname))?;
+    LinkConfig::from_config(&cfg.bn).map_err(|err| StartupError::BnAddress(err.to_string()))?;
     let budget = MemoryBudget::compute(
         &cfg,
         me.roster.hosts.len(),
