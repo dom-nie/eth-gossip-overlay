@@ -542,8 +542,8 @@ impl FakeBn {
     }
 
     /// Asks for the peer's metadata. Lighthouse's outbound upgrade offers v3, v2 and v1 in
-    /// that order and multistream-select takes the first the peer supports, so a peer that
-    /// registers all three always answers v3.
+    /// that order and multistream-select takes the first the peer supports; the sidecar
+    /// registers v2 and v1, so v2 is what comes back (T-102).
     pub async fn request_metadata(&self) {
         self.request(RequestType::MetaData(MetadataRequest::new_v3()))
             .await;

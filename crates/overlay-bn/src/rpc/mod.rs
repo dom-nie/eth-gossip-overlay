@@ -252,7 +252,6 @@ impl Responder {
             }
             Protocol::MetaDataV1 => Ok(self.metadata.encode(1)),
             Protocol::MetaDataV2 => Ok(self.metadata.encode(2)),
-            Protocol::MetaDataV3 => Ok(self.metadata.encode(3)),
             Protocol::GoodbyeV1 => {
                 return match Goodbye::decode(request) {
                     Ok(Goodbye(reason)) => Response::Goodbye(reason),
@@ -611,10 +610,6 @@ mod tests {
         assert_eq!(
             responder.respond(Protocol::MetaDataV2, &[]),
             Response::Success(expected.encode(2))
-        );
-        assert_eq!(
-            responder.respond(Protocol::MetaDataV3, &[]),
-            Response::Success(expected.encode(3))
         );
     }
 

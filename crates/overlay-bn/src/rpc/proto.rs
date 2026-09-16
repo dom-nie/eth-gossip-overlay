@@ -5,6 +5,15 @@
 //! these to a peer; registering all of them means any request it can make gets a well-formed
 //! answer instead of a negotiation failure it would log. The drift test compares the table with
 //! Lighthouse's enum in both directions.
+//!
+//! The one id left out on purpose is `metadata/3`. Its body carries a custody group count,
+//! and a count the beacon node accepts makes it assign the sidecar custody subnets derived from
+//! the sidecar's own peer id: subnets it does not hold, on which it would then stand in for a
+//! real custody peer in the node's discovery and be asked first for columns it refuses (T-102).
+//! Lighthouse offers v3, v2 and v1 on every metadata request (`rpc/protocol.rs:432-437`), so
+//! v2 negotiates, and `meta_data_response` skips custody assignment for a v2 body
+//! (`peer_manager/mod.rs:767-770`). What that costs is `DataColumnSidecarsByRoot`: the node
+//! asks only custody peers for columns, so the handler below is never reached (§5.8).
 
 use libp2p::StreamProtocol;
 
@@ -21,8 +30,6 @@ pub enum Protocol {
     MetaDataV1,
     /// `metadata/2`: answered with `syncnets` as well.
     MetaDataV2,
-    /// `metadata/3`: answered with the custody group count as well.
-    MetaDataV3,
     /// `goodbye/1`: the connection is closed.
     GoodbyeV1,
     /// `beacon_blocks_by_root/2`: answered out of the recent store while the by-root cache is
@@ -57,8 +64,8 @@ macro_rules! id {
     };
 }
 
-/// The table, in `SupportedProtocol`'s order.
-static TABLE: [(StreamProtocol, Protocol); 22] = [
+/// The table, in `SupportedProtocol`'s order, without `metadata/3` (module doc).
+static TABLE: [(StreamProtocol, Protocol); 21] = [
     (id!("status", "1"), Protocol::StatusV1),
     (id!("status", "2"), Protocol::StatusV2),
     (id!("goodbye", "1"), Protocol::GoodbyeV1),
@@ -92,7 +99,6 @@ static TABLE: [(StreamProtocol, Protocol); 22] = [
     (id!("ping", "1"), Protocol::PingV1),
     (id!("metadata", "1"), Protocol::MetaDataV1),
     (id!("metadata", "2"), Protocol::MetaDataV2),
-    (id!("metadata", "3"), Protocol::MetaDataV3),
     (id!("light_client_bootstrap", "1"), Protocol::Unsupported),
     (
         id!("light_client_optimistic_update", "1"),
@@ -166,10 +172,6 @@ mod tests {
 
         assert!(lighthouse.contains(&declined));
         assert_eq!(ours, &lighthouse - &BTreeSet::from([declined]));
-        assert_eq!(
-            all().count(),
-            lighthouse.len(),
-            "a duplicate id in the table"
-        );
+        assert_eq!(all().count(), ours.len(), "a duplicate id in the table");
     }
 }

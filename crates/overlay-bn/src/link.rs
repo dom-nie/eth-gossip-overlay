@@ -1885,7 +1885,7 @@ mod tests {
 
     /// A ping is answered with the sidecar's own sequence number, not the one it was sent,
     /// and the metadata request that follows carries the bits of the advertised set.
-    /// Lighthouse offers v3 first, so v3 is what it decodes.
+    /// Lighthouse offers v3 first and the sidecar declines it, so v2 is what it decodes.
     #[tokio::test(flavor = "multi_thread")]
     async fn fake_bn_ping_gets_seq_number_and_metadata_request_gets_current_bitfields() {
         let mut bn = FakeBn::start().await;
@@ -1902,14 +1902,13 @@ mod tests {
         let RpcAnswer::MetaData(metadata) = &answer else {
             panic!("not a metadata answer: {answer:?}");
         };
-        let MetaData::V3(metadata) = metadata.as_ref() else {
-            panic!("not metadata v3: {metadata:?}");
+        let MetaData::V2(metadata) = metadata.as_ref() else {
+            panic!("not metadata v2: {metadata:?}");
         };
         assert_eq!(metadata.seq_number, 1);
         assert!(metadata.attnets.get(3).unwrap());
         assert!(!metadata.attnets.get(4).unwrap());
         assert!(metadata.syncnets.get(1).unwrap());
-        assert_eq!(metadata.custody_group_count, 4);
     }
 
     /// Lighthouse offers metadata v3, v2 and v1 in that order and takes the first the peer
@@ -1932,71 +1931,6 @@ mod tests {
         assert!(matches!(metadata.as_ref(), MetaData::V2(_)), "{metadata:?}");
         assert!(metadata.custody_group_count().is_err());
         drop(harness);
-    }
-
-    /// The custody range in the metadata the sidecar answers comes from the beacon node's own
-    /// spec, by the connect probe. Without it the sidecar would answer mainnet's floor of 4,
-    /// which is out of range on a network that reports fewer groups than that, and Lighthouse
-    /// says goodbye to a peer whose count it cannot use.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn custody_range_from_the_connect_probe_reaches_the_metadata_answer() {
-        let mut bn = FakeBn::start().await;
-        bn.set_spec_response(ok_json(json!({"data": {
-            "CUSTODY_REQUIREMENT": "1",
-            "NUMBER_OF_CUSTODY_GROUPS": "1"
-        }})))
-        .await;
-        let (mut harness, mut answers) = connected(&mut bn).await;
-
-        // The probe hands the responder the snapshot before it publishes it here.
-        tokio::time::timeout(WAIT, harness.spec.changed())
-            .await
-            .expect("the connect probe never reported the spec")
-            .unwrap();
-        bn.request_metadata().await;
-
-        assert_eq!(harness.spec.borrow().custody_requirement, 1);
-        assert_eq!(custody_group_count(next_answer(&mut answers).await), 1);
-    }
-
-    /// The same range, arriving the other way: a link started on a spec watch that already
-    /// holds it answers from it before any probe has been made, which is what a beacon node
-    /// that asks for metadata the moment it connects reads.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn custody_range_the_link_starts_with_reaches_the_metadata_answer() {
-        let mut bn = FakeBn::start().await;
-        // The probe cannot answer, so nothing but the starting snapshot can set the range.
-        bn.set_spec_response(ResponseTemplate::new(503)).await;
-        let mut answers = bn.responses();
-        let spec = SpecSnapshot {
-            custody_requirement: 1,
-            number_of_custody_groups: 1,
-            ..crate::spec::MAINNET
-        };
-        let harness = spawn_with_spec(
-            link_config(&bn),
-            &bn,
-            &node_key(&tempfile::tempdir().unwrap()),
-            spec,
-        );
-        bn.wait_for(|e| matches!(e, FakeBnEvent::Connected(_)))
-            .await;
-
-        bn.request_metadata().await;
-
-        assert_eq!(custody_group_count(next_answer(&mut answers).await), 1);
-        drop(harness);
-    }
-
-    /// The count in a metadata answer, which is always v3 over the wire.
-    fn custody_group_count(answer: RpcAnswer) -> u64 {
-        let RpcAnswer::MetaData(metadata) = &answer else {
-            panic!("not a metadata answer: {answer:?}");
-        };
-        let MetaData::V3(metadata) = metadata.as_ref() else {
-            panic!("not metadata v3: {metadata:?}");
-        };
-        metadata.custody_group_count
     }
 
     /// The whole path T-014 feeds: the beacon node subscribes, the mirror turns that into a
