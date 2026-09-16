@@ -52,10 +52,15 @@ use crate::rpc::{ByRootCache, ByRootOutcome, Chunk, MAX_REQUEST_BLOCKS, Response
 /// answered before the cache existed, so a beacon node whose lookup misses is no worse off
 /// than it was. A request that names more than one object is answered with a chunk for each
 /// one found, in the order it asked, which is what Lighthouse reads a partial answer as.
-/// While the cache or inject is off every request is refused the same way, uncounted: a
-/// refusal is neither a hit nor a miss.
+/// While the cache or inject is off every request is refused the same way, unread, and counted
+/// as a refusal rather than a miss: with the cache off that is every lookup the beacon node
+/// sends this way, and it is the one trace a dropped parent lookup leaves on the sidecar
+/// (T-101).
 pub fn answer(cache: &ByRootCache, protocol: Protocol, request: &[u8]) -> Response {
     if !cache.enabled() || !cache.inject() {
+        cache
+            .stats
+            .by_root_request(protocol, ByRootOutcome::Refused);
         return Response::ResourceUnavailable;
     }
     let chunks = match protocol {
