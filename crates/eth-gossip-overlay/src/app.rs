@@ -48,6 +48,7 @@ use overlay_core::identity::{Seeds, derive_tls_keypair};
 use overlay_core::lanes::ClassLanes;
 use overlay_core::reassemble::{ReassembleConfig, Reassembler};
 use overlay_core::recent::{self, RECENT_SLOTS, RecentLarge, SharedRecentLarge};
+use overlay_core::repair::responder_limit;
 use overlay_core::roster::{Hostname, Roster, SelfIdentity, resolve_self};
 use overlay_core::seen::{SEEN_CAPACITY, SEEN_TTL, SeenCache, SharedSeenCache};
 use overlay_core::time::SystemClock;
@@ -518,6 +519,7 @@ impl App {
                 spec_rx.borrow().seconds_per_slot,
                 Instant::now(),
             ),
+            repair_limit: responder_limit(cfg.bn.publish_rate_limit.large_per_s, Instant::now()),
             large: cfg.classes.large.clone(),
             // The second hop a relay makes, handed over rather than reached for: one hop is
             // structural everywhere else on this path (D20, T-063).

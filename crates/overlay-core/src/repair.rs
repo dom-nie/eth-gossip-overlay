@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::custody::{BitSet, ColumnGap};
 use crate::msgid::MessageId;
+use crate::ratelimit::TokenBucket;
 use crate::reassemble::{Incomplete, Reassembler};
 use crate::roster::Hostname;
 
@@ -42,6 +43,28 @@ pub const REPAIR_ATTEMPT_MAX: Duration = Duration::from_millis(500);
 /// for this tick and the next candidate takes the work, which is what keeps the rest of the
 /// region busy instead of idle. `overlay-transport` holds the drift test.
 pub const MAX_REPAIR_IN_FLIGHT_PER_PEER: usize = 3;
+
+/// How many repair requests one peer may make of this host per second, as a bucket that starts
+/// full (R2.3).
+///
+/// A requester makes at most [`REPAIR_ATTEMPTS`] attempts per message (D24), and a region
+/// carries at most `large_per_s` large messages a second, the ceiling `bn.publish_rate_limit`
+/// admits into a beacon node (DX-N3), so:
+///
+/// ```text
+/// rate  = REPAIR_ATTEMPTS × large_per_s    3 × 300 = 900 a second at the shipped default
+/// burst = rate                             one second's worth, like the publish buckets
+/// ```
+///
+/// A peer that runs the bucket flat costs this host 900 encodes a second, 37 µs each for a
+/// 200 KB block, which is a thirtieth of a core; the four streams it may hold open bound how
+/// many are in flight, not how many there are. A request past the bucket is answered
+/// `NotFound`, which is what makes an honest requester move to its next candidate instead of
+/// waiting, and counted `repair_requests_total{outcome="rate_limited"}`.
+pub fn responder_limit(large_per_s: u32, now: Instant) -> TokenBucket {
+    let rate = REPAIR_ATTEMPTS as u64 * u64::from(large_per_s);
+    TokenBucket::new(rate, rate, now)
+}
 
 /// How long a message is repaired for, measured from its deadline. Past it the message is given
 /// up on whoever is left to ask, because a block that arrives this late has already lost the race
@@ -89,6 +112,9 @@ pub enum Outcome {
     /// Nobody is left to ask, or the budget ran out. No request was sent and public gossip
     /// delivers the message (D24).
     GaveUp,
+    /// Counted by the host answering, not the one asking: the requester was past
+    /// [`responder_limit`] and was told `NotFound` so it moves on (R2.3).
+    RateLimited,
 }
 
 impl Outcome {
@@ -99,6 +125,7 @@ impl Outcome {
             Self::NotFound => "not_found",
             Self::Timeout => "timeout",
             Self::GaveUp => "gave_up",
+            Self::RateLimited => "rate_limited",
         }
     }
 }

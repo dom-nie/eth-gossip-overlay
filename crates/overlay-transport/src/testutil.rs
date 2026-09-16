@@ -55,9 +55,10 @@ use overlay_core::lanes::{ClassLanes, LanePusher};
 use overlay_core::msgid;
 use overlay_core::protocol::{MAX_FRAME_BYTES, SUPPORTED_FEATURES};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
+use overlay_core::ratelimit::TokenBucket;
 use overlay_core::reassemble::{INCOMPLETE_TTL, MAX_IN_FLIGHT, ReassembleConfig, Reassembler};
 use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
-use overlay_core::repair::{Form as RepairForm, Outcome as RepairOutcome};
+use overlay_core::repair::{self, Form as RepairForm, Outcome as RepairOutcome};
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::seen::{SeenCache, SharedSeenCache};
 use overlay_core::spec::SpecSnapshot;
@@ -630,6 +631,7 @@ pub struct Builder {
     incomplete_ttl: Duration,
     regions: Vec<Region>,
     budget: Option<FanoutBudget>,
+    repair_limit: Option<TokenBucket>,
     clock: Arc<dyn Clock>,
     advertised: BTreeMap<usize, u64>,
 }
@@ -655,6 +657,7 @@ impl Builder {
             incomplete_ttl: INCOMPLETE_TTL,
             regions: vec![Region(REGION.to_owned()); kinds.len()],
             budget: None,
+            repair_limit: None,
             clock: Arc::new(SystemClock),
             advertised: BTreeMap::new(),
         }
@@ -682,6 +685,13 @@ impl Builder {
     /// slot otherwise, which no test can spend in one batch.
     pub fn budget(mut self, budget: FanoutBudget) -> Self {
         self.budget = Some(budget);
+        self
+    }
+
+    /// How many repair requests each of a sidecar's peers may make of it per second (R2.3).
+    /// The shipped bucket otherwise, which no test empties one stream at a time.
+    pub fn repair_limit(mut self, limit: TokenBucket) -> Self {
+        self.repair_limit = Some(limit);
         self
     }
 
@@ -871,6 +881,7 @@ impl Builder {
             in_flight: self.in_flight,
             incomplete_ttl: self.incomplete_ttl,
             budget: self.budget,
+            repair_limit: self.repair_limit,
             clock: self.clock,
         };
         let initial = self
@@ -1013,6 +1024,8 @@ pub struct TestCluster<A: Admission = HelloAdmission> {
     incomplete_ttl: Duration,
     /// The fan-out budget a test decided, or the fleet's own share of a slot.
     budget: Option<FanoutBudget>,
+    /// The repair bucket a test decided, or the shipped one.
+    repair_limit: Option<TokenBucket>,
     /// The clock every sidecar's receive path reads.
     clock: Arc<dyn Clock>,
 }
@@ -1379,6 +1392,12 @@ impl<A: Admission> TestCluster<A> {
                     self.hosts.len(),
                     config::LargeClass::default().chunk_bytes,
                     12,
+                    Instant::now(),
+                )
+            }),
+            repair_limit: self.repair_limit.clone().unwrap_or_else(|| {
+                repair::responder_limit(
+                    config::PublishRateLimit::default().large_per_s,
                     Instant::now(),
                 )
             }),

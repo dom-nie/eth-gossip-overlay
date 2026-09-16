@@ -65,6 +65,7 @@ use overlay_core::events::{self, Arrivals, FirstArrival};
 use overlay_core::msgid::{self, Branch, MessageId};
 use overlay_core::protocol::{MAX_FRAME_BYTES, features};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
+use overlay_core::ratelimit::TokenBucket;
 use overlay_core::reassemble::{Outcome, Reason, Reassembler};
 use overlay_core::recent::SharedRecentLarge;
 use overlay_core::repair::{Form as RepairForm, Outcome as RepairOutcome};
@@ -219,6 +220,9 @@ pub struct Deps {
     /// The budget each peer gets a copy of. A bucket that starts full is what a peer that
     /// connects an hour later would have anyway, since a refill saturates at the capacity.
     pub budget: FanoutBudget,
+    /// How many repair requests each peer may make of this host per second (R2.3), a bucket
+    /// each peer gets a copy of, like the budget above it.
+    pub repair_limit: TokenBucket,
     /// The split every host of the fleet cuts a large message into, which is how a repair
     /// answer rebuilds the chunks a peer is asking for from the payload the recent store kept
     /// (§5.6). The same file on every host, so the chunks come out the same as the origin's.
@@ -2597,6 +2601,7 @@ mod tests {
                 }),
                 clock: Arc::new(SystemClock),
                 budget: FanoutBudget::default_for(2, 2048, 12, Instant::now()),
+                repair_limit: TokenBucket::new(1, 1, Instant::now()),
                 large: config::LargeClass::default(),
                 relaying: Relaying {
                     live: LiveSource::fixed(crate::manager::LiveView::default()),
@@ -4111,6 +4116,57 @@ mod tests {
             ask(&peer, msg_id, one_too_many).await,
             [Frame::RepairResp(RepairResp::NotFound)]
         );
+    }
+
+    /// R2.3's fence. A repair answer costs this host an encode and sits outside both the fan-out
+    /// budget and the beacon node's limiter, so each peer gets a bucket of its own. Past it a
+    /// request is answered `NotFound`, which is what makes an honest requester move to its next
+    /// candidate rather than wait, and counted under its own outcome. The fan-out budget is not
+    /// charged: a peer doing D24's recovery would be closed for it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repair_requests_over_the_per_peer_rate_get_not_found_and_are_counted() {
+        let block = topic("beacon_block");
+        let clock = Arc::new(FakeClock::new());
+        let limit = TokenBucket::new(1, 2, clock.now());
+        let (cluster, peer) =
+            peer_of_with(subscriptions(&[&block], &[]), &[(1, &block)], |builder| {
+                builder.clock(clock.clone()).repair_limit(limit)
+            })
+            .await;
+        let body = large_payload(8 * 1024);
+        let msg_id = holding(&cluster, &block, &body);
+        told_about(&cluster, &block).await;
+        let rate_limited = || {
+            cluster
+                .stats(1)
+                .repair_requests(RepairForm::Chunk, RepairOutcome::RateLimited)
+        };
+
+        assert_eq!(
+            ask(&peer, msg_id, vec![0]).await.len(),
+            2,
+            "first of the burst"
+        );
+        assert_eq!(
+            ask(&peer, msg_id, vec![0]).await.len(),
+            2,
+            "second of the burst"
+        );
+        assert_eq!(
+            ask(&peer, msg_id, vec![0]).await,
+            [Frame::RepairResp(RepairResp::NotFound)],
+            "one past the burst"
+        );
+        assert_eq!(rate_limited(), 1);
+
+        clock.advance(Duration::from_secs(1));
+
+        assert_eq!(
+            ask(&peer, msg_id, vec![0]).await.len(),
+            2,
+            "a second buys one back"
+        );
+        assert_eq!(rate_limited(), 1);
     }
 
     /// D24's responder cap, which is DX-N3's `max_concurrent_bidi_streams` under another name.
