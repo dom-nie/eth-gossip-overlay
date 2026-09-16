@@ -399,8 +399,6 @@ fn every_alert_holds_for_a_window_and_carries_a_summary_and_a_runbook() {
 #[cfg(target_os = "linux")]
 #[test]
 fn process_names_are_the_ones_the_collector_exports() {
-    use prometheus::core::Collector;
-
     let registry = Registry::new();
     Metrics::new(&registry).unwrap();
     let gathered: BTreeSet<String> = registry
