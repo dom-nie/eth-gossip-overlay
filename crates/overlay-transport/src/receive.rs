@@ -106,6 +106,11 @@ const STALLED_STREAM_CODE: u32 = 0;
 /// the same count here, where the work is.
 pub const MAX_REPAIR_STREAMS_PER_PEER: usize = crate::endpoint::MAX_BIDI_STREAMS as usize;
 
+/// Splits a payload into its `k + m` chunks: `rs::encode` everywhere but a test. A repair answer
+/// for a parity index is the one place the receive path runs the codec, and a test counts
+/// through here that a request for data indices alone never does (R2.3).
+pub type Encode = Arc<dyn Fn(&[u8], Params) -> Vec<Bytes> + Send + Sync>;
+
 /// Where the receive path counts. Every method is about one peer's traffic, so `source="overlay"`
 /// is implied on the two counters that carry it rather than passed: T-041 binds
 /// [`first_seen`](Self::first_seen) and [`duplicate`](Self::duplicate) under that label, the way
@@ -228,6 +233,8 @@ pub struct Deps {
     /// answer rebuilds the chunks a peer is asking for from the payload the recent store kept
     /// (§5.6). The same file on every host, so the chunks come out the same as the origin's.
     pub large: LargeClass,
+    /// The codec a repair answer for a parity index runs, see [`Encode`].
+    pub encode: Encode,
     /// What the two second hops are made with.
     pub relaying: Relaying,
 }
@@ -920,7 +927,7 @@ impl Ctx {
         let Some(topic_id) = self.told_id(&topic) else {
             return not_found();
         };
-        let chunks = rs::encode(&payload, split);
+        let chunks = (self.deps.encode)(&payload, split);
         let mut answer: Vec<Frame> = missing
             .iter()
             .filter_map(|index| Some((*index, chunks.get(usize::from(*index))?)))
@@ -1291,6 +1298,8 @@ impl Ctx {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
     use crate::testlog::LOG;
     use crate::testutil::{
@@ -2629,6 +2638,7 @@ mod tests {
                 budget: FanoutBudget::default_for(2, 2048, 12, Instant::now()),
                 repair_limit: TokenBucket::new(1, 1, Instant::now()),
                 large: config::LargeClass::default(),
+                encode: Arc::new(overlay_core::rs::encode),
                 relaying: Relaying {
                     live: LiveSource::fixed(crate::manager::LiveView::default()),
                     topics: Arc::new(Mutex::new(OwnTopics::default())),
@@ -4141,6 +4151,67 @@ mod tests {
         assert_eq!(
             ask(&peer, msg_id, one_too_many).await,
             [Frame::RepairResp(RepairResp::NotFound)]
+        );
+    }
+
+    /// R2.3's other half. A data chunk is a slice of the stored payload, so a request naming
+    /// data indices alone, which is what D24 lists first, is answered without running the
+    /// codec at all; a parity chunk needs every data chunk through it, so a parity index still
+    /// pays the encode. The bytes are the ones the codec would give either way.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_data_only_repair_request_does_not_encode() {
+        let block = topic("beacon_block");
+        let encodes = Arc::new(AtomicUsize::new(0));
+        let counting: Encode = {
+            let encodes = encodes.clone();
+            Arc::new(move |payload: &[u8], params: Params| {
+                encodes.fetch_add(1, Ordering::SeqCst);
+                overlay_core::rs::encode(payload, params)
+            })
+        };
+        let (cluster, peer) =
+            peer_of_with(subscriptions(&[&block], &[]), &[(1, &block)], |builder| {
+                builder.encode(counting)
+            })
+            .await;
+        let body = large_payload(8 * 1024);
+        let msg_id = holding(&cluster, &block, &body);
+        told_about(&cluster, &block).await;
+        let split = Params::for_len(body.len(), 2048, 0.10).unwrap();
+        let chunks = overlay_core::rs::encode(&body, split);
+        let sent = |answer: &[Frame]| -> Vec<(u16, Bytes)> {
+            answer
+                .iter()
+                .filter_map(|frame| match frame {
+                    Frame::Chunk { chunk, .. } => Some((chunk.index, chunk.data.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+        let last_data = split.k - 1;
+
+        let answer = ask(&peer, msg_id, vec![0, last_data]).await;
+
+        assert_eq!(encodes.load(Ordering::SeqCst), 0, "data indices are slices");
+        assert_eq!(
+            sent(&answer),
+            vec![
+                (0, chunks[0].clone()),
+                (last_data, chunks[usize::from(last_data)].clone())
+            ],
+            "the padded last data chunk included"
+        );
+
+        let answer = ask(&peer, msg_id, vec![split.k]).await;
+
+        assert_eq!(
+            encodes.load(Ordering::SeqCst),
+            1,
+            "a parity index runs the codec once"
+        );
+        assert_eq!(
+            sent(&answer),
+            vec![(split.k, chunks[usize::from(split.k)].clone())]
         );
     }
 

@@ -80,7 +80,7 @@ use crate::manager::{
     Admission, CloseCode, ConnectionManager, Handle, LivePeer, LiveSource, LiveView, Local,
     ManagerStats, PeerCounts, PeerEvent, PeerInfo,
 };
-use crate::receive::{Deps, PeerReceiver, ReceiveStats, Relaying};
+use crate::receive::{Deps, Encode, PeerReceiver, ReceiveStats, Relaying};
 use crate::sender::{
     self, DropReason, LARGE_QUEUED_BYTES_MAX, LargeLedger, SenderHandle, SenderStats, StaleReason,
     Transport,
@@ -632,6 +632,7 @@ pub struct Builder {
     regions: Vec<Region>,
     budget: Option<FanoutBudget>,
     repair_limit: Option<TokenBucket>,
+    encode: Encode,
     clock: Arc<dyn Clock>,
     advertised: BTreeMap<usize, u64>,
 }
@@ -658,6 +659,7 @@ impl Builder {
             regions: vec![Region(REGION.to_owned()); kinds.len()],
             budget: None,
             repair_limit: None,
+            encode: Arc::new(overlay_core::rs::encode),
             clock: Arc::new(SystemClock),
             advertised: BTreeMap::new(),
         }
@@ -692,6 +694,12 @@ impl Builder {
     /// The shipped bucket otherwise, which no test empties one stream at a time.
     pub fn repair_limit(mut self, limit: TokenBucket) -> Self {
         self.repair_limit = Some(limit);
+        self
+    }
+
+    /// The codec every sidecar's repair answers run, for the one test that counts how often.
+    pub fn encode(mut self, encode: Encode) -> Self {
+        self.encode = encode;
         self
     }
 
@@ -882,6 +890,7 @@ impl Builder {
             incomplete_ttl: self.incomplete_ttl,
             budget: self.budget,
             repair_limit: self.repair_limit,
+            encode: self.encode,
             clock: self.clock,
         };
         let initial = self
@@ -1026,6 +1035,8 @@ pub struct TestCluster<A: Admission = HelloAdmission> {
     budget: Option<FanoutBudget>,
     /// The repair bucket a test decided, or the shipped one.
     repair_limit: Option<TokenBucket>,
+    /// The codec repair answers run.
+    encode: Encode,
     /// The clock every sidecar's receive path reads.
     clock: Arc<dyn Clock>,
 }
@@ -1402,6 +1413,7 @@ impl<A: Admission> TestCluster<A> {
                 )
             }),
             large: self.large.clone(),
+            encode: self.encode.clone(),
             relaying: Relaying {
                 live: live.clone(),
                 topics: node.topics.clone(),

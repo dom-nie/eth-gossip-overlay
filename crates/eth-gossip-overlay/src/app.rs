@@ -521,6 +521,7 @@ impl App {
             ),
             repair_limit: responder_limit(cfg.bn.publish_rate_limit.large_per_s, Instant::now()),
             large: cfg.classes.large.clone(),
+            encode: Arc::new(overlay_core::rs::encode),
             // The second hop a relay makes, handed over rather than reached for: one hop is
             // structural everywhere else on this path (D20, T-063).
             relaying: Relaying {
