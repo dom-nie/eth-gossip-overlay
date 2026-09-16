@@ -134,7 +134,9 @@ pub struct ReloadReport {
     pub trigger: Trigger,
     /// The keys that took effect, and `roster` when the roster itself changed.
     pub applied: Vec<String>,
-    /// Keys that changed in the file but only take effect on a restart.
+    /// Keys changed in the file that only a restart reads, every one since the process
+    /// started: an edit the roster watcher's reload saw first is still pending when the
+    /// operator runs their own.
     pub restart_required: Vec<String>,
     /// Why the reload did not finish, if it did not. The previous values stay in force. One
     /// slot: a reload that hits two problems reports the later one, which is the roster's,
@@ -347,6 +349,8 @@ pub struct Reloader {
     /// is the one the sidecar started from whatever a new document says.
     roster_path: PathBuf,
     document: yaml::Value,
+    /// What `ReloadReport::restart_required` lists, kept until the process restarts.
+    pending_restart: BTreeSet<String>,
     config: Config,
     roster: watch::Sender<Roster>,
     /// Rebuilt from the roster and `seeds` before either is changed for anyone else. The
@@ -461,6 +465,7 @@ impl Reloader {
             config_path,
             roster_path: config.overlay.roster_file.clone(),
             document,
+            pending_restart: BTreeSet::new(),
             config,
             roster: deps.roster,
             pins: deps.pins,
@@ -494,6 +499,7 @@ impl Reloader {
             // one broken file, one error, and the next reload applies both.
             Err(error) => report.error = Some(error),
         }
+        report.restart_required = self.pending_restart.iter().cloned().collect();
         self.stats.reloaded(&report);
         let (applied, restart_required) = (
             report.applied.join(", "),
@@ -520,6 +526,7 @@ impl Reloader {
     /// Runs the applier of every changed key that has one, and records the rest.
     fn apply_config(&mut self, document: yaml::Value, config: Config, report: &mut ReloadReport) {
         let mut applied = Vec::new();
+        let mut restart_required = Vec::new();
         for path in changed_paths(&self.document, &document) {
             let outcome = if covers(PREVIOUS_SEED, &path) {
                 Some(self.apply_previous_seed(&config))
@@ -533,7 +540,7 @@ impl Reloader {
                 Some(Ok(())) => applied.push(path),
                 Some(Err(reason)) => report.error = Some(ReloadError::Config(reason)),
                 None if reloadable(&path) => applied.push(path),
-                None => report.restart_required.push(path),
+                None => restart_required.push(path),
             }
         }
         // Only what took effect is copied onto the configuration in force: a key that needs a
@@ -547,13 +554,15 @@ impl Reloader {
             Ok(config) => self.config = config,
             Err(error) => report.error = Some(error),
         }
-        // The next diff runs against what was taken in plus the restart-required keys. A key
-        // whose applier refused it stays at its old value, so the corrected file reads as a
-        // change again and the applier gets another go.
-        for path in &report.restart_required {
+        // The next diff runs against what was taken in plus the restart-required keys, which
+        // stay pending rather than being diffed again. A key whose applier refused it stays at
+        // its old value, so the corrected file reads as a change again and the applier gets
+        // another go.
+        for path in &restart_required {
             copy_path(&mut effective, &document, path);
         }
         self.document = effective;
+        self.pending_restart.extend(restart_required);
         report.applied.extend(applied);
     }
 

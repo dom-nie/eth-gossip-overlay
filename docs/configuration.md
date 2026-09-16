@@ -9,9 +9,9 @@ finds out before systemd does.
 
 ## Reload or restart
 
-`systemctl reload eth-gossip-overlay`, `SIGHUP` and `eth-gossip-overlayctl roster reload` all re-read
-`config.yaml` and `roster.yaml` without dropping a connection. The reload report says what took
-effect and what did not:
+`systemctl reload eth-gossip-overlay`, `SIGHUP` and `eth-gossip-overlayctl roster reload` re-read
+`config.yaml` and `roster.yaml` without dropping a connection. The report says what took effect
+and what did not:
 
 ```console
 $ sudo eth-gossip-overlayctl roster reload
@@ -19,9 +19,9 @@ applied: inject, roster
 restart required: overlay.listen
 ```
 
-The table below says which side each key is on. A key marked `restart` is read once at startup:
-changing it does nothing until the sidecar restarts, and the report names it so the change is
-not silently lost. A reload applies a key only when its value changed.
+The table says which side each key is on. A `restart` key is read once at startup: a change to
+it is listed on every report until the sidecar restarts. A key is applied only when its value
+changed; one that failed to apply is retried on the next reload.
 
 ## Who this host is
 
