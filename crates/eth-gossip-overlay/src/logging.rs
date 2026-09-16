@@ -114,7 +114,7 @@ impl LogHandle {
         if let Some(directives) = &self.rust_log {
             tracing::info!(
                 rust_log = directives,
-                level,
+                configured_level = level,
                 "RUST_LOG is set, so log.level is not applied"
             );
             return;
@@ -125,7 +125,11 @@ impl LogHandle {
             Ok(filter) => {
                 let _ = self.level.reload(filter);
             }
-            Err(error) => tracing::warn!(%error, level, "keeping the level: it does not parse"),
+            Err(error) => tracing::warn!(
+                %error,
+                configured_level = level,
+                "keeping the level: it does not parse"
+            ),
         }
     }
 
