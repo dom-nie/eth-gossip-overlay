@@ -568,8 +568,12 @@ fn performance_doc_names_the_largest_roster_that_fits_at_the_defaults() {
         "the floor binds at {floor_binds_at}, and {largest} is the largest roster that fits"
     );
     let sentence = format!("{largest} hosts is the largest roster that fits");
+    let prose = read(PERFORMANCE)
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ");
     assert!(
-        read(PERFORMANCE).contains(&sentence),
+        prose.contains(&sentence),
         "{PERFORMANCE} does not say {sentence:?}"
     );
 }

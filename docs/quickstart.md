@@ -58,6 +58,7 @@ when you want to change one.
 
 ```sh
 sudo install -d -m 755 /etc/eth-gossip-overlay
+sudo install -d -m 700 /var/lib/eth-gossip-overlay
 sudo install -m 600 seed /etc/eth-gossip-overlay/seed
 sudo install -m 644 config.yaml /etc/eth-gossip-overlay/config.yaml
 sudo install -m 644 roster.yaml /etc/eth-gossip-overlay/roster.yaml
@@ -66,7 +67,9 @@ echo "ETH_GOSSIP_OVERLAY_HOSTNAME=$(hostname)" | sudo tee /etc/eth-gossip-overla
 
 The hostname in that last file has to be the `hostname:` of this host's roster entry. It is the
 one value the two files must agree on, and setting it from your inventory rather than from the
-kernel is what keeps them agreeing.
+kernel is what keeps them agreeing. `/var/lib/eth-gossip-overlay` is the unit's own: its
+`StateDirectory=` makes it at the first start and takes over whatever is already in it, and
+making it now lets the rehearsal in the next step write the node key before the unit has run.
 
 ## 4. Start the sidecar
 

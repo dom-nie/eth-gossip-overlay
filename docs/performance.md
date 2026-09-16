@@ -39,9 +39,9 @@ At the shipped defaults, a roster of 200 hosts and the unit's `MemoryMax=1G`, wh
 
 <!-- end generated -->
 
-The sum therefore sits on the usable line whatever the roster, until the floor binds: at these
-defaults that is 322 hosts, and past it the total goes over. A row that grows for any other
-reason brings that forward.
+The sum sits on the usable line until the floor binds: at these defaults 322 hosts is the
+largest roster that fits, and one more goes over and the sidecar warns. Any other row that grows
+brings that forward.
 
 ### The by-root cache
 
