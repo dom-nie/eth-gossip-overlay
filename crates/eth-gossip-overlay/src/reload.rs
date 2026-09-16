@@ -1110,6 +1110,25 @@ mod tests {
         );
     }
 
+    /// The roster watcher's reload can be the first to see a restart-required edit. The operator
+    /// who then runs their own reload has to be told too, not answered `none` because the
+    /// journal already was (R5.4a).
+    #[test]
+    fn a_restart_required_key_is_reported_on_every_reload_until_restart() {
+        let mut h = Fixture::new(
+            "overlay:\n  roster_file: ROSTER\n  listen: \"[::]:7788\"\ninject: true\n",
+            &roster_yaml(3),
+        );
+        h.write_config("overlay:\n  roster_file: ROSTER\n  listen: \"[::]:9999\"\ninject: true\n");
+
+        let automatic = h.reloader.reload(Trigger::Automatic);
+        let manual = h.reloader.reload(Trigger::Manual);
+
+        assert_eq!(automatic.restart_required, ["overlay.listen"]);
+        assert_eq!(manual.restart_required, ["overlay.listen"], "{manual:?}");
+        assert!(manual.applied.is_empty(), "{manual:?}");
+    }
+
     /// The repair deadline reaches T-082's scheduler, which reads it on every tick, so a canary
     /// that finds 250 ms firing during ordinary column bursts moves it without a restart (D24).
     ///
