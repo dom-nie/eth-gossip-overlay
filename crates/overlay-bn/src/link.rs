@@ -221,8 +221,7 @@ impl BnLink {
         let connected = Arc::new(AtomicBool::new(false));
         let (control, events) = mpsc::channel(CONTROL_CHANNEL_CAPACITY);
         let (listen_tx, listen) = watch::channel(None);
-        let mut responder = Responder::new().with_by_root(by_root);
-        responder.set_spec(&spec.borrow());
+        let responder = Responder::new().with_by_root(by_root);
         let enr = match node_key.enr(&cfg.listen_addr) {
             Ok(enr) => Some(enr),
             Err(err) => {
@@ -575,7 +574,6 @@ impl Link {
             tracing::warn!(%err, "connect probe failed");
         }
         if let Ok(snapshot) = spec {
-            self.responder.set_spec(&snapshot);
             self.spec.send_replace(snapshot);
         }
         self.emit(BnEvent::BnInfo {
@@ -827,22 +825,8 @@ mod tests {
     }
 
     fn spawn_with_key(cfg: LinkConfig, bn: &FakeBn, node_key: &NodeKey) -> Harness {
-        spawn_with_spec(cfg, bn, node_key, crate::spec::MAINNET)
-    }
-
-    /// A link whose spec watch already holds `spec` when it starts, the way a process that
-    /// read the beacon node's spec before spawning the link would leave it.
-    fn spawn_with_spec(
-        cfg: LinkConfig,
-        bn: &FakeBn,
-        node_key: &NodeKey,
-        spec_value: SpecSnapshot,
-    ) -> Harness {
         let (commands, commands_rx) = mpsc::channel(64);
-        let (spec_tx, _) = spec_watch();
-        spec_tx.send_replace(spec_value);
-        // Subscribed after the send, so `changed()` waits for the connect probe's snapshot.
-        let spec = spec_tx.subscribe();
+        let (spec_tx, spec) = spec_watch();
         let (sets, sets_rx) = watch::channel(SubscriptionSets::default());
         let stats = Arc::new(Counts::default());
         let lanes = ClassLanes::new(stats.clone());

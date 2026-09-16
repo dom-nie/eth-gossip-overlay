@@ -69,8 +69,8 @@ impl Status {
 
 /// `MetaData`: what the sidecar tells the beacon node about itself. The bitfields are SSZ
 /// `Bitvector[64]` and `Bitvector[4]`: subnet `i` is bit `i % 8` of byte `i / 8`. Version 1
-/// stops after `attnets`, version 2 adds `syncnets`, version 3 the custody group count, which
-/// is `None` after a v1 or v2 decode and written as 0 when a v3 encode has none.
+/// stops after `attnets`, version 2 adds `syncnets`. Version 3, which adds a custody group
+/// count, is the one version the sidecar does not speak (`proto`, T-102).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MetaData {
     /// Bumped whenever the rest changes, so the beacon node knows to ask again.
@@ -79,8 +79,6 @@ pub struct MetaData {
     pub attnets: [u8; 8],
     /// The sync committee subnets, in the low four bits.
     pub syncnets: u8,
-    /// How many custody groups the sidecar claims; v3 only.
-    pub custody_group_count: Option<u64>,
 }
 
 impl MetaData {
@@ -88,29 +86,23 @@ impl MetaData {
     pub const V1_LEN: usize = 16;
     /// The v2 body: v1 plus one byte of `syncnets`.
     pub const V2_LEN: usize = 17;
-    /// The v3 body: v2 plus one `u64`.
-    pub const V3_LEN: usize = 25;
 
-    /// The body at protocol `version` 1, 2 or 3.
+    /// The body at protocol `version` 1 or 2.
     pub fn encode(&self, version: u8) -> Vec<u8> {
-        let mut out = Vec::with_capacity(Self::V3_LEN);
+        let mut out = Vec::with_capacity(Self::V2_LEN);
         out.extend_from_slice(&self.seq_number.to_le_bytes());
         out.extend_from_slice(&self.attnets);
         if version >= 2 {
             out.push(self.syncnets);
         }
-        if version >= 3 {
-            out.extend_from_slice(&self.custody_group_count.unwrap_or(0).to_le_bytes());
-        }
         out
     }
 
-    /// Reads a body sent on protocol `version` 1, 2 or 3.
+    /// Reads a body sent on protocol `version` 1 or 2.
     pub fn decode(bytes: &[u8], version: u8) -> Result<Self, Malformed> {
         let expected = match version {
             0 | 1 => Self::V1_LEN,
-            2 => Self::V2_LEN,
-            _ => Self::V3_LEN,
+            _ => Self::V2_LEN,
         };
         if bytes.len() != expected {
             return Err(Malformed);
@@ -119,7 +111,6 @@ impl MetaData {
             seq_number: u64_at(bytes, 0),
             attnets: array(&bytes[8..16]),
             syncnets: bytes.get(16).copied().unwrap_or(0),
-            custody_group_count: (version >= 3).then(|| u64_at(bytes, 17)),
         })
     }
 }
@@ -182,8 +173,7 @@ fn array<const N: usize>(bytes: &[u8]) -> [u8; N] {
 mod tests {
     use lighthouse_network::rpc::GoodbyeReason;
     use lighthouse_network::rpc::methods::{
-        MetaDataV1, MetaDataV2, MetaDataV3, Ping as LighthousePing, StatusMessageV1,
-        StatusMessageV2,
+        MetaDataV1, MetaDataV2, Ping as LighthousePing, StatusMessageV1, StatusMessageV2,
     };
     use ssz::{Decode, Encode};
     use types::{Epoch, Hash256, MainnetEthSpec, Slot};
@@ -237,14 +227,13 @@ mod tests {
     }
 
     /// Bit 3 of attnets and bit 1 of syncnets: byte i/8, bit i%8, as `Bitvector` lays them
-    /// out. Version 1 is answered by the sidecar too, so it is checked here as well.
+    /// out. Both versions the sidecar answers are checked, and a v3-sized body is refused.
     #[test]
-    fn metadata_v2_and_v3_round_trip_against_lighthouse_ssz() {
+    fn metadata_v1_and_v2_round_trip_against_lighthouse_ssz() {
         let metadata = MetaData {
             seq_number: 5,
             attnets: [0b1000, 0, 0, 0, 0, 0, 0, 0],
             syncnets: 0b10,
-            custody_group_count: Some(8),
         };
 
         let v1 = metadata.encode(1);
@@ -256,7 +245,6 @@ mod tests {
             MetaData::decode(&theirs.as_ssz_bytes(), 1).unwrap(),
             MetaData {
                 syncnets: 0,
-                custody_group_count: None,
                 ..metadata.clone()
             }
         );
@@ -270,21 +258,9 @@ mod tests {
         assert!(theirs.syncnets.get(1).unwrap());
         assert_eq!(
             MetaData::decode(&theirs.as_ssz_bytes(), 2).unwrap(),
-            MetaData {
-                custody_group_count: None,
-                ..metadata.clone()
-            }
-        );
-
-        let v3 = metadata.encode(3);
-        let theirs = MetaDataV3::<MainnetEthSpec>::from_ssz_bytes(&v3).unwrap();
-        assert_eq!(v3.len(), MetaData::V3_LEN);
-        assert_eq!(theirs.custody_group_count, 8);
-        assert_eq!(
-            MetaData::decode(&theirs.as_ssz_bytes(), 3).unwrap(),
             metadata
         );
-        assert_eq!(MetaData::decode(&v3, 2), Err(Malformed));
+        assert_eq!(MetaData::decode(&[0; 25], 2), Err(Malformed));
     }
 
     #[test]

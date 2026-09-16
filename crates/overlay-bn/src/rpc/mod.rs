@@ -35,7 +35,6 @@ use snap::read::FrameDecoder;
 
 use crate::rpc::msg::{Goodbye, Malformed, MetaData, Ping, Status};
 use crate::rpc::proto::Protocol;
-use crate::spec::SpecSnapshot;
 
 mod by_root;
 pub mod msg;
@@ -99,39 +98,17 @@ impl fmt::Debug for ByRootCache {
 }
 
 /// Answers requests from the sidecar's own state and nothing else: no chain, no clock, no
-/// channels, so the swarm loop calls it inline. Its inputs are the beacon node's subscriptions,
-/// the beacon node's spec, and the recent store where the optional by-root cache reads.
-#[derive(Clone, Debug)]
+/// channels, so the swarm loop calls it inline. Its inputs are the beacon node's subscriptions
+/// and the recent store where the optional by-root cache reads.
+#[derive(Clone, Debug, Default)]
 pub struct Responder {
     metadata: MetaData,
-    /// Column subnets the beacon node subscribes to, before the range below is applied. A
-    /// subnet is counted once however many fork digests it is subscribed under.
-    columns: BTreeSet<u8>,
-    /// The range Lighthouse accepts a custody group count in.
-    custody_requirement: u64,
-    number_of_custody_groups: u64,
     /// `None` in a responder nobody handed a store, which is every test of the other protocols.
     by_root: Option<ByRootCache>,
 }
 
-impl Default for Responder {
-    fn default() -> Self {
-        Self {
-            metadata: MetaData {
-                custody_group_count: Some(crate::spec::MAINNET.custody_requirement),
-                ..MetaData::default()
-            },
-            columns: BTreeSet::new(),
-            custody_requirement: crate::spec::MAINNET.custody_requirement,
-            number_of_custody_groups: crate::spec::MAINNET.number_of_custody_groups,
-            by_root: None,
-        }
-    }
-}
-
 impl Responder {
-    /// A responder with empty bitfields at sequence number 0, on mainnet's spec until the
-    /// beacon node's own arrives.
+    /// A responder with empty bitfields at sequence number 0.
     pub fn new() -> Self {
         Self::default()
     }
@@ -148,60 +125,26 @@ impl Responder {
     }
 
     /// Recomputes the metadata from the beacon node's own subscriptions (the mirror's
-    /// `advertised` set, D12): attestation and sync committee subnets become bits, and the
-    /// distinct column subnets, however many fork digests each is subscribed under, are the
-    /// custody group count, which is then held inside the range the beacon node's spec gives
-    /// (`publish` below). The extra column topics the sidecar adds on its own are in `local`, not here,
-    /// so they never inflate the count.
+    /// `advertised` set, D12): attestation and sync committee subnets become bits. Column
+    /// topics are not reported at all; the sidecar claims no custody (`proto`, T-102).
+    /// The sequence number moves only when what a peer would read changed, because
+    /// Lighthouse re-requests the metadata every time it sees the number rise.
     pub fn set_subscriptions(&mut self, advertised: &BTreeSet<Topic>) {
         let mut attnets = [0; 8];
         let mut syncnets = 0;
-        self.columns.clear();
         for topic in advertised {
             match *topic.kind() {
                 TopicKind::Attestation(i) if usize::from(i) < 8 * attnets.len() => {
                     attnets[usize::from(i / 8)] |= 1 << (i % 8);
                 }
                 TopicKind::SyncCommittee(i) if i < SYNCNETS_BITS => syncnets |= 1 << i,
-                TopicKind::DataColumnSidecar(subnet) => {
-                    self.columns.insert(subnet);
-                }
                 _ => {}
             }
         }
-        self.publish(attnets, syncnets);
-    }
-
-    /// Takes the custody group range from the beacon node's spec. Until this is called the
-    /// range is mainnet's, which every network the sidecar has seen shares.
-    pub fn set_spec(&mut self, spec: &SpecSnapshot) {
-        self.custody_requirement = spec.custody_requirement;
-        self.number_of_custody_groups = spec.number_of_custody_groups;
-        self.publish(self.metadata.attnets, self.metadata.syncnets);
-    }
-
-    /// Puts the current inputs into the metadata a peer reads, moving the sequence number only
-    /// when what it would read changed, because Lighthouse re-requests the metadata every time
-    /// it sees the number rise.
-    ///
-    /// The custody group count is held inside the range the beacon node's spec gives, because
-    /// `compute_peer_custody_groups` refuses a count outside
-    /// `custody_requirement..=number_of_custody_groups` and `meta_data_response` answers that
-    /// refusal with `goodbye_peer(.., GoodbyeReason::Fault, ..)`
-    /// (`beacon_node/lighthouse_network/src/peer_manager/mod.rs`). A syncing beacon node
-    /// subscribes to no column topic at all, so the honest count is below the floor whenever
-    /// it matters most.
-    fn publish(&mut self, attnets: [u8; 8], syncnets: u8) {
         let next = MetaData {
             seq_number: self.metadata.seq_number,
             attnets,
             syncnets,
-            // Not `clamp`, which panics when a beacon node reports a floor above its ceiling.
-            custody_group_count: Some(
-                (self.columns.len() as u64)
-                    .max(self.custody_requirement)
-                    .min(self.number_of_custody_groups),
-            ),
         };
         if next != self.metadata {
             self.metadata = MetaData {
@@ -479,13 +422,9 @@ mod tests {
     use super::*;
     use crate::rpc::msg::{Ping, Status};
     use crate::rpc::proto::Protocol;
-    use crate::spec::SpecSnapshot;
 
     fn topics(names: &[&str]) -> BTreeSet<Topic> {
-        topics_at("6a95a1a9", names)
-    }
-
-    fn topics_at(digest: &str, names: &[&str]) -> BTreeSet<Topic> {
+        let digest = "6a95a1a9";
         names
             .iter()
             .map(|name| Topic::parse(&format!("/eth2/{digest}/{name}/ssz_snappy")).unwrap())
@@ -604,88 +543,12 @@ mod tests {
             seq_number: 1,
             attnets: [0b1000, 0, 0, 0, 0, 0, 0, 0],
             syncnets: 0b10,
-            custody_group_count: Some(crate::spec::MAINNET.custody_requirement),
         };
         assert_eq!(responder.metadata(), &expected);
         assert_eq!(
             responder.respond(Protocol::MetaDataV2, &[]),
             Response::Success(expected.encode(2))
         );
-    }
-
-    /// The mirror's extra column topics live in `local`, never in `advertised`, so a
-    /// responder fed the advertised set alone counts only what the beacon node subscribed to.
-    ///
-    /// What is counted is the subnet, not the topic. Across a fork the beacon node holds both
-    /// digests' topics at once, joining the next fork's two slots early and leaving the old
-    /// one two epochs late (`beacon_node/network/src/service.rs`), and counting topics would
-    /// double the number it reports for those two epochs.
-    #[test]
-    fn custody_group_count_counts_only_columns_the_bn_subscribes_to() {
-        let columns: Vec<String> = (0..128)
-            .map(|i| format!("data_column_sidecar_{i}"))
-            .collect();
-        let names: Vec<&str> = columns.iter().map(String::as_str).collect();
-        let mut all = Responder::new();
-        let mut none = Responder::new();
-        let mut forking = Responder::new();
-        let two_digests: BTreeSet<Topic> = topics_at("6a95a1a9", &names[..8])
-            .union(&topics_at("f0e1d2c3", &names[..8]))
-            .cloned()
-            .collect();
-
-        all.set_subscriptions(&topics(&names));
-        none.set_subscriptions(&topics(&["beacon_block"]));
-        forking.set_subscriptions(&two_digests);
-
-        assert_eq!(all.metadata().custody_group_count, Some(128));
-        assert_eq!(none.metadata().custody_group_count, Some(4));
-        assert_eq!(forking.metadata().custody_group_count, Some(8));
-        assert_eq!(all.metadata().attnets, [0; 8]);
-    }
-
-    /// Lighthouse's peer manager refuses a custody group count outside
-    /// `custody_requirement..=number_of_custody_groups` and says goodbye to the peer for it
-    /// (`compute_peer_custody_groups` and `meta_data_response` in
-    /// `beacon_node/lighthouse_network/src/peer_manager/mod.rs`), so what the sidecar reports
-    /// is held inside that range: a beacon node that is syncing subscribes to nothing, and one
-    /// that custodies the minimum subscribes to fewer topics than the minimum count.
-    #[test]
-    fn custody_group_count_stays_inside_the_range_lighthouse_accepts() {
-        let mut responder = Responder::new();
-        let floor = crate::spec::MAINNET.custody_requirement;
-
-        let syncing = responder.metadata().custody_group_count;
-        responder.set_subscriptions(&topics(&["data_column_sidecar_0"]));
-        let one_column = responder.metadata().custody_group_count;
-        responder.set_spec(&SpecSnapshot {
-            custody_requirement: 1,
-            number_of_custody_groups: 1,
-            ..crate::spec::MAINNET
-        });
-
-        assert_eq!(syncing, Some(floor));
-        assert_eq!(one_column, Some(floor));
-        assert_eq!(responder.metadata().custody_group_count, Some(1));
-    }
-
-    /// The sequence number tracks what a peer would read, whichever input moved it: a spec
-    /// that changes the reported count bumps it, and one that does not leaves it alone.
-    #[test]
-    fn seq_number_follows_the_spec_as_well_as_the_subscriptions() {
-        let mut responder = Responder::new();
-        responder.set_subscriptions(&topics(&["data_column_sidecar_0"]));
-        let after_subscriptions = responder.metadata().seq_number;
-
-        responder.set_spec(&crate::spec::MAINNET);
-        let unchanged = responder.metadata().seq_number;
-        responder.set_spec(&SpecSnapshot {
-            custody_requirement: 1,
-            ..crate::spec::MAINNET
-        });
-
-        assert_eq!(unchanged, after_subscriptions);
-        assert_eq!(responder.metadata().seq_number, after_subscriptions + 1);
     }
 
     #[test]
