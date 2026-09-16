@@ -590,6 +590,7 @@ fn enable_with(nic: &dyn Nic, cfg: &IoThread, port: u16) -> Report {
 mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex;
+    use std::time::{Duration, Instant};
 
     use overlay_core::config::{IoThread, Steering};
 
@@ -771,6 +772,52 @@ mod tests {
         assert_eq!(
             nic.read(Path::new("/sys/class/net/eth0/threaded")).ok(),
             Some("1".to_owned())
+        );
+    }
+
+    /// The undo runs `ethtool` on the blocking pool at shutdown, and an `ethtool` stuck behind
+    /// a driver reset does not return. Nothing in the undo may hold the runtime past the bound
+    /// `main` puts on its teardown: the deadline fires over the await, the closure is abandoned
+    /// and the process exits (R3.3).
+    #[test]
+    fn steering_undo_that_hangs_does_not_hold_stop() {
+        struct Hanging;
+        impl Nic for Hanging {
+            fn ethtool(&self, _: &[&str]) -> io::Result<String> {
+                std::thread::sleep(Duration::from_secs(1));
+                Ok(String::new())
+            }
+            fn read(&self, _: &Path) -> io::Result<String> {
+                Ok(String::new())
+            }
+            fn write(&self, _: &Path, _: &str) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let report = apply_with(
+            &Fake::default(),
+            &plan(&caps(true), &cfg(Steering::Auto), PORT),
+        );
+        let deadline = Duration::from_millis(100);
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let started = Instant::now();
+
+        runtime.block_on(async {
+            let undo = tokio::task::spawn_blocking(move || undo_with(&Hanging, &report));
+            assert!(
+                tokio::time::timeout(deadline, undo).await.is_err(),
+                "the undo returned before its ethtool did"
+            );
+        });
+        runtime.shutdown_timeout(deadline);
+
+        let took = started.elapsed();
+        assert!(
+            took < deadline * 2 + Duration::from_millis(500),
+            "the stop took {took:?}"
         );
     }
 
