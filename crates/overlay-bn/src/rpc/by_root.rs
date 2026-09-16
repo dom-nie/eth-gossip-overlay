@@ -1,6 +1,12 @@
 //! The optional by-root cache: the sidecar answers its own beacon node's `BeaconBlocksByRoot`
 //! and `DataColumnSidecarsByRoot` lookups out of the payloads it already holds (§5.8, T-085).
 //!
+//! In practice only the block half is asked. Lighthouse requests columns from the peers it has
+//! assigned custody subnets to, and the sidecar answers MetaData without a custody group count
+//! so that it is never one of them (`proto`, T-102). The column handler stays, since the
+//! store holds the columns either way and the handler is the small part, but nothing calls it
+//! until a release changes who the node asks.
+//!
 //! Lighthouse does not prefer trusted peers when it picks who to ask, so a lookup lands here
 //! only sometimes. When it does, a missing-parent recovery is a localhost round trip instead of
 //! a public one, and when it does not, the beacon node is exactly where it was. That is why the

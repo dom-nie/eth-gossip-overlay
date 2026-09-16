@@ -35,7 +35,8 @@ pub enum Protocol {
     /// `beacon_blocks_by_root/2`: answered out of the recent store while the by-root cache is
     /// on, and `ResourceUnavailable` otherwise (§5.8).
     BlocksByRootV2,
-    /// `data_column_sidecars_by_root/1`: the same.
+    /// `data_column_sidecars_by_root/1`: the same, and never asked. The node requests columns
+    /// from custody peers only, and the sidecar claims no custody (module doc).
     ColumnsByRootV1,
     /// Every other id Lighthouse can negotiate: answered `ResourceUnavailable`.
     Unsupported,

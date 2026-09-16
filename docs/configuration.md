@@ -68,10 +68,10 @@ The `log` section sets the level and the format of the sidecar's one output stre
 the events as well. [events.md](events.md) has the fields, the queries, and why
 `tracing-journald` is an option rather than the default.
 
-`bn.by_root_cache` trades memory for latency and is off. On, the sidecar answers the node's own
-block and column lookups from what it holds, saving a public round trip. Lighthouse picks that
-peer at random, so `overlay_by_root_requests_total` is what says whether it pays. Each of `slots`
-costs 5.2 MiB of the connection receive window ([performance.md](performance.md)).
+`bn.by_root_cache` trades memory for latency and is off. On, the sidecar answers the node's block
+lookups from its store, saving a public round trip; columns are asked of custody peers only, which
+the sidecar is not. Lighthouse picks the peer at random; `overlay_by_root_requests_total` says
+whether it pays. Each slot costs 5.2 MiB of receive window ([performance.md](performance.md)).
 
 ## Every key
 
