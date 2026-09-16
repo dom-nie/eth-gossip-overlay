@@ -95,7 +95,6 @@ pub fn mainnet_spec() -> SpecSnapshot {
         data_column_sidecar_subnet_count: 128,
         number_of_columns: 128,
         number_of_custody_groups: 128,
-        custody_requirement: 4,
         max_payload_size: 10_485_760,
         seconds_per_slot: 12,
         slots_per_epoch: 32,

@@ -11,8 +11,7 @@ use tokio::sync::watch;
 pub use overlay_core::spec::SpecSnapshot;
 
 /// Mainnet as the pinned Lighthouse v8.2.2 ships it. `DATA_COLUMN_SIDECAR_SUBNET_COUNT`,
-/// `NUMBER_OF_CUSTODY_GROUPS`, `CUSTODY_REQUIREMENT`, `MAX_PAYLOAD_SIZE` and
-/// `SECONDS_PER_SLOT` come from
+/// `NUMBER_OF_CUSTODY_GROUPS`, `MAX_PAYLOAD_SIZE` and `SECONDS_PER_SLOT` come from
 /// `common/eth2_network_config/built_in_network_configs/mainnet/config.yaml`,
 /// `NUMBER_OF_COLUMNS` from `consensus/types/presets/mainnet/fulu.yaml` and
 /// `SLOTS_PER_EPOCH` from `consensus/types/presets/mainnet/phase0.yaml`.
@@ -20,7 +19,6 @@ pub const MAINNET: SpecSnapshot = SpecSnapshot {
     data_column_sidecar_subnet_count: 128,
     number_of_columns: 128,
     number_of_custody_groups: 128,
-    custody_requirement: 4,
     max_payload_size: 10_485_760,
     seconds_per_slot: 12,
     slots_per_epoch: 32,
@@ -38,8 +36,6 @@ pub struct SpecWire {
     number_of_columns: u64,
     #[serde(deserialize_with = "quoted")]
     number_of_custody_groups: u64,
-    #[serde(deserialize_with = "quoted")]
-    custody_requirement: u64,
     #[serde(deserialize_with = "quoted")]
     max_payload_size: u64,
     #[serde(deserialize_with = "quoted")]
@@ -60,7 +56,6 @@ impl From<SpecSnapshot> for SpecWire {
             data_column_sidecar_subnet_count: spec.data_column_sidecar_subnet_count,
             number_of_columns: spec.number_of_columns,
             number_of_custody_groups: spec.number_of_custody_groups,
-            custody_requirement: spec.custody_requirement,
             max_payload_size: spec.max_payload_size,
             seconds_per_slot: spec.seconds_per_slot,
             slots_per_epoch: spec.slots_per_epoch,
@@ -74,7 +69,6 @@ impl From<SpecWire> for SpecSnapshot {
             data_column_sidecar_subnet_count: wire.data_column_sidecar_subnet_count,
             number_of_columns: wire.number_of_columns,
             number_of_custody_groups: wire.number_of_custody_groups,
-            custody_requirement: wire.custody_requirement,
             max_payload_size: wire.max_payload_size,
             seconds_per_slot: wire.seconds_per_slot,
             slots_per_epoch: wire.slots_per_epoch,

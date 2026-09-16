@@ -21,10 +21,6 @@ pub struct SpecSnapshot {
     pub number_of_columns: u64,
     /// `NUMBER_OF_CUSTODY_GROUPS`: how many groups the columns are assigned to for custody.
     pub number_of_custody_groups: u64,
-    /// `CUSTODY_REQUIREMENT`: the fewest custody groups a node may claim. With
-    /// [`number_of_custody_groups`](Self::number_of_custody_groups) it bounds the count the
-    /// sidecar may report in its `MetaData` (T-019).
-    pub custody_requirement: u64,
     /// `MAX_PAYLOAD_SIZE`: the largest gossip message the beacon node accepts. The gossipsub
     /// link's limit must agree with it.
     pub max_payload_size: u64,
