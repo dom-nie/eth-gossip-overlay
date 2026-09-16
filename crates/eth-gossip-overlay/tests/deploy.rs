@@ -23,6 +23,7 @@ const COMPOSE_ROSTER: &str = "examples/compose/roster.yaml";
 const COMPOSE_CONFIG: &str = "examples/compose/config.yaml";
 const COMPOSE: &str = "examples/compose/docker-compose.yml";
 const DOCKERFILE: &str = "Dockerfile";
+const CI: &str = ".github/workflows/ci.yml";
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -424,4 +425,46 @@ fn dockerfile_labels_the_version_the_workspace_builds() {
         read(DOCKERFILE).contains(&expected),
         "{DOCKERFILE} does not carry {expected}"
     );
+}
+
+/// T-050's runner table. `ubuntu-slim` is one vCPU, 5 GB and a fifteen-minute cap, with no
+/// rustup on the image, so it takes the jobs that compile nothing and no other: a compiling job
+/// moved there times out, and the first anyone hears of it is fifteen minutes into the run.
+#[test]
+fn every_ci_job_runs_on_the_runner_the_table_names() {
+    let workflow: serde_yaml_bw::Value =
+        serde_yaml_bw::from_str(&read(CI)).unwrap_or_else(|err| panic!("{CI}: {err}"));
+    let jobs = &workflow["jobs"];
+
+    let table: [(&str, &[&str]); 7] = [
+        ("check", &["ubuntu-latest", "macos-latest"]),
+        ("deploy-examples", &["ubuntu-latest"]),
+        ("observability", &["ubuntu-latest"]),
+        ("container", &["ubuntu-latest"]),
+        ("changelog", &["ubuntu-slim"]),
+        ("deny", &["ubuntu-slim"]),
+        ("links", &["ubuntu-slim"]),
+    ];
+    assert_eq!(
+        jobs.as_mapping().unwrap().len(),
+        table.len(),
+        "{CI}: a job is missing from the table"
+    );
+
+    for (job, runners) in table {
+        let runs_on = jobs[job]["runs-on"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{CI}: {job} has no runs-on"));
+        let actual: Vec<&str> = if runs_on == "${{ matrix.os }}" {
+            jobs[job]["strategy"]["matrix"]["os"]
+                .as_sequence()
+                .unwrap()
+                .iter()
+                .map(|os| os.as_str().unwrap())
+                .collect()
+        } else {
+            vec![runs_on]
+        };
+        assert_eq!(actual, runners, "{CI}: {job} runs on the wrong runner");
+    }
 }
