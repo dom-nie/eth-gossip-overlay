@@ -547,7 +547,13 @@ impl Reloader {
             Ok(config) => self.config = config,
             Err(error) => report.error = Some(error),
         }
-        self.document = document;
+        // The next diff runs against what was taken in plus the restart-required keys. A key
+        // whose applier refused it stays at its old value, so the corrected file reads as a
+        // change again and the applier gets another go.
+        for path in &report.restart_required {
+            copy_path(&mut effective, &document, path);
+        }
+        self.document = effective;
         report.applied.extend(applied);
     }
 
