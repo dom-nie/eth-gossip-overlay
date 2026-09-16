@@ -235,6 +235,34 @@ fn check_config_refuses_a_bad_libp2p_addr() {
     assert_eq!(stderr.lines().count(), 1, "{stderr:?}");
 }
 
+/// R5.9: the rehearsal printed a budget with nothing to compare it against and never said when
+/// it did not fit. It now names the ceiling it was derived against and where that came from,
+/// and logs the same warning a start would. Exit 0 either way: budget::check's own rule is
+/// that over budget still starts, and an exit 1 here would fail configuration management on
+/// every roster past the line docs/performance.md says goes over by design.
+#[test]
+fn check_config_prints_the_ceiling_and_warns_over_budget() {
+    let fixture = common::Fixture::new();
+    let output = check_config(&fixture);
+    assert!(output.status.success(), "{output:?}");
+    let printed = String::from_utf8(output.stdout).unwrap();
+    assert!(printed.contains("memory ceiling:"), "{printed}");
+    assert!(!printed.contains("above the limit"), "{printed}");
+
+    rewrite_config_line(
+        &fixture,
+        "listen_addr:",
+        "  listen_addr: \"/ip4/127.0.0.1/tcp/0\"\n  by_root_cache:\n    enabled: true\n    slots: 100000",
+    );
+    let output = check_config(&fixture);
+
+    assert!(output.status.success(), "{output:?}");
+    let printed = String::from_utf8(output.stdout).unwrap();
+    assert!(printed.contains("memory ceiling:"), "{printed}");
+    assert!(printed.contains("WARN"), "{printed}");
+    assert!(printed.contains("above the limit"), "{printed}");
+}
+
 /// The peer id `peer-id` prints for this fixture's node key, which is what `check-config` has to
 /// agree with.
 // A broken fixture is reported by panicking, which is what the unwraps here are.
