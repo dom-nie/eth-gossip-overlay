@@ -49,6 +49,7 @@ The first release, so all of it is new.
 ### Changed
 
 - A reload in which a key failed to apply, such as `overlay.fleet_seed_previous_file` naming a file not yet on disk, keeps that key's old value as the baseline, so the next reload of the corrected file applies it and the report says so. Step 1 of the seed rotation in `docs/security.md` now holds on a host where the key lands before its file; before, every later reload of that file reported nothing applied and the host never loaded the new seed.
+- A restart-required key you edit and then put back drops off `restart required:` on the reload that reads the reverted file, instead of staying listed until the sidecar restarts.
 - `OverlayPeersLow` fires on a host with no live peer. `overlay_peers_connected` carries a zero for every roster region rather than no series at all, so the rule has something to compare with the roster and the dashboard's peers panel reads zero instead of a gap.
 - The image starts with the shipped `config.yaml` unchanged: it carries `/run/eth-gossip-overlay`, owned by its user, so the admin socket has somewhere to bind and the README's `docker run` comes up instead of exiting at the last step of its start.
 - The events survive a lower log level. `log.level: warn` or `error` quiets the sidecar's own lines and keeps `first_arrival` and `import` at `INFO`, so the panels the canary is judged on stay populated; `RUST_LOG` can still filter them out.

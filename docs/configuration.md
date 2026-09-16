@@ -19,9 +19,9 @@ applied: inject, roster
 restart required: overlay.listen
 ```
 
-The table says which side each key is on. A `restart` key is read once at startup: a change to
-it is listed on every report until the sidecar restarts. A key is applied only when its value
-changed; one that failed to apply is retried on the next reload.
+The table says which side each key is on. A `restart` key is read once at startup: an edit is
+listed on every report until it is reverted or the sidecar restarts. A key is applied only when
+its value changed; a failed one is retried on the next reload.
 
 ## Who this host is
 
