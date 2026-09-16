@@ -319,6 +319,26 @@ pub trait ManagerStats: Send + Sync {
 /// Peer counts by the labels `peers_connected` and `peers_roster` carry.
 pub type PeerCounts = BTreeMap<(Region, Option<String>), usize>;
 
+/// Both peer gauges from one view: every roster host but this one, and the live peers counted
+/// by the region and site they declared.
+pub fn peer_gauges(
+    roster: &Roster,
+    me: &Hostname,
+    live: impl IntoIterator<Item = (Region, Option<String>)>,
+) -> (PeerCounts, PeerCounts) {
+    let mut in_roster = PeerCounts::new();
+    for host in roster.others(me) {
+        *in_roster
+            .entry((host.region.clone(), host.site.clone()))
+            .or_default() += 1;
+    }
+    let mut connected = PeerCounts::new();
+    for key in live {
+        *connected.entry(key).or_default() += 1;
+    }
+    (in_roster, connected)
+}
+
 impl ManagerStats for () {
     fn handshake_failure(&self, _: HandshakeFailure) {}
     fn auth_via_previous_seed(&self, _: &Hostname) {}
@@ -562,23 +582,16 @@ impl Shared {
     }
 
     fn publish_gauges(&self) {
-        let mut in_roster = PeerCounts::new();
-        {
-            let roster = self.roster.borrow();
-            for host in roster.others(&self.local.self_id.hostname) {
-                *in_roster
-                    .entry((host.region.clone(), host.site.clone()))
-                    .or_default() += 1;
-            }
-        }
-        let mut connected = PeerCounts::new();
-        for slot in self.peers().values() {
-            if let Slot::Live(peer) = slot {
-                *connected
-                    .entry((peer.region.clone(), peer.site.clone()))
-                    .or_default() += 1;
-            }
-        }
+        let live: Vec<(Region, Option<String>)> = self
+            .peers()
+            .values()
+            .filter_map(|slot| match slot {
+                Slot::Live(peer) => Some((peer.region.clone(), peer.site.clone())),
+                _ => None,
+            })
+            .collect();
+        let (in_roster, connected) =
+            peer_gauges(&self.roster.borrow(), &self.local.self_id.hostname, live);
         self.stats.peers_roster(&in_roster);
         self.stats.peers_connected(&connected);
     }
