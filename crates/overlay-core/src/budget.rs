@@ -23,6 +23,7 @@ use crate::ratelimit::TokenBucket;
 use crate::reassemble;
 use crate::recent::{self, RECENT_MAX_BYTES};
 use crate::seen::{SEEN_CAPACITY, SEEN_TTL};
+use crate::wire::{MAX_TOPIC_BYTES, MAX_TOPIC_SNAPSHOT_ENTRIES};
 
 /// How long a peer may stay over its budget before the connection is closed with
 /// `RateExceeded` (DX-N3).
@@ -158,6 +159,12 @@ pub const SMALL_MESSAGE_BYTES: u64 = 512;
 /// index bitmaps, the peers that sent a chunk, and the map and deque entries holding it all.
 pub const REASSEMBLY_ENTRY_BYTES: u64 = 4096;
 
+/// What one entry of a peer's topic table costs at the longest topic string the wire allows:
+/// the string, the `Topic` and id around it and the hash-table slack, held twice, once under
+/// the id and once under the topic. A real topic is fifty bytes, so a table of real topics is
+/// a fifth of this; the row is what a peer may make this host hold, not what one does (R2.2).
+pub const PEER_TOPIC_ENTRY_BYTES: u64 = 2 * (MAX_TOPIC_BYTES as u64 + 64);
+
 /// The headroom OPS-N4 asks the budget to leave under `MemoryMax`, as a percentage.
 pub const HEADROOM_PERCENT: u64 = 25;
 
@@ -242,6 +249,10 @@ impl MemoryBudget {
                 "peer_send_lanes",
                 peers * lanes.small_frames as u64 * SMALL_MESSAGE_BYTES
                     + (peers * lanes.large_bytes as u64).min(lanes.large_bytes_max as u64),
+            ),
+            (
+                "peer_topic_tables",
+                peers * MAX_TOPIC_SNAPSHOT_ENTRIES as u64 * PEER_TOPIC_ENTRY_BYTES,
             ),
             ("gossipsub", gossipsub_caches()),
             ("by_root_cache", by_root_cache_bytes(cfg)),
@@ -427,9 +438,10 @@ mod tests {
         ("publish_queue", 35_651_584),
         ("reassembler", 35_651_584),
         ("peer_send_lanes", 128_241_664),
+        ("peer_topic_tables", 130_416_640),
         ("gossipsub", 34_132_480),
         ("by_root_cache", 0),
-        ("quic_receive_windows", 582_351_212),
+        ("quic_receive_windows", 452_586_695),
     ];
 
     /// OPS-N4's whole point: every bounded structure at its worst case, summed, fits under the

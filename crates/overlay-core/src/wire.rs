@@ -68,9 +68,13 @@ pub const MAX_TOPIC_BYTES: usize = 256;
 /// already bounds, and it answers `NotFound` to more indices than the split has.
 pub const MAX_MISSING_INDICES: usize = u16::MAX as usize;
 
-/// The most topics one HELLO may announce. A beacon node subscribes to a few hundred topics
-/// across a fork transition; this leaves room for several forks at once.
-pub const MAX_TOPIC_SNAPSHOT_ENTRIES: usize = 4096;
+/// The most topics one HELLO may announce, and the most a peer may bind afterwards with
+/// `TOPIC_ADD`. A beacon node subscribes to a couple of hundred topics per fork digest and
+/// holds two digests across a transition, so this is room for four or five forks at once. It is
+/// also what every peer may make this host hold: at 640 bytes an entry and 199 peers, 1024
+/// entries is 124 MiB of the memory budget, where 4096 would be 498 MiB and would not fit under
+/// `MemoryMax=1G` beside the other rows (OPS-N4, R2.2).
+pub const MAX_TOPIC_SNAPSHOT_ENTRIES: usize = 1024;
 
 /// What a `BATCH` costs before its first entry: the type and flags bytes and the entry count.
 /// The batcher (T-061) fills a batch to the datagram limit without encoding it to find out how

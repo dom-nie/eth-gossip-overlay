@@ -10,6 +10,8 @@ the second is arithmetic over the code's own constants.
 row is a structure with a bound in code, so the sum is a worst case and not a measurement:
 nothing in it grows with traffic, and a real fleet sits far below it. `by_root_cache` reads zero
 because the optional cache it names ships off; the section below says what turning it on costs.
+`peer_topic_tables` is every peer's topic table full to the HELLO cap with the longest names the
+wire allows; a real table is a few hundred fifty-byte topics.
 
 `quic_receive_windows` is the one row that is not a constant. It is whatever the other rows
 leave under the ceiling, shared out over the roster and floored at the 1 MiB stream window
@@ -18,7 +20,7 @@ Once the floor binds, it cannot shrink further and the sidecar warns at startup.
 
 <!-- generated from crates/overlay-core/src/budget.rs, do not edit by hand -->
 
-At the shipped defaults, a roster of 200 hosts and the unit's `MemoryMax=1G`, which gives every connection a receive window of 2.8 MiB.
+At the shipped defaults, a roster of 200 hosts and the unit's `MemoryMax=1G`, which gives every connection a receive window of 2.2 MiB.
 
 | Structure | Bytes | MiB |
 |---|---:|---:|
@@ -27,17 +29,18 @@ At the shipped defaults, a roster of 200 hosts and the unit's `MemoryMax=1G`, wh
 | `publish_queue` | 35651584 | 34.0 |
 | `reassembler` | 35651584 | 34.0 |
 | `peer_send_lanes` | 128241664 | 122.3 |
+| `peer_topic_tables` | 130416640 | 124.4 |
 | `gossipsub` | 34132480 | 32.6 |
 | `by_root_cache` | 0 | 0.0 |
-| `quic_receive_windows` | 582351212 | 555.4 |
-| **Sum of the bounds** | 856066924 | 816.4 |
-| **Plus 25% headroom** | 1070083655 | 1020.5 |
+| `quic_receive_windows` | 452586695 | 431.6 |
+| **Sum of the bounds** | 856719047 | 817.0 |
+| **Plus 25% headroom** | 1070898808 | 1021.3 |
 | `MemoryMax` | 1073741824 | 1024.0 |
 
 <!-- end generated -->
 
 The sum therefore sits on the usable line whatever the roster, until the floor binds: at these
-defaults that is 478 hosts, and past it the total goes over. A row that grows for any other
+defaults that is 322 hosts, and past it the total goes over. A row that grows for any other
 reason brings that forward.
 
 ### The by-root cache
