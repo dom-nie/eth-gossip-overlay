@@ -28,6 +28,43 @@ exceptions = [
   # feature onto the reqwest this workspace uses with json only, so cargo deny walks into it;
   # no build of the binaries links it (cargo tree -p overlay-bn -e normal has no TLS crate).
   { crate = "webpki-roots", allow = ["CDLA-Permissive-2.0"] },
+  # A Keccak under a public-domain dedication, which Lighthouse's network_utils uses and
+  # nothing of ours does. It reaches the check through lighthouse_network, a dev-dependency
+  # (D38); no build of the binaries links it (cargo tree -p eth-gossip-overlay -e normal -i
+  # tiny-keccak prints nothing).
+  { crate = "tiny-keccak", allow = ["CC0-1.0"] },
+]
+# Lighthouse's internal crates carry no `license` field. They inherit the Apache-2.0 LICENSE at
+# the root of the repository, at the rev the lock pins for v8.2.2,
+# e423a66763bb1bd780492d635123f208d80c3538. The list is what `cargo deny check licenses` named;
+# a Lighthouse bump that pulls in another one shows up as a new unlicensed error here.
+clarify = [
+  { crate = "bls", expression = "Apache-2.0", license-files = [] },
+  { crate = "clap_utils", expression = "Apache-2.0", license-files = [] },
+  { crate = "directory", expression = "Apache-2.0", license-files = [] },
+  { crate = "eip_3076", expression = "Apache-2.0", license-files = [] },
+  { crate = "eth2", expression = "Apache-2.0", license-files = [] },
+  { crate = "eth2_config", expression = "Apache-2.0", license-files = [] },
+  { crate = "eth2_interop_keypairs", expression = "Apache-2.0", license-files = [] },
+  { crate = "eth2_key_derivation", expression = "Apache-2.0", license-files = [] },
+  { crate = "eth2_keystore", expression = "Apache-2.0", license-files = [] },
+  { crate = "eth2_network_config", expression = "Apache-2.0", license-files = [] },
+  { crate = "fixed_bytes", expression = "Apache-2.0", license-files = [] },
+  { crate = "int_to_bytes", expression = "Apache-2.0", license-files = [] },
+  { crate = "kzg", expression = "Apache-2.0", license-files = [] },
+  { crate = "lighthouse_network", expression = "Apache-2.0", license-files = [] },
+  { crate = "lighthouse_version", expression = "Apache-2.0", license-files = [] },
+  { crate = "logging", expression = "Apache-2.0", license-files = [] },
+  { crate = "lru_cache", expression = "Apache-2.0", license-files = [] },
+  { crate = "merkle_proof", expression = "Apache-2.0", license-files = [] },
+  { crate = "metrics", expression = "Apache-2.0", license-files = [] },
+  { crate = "network_utils", expression = "Apache-2.0", license-files = [] },
+  { crate = "pretty_reqwest_error", expression = "Apache-2.0", license-files = [] },
+  { crate = "proto_array", expression = "Apache-2.0", license-files = [] },
+  { crate = "swap_or_not_shuffle", expression = "Apache-2.0", license-files = [] },
+  { crate = "task_executor", expression = "Apache-2.0", license-files = [] },
+  { crate = "types", expression = "Apache-2.0", license-files = [] },
+  { crate = "workspace_members", expression = "Apache-2.0", license-files = [] },
 ]
 
 [bans]
