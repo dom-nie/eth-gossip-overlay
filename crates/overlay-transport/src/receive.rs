@@ -159,7 +159,8 @@ pub trait ReceiveStats: ManagerStats + TrafficStats {
 
     /// `repair_requests_total{form, outcome}`: one repair request, what it asked for and what
     /// it came to, `gave_up` included, which is the one that stands for a request nobody was
-    /// left to send (§12, D24).
+    /// left to send (§12, D24). `rate_limited` is the one outcome the answering host counts, for
+    /// a peer asking faster than [`Deps::repair_limit`] allows (R2.3).
     fn repair_request(&self, form: RepairForm, outcome: RepairOutcome);
 }
 
@@ -266,6 +267,7 @@ impl PeerReceiver {
             site: peer.site.clone(),
             state: peer.state.clone(),
             budget: Mutex::new(deps.budget.clone()),
+            repair_limit: Mutex::new(deps.repair_limit.clone()),
             deps,
             repair: false,
             warned_invalid: AtomicBool::new(false),
@@ -333,6 +335,7 @@ impl RepairSink {
             site: live.site.clone(),
             state: live.state.clone(),
             budget: Mutex::new(deps.budget.clone()),
+            repair_limit: Mutex::new(deps.repair_limit.clone()),
             deps: deps.clone(),
             repair: true,
             warned_invalid: AtomicBool::new(false),
@@ -358,6 +361,8 @@ struct Ctx {
     state: Arc<Mutex<PeerState>>,
     /// What this peer may make this host fan out (DX-N3), one bucket per connection.
     budget: Mutex<FanoutBudget>,
+    /// How often this peer may have this host answer a repair (R2.3), the same way.
+    repair_limit: Mutex<TokenBucket>,
     deps: Deps,
     /// Whether what arrives here was asked for (T-082). A repair answer is published and read
     /// but never kept, so nothing a host was served can be served on (D39).
@@ -862,8 +867,28 @@ impl Ctx {
     /// on to the next candidate rather than wait: a message this host does not hold, a request
     /// for more indices than the message has data chunks, and a topic this host cannot name to
     /// this peer yet (MD-04).
+    ///
+    /// Every request costs the peer a token first (R2.3). The bucket is what bounds how often
+    /// this host encodes for one peer, since neither the fan-out budget nor the beacon node's
+    /// limiter sees a repair, and a request past it is `NotFound` like anything else the peer
+    /// is not owed, counted `rate_limited`.
     fn repair(&self, request: &RepairReq) -> Vec<Frame> {
         let not_found = || vec![Frame::RepairResp(RepairResp::NotFound)];
+        let admitted = self
+            .repair_limit
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .try_take(1, self.deps.clock.now());
+        if !admitted {
+            let form = match request {
+                RepairReq::Missing { .. } => RepairForm::Chunk,
+                RepairReq::Column { .. } => RepairForm::Column,
+            };
+            self.deps
+                .stats
+                .repair_request(form, RepairOutcome::RateLimited);
+            return not_found();
+        }
         let Some(msg_id) = self.asked_for(request) else {
             return not_found();
         };
@@ -2573,6 +2598,7 @@ mod tests {
             site: None,
             state: Arc::new(Mutex::new(PeerState::default())),
             budget: Mutex::new(FanoutBudget::default_for(2, 2048, 12, Instant::now())),
+            repair_limit: Mutex::new(TokenBucket::new(1, 1, Instant::now())),
             repair: false,
             deps: Deps {
                 seen: SharedSeenCache::new(SeenCache::new(
