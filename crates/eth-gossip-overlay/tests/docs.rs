@@ -22,6 +22,7 @@ use serde_yaml_bw as yaml;
 
 const CONFIGURATION: &str = "docs/configuration.md";
 const PERFORMANCE: &str = "docs/performance.md";
+const QUICKSTART: &str = "docs/quickstart.md";
 const LIGHTHOUSE: &str = "docs/lighthouse.md";
 const CONFIG_SOURCE: &str = "crates/overlay-core/src/config.rs";
 const BUDGET_SOURCE: &str = "crates/overlay-core/src/budget.rs";
@@ -502,6 +503,75 @@ fn readme_check_config_sample_matches_a_regenerated_line() {
         assert!(text.contains(&ceiling), "{readme} has no line {ceiling:?}");
         assert!(text.contains(&total), "{readme} has no line {total:?}");
     }
+}
+
+/// R5.8: `check-config` creates the node key where a start would, and on a fresh host the
+/// directory for it exists only once the unit's `StateDirectory=` has run. The quickstart
+/// rehearses the start before the unit is installed, so it has to make the directory first.
+#[test]
+fn the_quickstart_makes_the_state_directory_before_the_rehearsal() {
+    let quickstart = read(QUICKSTART);
+    let state_dir = Config::default()
+        .bn
+        .node_key_file
+        .parent()
+        .unwrap()
+        .display()
+        .to_string();
+
+    let made = quickstart
+        .find(&format!("install -d -m 700 {state_dir}"))
+        .unwrap_or_else(|| panic!("{QUICKSTART} never makes {state_dir}"));
+    let rehearsed = quickstart
+        .find("eth-gossip-overlay check-config")
+        .unwrap_or_else(|| panic!("{QUICKSTART} never runs check-config"));
+
+    assert!(
+        made < rehearsed,
+        "{QUICKSTART} runs check-config before it makes {state_dir}"
+    );
+}
+
+/// R4.5: the prose under the table names the largest roster the defaults fit. The rows move
+/// that number (T-103's topic tables took it from 477 to well under that), so it is held to
+/// the same arithmetic as the table rather than written once. The sentence also says the floor
+/// binds at that roster and one more goes over, which is where the sidecar starts warning;
+/// both halves are checked, because a retuned row can pull them apart.
+#[test]
+fn performance_doc_names_the_largest_roster_that_fits_at_the_defaults() {
+    let at = |hosts: usize| {
+        MemoryBudget::compute(
+            &Config::default(),
+            hosts,
+            budget::MEMORY_MAX_DEFAULT,
+            SEND_LANES,
+        )
+    };
+    let fits = |hosts: usize| {
+        let budget = at(hosts);
+        budget.total_bytes <= budget.limit
+    };
+    let largest = (2..10_000).take_while(|&hosts| fits(hosts)).last().unwrap();
+    let floor_binds_at = (2..10_000)
+        .find(|&hosts| at(hosts).receive_window == budget::STREAM_RECEIVE_WINDOW)
+        .unwrap();
+    for hosts in [largest, largest + 1] {
+        let budget = at(hosts);
+        println!(
+            "{hosts} hosts: window {} total {} limit {}",
+            budget.receive_window, budget.total_bytes, budget.limit
+        );
+    }
+
+    assert_eq!(
+        floor_binds_at, largest,
+        "the floor binds at {floor_binds_at}, and {largest} is the largest roster that fits"
+    );
+    let sentence = format!("{largest} hosts is the largest roster that fits");
+    assert!(
+        read(PERFORMANCE).contains(&sentence),
+        "{PERFORMANCE} does not say {sentence:?}"
+    );
 }
 
 /// Split rather than grow. A runbook nobody finishes reading is a runbook that does not work at
