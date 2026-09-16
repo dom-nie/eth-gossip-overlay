@@ -961,6 +961,63 @@ mod tests {
         );
     }
 
+    /// The codec takes even chunk lengths only and panics on the rest, so a first chunk of odd
+    /// length is refused on its header and opens nothing.
+    #[test]
+    fn an_odd_length_chunk_header_is_rejected_as_bad_header() {
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        let mut odd = chunk(1, 0, 2, 1);
+        odd.data = Bytes::from_static(b"1234567");
+        odd.total_len = 14;
+
+        assert_eq!(
+            on(&reassembler, &odd, false, now),
+            Outcome::Rejected {
+                reason: Reason::BadHeader,
+                origin: host()
+            }
+        );
+        assert_eq!(reassembler.in_flight(), 0);
+    }
+
+    /// `k + m` fits a `u16` and still names a split the codec has no rate for: 60000 data
+    /// chunks with 5000 parity is past both of its tables. The index check runs first and
+    /// passes, so what refuses this is the guard and nothing before it.
+    #[test]
+    fn a_split_the_codec_does_not_support_is_rejected_as_bad_header() {
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+
+        assert_eq!(
+            on(&reassembler, &chunk(1, 0, 60000, 5000), false, now),
+            Outcome::Rejected {
+                reason: Reason::BadHeader,
+                origin: host()
+            }
+        );
+        assert_eq!(reassembler.in_flight(), 0);
+    }
+
+    /// A total length `k` chunks cannot hold is a message no split produced, so it is refused on
+    /// the first chunk rather than found out at decode.
+    #[test]
+    fn an_over_long_chunk_header_is_rejected_as_bad_header() {
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        let mut over = chunk(1, 0, 4, 1);
+        over.total_len += 1;
+
+        assert_eq!(
+            on(&reassembler, &over, false, now),
+            Outcome::Rejected {
+                reason: Reason::BadHeader,
+                origin: host()
+            }
+        );
+        assert_eq!(reassembler.in_flight(), 0);
+    }
+
     /// A second copy of an index is stored nowhere: the chunks are what the message is decoded
     /// from, so a peer that sent the same index twice must not be able to make this host think
     /// it has `k` of them.
