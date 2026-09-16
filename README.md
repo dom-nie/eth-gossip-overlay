@@ -41,13 +41,15 @@ cargo build --release          # binaries in target/release/{eth-gossip-overlay,
 ## Container
 
 `Dockerfile` builds an image with the two binaries, a libc and a non-root user that owns
-`/var/lib/eth-gossip-overlay`. Run it with `--network host` and give it a volume for that directory:
-it holds the node key, which is the peer id the beacon node trusts, so without one every
-restart is a new identity.
+`/var/lib/eth-gossip-overlay` and `/run/eth-gossip-overlay`, so the example config runs in it
+unchanged. Run it with `--network host` and give it a volume for the first directory: it holds
+the node key, which is the peer id the beacon node trusts, so without one every restart is a
+new identity. The admin socket lives in the second, inside the container, and
+`docker exec eth-gossip-overlay eth-gossip-overlayctl status` reaches it.
 
 ```sh
 docker build -t eth-gossip-overlay .
-docker run -d --network host \
+docker run -d --network host --name eth-gossip-overlay \
   -v /etc/eth-gossip-overlay:/etc/eth-gossip-overlay:ro \
   -v eth-gossip-overlay-state:/var/lib/eth-gossip-overlay \
   eth-gossip-overlay

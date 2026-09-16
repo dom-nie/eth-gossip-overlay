@@ -45,6 +45,10 @@ LABEL org.opencontainers.image.source="https://github.com/dom-nie/eth-gossip-ove
 # a volume or every restart is a new identity. 65532 is the base image's nonroot user, a fixed
 # uid so an operator can chown a host directory before the container ever starts.
 COPY --from=builder --chown=65532:65532 /state /var/lib/eth-gossip-overlay
+# /run/eth-gossip-overlay is where the shipped config binds the admin socket and where the env
+# file for the beacon node is written. systemd makes it with RuntimeDirectory=; here nothing
+# would, and the sidecar's start ends at that bind, so the image carries it with the same owner.
+COPY --from=builder --chown=65532:65532 /state /run/eth-gossip-overlay
 COPY --from=builder /usr/local/bin/eth-gossip-overlay /usr/local/bin/eth-gossip-overlayctl /usr/local/bin/
 
 USER 65532:65532

@@ -15,9 +15,10 @@ bn:
   # default path; the demo says it out loud because the volume is the point.
   node_key_file: /var/lib/eth-gossip-overlay/node.key
 
-# systemd gives the sidecar a writable /run/eth-gossip-overlay; a container does not, so both the
-# admin socket and the lighthouse.env file go on the node key's volume instead. RUNTIME_DIRECTORY
-# in docker-compose.yml points the second one there.
+# The image has a /run/eth-gossip-overlay of its own, but `docker compose exec` reaches the
+# socket by path and the beacon node's container reads the lighthouse.env file, so both go on
+# the node key's volume instead. RUNTIME_DIRECTORY in docker-compose.yml points the second one
+# there.
 admin_socket: /var/lib/eth-gossip-overlay/admin.sock
 
 # Prometheus scrapes from its own container, so the endpoint cannot be on loopback. The sidecar

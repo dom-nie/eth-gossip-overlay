@@ -333,8 +333,8 @@ mod tests {
         assert!(!dir.path().join("lighthouse.env.tmp").exists());
     }
 
-    /// A container has no `/run/eth-gossip-overlay` and no `RuntimeDirectory=`, so the write fails
-    /// and the caller warns. It must not leave anything behind when it does.
+    /// A container built without `/run/eth-gossip-overlay` has no `RuntimeDirectory=` to make it,
+    /// so the write fails and the caller warns. It must not leave anything behind when it does.
     #[test]
     fn trusted_peer_env_reports_a_directory_it_cannot_write() {
         let dir = tempfile::tempdir().unwrap();
