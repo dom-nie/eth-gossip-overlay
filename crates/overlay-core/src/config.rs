@@ -913,6 +913,38 @@ log:
         );
     }
 
+    /// R5.5: quinn re-arms the keep-alive timer at `now + interval` on every send, so at zero
+    /// the driver spins sending PINGs and two sidecars sat at 190% CPU each. One millisecond is
+    /// the same spin a thousand times a second, so the floor is a real interval rather than 1.
+    #[test]
+    fn zero_keepalive_is_refused() {
+        for ms in [0, 1, 999] {
+            let err =
+                Config::from_yaml(&format!("overlay: {{ keepalive_ms: {ms} }}")).unwrap_err();
+            assert!(err.to_string().contains("overlay.keepalive_ms"), "{err}");
+            assert!(err.to_string().contains("1000"), "{err}");
+        }
+        assert!(Config::from_yaml("overlay: { keepalive_ms: 1000 }").is_ok());
+    }
+
+    /// R5.5: quinn blocks every send once `in_flight + bytes >= window`, and the window is the
+    /// configured one until a loss, so a window smaller than a datagram never lets the
+    /// handshake out and no peer ever connects. The floor is the 14 720 bytes QUIC starts with
+    /// when nothing sets otherwise.
+    #[test]
+    fn initial_window_below_quinns_floor_is_refused() {
+        for bytes in [0, 1, 1200, 14_719] {
+            let err = Config::from_yaml(&format!("overlay: {{ initial_window_bytes: {bytes} }}"))
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("overlay.initial_window_bytes"),
+                "{err}"
+            );
+            assert!(err.to_string().contains("14720"), "{err}");
+        }
+        assert!(Config::from_yaml("overlay: { initial_window_bytes: 14720 }").is_ok());
+    }
+
     #[test]
     fn stale_after_must_not_be_shorter_than_batch_window() {
         let err =
