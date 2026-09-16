@@ -18,7 +18,9 @@
 //! short lock per frame, so a route plan reading the live view never waits on the network. A
 //! `TOPIC_ADD` the peer's table refuses closes the connection with
 //! [`CloseCode::ProtocolError`]: an id bound twice means this host's copy of the peer's table
-//! and the peer's own have drifted, and nothing decoded against it afterwards can be trusted.
+//! and the peer's own have drifted, and nothing decoded against it afterwards can be trusted,
+//! while a binding past the HELLO snapshot's cap is a peer growing this host's memory rather
+//! than announcing topics (R2.2).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -197,7 +199,7 @@ async fn read(
             Ok(Read::Frame(Frame::TopicAdd { id, topic })) => {
                 let applied = state(peer_state).table.apply_add(TopicId::new(id), &topic);
                 if let Err(error) = applied {
-                    tracing::warn!(%peer, %error, "closing a peer whose topic table contradicts itself");
+                    tracing::warn!(%peer, %error, "closing a peer over a topic table this host refuses");
                     CloseCode::ProtocolError.close(connection);
                     return;
                 }
@@ -507,7 +509,9 @@ mod tests {
         let closes = LOG
             .since(mark)
             .lines()
-            .filter(|line| line.contains(peer.0.as_str()) && line.contains("contradicts itself"))
+            .filter(|line| {
+                line.contains(peer.0.as_str()) && line.contains("topic table this host refuses")
+            })
             .count();
         assert!(closes > 1, "the peer was closed {closes} times");
     }

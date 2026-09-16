@@ -162,7 +162,9 @@ impl PeerTopicTable {
         Ok(())
     }
 
-    /// Takes one binding a peer announced in a `TOPIC_ADD`.
+    /// Takes one binding a peer announced in a `TOPIC_ADD`. A table holds at most
+    /// [`MAX_TOPIC_SNAPSHOT_ENTRIES`] bindings, the line HELLO's snapshot is already held to, so
+    /// what a peer can make this host hold is the same whether it announces before or after.
     pub fn apply_add(&mut self, id: TopicId, topic: &str) -> Result<(), PeerTableError> {
         let parsed = Topic::parse(topic).map_err(|err| PeerTableError::Unparsable(id, err))?;
         if let Some(held) = self.by_id.get(&id) {
@@ -171,6 +173,9 @@ impl PeerTopicTable {
             } else {
                 Err(PeerTableError::Conflict(id))
             };
+        }
+        if self.by_id.len() >= MAX_TOPIC_SNAPSHOT_ENTRIES {
+            return Err(PeerTableError::Full(id));
         }
         self.by_id.insert(id, parsed.clone());
         self.by_topic.insert(parsed, id);
@@ -189,10 +194,15 @@ impl PeerTopicTable {
     }
 }
 
-/// Why a peer's topic announcement is refused. Both are the peer breaking the protocol rather
+/// Why a peer's topic announcement is refused. Each is the peer breaking the protocol rather
 /// than a condition to recover from, so the connection closes; T-025 owns the close code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum PeerTableError {
+    /// The peer bound one topic more than a table holds. HELLO refuses a snapshot past the
+    /// same count, and a peer that reaches it afterwards is growing this host's copy of its
+    /// table rather than announcing topics its beacon node wants (R2.2).
+    #[error("topic id {0} is past the {cap} topics a peer may bind", cap = MAX_TOPIC_SNAPSHOT_ENTRIES)]
+    Full(TopicId),
     /// The peer bound an id it had already bound to another topic. Ids are the sender's own
     /// and it never has to reuse one, so a redefinition means its table and this one have
     /// drifted and nothing decoded against them can be trusted.
