@@ -16,11 +16,11 @@ use overlay_bn::publish::PublishStats;
 use overlay_core::budget::FanoutKind;
 use overlay_core::lanes::LaneStats;
 use overlay_core::pubqueue::{DropReason as QueueDropReason, QueueStats};
-use overlay_core::roster::{Hostname, Region};
+use overlay_core::roster::{Hostname, Region, Roster};
 use overlay_core::seen::SeenStats;
 use overlay_core::topic::Class;
 use overlay_transport::fanout::{Direction, PeerLabels, TrafficStats};
-use overlay_transport::manager::{ManagerStats, PeerCounts};
+use overlay_transport::manager::{ManagerStats, PeerCounts, peer_gauges};
 use overlay_transport::receive::ReceiveStats;
 use overlay_transport::sender::{DropReason as SendDropReason, SenderStats};
 use overlay_transport::subs::SubsStats;
@@ -613,6 +613,33 @@ fn manager_stats_counts_admission_and_replaces_the_peer_gauges() {
         ),
         Some(2.0)
     );
+}
+
+/// R5.1: a host with no live peer exports a zero for every roster region, so the health
+/// alert's `<` has a left side to compare. A family with no series is dropped from the scrape
+/// altogether, and an alert that compares nothing to the roster is silent at the one outage
+/// it exists for.
+#[test]
+fn peers_connected_has_a_zero_series_for_every_roster_region_at_startup() {
+    let registry = Registry::new();
+    let metrics = Metrics::new(&registry).unwrap();
+    let roster = Roster::from_yaml(include_str!("../../../deploy/examples/roster.yaml")).unwrap();
+    let (in_roster, connected) = peer_gauges(&roster, &hostname(), []);
+    metrics.peers_roster(&in_roster);
+    metrics.peers_connected(&connected);
+
+    assert_eq!(series(&registry, "overlay_peers_connected"), 2);
+    for (region, site) in [("eu", "fra1"), ("us", "nyc1")] {
+        assert_eq!(
+            sample(
+                &registry,
+                "overlay_peers_connected",
+                &[("region", region), ("site", site)]
+            ),
+            Some(0.0),
+            "{region}/{site}"
+        );
+    }
 }
 
 #[test]

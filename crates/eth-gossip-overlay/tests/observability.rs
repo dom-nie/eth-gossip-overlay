@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use eth_gossip_overlay::metrics::Metrics;
-use prometheus::Registry;
+use overlay_core::roster::Roster;
+use overlay_transport::manager::{ManagerStats, peer_gauges};
+use prometheus::{Encoder, Registry, TextEncoder};
 use serde::Deserialize;
 
 const ALERTS_DIR: &str = "deploy/prometheus";
@@ -85,20 +87,20 @@ fn promtool() -> Promtool {
     }
 }
 
-/// `promtool check rules` over `file` in `dir`, or `None` where promtool cannot be reached at
-/// all. The container form bind-mounts `dir`, so every caller passes a directory inside the
+/// `promtool` with `args`, run in `dir`, or `None` where promtool cannot be reached at all.
+/// The container form bind-mounts `dir`, so every caller passes a directory inside the
 /// workspace rather than a temporary one the runtime may not share.
-fn check_rules(dir: &Path, file: &str) -> Option<Output> {
+fn run_promtool(dir: &Path, args: &[&str]) -> Option<Output> {
     let output = match promtool() {
         Promtool::Local => Command::new("promtool")
-            .args(["check", "rules"])
-            .arg(dir.join(file))
+            .args(args)
+            .current_dir(dir)
             .output(),
         Promtool::Docker => Command::new("docker")
             .args(["run", "--rm", "-v"])
             .arg(format!("{}:/w", dir.display()))
             .args(["-w", "/w", "--entrypoint", "promtool", PROMETHEUS_IMAGE])
-            .args(["check", "rules", file])
+            .args(args)
             .output(),
         Promtool::Missing => {
             eprintln!("skipped: neither promtool nor a working docker is on this host");
@@ -106,6 +108,11 @@ fn check_rules(dir: &Path, file: &str) -> Option<Output> {
         }
     };
     Some(output.unwrap_or_else(|err| panic!("promtool: {err}")))
+}
+
+/// `promtool check rules` over `file` in `dir`.
+fn check_rules(dir: &Path, file: &str) -> Option<Output> {
+    run_promtool(dir, &["check", "rules", file])
 }
 
 fn assert_promtool_accepted(output: &Output) {
@@ -288,6 +295,67 @@ fn alert_rules_reference_only_metric_names_exported_by_the_binary() {
             rule.alert
         );
     }
+}
+
+/// R5.1: the rule in the state it exists for, a host whose roster is up and whose peers are
+/// all down. The series are what the registry exports for that state rather than a fixture
+/// written by hand: a family the registry drops for having no series drops out of the scrape
+/// too, and a `<` with nothing on its left matches nothing.
+#[test]
+fn overlay_peers_low_evaluates_on_a_host_with_no_live_peers() {
+    let rule = alert_rules()
+        .into_iter()
+        .find(|rule| rule.alert == "OverlayPeersLow")
+        .unwrap();
+    let named = metric_names(&rule.expr);
+
+    let registry = Registry::new();
+    let metrics = Metrics::new(&registry).unwrap();
+    let roster = Roster::from_yaml(&read("deploy/examples/roster.yaml")).unwrap();
+    let (in_roster, connected) = peer_gauges(&roster, &roster.hosts[0].hostname, []);
+    metrics.peers_roster(&in_roster);
+    metrics.peers_connected(&connected);
+
+    let mut scraped = Vec::new();
+    TextEncoder::new()
+        .encode(&registry.gather(), &mut scraped)
+        .unwrap();
+    let mut test = String::from("tests:\n  - interval: 1m\n    input_series:\n");
+    for line in String::from_utf8(scraped).unwrap().lines() {
+        let Some((series, value)) = line.rsplit_once(' ') else {
+            continue;
+        };
+        let (name, labels) = series
+            .split_once('{')
+            .map_or((series, ""), |(name, labels)| {
+                (name, labels.trim_end_matches('}'))
+            });
+        if !named.contains(name) {
+            continue;
+        }
+        let comma = if labels.is_empty() { "" } else { "," };
+        test.push_str(&format!(
+            "      - series: '{name}{{instance=\"h1\"{comma}{labels}}}'\n        values: '{value}'\n"
+        ));
+    }
+    let expr = rule
+        .expr
+        .lines()
+        .map(|line| format!("          {line}"))
+        .collect::<Vec<String>>()
+        .join("\n");
+    test.push_str(&format!(
+        "    promql_expr_test:\n      - expr: |\n{expr}\n        eval_time: 0m\n        \
+         exp_samples:\n          - labels: '{{instance=\"h1\"}}'\n            value: 0\n"
+    ));
+
+    let dir = scratch();
+    let file = "peers-low-with-no-live-peers.yml";
+    std::fs::write(dir.join(file), &test).unwrap();
+    let Some(output) = run_promtool(&dir, &["test", "rules", file]) else {
+        return;
+    };
+    assert_promtool_accepted(&output);
 }
 
 /// The eleven alerts §12 and the design panel asked for, each holding for a window and pointing
