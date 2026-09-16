@@ -1175,6 +1175,22 @@ mod tests {
         assert!(reverted.applied.is_empty(), "{reverted:?}");
     }
 
+    /// `config()` is what the running process uses, however many reloads have read a file that
+    /// says otherwise for a key only a restart takes in.
+    #[test]
+    fn reloader_config_answers_the_running_value_for_a_restart_required_key() {
+        let mut h = Fixture::new(
+            "overlay:\n  roster_file: ROSTER\n  listen: \"[::]:7788\"\ninject: true\n",
+            &roster_yaml(3),
+        );
+        h.write_config("overlay:\n  roster_file: ROSTER\n  listen: \"[::]:9999\"\ninject: true\n");
+
+        h.reloader.reload(Trigger::Manual);
+        h.reloader.reload(Trigger::Manual);
+
+        assert_eq!(h.reloader.config().overlay.listen.port(), 7788);
+    }
+
     /// The repair deadline reaches T-082's scheduler, which reads it on every tick, so a canary
     /// that finds 250 ms firing during ordinary column bursts moves it without a restart (D24).
     ///
