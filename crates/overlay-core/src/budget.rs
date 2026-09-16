@@ -506,6 +506,22 @@ mod tests {
         assert!(on.receive_window >= STREAM_RECEIVE_WINDOW);
     }
 
+    /// R2.2: a peer's topic table stops at the HELLO snapshot cap, and what every peer may make
+    /// this host hold at once is a row of the one budget like every other per-peer structure.
+    #[test]
+    fn topic_table_has_a_budget_row() {
+        let budget = budget();
+
+        assert_eq!(
+            row(&budget, "peer_topic_tables"),
+            199 * MAX_TOPIC_SNAPSHOT_ENTRIES as u64 * PEER_TOPIC_ENTRY_BYTES
+        );
+        assert!(
+            budget.receive_window > STREAM_RECEIVE_WINDOW,
+            "the row leaves the window off its floor at the fleet §2 describes"
+        );
+    }
+
     /// The rows are what T-076's table grows from, so the sum has to be the rows and the total
     /// has to be the sum plus exactly the headroom OPS-N4 asks for.
     #[test]
