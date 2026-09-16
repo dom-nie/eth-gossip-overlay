@@ -191,6 +191,50 @@ fn check_config_with_hostname_not_in_roster_exits_1() {
     assert!(stderr.contains("bn-nobody-99"), "{stderr}");
 }
 
+/// `check-config` on the fixture's files as they stand.
+// A binary that cannot be spawned is a broken fixture, reported by panicking.
+#[allow(clippy::unwrap_used)]
+fn check_config(fixture: &common::Fixture) -> std::process::Output {
+    fixture
+        .command()
+        .args(["check-config", "--config"])
+        .arg(&fixture.config)
+        .output()
+        .unwrap()
+}
+
+/// The fixture's config with the line for `key` replaced by `line`, so a test can break one
+/// key without knowing the rest of the file.
+// A config the fixture just wrote and cannot read back is a broken fixture, reported by panicking.
+#[allow(clippy::unwrap_used)]
+fn rewrite_config_line(fixture: &common::Fixture, key: &str, line: &str) {
+    let config = std::fs::read_to_string(&fixture.config).unwrap();
+    let rewritten: String = config
+        .lines()
+        .map(|found| match found.trim_start().starts_with(key) {
+            true => format!("{line}\n"),
+            false => format!("{found}\n"),
+        })
+        .collect();
+    assert_ne!(rewritten, config, "the fixture's config has no {key} line");
+    std::fs::write(&fixture.config, rewritten).unwrap();
+}
+
+/// R5.6: `bn.libp2p_addr` was parsed only when the link was built, so a start refused what the
+/// rehearsal had passed. README.md promises exit 1 for anything a start needs.
+#[test]
+fn check_config_refuses_a_bad_libp2p_addr() {
+    let fixture = common::Fixture::new();
+    rewrite_config_line(&fixture, "libp2p_addr:", "  libp2p_addr: garbage");
+
+    let output = check_config(&fixture);
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("bn.libp2p_addr"), "{stderr}");
+    assert_eq!(stderr.lines().count(), 1, "{stderr:?}");
+}
+
 /// The peer id `peer-id` prints for this fixture's node key, which is what `check-config` has to
 /// agree with.
 // A broken fixture is reported by panicking, which is what the unwraps here are.
