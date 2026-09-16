@@ -125,25 +125,26 @@ startup rather than looping it, and `eth-gossip-overlay check-config` says so in
 
 ## OverlayRepairRateRising
 
-This host is asking peers to resend what it did not receive, at a rate that is not incidental.
-[rollout.md](rollout.md) says where the threshold comes from. Split it two ways first:
+This host is asking peers to resend what it did not receive. [rollout.md](rollout.md) says where
+the threshold comes from. Split it two ways first:
 
 ```promql
 sum by (instance, form, outcome) (rate(overlay_repair_requests_total[15m]))
 ```
 
 `form="chunk"` is loss on the overlay path, not a fault in the sidecar: one host or one link
-dropping chunks, or a region whose stripes miss `classes.large.repair_deadline_ms`. Read it next
-to `overlay_peer_queue_drops_total`, which says whether the chunks were dropped before they were
+dropping chunks, or a region whose stripes miss `classes.large.repair_deadline_ms`.
+`overlay_peer_queue_drops_total` beside it says whether the chunks were dropped before they were
 sent.
 
 `form="column"` is this beacon node short of custody columns past the same deadline, which is
 rarer. Setting `classes.large.column_repair: false` and reloading turns it off; the node then
-fetches its own columns as it did before.
+fetches its own columns.
 
-The `outcome` label splits either form. `completed` is loss that repair covered. `not_found` and
-`timeout` are peers that could not answer. `gave_up` is no request sent, because no candidate was
-live and advertising the repair feature bit, which during a rolling upgrade is expected.
+`outcome` splits either form. `completed` is loss repair covered. `not_found` and `timeout` are
+peers that could not answer. `gave_up` is no request sent: no candidate was live and advertising
+the feature bit, expected during a rolling upgrade. `rate_limited` is counted by the answering
+host: a peer asked faster than its bucket allows. Zero on an honest fleet.
 
 `overlay_column_topic_mismatch_total` beside it reads zero on a healthy fleet; it counts a network
 whose subnets do not name its columns.

@@ -18,7 +18,8 @@ What an attacker with a foothold on the overlay does get is CPU. Junk delivered 
 published to its beacon node and validated before it is thrown away, and a message that fans out
 reaches every host. That is the cost the fences are sized against, and it is bounded twice: by
 the publish rate limits on the way into a beacon node, and by the per-peer fan-out budget that
-stops one authenticated sibling making the whole fleet do its work.
+stops one authenticated sibling making the whole fleet do its work. Repair answers sit outside
+both, so each peer also gets a bucket on how often this host will answer one.
 
 Confidentiality is not a goal. Everything on the overlay is public gossip, and QUIC's encryption
 is there because QUIC requires TLS, not because the payloads are secret. Losing a beacon node is
