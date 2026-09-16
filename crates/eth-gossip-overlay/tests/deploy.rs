@@ -386,6 +386,31 @@ fn compose_roster_and_config_load_with_real_parsers() {
     }
 }
 
+/// R5.7: the shipped config binds the admin socket under `/run/eth-gossip-overlay`, which systemd
+/// makes with `RuntimeDirectory=` and a container has no one to make. The image runs as 65532
+/// with no shell, so the final stage has to carry that directory, owned by that user, or the
+/// container dies at the last bind of its start with the example config unchanged.
+#[test]
+fn dockerfile_final_stage_carries_the_admin_socket_directory() {
+    let dockerfile = read(DOCKERFILE);
+    let final_stage = dockerfile.rsplit("\nFROM ").next().unwrap();
+    let socket_dir = Config::default()
+        .admin_socket
+        .parent()
+        .unwrap()
+        .display()
+        .to_string();
+
+    assert!(
+        final_stage.lines().any(|line| {
+            line.starts_with("COPY")
+                && line.contains("--chown=65532:65532")
+                && line.trim_end().ends_with(&socket_dir)
+        }),
+        "{DOCKERFILE}: the final stage does not copy {socket_dir} in, owned by 65532"
+    );
+}
+
 /// The version label is what a registry and an operator read off a pulled image, so it has to
 /// be the version the workspace builds rather than whatever it was when the file was written.
 #[test]
