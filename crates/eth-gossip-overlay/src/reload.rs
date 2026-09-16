@@ -1023,6 +1023,28 @@ mod tests {
         assert!(h.pinned(&FleetSeed::from(SEED), "bn-1"));
     }
 
+    /// `docs/security.md` step 1 on a host where the key reaches `config.yaml` before the seed
+    /// file reaches disk: the first reload fails, and the next one, with the file in place, has
+    /// to apply it. It cannot if the failed value already sits in the baseline (R5.3).
+    #[test]
+    fn a_reload_whose_applier_fails_keeps_the_old_value_in_the_baseline() {
+        let mut h = Fixture::new(CONFIG, &roster_yaml(3));
+        let seed = h.roster_path.with_file_name("seed.previous");
+        h.write_config(&format!(
+            "overlay:\n  roster_file: ROSTER\n  fleet_seed_previous_file: {}\ninject: true\n",
+            seed.display()
+        ));
+        let first = h.reloader.reload(Trigger::Manual);
+        assert!(first.error.is_some(), "{first:?}");
+
+        write_secret_file(&seed, &[7; 32]).unwrap();
+        let second = h.reloader.reload(Trigger::Manual);
+
+        assert_eq!(second.applied, [PREVIOUS_SEED], "{second:?}");
+        assert!(second.error.is_none(), "{second:?}");
+        assert!(h.pinned(&FleetSeed::from([7; 32]), "bn-1"));
+    }
+
     #[test]
     fn invalid_config_yaml_keeps_previous_values_and_reports_error() {
         let mut h = Fixture::new(CONFIG, &roster_yaml(3));
