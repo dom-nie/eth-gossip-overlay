@@ -134,9 +134,9 @@ pub struct ReloadReport {
     pub trigger: Trigger,
     /// The keys that took effect, and `roster` when the roster itself changed.
     pub applied: Vec<String>,
-    /// Keys changed in the file that only a restart reads, every one since the process
-    /// started: an edit the roster watcher's reload saw first is still pending when the
-    /// operator runs their own.
+    /// Keys that only a restart reads whose file value is not the one the process started
+    /// with: an edit the roster watcher's reload saw first is still pending when the operator
+    /// runs their own, and one that was put back is gone.
     pub restart_required: Vec<String>,
     /// Why the reload did not finish, if it did not. The previous values stay in force. One
     /// slot: a reload that hits two problems reports the later one, which is the roster's,
@@ -349,7 +349,8 @@ pub struct Reloader {
     /// is the one the sidecar started from whatever a new document says.
     roster_path: PathBuf,
     document: yaml::Value,
-    /// What `ReloadReport::restart_required` lists, kept until the process restarts.
+    /// What `ReloadReport::restart_required` lists, as of the last reload that could read the
+    /// file; one that could not repeats it.
     pending_restart: BTreeSet<String>,
     config: Config,
     roster: watch::Sender<Roster>,
@@ -554,15 +555,13 @@ impl Reloader {
             Ok(config) => self.config = config,
             Err(error) => report.error = Some(error),
         }
-        // The next diff runs against what was taken in plus the restart-required keys, which
-        // stay pending rather than being diffed again. A key whose applier refused it stays at
-        // its old value, so the corrected file reads as a change again and the applier gets
-        // another go.
-        for path in &restart_required {
-            copy_path(&mut effective, &document, path);
-        }
+        // The next diff runs against what was taken in. A restart-required key keeps the value
+        // the process started with, so every reload compares the file against it and the key
+        // is pending exactly while the two differ (MD-07). A key whose applier refused it
+        // stays at its old value, so the corrected file reads as a change again and the
+        // applier gets another go.
         self.document = effective;
-        self.pending_restart.extend(restart_required);
+        self.pending_restart = restart_required.into_iter().collect();
         report.applied.extend(applied);
     }
 
