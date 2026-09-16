@@ -359,9 +359,9 @@ pub fn read_memory_max(path: &Path) -> Option<u64> {
 /// [`MEMORY_MAX_DEFAULT`] with a warning where nothing sets a ceiling, so an operator running
 /// the sidecar outside the unit gets the number the documentation is written against and a
 /// line saying so.
+#[cfg(target_os = "linux")]
 // mutants::skip: two absolute paths no test can stage. `own_cgroup` and `cgroup_memory_max`
 // are the halves that decide anything and both are under test with a tree of their own.
-#[cfg(target_os = "linux")]
 #[cfg_attr(test, mutants::skip)]
 pub fn ceiling() -> Ceiling {
     const PROC_SELF_CGROUP: &str = "/proc/self/cgroup";
