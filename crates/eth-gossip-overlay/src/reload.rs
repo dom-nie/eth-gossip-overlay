@@ -31,9 +31,9 @@
 //!   turning the cache off puts T-019's `ResourceUnavailable` back on the next lookup. The
 //!   window `bn.by_root_cache.slots` names is not reloadable: the recent store is sized once,
 //!   against the memory budget the process started under.
-//! - `overlay.fleet_seed_previous_file`: loaded with T-004's reader and published for
-//!   [`spawn_pin_table`], which rebuilds T-021's pin table so the verifier accepts keys from
-//!   the outgoing seed for as long as the file is configured (DX-N2).
+//! - `overlay.fleet_seed_previous_file`: loaded with T-004's reader, and T-021's pin table is
+//!   rebuilt with it so the verifier accepts keys from the outgoing seed for as long as the
+//!   file is configured (DX-N2).
 //! - `log.level` and `log.format`: T-044's [`LogHandle`], which leaves the level alone while
 //!   `RUST_LOG` is set and says so (D32).
 //! - `classes.small.batch_window_ms` and `classes.small.stale_after_ms`: one applier for the
@@ -98,8 +98,12 @@ pub const RELOADABLE: &[&str] = &[
     "overlay.fanout.small.cross_region",
     "overlay.fanout.small.relay_min_remote_hosts",
     "overlay.fanout.small.relays_per_remote_region",
-    "overlay.fleet_seed_previous_file",
+    PREVIOUS_SEED,
 ];
+
+/// The one reloadable key applied by the reloader itself rather than by a registered closure:
+/// the seeds it reads into are the ones `apply_roster` builds the pin table from.
+const PREVIOUS_SEED: &str = "overlay.fleet_seed_previous_file";
 
 /// What asked for a reload (D26). A human means what the files say; a tool that writes them
 /// may be broken, which is what the roster shrink guard protects against.
@@ -179,10 +183,15 @@ pub struct Deps {
     /// (§5.8). Only the flag reloads: the store's window is sized once, at startup, because the
     /// memory budget it is priced in is.
     pub by_root_cache: Arc<AtomicBool>,
-    /// The roster the connection manager (T-023) and the pin table (T-021) follow.
+    /// The roster the connection manager (T-023) follows.
     pub roster: watch::Sender<Roster>,
-    /// The outgoing seed while a rotation is in progress (DX-N2).
-    pub previous_seed: watch::Sender<Option<FleetSeed>>,
+    /// The pin table every handshake is verified against (T-021). A reload rebuilds it before
+    /// it publishes the roster, so the dial the manager starts for an added host is checked
+    /// against a table that already holds the host (T-104).
+    pub pins: Arc<ArcSwap<PinTable>>,
+    /// The seeds the table is built from: the one in force, which takes a restart to change,
+    /// and the outgoing one while a rotation is in progress (DX-N2).
+    pub seeds: Seeds,
     /// The ceilings the publisher rebuilds its token buckets from (DX-N3).
     pub limits: watch::Sender<PublishRateLimit>,
     /// The window and stale bound the batcher collects under (D21).
@@ -326,37 +335,6 @@ fn mtime(path: &Path) -> Option<SystemTime> {
     }
 }
 
-/// Keeps T-021's pin table in step with the two channels a reload writes (DX-N2).
-///
-/// Both decide who may pair: the roster says whose keys are pinned at all, and the outgoing
-/// seed decides whether a peer that has not rotated yet is still one of them. The verifier
-/// reads the table through the `ArcSwap` on every handshake, so replacing it drops no
-/// connection. The task ends when the reloader that owns both senders does.
-pub fn spawn_pin_table(
-    pins: Arc<ArcSwap<PinTable>>,
-    current: FleetSeed,
-    mut roster: watch::Receiver<Roster>,
-    mut previous_seed: watch::Receiver<Option<FleetSeed>>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            let changed = tokio::select! {
-                changed = roster.changed() => changed,
-                changed = previous_seed.changed() => changed,
-            };
-            if changed.is_err() {
-                return;
-            }
-            let seeds = Seeds {
-                current: current.clone(),
-                previous: previous_seed.borrow_and_update().clone(),
-            };
-            let table = PinTable::build(&roster.borrow_and_update(), &seeds);
-            pins.store(Arc::new(table));
-        }
-    })
-}
-
 /// One reloadable key's consumer: it takes the new configuration and puts the key where the
 /// running sidecar reads it, or says why it could not.
 type Applier = Box<dyn FnMut(&Config) -> Result<(), String> + Send>;
@@ -371,6 +349,10 @@ pub struct Reloader {
     document: yaml::Value,
     config: Config,
     roster: watch::Sender<Roster>,
+    /// Rebuilt from the roster and `seeds` before either is changed for anyone else. The
+    /// verifier reads it through the `ArcSwap` on every handshake, so a rebuild drops nothing.
+    pins: Arc<ArcSwap<PinTable>>,
+    seeds: Seeds,
     appliers: Vec<(&'static str, Applier)>,
     stats: Arc<dyn ReloadStats>,
 }
@@ -384,7 +366,6 @@ impl Reloader {
     pub fn new(config_path: PathBuf, deps: Deps) -> Result<Self, ReloadError> {
         let (document, config) = read_config(&config_path)?;
         let inject = deps.inject;
-        let previous_seed = deps.previous_seed;
         let started_with = config.overlay.fanout.large.clone();
         let by_root_cache = deps.by_root_cache;
         let column_repair = deps.column_repair;
@@ -475,19 +456,6 @@ impl Reloader {
                     Ok(())
                 })
             }),
-            (
-                "overlay.fleet_seed_previous_file",
-                Box::new(move |cfg: &Config| {
-                    let seed = match &cfg.overlay.fleet_seed_previous_file {
-                        Some(path) => Some(FleetSeed::from(
-                            *read_secret_file(path).map_err(|err| err.to_string())?,
-                        )),
-                        None => None,
-                    };
-                    previous_seed.send_replace(seed);
-                    Ok(())
-                }),
-            ),
         ];
         Ok(Self {
             config_path,
@@ -495,6 +463,8 @@ impl Reloader {
             document,
             config,
             roster: deps.roster,
+            pins: deps.pins,
+            seeds: deps.seeds,
             appliers,
             stats: deps.stats,
         })
@@ -551,11 +521,17 @@ impl Reloader {
     fn apply_config(&mut self, document: yaml::Value, config: Config, report: &mut ReloadReport) {
         let mut applied = Vec::new();
         for path in changed_paths(&self.document, &document) {
-            match self.appliers.iter_mut().find(|(key, _)| covers(key, &path)) {
-                Some((_, apply)) => match apply(&config) {
-                    Ok(()) => applied.push(path),
-                    Err(reason) => report.error = Some(ReloadError::Config(reason)),
-                },
+            let outcome = if covers(PREVIOUS_SEED, &path) {
+                Some(self.apply_previous_seed(&config))
+            } else {
+                self.appliers
+                    .iter_mut()
+                    .find(|(key, _)| covers(key, &path))
+                    .map(|(_, apply)| apply(&config))
+            };
+            match outcome {
+                Some(Ok(())) => applied.push(path),
+                Some(Err(reason)) => report.error = Some(ReloadError::Config(reason)),
                 None if reloadable(&path) => applied.push(path),
                 None => report.restart_required.push(path),
             }
@@ -573,6 +549,22 @@ impl Reloader {
         }
         self.document = document;
         report.applied.extend(applied);
+    }
+
+    /// Reads the outgoing seed the document names, or forgets it, and rebuilds the pin table so
+    /// the verifier accepts keys from it for as long as the key is configured (DX-N2).
+    fn apply_previous_seed(&mut self, cfg: &Config) -> Result<(), String> {
+        self.seeds.previous = match &cfg.overlay.fleet_seed_previous_file {
+            Some(path) => Some(FleetSeed::from(
+                *read_secret_file(path).map_err(|err| err.to_string())?,
+            )),
+            None => None,
+        };
+        self.pins.store(Arc::new(PinTable::build(
+            &self.roster.borrow(),
+            &self.seeds,
+        )));
+        Ok(())
     }
 
     /// Publishes the roster on the watch channel when the file says something new. A file that
@@ -607,6 +599,12 @@ impl Reloader {
             });
             return;
         }
+        // The table first. The manager dials an added host the moment it sees the roster, and
+        // the handshake reads the table; the other order verified that dial against a table
+        // that did not hold the host yet (R3.2). What is left is an inbound dial landing
+        // between the two stores, refused as `hostname` for the microseconds in between.
+        self.pins
+            .store(Arc::new(PinTable::build(&roster, &self.seeds)));
         self.roster.send_replace(roster);
         report.applied.push("roster".to_owned());
     }
@@ -755,6 +753,9 @@ mod tests {
     /// A config document with the roster path filled in by [`Fixture::write_config`].
     const CONFIG: &str = "overlay:\n  roster_file: ROSTER\ninject: true\n";
 
+    /// The seed in force for every fixture.
+    const SEED: [u8; 32] = [1; 32];
+
     /// `n` hosts named `bn-1` upwards, all in one region.
     fn roster_yaml(n: usize) -> String {
         let mut text = "hosts:\n".to_owned();
@@ -834,7 +835,7 @@ mod tests {
         roster_path: PathBuf,
         inject: Arc<AtomicBool>,
         roster: watch::Receiver<Roster>,
-        previous_seed: watch::Receiver<Option<FleetSeed>>,
+        pins: Arc<ArcSwap<PinTable>>,
         limits: watch::Receiver<PublishRateLimit>,
         small: watch::Receiver<SmallClass>,
         fanout: watch::Receiver<Fanout>,
@@ -869,7 +870,14 @@ mod tests {
             let inject = Arc::new(AtomicBool::new(true));
             let by_root_cache = Arc::new(AtomicBool::new(false));
             let (roster_tx, roster_rx) = watch::channel(Roster::from_yaml(roster).unwrap());
-            let (seed_tx, previous_seed) = watch::channel(None);
+            let seeds = Seeds {
+                current: FleetSeed::from(SEED),
+                previous: None,
+            };
+            let pins = Arc::new(ArcSwap::from_pointee(PinTable::build(
+                &roster_tx.borrow(),
+                &seeds,
+            )));
             let (limits_tx, limits) = watch::channel(PublishRateLimit::default());
             let (small_tx, small) = watch::channel(SmallClass::default());
             let (fanout_tx, fanout) = watch::channel(Fanout::default());
@@ -885,7 +893,8 @@ mod tests {
                     inject: inject.clone(),
                     by_root_cache: by_root_cache.clone(),
                     roster: roster_tx,
-                    previous_seed: seed_tx,
+                    pins: pins.clone(),
+                    seeds,
                     limits: limits_tx,
                     small: small_tx,
                     fanout: fanout_tx,
@@ -902,7 +911,7 @@ mod tests {
                 roster_path,
                 inject,
                 roster: roster_rx,
-                previous_seed,
+                pins,
                 limits,
                 small,
                 fanout,
@@ -916,6 +925,12 @@ mod tests {
 
         fn write_roster(&self, text: &str) {
             fs::write(&self.roster_path, text).unwrap();
+        }
+
+        /// Whether the pin table holds `host`'s key under `seed`.
+        fn pinned(&self, seed: &FleetSeed, host: &str) -> bool {
+            let key = expected_tls_public_key(seed, &Hostname(host.to_owned()));
+            self.pins.load().lookup(&key).is_some()
         }
 
         fn write_config(&self, text: &str) {
@@ -955,26 +970,38 @@ mod tests {
         assert_eq!(published.hosts[3].hostname, Hostname("bn-4".to_owned()));
     }
 
+    /// DX-N2: the table accepts keys from the outgoing seed for as long as the key names it,
+    /// beside the seed in force, and drops them once the key goes.
     #[test]
-    fn reload_publishes_previous_seed_when_fleet_seed_previous_file_is_set_and_none_when_removed() {
-        let mut h = Fixture::new(CONFIG, &roster_yaml(3));
+    fn pin_table_follows_the_roster_and_the_previous_seed() {
+        let mut h = Fixture::new(CONFIG, &roster_yaml(2));
+        let (current, previous) = (FleetSeed::from(SEED), FleetSeed::from([7; 32]));
+        assert!(!h.pinned(&current, "bn-3"));
+
+        h.write_roster(&roster_yaml(3));
+        let report = h.reloader.reload(Trigger::Manual);
+
+        assert_eq!(report.applied, ["roster"]);
+        assert!(h.pinned(&current, "bn-3"));
+
         let seed = h.roster_path.with_file_name("seed.previous");
         write_secret_file(&seed, &[7; 32]).unwrap();
         h.write_config(&format!(
             "overlay:\n  roster_file: ROSTER\n  fleet_seed_previous_file: {}\ninject: true\n",
             seed.display()
         ));
-
         let report = h.reloader.reload(Trigger::Manual);
 
         assert_eq!(report.applied, ["overlay.fleet_seed_previous_file"]);
-        assert!(h.previous_seed.borrow_and_update().is_some(), "{report:?}");
+        assert!(h.pinned(&previous, "bn-1"), "{report:?}");
+        assert!(h.pinned(&current, "bn-1"));
 
         h.write_config(CONFIG);
         let report = h.reloader.reload(Trigger::Manual);
 
         assert_eq!(report.applied, ["overlay.fleet_seed_previous_file"]);
-        assert!(h.previous_seed.borrow_and_update().is_none(), "{report:?}");
+        assert!(!h.pinned(&previous, "bn-1"), "{report:?}");
+        assert!(h.pinned(&current, "bn-1"));
     }
 
     #[test]
@@ -993,7 +1020,7 @@ mod tests {
             matches!(&report.error, Some(ReloadError::Config(reason)) if reason.contains("seed.previous")),
             "{report:?}"
         );
-        assert!(h.previous_seed.borrow_and_update().is_none());
+        assert!(h.pinned(&FleetSeed::from(SEED), "bn-1"));
     }
 
     #[test]
@@ -1375,46 +1402,6 @@ mod tests {
             fanout.large.cross_region,
             LargeFanout::default().cross_region
         );
-    }
-
-    /// Waits for `done`, so a test fails on a bound instead of hanging when the task under it
-    /// stops working.
-    async fn until(mut done: impl FnMut() -> bool) {
-        tokio::time::timeout(Duration::from_secs(1), async {
-            while !done() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the pin table was never rebuilt");
-    }
-
-    #[tokio::test]
-    async fn pin_table_follows_the_roster_and_the_previous_seed() {
-        let current = FleetSeed::from([1; 32]);
-        let previous = FleetSeed::from([2; 32]);
-        let roster = Roster::from_yaml(&roster_yaml(2)).unwrap();
-        let seeds = Seeds {
-            current: current.clone(),
-            previous: None,
-        };
-        let pins = Arc::new(ArcSwap::from_pointee(PinTable::build(&roster, &seeds)));
-        let (roster_tx, roster_rx) = watch::channel(roster);
-        let (seed_tx, seed_rx) = watch::channel(None);
-        let _task = spawn_pin_table(pins.clone(), current.clone(), roster_rx, seed_rx);
-        let pinned = |seed: &FleetSeed, host: &str| {
-            let key = expected_tls_public_key(seed, &Hostname(host.to_owned()));
-            pins.load().lookup(&key).is_some()
-        };
-
-        roster_tx.send_replace(Roster::from_yaml(&roster_yaml(3)).unwrap());
-
-        until(|| pinned(&current, "bn-3")).await;
-
-        seed_tx.send_replace(Some(FleetSeed::from([2; 32])));
-
-        until(|| pinned(&previous, "bn-1")).await;
-        assert!(pinned(&current, "bn-1"));
     }
 
     /// The one line an operator reads after a reload, as JSON so the fields can be asserted by

@@ -393,9 +393,10 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    use arc_swap::ArcSwap;
     use bytes::Bytes;
     use overlay_core::config::Log;
-    use overlay_core::identity::FleetSeed;
+    use overlay_core::identity::{FleetSeed, Seeds};
     use overlay_core::roster::{Hostname, Region, Roster, SelfIdentity};
     use overlay_core::topic::{Class, SubscriptionSets, Topic};
     use overlay_transport::hello::Negotiated;
@@ -406,6 +407,7 @@ mod tests {
     use overlay_transport::testutil::{
         Builder, NodeKind, SendSpy, eventually, peer_state, view_of,
     };
+    use overlay_transport::tls::PinTable;
     use tempfile::TempDir;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     use tokio::net::UnixStream;
@@ -501,7 +503,14 @@ mod tests {
             let by_root_cache = Arc::new(AtomicBool::new(false));
             let (roster_tx, roster_rx) =
                 watch::channel(Roster::from_yaml(&roster_yaml(3)).unwrap());
-            let (seed_tx, _seed_rx) = watch::channel::<Option<FleetSeed>>(None);
+            let seeds = Seeds {
+                current: FleetSeed::from([1; 32]),
+                previous: None,
+            };
+            let pins = Arc::new(ArcSwap::from_pointee(PinTable::build(
+                &roster_tx.borrow(),
+                &seeds,
+            )));
             let (limits_tx, _limits_rx) = watch::channel(Default::default());
             let (small_tx, _small_rx) = watch::channel(Default::default());
             let (fanout_tx, _fanout_rx) = watch::channel(Default::default());
@@ -514,7 +523,8 @@ mod tests {
                     inject: inject.clone(),
                     by_root_cache: by_root_cache.clone(),
                     roster: roster_tx,
-                    previous_seed: seed_tx,
+                    pins,
+                    seeds,
                     limits: limits_tx,
                     small: small_tx,
                     fanout: fanout_tx,

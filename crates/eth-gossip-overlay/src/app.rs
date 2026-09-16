@@ -548,13 +548,6 @@ impl App {
         );
         tracing::info!("fanout and overlay receive path started");
 
-        let (previous_seed_tx, previous_seed_rx) = watch::channel(None);
-        let pin_table = reload::spawn_pin_table(
-            pins,
-            me.seeds.current,
-            roster_tx.subscribe(),
-            previous_seed_rx,
-        );
         let admin_roster = roster_tx.subscribe();
         let (reload, reload_task) = reload::spawn(Reloader::new(
             config_path,
@@ -562,7 +555,8 @@ impl App {
                 inject: inject.clone(),
                 by_root_cache: by_root_on,
                 roster: roster_tx,
-                previous_seed: previous_seed_tx,
+                pins,
+                seeds: me.seeds,
                 limits: limits_tx,
                 small: small_tx,
                 fanout: fanout_tx,
@@ -619,7 +613,6 @@ impl App {
                 exchange,
                 fanout,
                 batching,
-                pin_table,
                 reload_task,
                 hangups,
                 roster_watcher,
