@@ -1155,6 +1155,26 @@ mod tests {
         assert!(manual.applied.is_empty(), "{manual:?}");
     }
 
+    /// An operator who edits `overlay.listen` and puts it back has nothing pending, and the
+    /// report has to say so. It can only if the baseline still holds the value the process
+    /// started with: one that absorbed the edit reads the revert as a second change (T-109).
+    #[test]
+    fn a_reverted_restart_required_edit_clears_the_report() {
+        let mut h = Fixture::new(
+            "overlay:\n  roster_file: ROSTER\n  listen: \"[::]:7788\"\ninject: true\n",
+            &roster_yaml(3),
+        );
+        h.write_config("overlay:\n  roster_file: ROSTER\n  listen: \"[::]:9999\"\ninject: true\n");
+        let edited = h.reloader.reload(Trigger::Manual);
+        assert_eq!(edited.restart_required, ["overlay.listen"], "{edited:?}");
+
+        h.write_config("overlay:\n  roster_file: ROSTER\n  listen: \"[::]:7788\"\ninject: true\n");
+        let reverted = h.reloader.reload(Trigger::Manual);
+
+        assert!(reverted.restart_required.is_empty(), "{reverted:?}");
+        assert!(reverted.applied.is_empty(), "{reverted:?}");
+    }
+
     /// The repair deadline reaches T-082's scheduler, which reads it on every tick, so a canary
     /// that finds 250 ms firing during ordinary column bursts moves it without a restart (D24).
     ///
