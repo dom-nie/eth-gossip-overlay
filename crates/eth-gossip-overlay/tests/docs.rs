@@ -473,6 +473,37 @@ fn lighthouse_doc_drop_in_matches_the_shipped_file() {
     );
 }
 
+/// Check 7 (R5.9). The `check-config` sample in both READMEs carries the lines the binary
+/// prints for the three-host roster the sample shows, so the budget line cannot go stale the
+/// way the old one had: no roster size could produce it. The ceiling is the built-in default,
+/// which is what any shell without a cgroup limit of its own reads.
+#[test]
+fn readme_check_config_sample_matches_a_regenerated_line() {
+    let budget = MemoryBudget::compute(
+        &Config::default(),
+        3,
+        budget::MEMORY_MAX_DEFAULT,
+        SEND_LANES,
+    );
+    let mib = |bytes: u64| bytes.div_ceil(1024 * 1024);
+    let ceiling = format!(
+        "memory ceiling: {} MiB (built-in default)",
+        mib(budget.limit)
+    );
+    let total = format!(
+        "memory budget: {} MiB ({} MiB in bounded structures plus {}% headroom)",
+        mib(budget.total_bytes),
+        mib(budget.bounded_bytes),
+        budget::HEADROOM_PERCENT
+    );
+
+    for readme in ["README.md", "deploy/README.md"] {
+        let text = read(readme);
+        assert!(text.contains(&ceiling), "{readme} has no line {ceiling:?}");
+        assert!(text.contains(&total), "{readme} has no line {total:?}");
+    }
+}
+
 /// Split rather than grow. A runbook nobody finishes reading is a runbook that does not work at
 /// three in the morning.
 #[test]
