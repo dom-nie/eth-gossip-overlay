@@ -971,6 +971,23 @@ mod tests {
         assert!(!h.reloader.config().inject);
     }
 
+    /// `eth-gossip-overlayctl inject off` is the kill switch, and the file still says `inject:
+    /// true`. A reload applies a key only when its value changed in the file, so the switch
+    /// outlives every reload, the roster watcher's included, until someone edits the file or
+    /// turns it back on. Reconciling the file over the socket was judged harmful: a discovery
+    /// tool rewriting the roster would undo an incident's `inject off` (R5.4b, design).
+    #[test]
+    fn inject_off_survives_a_file_reload() {
+        let mut h = Fixture::new(CONFIG, &roster_yaml(3));
+        h.inject.store(false, Ordering::Relaxed);
+        h.write_roster(&roster_yaml(4));
+
+        let report = h.reloader.reload(Trigger::Automatic);
+
+        assert_eq!(report.applied, ["roster"], "{report:?}");
+        assert!(!h.inject.load(Ordering::Relaxed));
+    }
+
     #[test]
     fn reload_publishes_new_roster_on_the_watch_channel() {
         let mut h = Fixture::new(CONFIG, &roster_yaml(3));
