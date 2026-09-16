@@ -4,12 +4,13 @@
 use std::time::{Duration, Instant};
 
 use eth_gossip_overlay::metrics::{
-    BN_SUBSCRIPTIONS, BYTES_TOTAL, CHUNKS_RECEIVED_TOTAL, FIRST_SEEN_TOTAL, IO_THREAD_PINNED,
-    LABEL_CLASS, LABEL_DIRECTION, LABEL_OUTCOME, LABEL_PEER, LABEL_REASON, LABEL_SOURCE,
-    LABEL_UNIT, MESSAGES_TOTAL, PARITY_USED_TOTAL, PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL,
-    PEER_QUEUE_DEPTH, PEER_QUEUE_DROPS_TOTAL, PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF,
-    RECONSTRUCT_SECONDS, RELAYED_BATCHES_TOTAL, REPAIR_REQUESTS_TOTAL, SOURCE_OVERLAY,
-    UNANNOUNCED_TOPIC_TOTAL, UNIT_BYTES, UNKNOWN_TOPIC_ID_TOTAL, UNWANTED_TOPIC_TOTAL,
+    BN_SUBSCRIPTIONS, BYTES_TOTAL, CHUNKS_RECEIVED_TOTAL, FIRST_SEEN_TOTAL,
+    HANDSHAKE_FAILURES_TOTAL, IO_THREAD_PINNED, LABEL_CLASS, LABEL_DIRECTION, LABEL_OUTCOME,
+    LABEL_PEER, LABEL_REASON, LABEL_ROLE, LABEL_SOURCE, LABEL_UNIT, MESSAGES_TOTAL,
+    PARITY_USED_TOTAL, PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL, PEER_QUEUE_DEPTH, PEER_QUEUE_DROPS_TOTAL,
+    PEERS_CONNECTED, PUBLISH_SUPPRESSED_TOTAL, REASON_INJECT_OFF, RECONSTRUCT_SECONDS,
+    RELAYED_BATCHES_TOTAL, REPAIR_REQUESTS_TOTAL, SOURCE_OVERLAY, UNANNOUNCED_TOPIC_TOTAL,
+    UNIT_BYTES, UNKNOWN_TOPIC_ID_TOTAL, UNWANTED_TOPIC_TOTAL,
 };
 use harness::{Fleet, SETTLE, Scrape, WAIT, incompressible, topic};
 use overlay_core::protocol::features;
@@ -1344,4 +1345,43 @@ async fn block_completes_via_repair_when_a_stripe_host_dies_mid_transfer() {
             "node {node} finished the block without repairing it"
         );
     }
+}
+
+/// A reload that adds a host publishes the roster and rebuilds the pin table, and the dial the
+/// manager starts for the added host is verified against that table. With 198 other hosts the
+/// rebuild takes milliseconds in a debug build and a loopback dial reaches the verifier sooner,
+/// so a table rebuilt after the publish refused the host once as `key_mismatch` and paired it a
+/// backoff step later (R3.2). Node 1 keeps node 0 in its roster throughout and sorts higher, so
+/// the only dial in the scenario is the one the add starts.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_roster_add_never_dials_against_the_old_pin_table() {
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", 2)])
+        .config(|settings| settings.fillers = 198)
+        .start()
+        .await;
+    fleet.wait_full_mesh(WAIT).await;
+    let connected = |scrapes: &[Scrape]| scrapes[0].sum(PEERS_CONNECTED, &[]);
+
+    fleet.drop_from_roster(0, 1).await;
+    fleet
+        .wait_for_metrics("node 0 to let node 1 go", WAIT, |scrapes| {
+            connected(scrapes) == 0.0
+        })
+        .await;
+    fleet.add_to_roster(0, 1).await;
+    fleet
+        .wait_for_metrics("node 0 to pair with node 1 again", WAIT, |scrapes| {
+            connected(scrapes) == 1.0
+        })
+        .await;
+
+    let refused = fleet.node(0).metrics().await.sum(
+        HANDSHAKE_FAILURES_TOTAL,
+        &[(LABEL_ROLE, "dial"), (LABEL_REASON, "key_mismatch")],
+    );
+    assert_eq!(
+        refused, 0.0,
+        "node 0 dialled node 1 against a pin table that did not hold it"
+    );
 }

@@ -184,6 +184,10 @@ pub struct Settings {
     /// `overlay.io_thread.pin_cpu`: the core every node reserves for its overlay endpoint
     /// (T-091). Off, as the shipped defaults have it, unless a scenario asks.
     pub pin_cpu: Option<u32>,
+    /// Hosts every roster names that no sidecar runs for, so a scenario can have the roster of
+    /// a real fleet without starting one. They sort below every node and are never dialled;
+    /// what they cost is a key derivation each in every pin table rebuild (T-104).
+    pub fillers: usize,
 }
 
 impl Default for Settings {
@@ -196,6 +200,7 @@ impl Default for Settings {
             parity_ratio: LargeClass::default().parity_ratio,
             initial_window_bytes: Overlay::default().initial_window_bytes,
             pin_cpu: None,
+            fillers: 0,
         }
     }
 }
@@ -288,7 +293,8 @@ pub struct Fleet {
     settings: Settings,
     /// The seed in force, which [`Fleet::rotate_seed`] replaces.
     seed: [u8; 32],
-    /// Pairs whose rosters no longer name each other, from [`Fleet::partition`].
+    /// `(a, b)` for every node `a` whose roster no longer names node `b`, from
+    /// [`Fleet::partition`] and [`Fleet::drop_from_roster`].
     cut: Vec<(usize, usize)>,
     /// How many probe rounds [`Fleet::wait_full_mesh`] has run.
     probes: usize,
@@ -489,7 +495,7 @@ impl Fleet {
     fn write_files(&self, index: usize) {
         let node = &self.nodes[index];
         let hosts: String = (0..self.nodes.len())
-            .filter(|&other| other == index || !self.is_cut(index, other))
+            .filter(|&other| other == index || !self.cut.contains(&(index, other)))
             .map(|other| {
                 let peer = &self.nodes[other];
                 format!(
@@ -497,6 +503,12 @@ impl Fleet {
                     peer.hostname, peer.region, peer.overlay
                 )
             })
+            .chain((0..self.settings.fillers).map(|filler| {
+                format!(
+                    "  - hostname: aa-filler-{filler:03}\n    region: {}\n    addr: \"127.0.0.1:1\"\n",
+                    node.region
+                )
+            }))
             .collect();
         std::fs::write(node.dir.join("roster.yaml"), format!("hosts:\n{hosts}")).unwrap();
 
@@ -633,6 +645,7 @@ impl Fleet {
         for &left in a {
             for &right in b {
                 self.cut.push((left, right));
+                self.cut.push((right, left));
             }
         }
         for index in 0..self.nodes.len() {
@@ -658,14 +671,37 @@ impl Fleet {
         self.reload_all().await;
     }
 
+    /// Takes node `peer` out of node `index`'s roster and reloads that node alone, which closes
+    /// the pair's connection from `index`'s side. `peer` keeps naming `index`, and when it sorts
+    /// higher it keeps waiting to be dialled.
+    pub async fn drop_from_roster(&mut self, index: usize, peer: usize) {
+        self.cut.push((index, peer));
+        self.write_files(index);
+        self.reload(index).await;
+    }
+
+    /// Puts node `peer` back into node `index`'s roster and reloads that node alone, which is
+    /// the roster add a discovery tool makes when a host joins the fleet.
+    pub async fn add_to_roster(&mut self, index: usize, peer: usize) {
+        self.cut.retain(|cut| *cut != (index, peer));
+        self.write_files(index);
+        self.reload(index).await;
+    }
+
     /// `eth-gossip-overlayctl reload` on every running node, the way `systemctl reload` reaches a
     /// whole fleet.
     async fn reload_all(&self) {
-        for node in &self.nodes {
-            if node.app.is_some() {
-                let answer = node.ctl(r#"{"cmd":"reload"}"#).await;
-                assert!(answer.contains(r#""ok":true"#), "reload: {answer}");
-            }
+        for index in 0..self.nodes.len() {
+            self.reload(index).await;
+        }
+    }
+
+    /// `eth-gossip-overlayctl reload` on node `index`, if it is running.
+    async fn reload(&self, index: usize) {
+        let node = &self.nodes[index];
+        if node.app.is_some() {
+            let answer = node.ctl(r#"{"cmd":"reload"}"#).await;
+            assert!(answer.contains(r#""ok":true"#), "reload: {answer}");
         }
     }
 
