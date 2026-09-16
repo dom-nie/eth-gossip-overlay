@@ -232,6 +232,7 @@ mod tests {
     use std::time::Instant;
 
     use bytes::Bytes;
+    use overlay_core::roster::Hostname;
     use overlay_core::subs::Bitmap;
     use overlay_core::topic::table::TopicId;
     use overlay_core::topic::{SubscriptionSets, Topic};
@@ -240,7 +241,7 @@ mod tests {
 
     use crate::hello;
     use crate::hello::OwnTopics;
-    use crate::manager::{CloseCode, PeerInfo, RECONNECT_MIN};
+    use crate::manager::{CloseCode, PeerEvent, PeerInfo, RECONNECT_MIN};
     use crate::testlog::LOG;
     use crate::testutil::{Builder, CountingStats, NodeKind, TestCluster, WAIT, eventually};
     use crate::tls::Role;
@@ -378,6 +379,82 @@ mod tests {
                 id: id.get(),
                 topic: carried.to_string()
             }
+        );
+    }
+
+    /// The next `Up` for `peer` on node `index`, stepping over the `Down` a supersede emits
+    /// first.
+    async fn next_up(cluster: &mut TestCluster, index: usize, peer: &Hostname) -> PeerInfo {
+        loop {
+            if let PeerEvent::Up(up) = cluster.next_event(index).await
+                && up.hostname == *peer
+            {
+                return up;
+            }
+        }
+    }
+
+    /// A peer that restarted or moved supersedes its own connection (D15). The manager records
+    /// the new HELLO before the old connection's announce loop has been stopped, so an intern
+    /// landing in that window is one the old loop announces on a stream that is already
+    /// closing. That announcement must not count: the new connection never carried it, and
+    /// every frame this host then sent on the id would be dropped as `unknown_topic_id` for as
+    /// long as the connection lasted (R3.1). The old loop's last announce is driven by hand,
+    /// because the window is a scheduling coincidence no test can wait for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_supersede_during_an_intern_leaves_no_topic_untold() {
+        let block = topic("beacon_block");
+        let carried = topic("beacon_attestation_9");
+        let mut cluster = Builder::new(&[NodeKind::Bare, NodeKind::Manager])
+            .start()
+            .await;
+        let (_sets, sets) = watch::channel(advertising(&[&block]));
+        let topics = cluster.topics(1).clone();
+        let peer = cluster.hostname(0);
+        let stats: Arc<dyn super::SubsStats> = Arc::new(());
+
+        let mut first = cluster.dial_with_hello(0, 1, &cluster.self_hello(0)).await;
+        let old = next_up(&mut cluster, 1, &peer).await;
+        let old_loop = tokio::spawn(super::peer(
+            old,
+            sets.clone(),
+            topics.clone(),
+            stats.clone(),
+        ));
+        assert_eq!(
+            next_frame(&mut first).await,
+            Frame::TopicAdd {
+                id: 0,
+                topic: block.to_string()
+            }
+        );
+        assert_eq!(
+            next_frame(&mut first).await,
+            Frame::Subs { bitmap: bits(&[0]) }
+        );
+
+        let mut second = cluster.dial_with_hello(0, 1, &cluster.self_hello(0)).await;
+        let new = next_up(&mut cluster, 1, &peer).await;
+        tokio::time::timeout(WAIT, old_loop)
+            .await
+            .expect("the old loop ends on the close")
+            .unwrap();
+        hello::lock(&topics).intern(&carried).unwrap();
+        // The old loop's turn, as it goes when the intern lands inside the window.
+        super::owed(&peer, &sets.borrow(), &topics);
+
+        tokio::spawn(super::peer(new, sets, topics, stats));
+
+        assert_eq!(
+            next_frame(&mut second).await,
+            Frame::TopicAdd {
+                id: 1,
+                topic: carried.to_string()
+            }
+        );
+        assert_eq!(
+            next_frame(&mut second).await,
+            Frame::Subs { bitmap: bits(&[0]) }
         );
     }
 
