@@ -429,6 +429,61 @@ mod tests {
         assert_eq!(read_memory_max(&numeric), Some(536_870_912));
     }
 
+    /// R5.2: under the shipped unit the process sits in `system.slice/eth-gossip-overlay.service`
+    /// with no cgroup namespace, and the root cgroup has no `memory.max` at all, so the literal
+    /// `/sys/fs/cgroup/memory.max` was the wrong file on every host but a container. The ceiling
+    /// is the one in force for the process's own cgroup: its file, or the nearest ancestor's
+    /// that holds a number rather than `max`. A container with a private namespace sits at `/`,
+    /// which is where the old read happened to be right.
+    #[test]
+    fn memory_max_reads_the_process_cgroup_not_the_root() {
+        let root = tempfile::tempdir().unwrap();
+        let unit = "/system.slice/eth-gossip-overlay.service";
+        let unit_dir = root.path().join("system.slice/eth-gossip-overlay.service");
+        std::fs::create_dir_all(&unit_dir).unwrap();
+        std::fs::write(unit_dir.join("memory.max"), "max\n").unwrap();
+        let slice = root.path().join("system.slice/memory.max");
+        std::fs::write(&slice, "536870912\n").unwrap();
+
+        assert_eq!(
+            own_cgroup("12:memory:/legacy\n0::/system.slice/eth-gossip-overlay.service\n"),
+            Some(unit)
+        );
+        assert_eq!(own_cgroup("12:memory:/legacy\n"), None, "cgroup v1 alone");
+        assert_eq!(
+            cgroup_memory_max(root.path(), unit),
+            Some((536_870_912, slice.clone())),
+            "the slice's ceiling is the one in force for the unit"
+        );
+
+        std::fs::write(&slice, "max\n").unwrap();
+        assert_eq!(
+            cgroup_memory_max(root.path(), unit),
+            None,
+            "no ceiling anywhere up the tree"
+        );
+
+        std::fs::write(root.path().join("memory.max"), "1073741824\n").unwrap();
+        assert_eq!(
+            cgroup_memory_max(root.path(), "/"),
+            Some((1_073_741_824, root.path().join("memory.max"))),
+            "a container with its own namespace sits at the root"
+        );
+
+        #[cfg(not(target_os = "linux"))]
+        {
+            let mark = LOG.len();
+            assert_eq!(
+                ceiling(),
+                Ceiling {
+                    bytes: MEMORY_MAX_DEFAULT,
+                    source: None
+                }
+            );
+            assert!(!LOG.since(mark).contains("WARN"), "not Linux, nothing to warn about");
+        }
+    }
+
     /// What every bounded structure holds at the shipped defaults for the fleet §2 describes,
     /// row by row, so a default that moves fails here naming itself rather than only moving the
     /// total. The numbers are the ones `docs/performance.md` prints.
