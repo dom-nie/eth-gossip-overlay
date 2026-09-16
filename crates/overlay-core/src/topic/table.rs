@@ -45,7 +45,7 @@ use std::fmt;
 
 use crate::roster::Hostname;
 use crate::topic::{SubscriptionSets, Topic, TopicError};
-use crate::wire::Frame;
+use crate::wire::{Frame, MAX_TOPIC_SNAPSHOT_ENTRIES};
 
 /// How many topics one table holds, so ids run from 0 to 65,534 and `u16::MAX` is never
 /// assigned. A fleet across a fork transition interns a few hundred, so the ceiling is there to
@@ -368,6 +368,32 @@ mod tests {
 
         assert_eq!(refused, Err(PeerTableError::Conflict(TopicId::new(3))));
         assert_eq!(peer.resolve(TopicId::new(3)), Some(&column(0)));
+    }
+
+    /// The cap HELLO's snapshot already has, applied to the adds that follow it. A binding the
+    /// table already holds costs nothing and is still taken at the cap, so a peer resending its
+    /// table is not mistaken for one growing it.
+    #[test]
+    fn apply_add_past_the_snapshot_cap_is_full_error() {
+        let mut peer = PeerTopicTable::new();
+        let name = |id: usize| format!("/eth2/{id:08x}/beacon_block/ssz_snappy");
+        for id in 0..MAX_TOPIC_SNAPSHOT_ENTRIES {
+            peer.apply_add(TopicId::new(id as u16), &name(id)).unwrap();
+        }
+        let one_more = TopicId::new(MAX_TOPIC_SNAPSHOT_ENTRIES as u16);
+
+        let refused = peer.apply_add(one_more, &name(MAX_TOPIC_SNAPSHOT_ENTRIES));
+
+        assert_eq!(refused, Err(PeerTableError::Full(one_more)));
+        assert_eq!(peer.resolve(one_more), None);
+        assert_eq!(peer.apply_add(TopicId::new(0), &name(0)), Ok(()));
+        assert_eq!(
+            refused.unwrap_err().to_string(),
+            format!(
+                "topic id {MAX_TOPIC_SNAPSHOT_ENTRIES} is past the \
+                 {MAX_TOPIC_SNAPSHOT_ENTRIES} topics a peer may bind"
+            )
+        );
     }
 
     #[test]

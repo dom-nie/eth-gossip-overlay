@@ -233,12 +233,12 @@ mod tests {
     use overlay_core::subs::Bitmap;
     use overlay_core::topic::table::TopicId;
     use overlay_core::topic::{SubscriptionSets, Topic};
-    use overlay_core::wire::{Frame, Read};
+    use overlay_core::wire::{Frame, MAX_TOPIC_SNAPSHOT_ENTRIES, Read};
     use tokio::sync::{mpsc, watch};
 
     use crate::hello;
     use crate::hello::OwnTopics;
-    use crate::manager::{PeerInfo, RECONNECT_MIN};
+    use crate::manager::{CloseCode, PeerInfo, RECONNECT_MIN};
     use crate::testlog::LOG;
     use crate::testutil::{Builder, CountingStats, NodeKind, TestCluster, WAIT, eventually};
     use crate::tls::Role;
@@ -510,6 +510,59 @@ mod tests {
             .filter(|line| line.contains(peer.0.as_str()) && line.contains("contradicts itself"))
             .count();
         assert!(closes > 1, "the peer was closed {closes} times");
+    }
+
+    /// HELLO refuses a snapshot past `MAX_TOPIC_SNAPSHOT_ENTRIES`, and the `TOPIC_ADD`s that
+    /// come after it are held to the same line: a peer streaming bindings past it is growing
+    /// this host's copy of its table rather than announcing topics, and is closed the way one
+    /// whose HELLO tried the same is (R2.2).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn topic_add_past_the_snapshot_cap_closes_the_connection() {
+        let (cluster, _sets, mut peers, manager) =
+            exchange(&[&[]], SubscriptionSets::default()).await;
+        let host = cluster.hostname(0);
+        let name = |id: usize| format!("/eth2/{id:08x}/beacon_block/ssz_snappy");
+        let binding = |id: usize| Frame::TopicAdd {
+            id: id as u16,
+            topic: name(id),
+        };
+
+        for id in 0..MAX_TOPIC_SNAPSHOT_ENTRIES {
+            peers[0].control.write_frame(&binding(id)).await.unwrap();
+        }
+        // The stream is ordered, so the last id turning up in the live view says every
+        // binding before it was taken without complaint.
+        let last = MAX_TOPIC_SNAPSHOT_ENTRIES - 1;
+        peers[0]
+            .control
+            .write_frame(&Frame::Subs {
+                bitmap: bits(&[last as u16]),
+            })
+            .await
+            .unwrap();
+        let last_topic = Topic::parse(&name(last)).unwrap();
+        eventually("every binding up to the cap to be applied", || {
+            cluster.live(manager).subscribed(&host, &last_topic)
+        })
+        .await;
+        assert_eq!(peers[0].connection.close_reason(), None);
+
+        peers[0]
+            .control
+            .write_frame(&binding(MAX_TOPIC_SNAPSHOT_ENTRIES))
+            .await
+            .unwrap();
+
+        eventually("the connection to close", || {
+            peers[0].connection.close_reason().is_some()
+        })
+        .await;
+        match peers[0].connection.close_reason() {
+            Some(quinn::ConnectionError::ApplicationClosed(closed)) => {
+                assert_eq!(closed.error_code, CloseCode::ProtocolError.code());
+            }
+            other => panic!("closed for {other:?}"),
+        }
     }
 
     /// The gauge an operator watches to see that the beacon node link is alive at all: the size
