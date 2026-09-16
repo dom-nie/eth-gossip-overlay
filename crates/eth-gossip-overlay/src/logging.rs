@@ -508,6 +508,28 @@ mod tests {
         assert_eq!(sink.objects()[0]["configured_level"], "error", "{line}");
     }
 
+    /// R5.11: `log.level: warn` is how an operator quiets a busy journal, and the events are
+    /// what the canary is judged on. Both are `info` lines, so without a carve-out for the
+    /// event target the level that quiets the journal also empties every Loki panel.
+    #[test]
+    fn events_survive_a_warn_global_level() {
+        let cfg = Log {
+            level: LogLevel::Warn,
+            format: LogFormat::Json,
+        };
+        let node = node();
+        let topic = block();
+
+        let sink = capture(&cfg, false, None, |_| {
+            tracing::info!("an ordinary line the level drops");
+            emit_first_arrival(&arrival(&topic, &node, Class::Large, Source::Bn));
+        });
+
+        let lines = sink.objects();
+        assert_eq!(lines.len(), 1, "{}", sink.text());
+        assert_eq!(lines[0]["event"], "first_arrival");
+    }
+
     #[test]
     fn field_names_match_the_documented_schema() {
         let node = node();
