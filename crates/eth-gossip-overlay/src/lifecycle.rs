@@ -214,6 +214,15 @@ pub fn exit_on_panic() {
     }));
 }
 
+/// Runs `serve` to completion on a runtime of its own, which is how `main` runs the sidecar,
+/// and returns what it produced.
+pub fn run_to_completion<T>(serve: impl Future<Output = T>) -> io::Result<T> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    Ok(runtime.block_on(serve))
+}
+
 /// Resolves on the first `SIGTERM` or `SIGINT`, which is the shutdown future the app runs
 /// until. `systemctl stop` sends the first and a terminal sends the second.
 pub fn terminated() -> io::Result<impl Future<Output = ()> + Send> {
@@ -229,10 +238,35 @@ pub fn terminated() -> io::Result<impl Future<Output = ()> + Send> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use super::*;
+    use crate::app::SHUTDOWN_DEADLINE;
 
     fn progress() -> Progress {
         Progress::default()
+    }
+
+    /// A `spawn_blocking` closure keeps running after the future that awaited it is dropped,
+    /// and dropping the runtime waits for it with no limit. The stop path has two of them, the
+    /// NIC undo's `ethtool` and the I/O thread join, so a hang there held the process past the
+    /// deadline `App::run` promises, for as long as `ethtool` took (R3.3).
+    #[test]
+    fn shutdown_returns_inside_the_deadline_over_a_hung_blocking_task() {
+        let started = Instant::now();
+
+        run_to_completion(async {
+            tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_secs(5)));
+            // Running, not queued: a closure that has not started is dropped at shutdown.
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        })
+        .unwrap();
+
+        let took = started.elapsed();
+        assert!(
+            took < SHUTDOWN_DEADLINE + Duration::from_secs(1),
+            "the stop took {took:?}"
+        );
     }
 
     /// OPS-N5: the kick means every core task is alive, so three out of four is a process one

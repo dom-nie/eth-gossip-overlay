@@ -94,10 +94,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let cfg = Config::load(&cli.config)?;
             let log = Arc::new(logging::init(&cfg.log));
             lifecycle::exit_on_panic();
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?
-                .block_on(app::serve(cli.config, cfg, log, cli.test_panic))?;
+            let served =
+                lifecycle::run_to_completion(app::serve(cli.config, cfg, log, cli.test_panic))?;
+            served?;
         }
         Command::PeerId => {
             let key = NodeKey::load_or_create(&Config::load(&cli.config)?.bn.node_key_file)?;

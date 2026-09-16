@@ -76,6 +76,17 @@ fn unit_has_notify_watchdog_and_restart_backoff_directives() {
     }
 }
 
+/// The outer fence on a stop (T-104). The sidecar bounds its own stop to two seconds and gives
+/// up on a blocking `ethtool` two seconds after that; a stop that still wedges is killed here
+/// rather than after systemd's ninety-second default.
+#[test]
+fn unit_bounds_a_stop_to_ten_seconds() {
+    assert!(
+        has_directive(&read(UNIT), "TimeoutStopSec=10"),
+        "{UNIT} is missing TimeoutStopSec=10"
+    );
+}
+
 /// Whether the file sets `key` at all, on a line of its own. A commented-out line sets nothing,
 /// which is how the unit can explain in place why a directive is missing.
 fn sets(text: &str, key: &str) -> bool {
