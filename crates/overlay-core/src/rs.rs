@@ -109,6 +109,24 @@ pub fn encode(payload: &[u8], params: Params) -> Vec<Bytes> {
         .collect()
 }
 
+/// The data chunk at `index` of a payload split by `params`, byte for byte what [`encode`] puts
+/// there, without running the codec: a data chunk is a slice of the payload with the last one
+/// zero-padded, and only parity needs every data chunk through the encoder. `None` for a parity
+/// index, which is the caller's cue to encode. A repair answer for data indices alone is the
+/// reason this exists (R2.3).
+pub fn data_chunk(payload: &[u8], params: Params, index: u16) -> Option<Bytes> {
+    if index >= params.k {
+        return None;
+    }
+    let start = usize::from(index) * params.chunk_bytes;
+    let end = payload.len().min(start + params.chunk_bytes);
+    let mut chunk = BytesMut::zeroed(params.chunk_bytes);
+    if start < end {
+        chunk[..end - start].copy_from_slice(&payload[start..end]);
+    }
+    Some(chunk.freeze())
+}
+
 /// Fills the `m` chunks after the data with parity computed over the data.
 #[expect(
     clippy::expect_used,
@@ -384,6 +402,23 @@ mod tests {
             .collect();
         assert_eq!(data[..len], payload[..]);
         assert!(data[len..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn data_chunk_is_what_encode_puts_at_that_index_and_none_for_parity() {
+        let len = 5 * 2048 + 100;
+        let payload = payload(len);
+        let params = Params::for_len(len, 2048, 0.10).unwrap();
+        let chunks = encode(&payload, params);
+
+        for index in 0..params.k {
+            assert_eq!(
+                data_chunk(&payload, params, index),
+                Some(chunks[usize::from(index)].clone()),
+                "index {index}"
+            );
+        }
+        assert_eq!(data_chunk(&payload, params, params.k), None);
     }
 
     #[test]

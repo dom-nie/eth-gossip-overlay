@@ -927,10 +927,21 @@ impl Ctx {
         let Some(topic_id) = self.told_id(&topic) else {
             return not_found();
         };
-        let chunks = (self.deps.encode)(&payload, split);
+        // D24 lists data indices first, and a data chunk is a slice of the stored payload, so
+        // the codec runs only when a parity index is among them (R2.3).
+        let encoded = missing
+            .iter()
+            .any(|index| *index >= split.k)
+            .then(|| (self.deps.encode)(&payload, split));
         let mut answer: Vec<Frame> = missing
             .iter()
-            .filter_map(|index| Some((*index, chunks.get(usize::from(*index))?)))
+            .filter_map(|index| {
+                let data = match &encoded {
+                    Some(chunks) => chunks.get(usize::from(*index))?.clone(),
+                    None => rs::data_chunk(&payload, split, *index)?,
+                };
+                Some((*index, data))
+            })
             .map(|(index, data)| Frame::Chunk {
                 flags: ChunkFlags::FORWARDED,
                 chunk: Chunk {
@@ -940,7 +951,7 @@ impl Ctx {
                     m: split.m,
                     index,
                     total_len: split.total_len,
-                    data: data.clone(),
+                    data,
                 },
             })
             .collect();
