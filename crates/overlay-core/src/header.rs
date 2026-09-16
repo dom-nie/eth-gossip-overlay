@@ -62,3 +62,23 @@ pub trait HeaderDecoder: Send + Sync {
     /// a peer can make up.
     fn header(&self, topic: &Topic, ssz: &[u8]) -> Option<Header>;
 }
+
+/// Where a `SignedBeaconBlock`'s `message` starts: past the 4-byte offset that says so and the
+/// 96-byte signature, which are the whole of its fixed part.
+const MESSAGE_AT: u32 = 100;
+
+/// Where `parent_root` sits: `slot` and `proposer_index`, 8 bytes each, open every fork's
+/// `BeaconBlock`, so the root follows at the same place whatever the fork or preset.
+const PARENT_ROOT_AT: std::ops::Range<usize> = 116..148;
+
+/// The parent root of the `SignedBeaconBlock` `ssz` carries, read at its fixed offset with no
+/// consensus type involved (T-101, D42). `None` for bytes that are not a signed block: the
+/// first offset names where `message` starts, and nothing else puts it at 100. A payload the
+/// beacon node cannot decode is one it opens no parent lookup for, so there is nothing to ask
+/// about it.
+pub fn block_parent_root(ssz: &[u8]) -> Option<[u8; 32]> {
+    if ssz.get(..4)? != MESSAGE_AT.to_le_bytes() {
+        return None;
+    }
+    ssz.get(PARENT_ROOT_AT)?.try_into().ok()
+}

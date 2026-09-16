@@ -62,6 +62,7 @@ use overlay_core::budget::{Charge, FanoutBudget, FanoutKind};
 use overlay_core::config::LargeClass;
 use overlay_core::custody::SharedCustody;
 use overlay_core::events::{self, Arrivals, FirstArrival};
+use overlay_core::header;
 use overlay_core::msgid::{self, Branch, MessageId};
 use overlay_core::protocol::{MAX_FRAME_BYTES, features};
 use overlay_core::pubqueue::{PublishItem, PublishSink};
@@ -75,7 +76,7 @@ use overlay_core::seen::SharedSeenCache;
 use overlay_core::subs::PeerState;
 use overlay_core::time::Clock;
 use overlay_core::topic::table::TopicId;
-use overlay_core::topic::{Class, SubscriptionSets, Topic};
+use overlay_core::topic::{Class, SubscriptionSets, Topic, TopicKind};
 use overlay_core::wire::{
     self, BatchEntry, BatchFlags, Chunk, ChunkFlags, Frame, Read, RepairReq, RepairResp,
 };
@@ -769,12 +770,17 @@ impl Ctx {
             return false;
         }
         self.deps.stats.first_seen(class);
-        self.deps.publish.enqueue(PublishItem {
-            topic: topic.clone(),
-            id,
-            payload: payload.clone(),
-            class,
-        });
+        let publish = !self.parent_unknown(topic, &ssz);
+        if publish {
+            self.deps.publish.enqueue(PublishItem {
+                topic: topic.clone(),
+                id,
+                payload: payload.clone(),
+                class,
+            });
+        } else {
+            self.deps.stats.parent_unknown();
+        }
         // Insert site 2 of 2 for the recent store (§5.6); T-016's inbound path is the other. A
         // reassembled message is always large class, and the peers that sent its chunks are the
         // ones that may still be missing some of them. `ssz` is what the reassembler
@@ -1278,14 +1284,45 @@ impl Ctx {
                 source,
                 header,
             });
-            self.deps.publish.enqueue(PublishItem {
-                topic,
-                id: computed.id,
-                payload,
-                class,
-            });
+            if ssz
+                .as_deref()
+                .is_some_and(|ssz| self.parent_unknown(&topic, ssz))
+            {
+                self.deps.stats.parent_unknown();
+            } else {
+                self.deps.publish.enqueue(PublishItem {
+                    topic,
+                    id: computed.id,
+                    payload,
+                    class,
+                });
+            }
         }
         owed
+    }
+
+    /// Whether `ssz`, a payload on `topic`, is a block whose parent this host's beacon node has
+    /// not imported (T-101, D42). Offered such a block, the node asks this sidecar for the
+    /// parent and nobody else, since the sender of a block has provably imported its parent on
+    /// the public network, and drops the block after four refusals. Kept back, the block reaches
+    /// the node from a public peer that has the parent, which is the no-overlay baseline §9
+    /// names. One map probe, no await; bytes that are not a block have no parent to ask about
+    /// and are the node's to refuse.
+    fn parent_unknown(&self, topic: &Topic, ssz: &[u8]) -> bool {
+        if !matches!(topic.kind(), TopicKind::BeaconBlock) {
+            return false;
+        }
+        let Some(parent) = header::block_parent_root(ssz) else {
+            return false;
+        };
+        if self.deps.arrivals.is_imported(parent) {
+            return false;
+        }
+        tracing::debug!(
+            parent_root = %events::hex(parent),
+            "keeping back a block whose parent the beacon node has not imported"
+        );
+        true
     }
 
     /// One line per connection about payloads the beacon node would refuse. A peer sending a

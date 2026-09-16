@@ -225,11 +225,16 @@ fn bytes32(root: Hash256) -> [u8; 32] {
 mod tests {
     use std::sync::Arc;
 
+    use overlay_core::header::block_parent_root;
     use overlay_core::msgid::MessageId;
     use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
     use overlay_core::time::{Clock, FakeClock};
     use ssz::{Decode, Encode};
-    use types::{BeaconBlock, BeaconBlockFulu, ChainSpec, DataColumnSidecarFulu, EmptyBlock};
+    use types::{
+        BeaconBlock, BeaconBlockAltair, BeaconBlockBase, BeaconBlockBellatrix, BeaconBlockCapella,
+        BeaconBlockDeneb, BeaconBlockElectra, BeaconBlockFulu, BeaconBlockGloas, ChainSpec,
+        DataColumnSidecarFulu, EmptyBlock,
+    };
 
     use super::*;
 
@@ -341,6 +346,47 @@ mod tests {
             assert_eq!(slot, 4_242);
             assert_eq!(root, bytes32(block.canonical_root()));
         }
+    }
+
+    /// T-101 test 4: `parent_root` sits at bytes 116..148 of a `SignedBeaconBlock` on every
+    /// fork Lighthouse knows, which is what lets the receive path read it with no consensus
+    /// type. A block of each fork gets a parent root of its own written at that offset, and the
+    /// typed decode reads the same root back, so the offset is the field and not a coincidence
+    /// of one layout. The wire is built here rather than by `signed_block`, whose fork check
+    /// an empty Electra block fails: it has Fulu's layout and the decoder tries Fulu first.
+    #[test]
+    fn parent_root_is_read_at_the_fixed_ssz_offset_for_every_fork() {
+        let spec = ChainSpec::mainnet();
+        let forks: [BeaconBlock<MainnetEthSpec>; 8] = [
+            BeaconBlock::Base(BeaconBlockBase::empty(&spec)),
+            BeaconBlock::Altair(BeaconBlockAltair::empty(&spec)),
+            BeaconBlock::Bellatrix(BeaconBlockBellatrix::empty(&spec)),
+            BeaconBlock::Capella(BeaconBlockCapella::empty(&spec)),
+            BeaconBlock::Deneb(BeaconBlockDeneb::empty(&spec)),
+            BeaconBlock::Electra(BeaconBlockElectra::empty(&spec)),
+            BeaconBlock::Fulu(BeaconBlockFulu::empty(&spec)),
+            BeaconBlock::Gloas(BeaconBlockGloas::empty(&spec)),
+        ];
+        for (n, block) in forks.into_iter().enumerate() {
+            let fork = block.to_ref().fork_name_unchecked();
+            let parent = [n as u8 + 1; 32];
+            let mut wire = 100u32.to_le_bytes().to_vec();
+            wire.extend_from_slice(&infinity_signature());
+            wire.extend_from_slice(&block.as_ssz_bytes());
+            wire[116..148].copy_from_slice(&parent);
+
+            let decoded = SignedBeaconBlock::<MainnetEthSpec>::any_from_ssz_bytes(&wire)
+                .unwrap_or_else(|err| panic!("{fork}: {err:?}"));
+
+            assert_eq!(bytes32(decoded.parent_root()), parent, "{fork}");
+            assert_eq!(block_parent_root(&wire), Some(parent), "{fork}");
+        }
+        assert_eq!(block_parent_root(&[0; 148]), None, "not a signed block");
+        assert_eq!(
+            block_parent_root(&fulu_block(1).1[..147]),
+            None,
+            "cut short"
+        );
     }
 
     #[test]

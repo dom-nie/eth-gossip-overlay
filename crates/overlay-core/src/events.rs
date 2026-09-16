@@ -203,9 +203,13 @@ struct Arrival {
     seen: Instant,
     /// The peer whose stream carried it, or `None` when the beacon node's own gossip won.
     origin: Option<Hostname>,
+    /// Whether the beacon node has reported importing the block (T-101).
+    imported: bool,
 }
 
-/// Which blocks reached this host lately, so an import event can be turned into a lag.
+/// Which blocks reached this host lately, so an import event can be turned into a lag, and
+/// which of them the beacon node has imported, so a block whose parent it lacks is not offered
+/// to it (T-101).
 ///
 /// It lives here rather than beside the event stream that reads it because both receive paths
 /// file into it, and one of them is in `overlay-transport`, which has never heard of the beacon
@@ -237,6 +241,7 @@ impl Arrivals {
                 Source::Bn => None,
                 Source::Overlay { origin } => Some((*origin).clone()),
             },
+            imported: false,
         };
         let mut seen = self.seen();
         self.prune(&mut seen, arrival.seen);
@@ -255,16 +260,19 @@ impl Arrivals {
         }
     }
 
-    /// Logs the import of the block at `slot` and says whether an arrival record matched it.
+    /// Logs the import of the block at `slot`, says whether an arrival record matched it, and
+    /// remembers the root as imported for [`is_imported`](Self::is_imported). A block the
+    /// overlay never carried gets a record for that alone, with no arrival to measure from.
     pub fn imported(&self, slot: u64, block_root: [u8; 32]) -> bool {
         let now = self.clock.now();
+        let imported_at = self.clock.wall();
         let mut seen = self.seen();
         self.prune(&mut seen, now);
         let arrival = seen.get(&block_root);
         emit_import(&ImportEvent {
             slot,
             block_root,
-            imported_at: self.clock.wall(),
+            imported_at,
             first_arrival_at: arrival.map(|arrival| arrival.at),
             source: arrival.map(|arrival| match &arrival.origin {
                 None => Source::Bn,
@@ -275,7 +283,30 @@ impl Arrivals {
                     .unwrap_or(u64::MAX)
             }),
         });
-        arrival.is_some()
+        let matched = arrival.is_some();
+        seen.entry(block_root)
+            .or_insert(Arrival {
+                at: imported_at,
+                seen: now,
+                origin: None,
+                imported: false,
+            })
+            .imported = true;
+        matched
+    }
+
+    /// Whether the beacon node has reported importing `block_root` inside the retention window.
+    ///
+    /// What the two overlay receive paths ask before offering the node a block: a node that
+    /// lacks the parent asks the sidecar for it and nobody else, and drops the block after four
+    /// refusals, where a block it takes from a public peer instead is fetched in one round trip
+    /// (T-101, D42). The set is empty for the first slot after a sidecar start and forgets a
+    /// parent older than the window; both cost one block kept back, and both are counted.
+    pub fn is_imported(&self, block_root: [u8; 32]) -> bool {
+        let mut seen = self.seen();
+        self.prune(&mut seen, self.clock.now());
+        seen.get(&block_root)
+            .is_some_and(|arrival| arrival.imported)
     }
 
     /// Drops the records the retention window no longer covers. Both entry points call it, so a
@@ -294,7 +325,7 @@ impl Arrivals {
 
 /// A root as the 64 hex characters every other tool prints it as, without the `0x` the log's
 /// other identifiers do not carry either.
-pub(crate) fn hex(root: [u8; 32]) -> String {
+pub fn hex(root: [u8; 32]) -> String {
     root.iter()
         .fold(String::with_capacity(64), |mut out, byte| {
             let _ = write!(out, "{byte:02x}");
