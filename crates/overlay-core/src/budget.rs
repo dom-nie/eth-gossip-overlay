@@ -14,7 +14,7 @@
 //! `now` is a parameter everywhere, so the bucket holds no clock and a test drives it with plain
 //! `Instant` arithmetic.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
@@ -130,10 +130,6 @@ impl FanoutBudget {
         }
     }
 }
-
-/// The cgroup v2 file holding the memory ceiling this process runs under. Absent on a host
-/// without cgroup v2, which includes every developer machine that is not Linux.
-const CGROUP_MEMORY_MAX: &str = "/sys/fs/cgroup/memory.max";
 
 /// The ceiling the shipped unit sets, `MemoryMax=1G` in
 /// `deploy/systemd/eth-gossip-overlay.service`. What the budget is sized against on a host with
@@ -316,26 +312,103 @@ fn gossipsub_caches() -> u64 {
         + per_second * GOSSIPSUB_HISTORY_SECS * SMALL_MESSAGE_BYTES
 }
 
-/// The memory ceiling this process runs under, from cgroup v2. `None` where the file is absent
-/// or holds `max`, which is a host with no ceiling to compare the budget against.
-// mutants::skip: the whole body is one absolute path no test can stage, and what the answer is
-// on the machine running the suite is the machine's, not the code's. `read_memory_max` is the
-// half that decides anything and it is under test with a file of its own.
-#[cfg_attr(test, mutants::skip)]
-pub fn cgroup_memory_max() -> Option<u64> {
-    read_memory_max(Path::new(CGROUP_MEMORY_MAX))
+/// The ceiling the budget is sized against, and where it was read from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ceiling {
+    /// The bytes.
+    pub bytes: u64,
+    /// The `memory.max` the bytes came from, or `None` for [`MEMORY_MAX_DEFAULT`].
+    pub source: Option<PathBuf>,
 }
 
-/// [`cgroup_memory_max`] with the path passed in, so a test can stage a file without a cgroup.
+/// The cgroup v2 path of the process `/proc/self/cgroup` describes, which is its `0::` line.
+/// A cgroup v1 host has no such line.
+pub fn own_cgroup(proc_self_cgroup: &str) -> Option<&str> {
+    proc_self_cgroup
+        .lines()
+        .find_map(|line| line.strip_prefix("0::"))
+}
+
+/// The `memory.max` in force for `cgroup` under `root`: its own file, or the nearest ancestor's
+/// that holds a number rather than `max`. The root cgroup has no file, so a tree that sets no
+/// ceiling anywhere is `None`.
+pub fn cgroup_memory_max(root: &Path, cgroup: &str) -> Option<(u64, PathBuf)> {
+    let mut dir = root.join(cgroup.trim_start_matches('/'));
+    loop {
+        let file = dir.join("memory.max");
+        if let Some(bytes) = read_memory_max(&file) {
+            return Some((bytes, file));
+        }
+        if dir == root {
+            return None;
+        }
+        dir = dir.parent()?.to_owned();
+    }
+}
+
+/// One `memory.max` file as a number, `None` where it is absent or holds `max`.
 pub fn read_memory_max(path: &Path) -> Option<u64> {
     std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
-/// The ceiling to size the budget against: the cgroup's where there is one, and the shipped
-/// unit's [`MEMORY_MAX_DEFAULT`] otherwise. An operator who runs the sidecar outside the unit
-/// with no cgroup gets the number the documentation is written against rather than none.
+/// The ceiling this process runs under: the `memory.max` of its own cgroup or of the nearest
+/// ancestor that sets one, which under the shipped unit is its `MemoryMax=` (R5.2). The root
+/// cgroup has no such file, so the process's own path is the one to start from; a container
+/// with a private cgroup namespace sits at `/` and reads the file at the mount.
+///
+/// [`MEMORY_MAX_DEFAULT`] with a warning where nothing sets a ceiling, so an operator running
+/// the sidecar outside the unit gets the number the documentation is written against and a
+/// line saying so.
+// mutants::skip: two absolute paths no test can stage. `own_cgroup` and `cgroup_memory_max`
+// are the halves that decide anything and both are under test with a tree of their own.
+#[cfg(target_os = "linux")]
+#[cfg_attr(test, mutants::skip)]
+pub fn ceiling() -> Ceiling {
+    const PROC_SELF_CGROUP: &str = "/proc/self/cgroup";
+    const CGROUP_ROOT: &str = "/sys/fs/cgroup";
+
+    let own = std::fs::read_to_string(PROC_SELF_CGROUP)
+        .ok()
+        .and_then(|text| own_cgroup(&text).map(str::to_owned));
+    let tried = match &own {
+        Some(cgroup) => Path::new(CGROUP_ROOT)
+            .join(cgroup.trim_start_matches('/'))
+            .join("memory.max"),
+        None => PathBuf::from(PROC_SELF_CGROUP),
+    };
+    match own.and_then(|cgroup| cgroup_memory_max(Path::new(CGROUP_ROOT), &cgroup)) {
+        Some((bytes, source)) => Ceiling {
+            bytes,
+            source: Some(source),
+        },
+        None => {
+            tracing::warn!(
+                tried = %tried.display(),
+                memory_max = MEMORY_MAX_DEFAULT,
+                "no cgroup sets a memory ceiling, so the budget is sized against the shipped \
+                 unit's default"
+            );
+            Ceiling {
+                bytes: MEMORY_MAX_DEFAULT,
+                source: None,
+            }
+        }
+    }
+}
+
+/// A host that is not Linux has no cgroup to read, so the constant is the ceiling and there is
+/// nothing to warn about.
+#[cfg(not(target_os = "linux"))]
+pub fn ceiling() -> Ceiling {
+    Ceiling {
+        bytes: MEMORY_MAX_DEFAULT,
+        source: None,
+    }
+}
+
+/// The bytes of [`ceiling`], for a caller that only sizes against it.
 pub fn memory_max() -> u64 {
-    cgroup_memory_max().unwrap_or(MEMORY_MAX_DEFAULT)
+    ceiling().bytes
 }
 
 /// Logs the budget at info and warns when it does not fit under the ceiling it was derived
@@ -480,7 +553,10 @@ mod tests {
                     source: None
                 }
             );
-            assert!(!LOG.since(mark).contains("WARN"), "not Linux, nothing to warn about");
+            assert!(
+                !LOG.since(mark).contains("WARN"),
+                "not Linux, nothing to warn about"
+            );
         }
     }
 
