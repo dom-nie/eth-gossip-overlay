@@ -1912,6 +1912,28 @@ mod tests {
         assert_eq!(metadata.custody_group_count, 4);
     }
 
+    /// Lighthouse offers metadata v3, v2 and v1 in that order and takes the first the peer
+    /// supports. The sidecar registers v2 and v1 only, so v2 is what the node's own outbound
+    /// codec decodes: a body with no custody group count. That is the whole of T-102. A v2
+    /// peer is "gracefully ignored" by `meta_data_response`
+    /// (`beacon_node/lighthouse_network/src/peer_manager/mod.rs:767-770`), assigned no custody
+    /// subnets, and so never counted as a custody peer for columns it cannot serve.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn metadata_answer_carries_no_custody_group_count() {
+        let mut bn = FakeBn::start().await;
+        let (harness, mut answers) = connected(&mut bn).await;
+
+        bn.request_metadata().await;
+
+        let answer = next_answer(&mut answers).await;
+        let RpcAnswer::MetaData(metadata) = &answer else {
+            panic!("not a metadata answer: {answer:?}");
+        };
+        assert!(matches!(metadata.as_ref(), MetaData::V2(_)), "{metadata:?}");
+        assert!(metadata.custody_group_count().is_err());
+        drop(harness);
+    }
+
     /// The custody range in the metadata the sidecar answers comes from the beacon node's own
     /// spec, by the connect probe. Without it the sidecar would answer mainnet's floor of 4,
     /// which is out of range on a network that reports fewer groups than that, and Lighthouse

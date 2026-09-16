@@ -140,11 +140,13 @@ mod tests {
         T::iter()
     }
 
-    /// Both directions: every variant Lighthouse has is in the table, and nothing else is.
-    /// The prefix and encoding segment are checked against a `ProtocolId` Lighthouse renders
-    /// itself, the names and versions come from the enum.
+    /// Both directions: every variant Lighthouse has is in the table, and nothing else is,
+    /// with the one exception the sidecar makes on purpose. `metadata/3` carries a custody
+    /// group count, and the sidecar claims no custody (T-102), so it is the one id Lighthouse
+    /// offers that is left out. The prefix and encoding segment are checked against a
+    /// `ProtocolId` Lighthouse renders itself, the names and versions come from the enum.
     #[test]
-    fn registered_protocol_list_matches_lighthouse_supported_protocols() {
+    fn registered_protocol_list_matches_lighthouse_supported_protocols_except_metadata_v3() {
         let ping = RequestType::<MainnetEthSpec>::Ping(Ping { data: 0 });
         let ping_ids = ping.supported_protocols();
         let rendered: Vec<&str> = ping_ids.iter().map(AsRef::as_ref).collect();
@@ -160,8 +162,10 @@ mod tests {
             })
             .collect();
         let ours: BTreeSet<String> = all().map(|id| id.as_ref().to_owned()).collect();
+        let declined = "/eth2/beacon_chain/req/metadata/3/ssz_snappy".to_owned();
 
-        assert_eq!(ours, lighthouse);
+        assert!(lighthouse.contains(&declined));
+        assert_eq!(ours, &lighthouse - &BTreeSet::from([declined]));
         assert_eq!(
             all().count(),
             lighthouse.len(),

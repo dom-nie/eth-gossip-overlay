@@ -425,6 +425,64 @@ async fn matrix_bn_startup_flags_dial_the_listening_sidecar() {
     assert_eq!(peer["connection_direction"], "Outgoing", "{peer}");
 }
 
+/// T-102. The sidecar answers MetaData v2, which has no custody group count, and for a peer
+/// with no ENR that count is the only thing Lighthouse assigns custody subnets from: a v2 body
+/// is "gracefully ignored" by `meta_data_response`
+/// (`beacon_node/lighthouse_network/src/peer_manager/mod.rs:767-770`). Both places that make a
+/// peer count as a custody peer read that assignment and nothing else,
+/// `has_good_peers_in_custody_subnet` (`peer_manager/peerdb.rs:344-365`) and
+/// `good_custody_subnet_peer` (`:297-313`), so an empty set here is what keeps the sidecar from
+/// standing in for a real custody peer in the node's discovery, or from being asked for a column
+/// it would refuse. Trust is untouched: the entry is still `is_trusted`, and `connect` already
+/// saw the `BnInfo` the `overlay_bn_trusted` gauge is fed from.
+///
+/// The node asks a new peer for metadata on its first ping exchange, up to 20 s after connect,
+/// and assigns the subnets under the same lock it stores the metadata under, so once the entry
+/// carries `meta_data` the assignment is whatever it is going to be.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a Lighthouse beacon node: scripts/lighthouse-matrix.sh"]
+async fn matrix_node_assigns_the_sidecar_no_custody_subnets() {
+    let env = env();
+    let mut sidecar = spawn(&env);
+    let deadline = sidecar.connect().await;
+
+    let peer = tokio::time::timeout_at(deadline.into(), async {
+        loop {
+            if let Some(peer) = lighthouse_peer(&env, sidecar.peer_id).await
+                && !peer["meta_data"].is_null()
+            {
+                return peer;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("the beacon node never obtained the sidecar's metadata");
+
+    println!(
+        "meta_data: {} custody_subnets: {}",
+        peer["meta_data"], peer["custody_subnets"]
+    );
+    assert_eq!(peer["custody_subnets"], serde_json::json!([]), "{peer}");
+    assert_eq!(peer["is_trusted"], true, "{peer}");
+}
+
+/// T-102's third check, which the beacon API cannot show. `has_good_peers_in_custody_subnet`
+/// (`peer_manager/peerdb.rs:344-365`) counts the connected, synced peers whose
+/// `is_assigned_to_custody_subnet` holds; its one caller is `maintain_custody_peers`
+/// (`peer_manager/mod.rs:978-1003`), and what that decides is a discovery query, which the
+/// matrix node runs without (`--disable-discovery`) and a node following the chain does not
+/// report. The only input the sidecar can move is its own assignment, and the test above pins
+/// that empty, so the sidecar adds zero to every subnet's count by construction.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "has_good_peers_in_custody_subnet is not on the beacon API; matrix_node_assigns_the_sidecar_no_custody_subnets pins its input"]
+async fn matrix_discovery_is_not_satisfied_by_the_sidecar() {
+    println!(
+        "skipped: has_good_peers_in_custody_subnet is not on the beacon API; \
+         matrix_node_assigns_the_sidecar_no_custody_subnets pins its input"
+    );
+}
+
 /// CL-N2 (7), the assumption T-087's custody tracker rests on. Two event names carry the whole
 /// of what column repair knows, and neither is promised by the beacon API specification:
 /// `block_gossip` fires inside gossip verification, after the proposer-signature check and after
