@@ -18,6 +18,22 @@ use crate::relay;
 /// stops, and §11.1 asks for twenty milliseconds; a second of it is an outage, not a tuning.
 const MAX_IRQ_SUSPEND_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// The least `overlay.keepalive_ms` may be. A keepalive exists to reach the peer before
+/// `idle_timeout_ms` closes a quiet connection, and one PING a second does that with the shipped
+/// five-second timeout four times over; anything shorter costs a packet per peer per interval
+/// for nothing, and at zero quinn re-arms the timer on every send and the driver spins (R5.5).
+/// An absolute floor rather than a fraction of the idle timeout, because a fraction would let
+/// `idle_timeout_ms: 10` carry `keepalive_ms: 1` through, and the `keepalive < idle` check
+/// already makes the idle timeout longer than this.
+const MIN_KEEPALIVE: Duration = Duration::from_secs(1);
+
+/// The least `overlay.initial_window_bytes` may be: the initial congestion window RFC 9002
+/// recommends and quinn uses when nothing sets one. quinn sends nothing once
+/// `in_flight + bytes >= window`, and the window is the configured one until the first loss,
+/// so one smaller than a 1200-byte datagram never lets the handshake out and no peer ever
+/// connects (R5.5).
+const MIN_INITIAL_WINDOW_BYTES: u64 = 14_720;
+
 /// The whole `config.yaml`, one field per key.
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -52,15 +68,17 @@ pub struct Overlay {
     /// `fleet_seed_previous_file`: the outgoing seed while a rotation is in progress, so peers
     /// still on it keep pairing. Absent or `null` otherwise.
     pub fleet_seed_previous_file: Option<PathBuf>,
-    /// `keepalive_ms`: the QUIC keepalive interval. Shorter than `idle_timeout_ms`, or every
+    /// `keepalive_ms`: the QUIC keepalive interval: at least 1000, since a shorter one is
+    /// packets for nothing and 0 spins the driver, and shorter than `idle_timeout_ms`, or every
     /// quiet connection would drop.
     #[serde(rename = "keepalive_ms", deserialize_with = "millis")]
     pub keepalive: Duration,
     /// `idle_timeout_ms`: how long a silent connection lives before QUIC closes it.
     #[serde(rename = "idle_timeout_ms", deserialize_with = "millis")]
     pub idle_timeout: Duration,
-    /// `initial_window_bytes`: the initial congestion window. A connection that carries one
-    /// block every 12 s never leaves slow start with the RFC default.
+    /// `initial_window_bytes`: the initial congestion window, at least 14720, QUIC's own
+    /// default: a window that cannot hold a datagram sends nothing, so no peer connects. A
+    /// connection carrying one block every 12 s never leaves slow start at the default.
     pub initial_window_bytes: u64,
     /// `fanout`: how each traffic class reaches its own region and the others.
     pub fanout: Fanout,
@@ -534,6 +552,29 @@ impl Config {
             ));
         }
         let (keepalive, idle) = (self.overlay.keepalive, self.overlay.idle_timeout);
+        if keepalive < MIN_KEEPALIVE {
+            return Err(invalid(
+                "overlay.keepalive_ms",
+                format!(
+                    "{} ms is shorter than {} ms: a PING a second keeps a quiet connection \
+                     inside idle_timeout_ms, anything shorter is packets for nothing, and 0 \
+                     spins the connection driver",
+                    keepalive.as_millis(),
+                    MIN_KEEPALIVE.as_millis()
+                ),
+            ));
+        }
+        let window = self.overlay.initial_window_bytes;
+        if window < MIN_INITIAL_WINDOW_BYTES {
+            return Err(invalid(
+                "overlay.initial_window_bytes",
+                format!(
+                    "{window} is below {MIN_INITIAL_WINDOW_BYTES}, QUIC's own initial window: \
+                     nothing is sent while the window cannot hold a datagram, so no peer would \
+                     ever connect"
+                ),
+            ));
+        }
         if keepalive >= idle {
             return Err(invalid(
                 "overlay.keepalive_ms",
@@ -919,8 +960,7 @@ log:
     #[test]
     fn zero_keepalive_is_refused() {
         for ms in [0, 1, 999] {
-            let err =
-                Config::from_yaml(&format!("overlay: {{ keepalive_ms: {ms} }}")).unwrap_err();
+            let err = Config::from_yaml(&format!("overlay: {{ keepalive_ms: {ms} }}")).unwrap_err();
             assert!(err.to_string().contains("overlay.keepalive_ms"), "{err}");
             assert!(err.to_string().contains("1000"), "{err}");
         }

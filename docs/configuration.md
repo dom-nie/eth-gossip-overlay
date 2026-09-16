@@ -4,8 +4,8 @@ One `config.yaml`, the same on every host, at `/etc/eth-gossip-overlay/config.ya
 `--config` says otherwise. Every key has a default, so a file naming only what you change is
 valid, and [`deploy/examples/config.yaml`](../deploy/examples/config.yaml) is that file with
 every default written out. An unknown or misspelled key stops the start rather than being
-ignored: run `eth-gossip-overlay check-config` after pushing a file and configuration management
-finds out before systemd does.
+ignored; `eth-gossip-overlay check-config` after a push lets configuration management find out
+before systemd does.
 
 ## Reload or restart
 
@@ -59,14 +59,14 @@ systemd sets it, which is what the shipped unit's `LoadCredential=` does. Set
 `overlay.fleet_seed_previous_file` only while a seed rotation is running;
 [security.md](security.md) is the procedure.
 
-`bn.node_key_file` holds this host's libp2p identity, created on first start with mode 0600. It
-is the peer id the beacon node trusts and is not derived from the seed. Deleting it gives the
-sidecar a new identity on the next start, so `lighthouse.env` changes and the beacon node has to
-be restarted to read it; keep the file, and on a container the volume under it.
+`bn.node_key_file` holds this host's libp2p identity, created on first start with mode 0600: the
+peer id the beacon node trusts, not derived from the seed. Deleting it gives the sidecar a new
+identity on the next start, so `lighthouse.env` changes and the beacon node has to restart to
+read it; keep the file, and on a container the volume under it.
 
-The `log` section sets the level and the format of the sidecar's one output stream, which carries
-the events as well. [events.md](events.md) has the fields, the queries, and why
-`tracing-journald` is an option rather than the default.
+The `log` section sets the level and format of the one output stream, events included.
+[events.md](events.md) has the fields, the queries, and why `tracing-journald` is an option
+rather than the default.
 
 `bn.by_root_cache` trades memory for latency and is off. On, the sidecar answers the node's block
 lookups from its store, saving a public round trip; columns are asked of custody peers only, which
@@ -75,8 +75,7 @@ whether it pays. Each slot costs 5.2 MiB of receive window ([performance.md](per
 
 ## Every key
 
-`On change` is `reload` for a key a running sidecar picks up and `restart` for one it reads only
-at startup. Every key below ships in 0.1.0, the first release.
+Every key below ships in 0.1.0, the first release.
 
 <!-- generated from crates/overlay-core/src/config.rs, do not edit by hand -->
 
@@ -86,9 +85,9 @@ at startup. Every key below ships in 0.1.0, the first release.
 | `overlay.roster_file` | `/etc/eth-gossip-overlay/roster.yaml` | restart | the fleet roster, re-read on SIGHUP and whenever the file changes. |
 | `overlay.fleet_seed_file` | `/etc/eth-gossip-overlay/seed` | restart | the shared secret every overlay TLS key derives from. |
 | `overlay.fleet_seed_previous_file` | unset | reload | the outgoing seed while a rotation is in progress, so peers still on it keep pairing. Absent or `null` otherwise. |
-| `overlay.keepalive_ms` | `1000` | restart | the QUIC keepalive interval. Shorter than `idle_timeout_ms`, or every quiet connection would drop. |
+| `overlay.keepalive_ms` | `1000` | restart | the QUIC keepalive interval: at least 1000, since a shorter one is packets for nothing and 0 spins the driver, and shorter than `idle_timeout_ms`, or every quiet connection would drop. |
 | `overlay.idle_timeout_ms` | `5000` | restart | how long a silent connection lives before QUIC closes it. |
-| `overlay.initial_window_bytes` | `4000000` | restart | the initial congestion window. A connection that carries one block every 12 s never leaves slow start with the RFC default. |
+| `overlay.initial_window_bytes` | `4000000` | restart | the initial congestion window, at least 14720, QUIC's own default: a window that cannot hold a datagram sends nothing, so no peer connects. A connection carrying one block every 12 s never leaves slow start at the default. |
 | `overlay.fanout.large.in_region` | `stripe` | restart | how a large message reaches the origin's own region. One of `stripe`, `direct`. |
 | `overlay.fanout.large.cross_region` | `stripe` | restart | how it reaches each other region. One of `stripe`, `direct`, `relays`. |
 | `overlay.fanout.large.stripe_min_recipients` | `16` | reload | with fewer subscribed recipients than this the message goes out whole; a stripe over a handful of hosts saves nothing. |

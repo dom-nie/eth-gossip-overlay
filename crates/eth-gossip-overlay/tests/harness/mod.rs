@@ -526,7 +526,7 @@ impl Fleet {
         };
         let yaml = format!(
             "overlay:\n  listen: \"{}\"\n  roster_file: {}\n  fleet_seed_file: {}\n{}\
-             \x20 keepalive_ms: 500\n  idle_timeout_ms: 5000\n{}\
+             \x20 keepalive_ms: 1000\n  idle_timeout_ms: 5000\n{}\
              \x20 initial_window_bytes: {}\n\
              \x20 fanout:\n    large:\n      stripe_min_recipients: {}\n\
              \x20   small:\n      relay_min_remote_hosts: {}\n\
