@@ -482,6 +482,28 @@ mod tests {
         assert_eq!(lines[2]["message"], "and still does");
     }
 
+    /// The value the file asked for goes under its own name. A second `level` key on the line
+    /// is the one `jq .level` reads, so a pipeline files the INFO notice as `error` (R5.10).
+    #[test]
+    fn the_level_notice_has_one_level_key() {
+        let cfg = Log {
+            level: LogLevel::Info,
+            format: LogFormat::Json,
+        };
+
+        let sink = capture(&cfg, false, Some("info"), |handle| {
+            handle.set_level("error")
+        });
+
+        let text = sink.text();
+        let line = text
+            .lines()
+            .find(|line| line.contains("not applied"))
+            .unwrap_or_else(|| panic!("{text}"));
+        assert_eq!(line.matches("\"level\":").count(), 1, "{line}");
+        assert_eq!(sink.objects()[0]["configured_level"], "error", "{line}");
+    }
+
     #[test]
     fn field_names_match_the_documented_schema() {
         let node = node();
