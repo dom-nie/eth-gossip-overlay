@@ -448,13 +448,14 @@ impl Scheduler {
 mod tests {
     use std::time::Duration;
 
-    use bytes::Bytes;
+    use bytes::{Bytes, BytesMut};
 
     use super::*;
     use crate::reassemble::{ReassembleConfig, Reassembler};
+    use crate::rs::Params;
     use crate::time::{Clock, FakeClock};
     use crate::topic::Topic;
-    use crate::wire::Chunk;
+    use crate::wire::{Chunk, Frame, MAX_PAYLOAD_BYTES, RepairReq};
 
     const TOPIC: &str = "/eth2/6a95a1a9/beacon_block/ssz_snappy";
     const DEADLINE: Duration = Duration::from_millis(250);
@@ -546,6 +547,27 @@ mod tests {
 
         // The same shortfall with a data index to spare lists no parity at all.
         assert_eq!(wanted(5, 2, &[1, 2, 3, 4, 5, 6]), vec![1, 2, 3]);
+    }
+
+    /// A request is one frame, so the frame has to have room for every index the scheduler can
+    /// ask for. `chunk_bytes: 512` is a legal config, a 10 MiB payload over it is 20480 data
+    /// chunks, and a requester holding one of them asks for the rest at once.
+    #[test]
+    fn a_repair_request_can_name_every_chunk_of_a_ten_megabyte_payload_at_512_byte_chunks() {
+        let params = Params::for_len(MAX_PAYLOAD_BYTES, 512, 0.10).expect("a legal split");
+        let all_but_the_first: Vec<u16> = (1..params.k + params.m).collect();
+        let missing = wanted(params.k, 1, &all_but_the_first);
+        assert_eq!(missing.len(), usize::from(params.k) - 1);
+        let frame = Frame::RepairReq(RepairReq::Missing {
+            msg_id: MessageId([7; 20]),
+            missing,
+        });
+
+        let mut out = BytesMut::new();
+        frame.encode(&mut out);
+
+        let decoded = Frame::decode(&mut out.freeze()).expect("the frame the scheduler built");
+        assert!(decoded == frame, "the round trip changed the request");
     }
 
     /// D23's order: the peers that forwarded a chunk first, by round trip, and the origin after
