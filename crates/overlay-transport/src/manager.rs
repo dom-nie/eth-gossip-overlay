@@ -321,6 +321,10 @@ pub type PeerCounts = BTreeMap<(Region, Option<String>), usize>;
 
 /// Both peer gauges from one view: every roster host but this one, and the live peers counted
 /// by the region and site they declared.
+///
+/// Every roster region starts at zero in `connected`, so a host with no peer up still exports
+/// a series for the health alert to compare with the roster. A family with no series is left
+/// out of the scrape altogether, and an alert with nothing on the left of its `<` never fires.
 pub fn peer_gauges(
     roster: &Roster,
     me: &Hostname,
@@ -332,7 +336,7 @@ pub fn peer_gauges(
             .entry((host.region.clone(), host.site.clone()))
             .or_default() += 1;
     }
-    let mut connected = PeerCounts::new();
+    let mut connected: PeerCounts = in_roster.keys().map(|key| (key.clone(), 0)).collect();
     for key in live {
         *connected.entry(key).or_default() += 1;
     }
