@@ -90,12 +90,14 @@ eth-gossip-overlay 0.1.0 9e5e500d46d6 2026-09-07
 protocol 1.0 features=0x0
 
 $ eth-gossip-overlay check-config
+2026-09-16T12:56:22.065239Z  INFO overlay_core::budget: memory budget bounded_bytes=622494412 total_bytes=778118015 headroom_percent=25 memory_max=1073741824 roster=3 receive_window=236499046 rows=[("seen_cache", 12800000), ("recent_store", 27238400), ("publish_queue", 35651584), ("reassembler", 35651584), ("peer_send_lanes", 2711552), ("peer_topic_tables", 1310720), ("gossipsub", 34132480), ("by_root_cache", 0), ("quic_receive_windows", 472998092)]
 hostname: bn-ams1-07
 region: eu
 site: ams1
 peer id: 12D3KooWJ6JBbaSGzLK7jZj7qtey7W9wc36Wq8qhkid7Rgpy854b
 roster: 3 hosts
-memory budget: 61 MiB (49 MiB in bounded structures plus 25% headroom)
+memory ceiling: 1024 MiB (built-in default)
+memory budget: 743 MiB (594 MiB in bounded structures plus 25% headroom)
 ```
 
 The second `--version` line is the compatibility one: the major travels in the overlay's ALPN and the minor and feature bits in `HELLO`, so a pair runs at the lower minor and the intersection of the bits. Two sidecars on the same major always pair.

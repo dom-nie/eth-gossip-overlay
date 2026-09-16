@@ -62,13 +62,12 @@ and past 73 slots it is at the 1 MiB floor. Sixteen is the default because Light
 a few slots back for a missing parent; the 64 slots §5.8 sketched would fit, at a 321 MB row and
 a 1.26 MiB window.
 
-If you change `MemoryMax` yourself, `OverlayMemoryHigh` in `deploy/prometheus/alerts.yml` and
-the two threshold lines on the dashboard's memory panel carry it as a literal and have to move
-with it.
+If you change `MemoryMax`, `OverlayMemoryHigh` in `deploy/prometheus/alerts.yml` and the
+dashboard memory panel's two threshold lines carry it as a literal and have to move with it.
 
-The sidecar logs this table at startup and again from `eth-gossip-overlay check-config`, at your
-own roster size and against `/sys/fs/cgroup/memory.max` where there is one, so what a host
-actually runs under is the number to read rather than this example.
+The sidecar logs this table at startup and from `eth-gossip-overlay check-config`, at your own
+roster size, against the `memory.max` of its cgroup or the nearest ancestor that sets one: under
+the unit that is `MemoryMax`, from a shell the built-in default, and `check-config` names which.
 
 ## Throughput
 

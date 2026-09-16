@@ -106,11 +106,12 @@ Resident memory has been over 80% of the unit's `MemoryMax` for ten minutes. At 
 kills the process and systemd restarts it, which costs the beacon node its trusted peer for a few
 seconds.
 
-`eth-gossip-overlay check-config` prints the memory budget the sidecar computed from the effective
-config and roster size; compare it with the ceiling to see whether the ceiling is simply too low
-for this fleet. If the budget is well under the ceiling and resident memory is not, look at the
-peer send lanes and the publish queue in the dashboard: a slow peer holds a full lane. The alert's
-threshold is a literal, so a `MemoryMax` raised in the unit has to be raised in the rule too.
+`eth-gossip-overlay check-config` prints the budget the sidecar computed from the effective
+config and roster size, the ceiling it read, and warns when the first is over the second: the
+ceiling is too low for this fleet. If the budget is well under the ceiling and resident memory is
+not, look at the peer send lanes and the publish queue in the dashboard: a slow peer holds a full
+lane. The alert's threshold is a literal, so a `MemoryMax` raised in the unit has to be raised in
+the rule.
 
 ## OverlaySidecarRestarting
 

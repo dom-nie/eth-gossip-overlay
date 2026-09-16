@@ -144,13 +144,22 @@ overlay_bn_trusted 1
 
 ```console
 $ sudo eth-gossip-overlay check-config
+2026-09-16T12:56:22.065239Z  INFO overlay_core::budget: memory budget bounded_bytes=622494412 total_bytes=778118015 headroom_percent=25 memory_max=1073741824 roster=3 receive_window=236499046 rows=[("seen_cache", 12800000), ("recent_store", 27238400), ("publish_queue", 35651584), ("reassembler", 35651584), ("peer_send_lanes", 2711552), ("peer_topic_tables", 1310720), ("gossipsub", 34132480), ("by_root_cache", 0), ("quic_receive_windows", 472998092)]
 hostname: bn-ams1-07
 region: eu
 site: ams1
 peer id: 12D3KooWJ6JBbaSGzLK7jZj7qtey7W9wc36Wq8qhkid7Rgpy854b
 roster: 3 hosts
-memory budget: 61 MiB (49 MiB in bounded structures plus 25% headroom)
+memory ceiling: 1024 MiB (built-in default)
+memory budget: 743 MiB (594 MiB in bounded structures plus 25% headroom)
 ```
+
+The two memory lines are the ceiling `check-config` found and the budget derived against it. The
+ceiling is the `memory.max` of the cgroup the command runs in, or of the nearest ancestor that
+sets one; a shell session sets none, so from a shell the command warns and falls back to the
+built-in default, which is the 1 GiB the unit sets. The sidecar's own start logs the same table
+against the unit's `MemoryMax`. A budget over the ceiling is a `WARN` line in both places, and
+the start goes ahead; [docs/performance.md](../docs/performance.md) says what to raise.
 
 ## Reload
 
