@@ -218,24 +218,24 @@ fn yes_no(has: bool) -> &'static str {
     if has { "yes" } else { "no" }
 }
 
-/// What `check-config` prints: the identity a start would run under and the memory budget it
-/// would log, from the same code a start uses.
+/// What `check-config` prints: the identity a start would run under, the ceiling it would size
+/// against and where that came from, and the memory budget it would log, from the same code a
+/// start uses. The budget's table and its warning go through the same subscriber a start has,
+/// so the rehearsal says what the start would say.
 pub fn check_config(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let cfg = Config::load(path)?;
+    let _log = crate::logging::init(&cfg.log);
     let me = Identity::load(&cfg)?;
     // Deriving the key is the check: a seed that reads as 32 bytes but cannot make a keypair
     // would otherwise only fail at the first handshake.
     tls::identity(&derive_tls_keypair(&me.seeds.current, &me.self_id.hostname))?;
     LinkConfig::from_config(&cfg.bn).map_err(|err| StartupError::BnAddress(err.to_string()))?;
-    let budget = MemoryBudget::compute(
-        &cfg,
-        me.roster.hosts.len(),
-        budget::memory_max(),
-        SEND_LANES,
-    );
+    let ceiling = budget::ceiling();
+    let budget = MemoryBudget::compute(&cfg, me.roster.hosts.len(), ceiling.bytes, SEND_LANES);
+    budget::check(&budget);
     Ok(format!(
-        "hostname: {}\nregion: {}\nsite: {}\npeer id: {}\nroster: {} {}\nmemory budget: {} \
-         ({} in bounded structures plus {}% headroom)\n",
+        "hostname: {}\nregion: {}\nsite: {}\npeer id: {}\nroster: {} {}\nmemory ceiling: {} \
+         ({})\nmemory budget: {} ({} in bounded structures plus {}% headroom)\n",
         me.self_id.hostname,
         me.self_id.region,
         me.self_id.site.as_deref().unwrap_or("none"),
@@ -245,6 +245,11 @@ pub fn check_config(path: &Path) -> Result<String, Box<dyn std::error::Error>> {
             "host"
         } else {
             "hosts"
+        },
+        mib(ceiling.bytes),
+        match &ceiling.source {
+            Some(file) => format!("from {}", file.display()),
+            None => "built-in default".to_owned(),
         },
         mib(budget.total_bytes),
         mib(budget.bounded_bytes),
