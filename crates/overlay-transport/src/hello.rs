@@ -31,7 +31,9 @@ use overlay_core::protocol::{
 use overlay_core::roster::{Hostname, Region, SelfIdentity};
 use overlay_core::subs::PeerState;
 use overlay_core::topic::Topic;
-use overlay_core::topic::table::{Announcer, OwnTopicTable, PeerTopicTable, TableFull, TopicId};
+use overlay_core::topic::table::{
+    Announcer, Generation, OwnTopicTable, PeerTopicTable, TableFull, TopicId,
+};
 use overlay_core::wire::{Frame, Hello, Read, write_frame};
 use tokio::sync::watch;
 
@@ -322,6 +324,9 @@ pub async fn perform(
         connection,
         control,
         state: Arc::new(Mutex::new(PeerState::new(topics))),
+        // Admission records the HELLO once it is known to have reached the peer, and that is
+        // where the generation comes from.
+        generation: Generation::default(),
     })
 }
 
@@ -507,7 +512,7 @@ impl Admission for HelloAdmission {
         let timeout = self.timeout;
         let topics = self.topics.clone();
         async move {
-            let peer = perform(
+            let mut peer = perform(
                 connection,
                 role,
                 &self_hello,
@@ -521,7 +526,7 @@ impl Admission for HelloAdmission {
             // Only now, and only what went: a HELLO that failed leaves the peer owed every
             // binding the attempt would have carried, because whatever connection it already
             // had was never sent them.
-            lock(&topics).announcer.hello_sent(&hostname, sent);
+            peer.generation = lock(&topics).announcer.hello_sent(&hostname, sent);
             Ok(peer)
         }
     }
@@ -578,13 +583,13 @@ mod tests {
         )
     }
 
-    /// What `peer` is still owed.
-    fn owed(topics: &Arc<Mutex<OwnTopics>>, peer: &Hostname) -> Vec<Frame> {
+    /// What `peer` is still owed on the connection `generation` names.
+    fn owed(topics: &Arc<Mutex<OwnTopics>>, peer: &Hostname, generation: Generation) -> Vec<Frame> {
         let mut own = lock(topics);
         let OwnTopics {
             table, announcer, ..
         } = &mut *own;
-        announcer.announce(peer, table)
+        announcer.announce(peer, generation, table)
     }
 
     /// The pin entry a connection from `peer` arrives with.
@@ -1119,7 +1124,7 @@ mod tests {
             .expect_err("the name in HELLO is not the name the key is pinned to");
 
         assert_eq!(refused.close, CloseCode::HostnameMismatch);
-        assert_eq!(owed(&topics, &lower).len(), 1);
+        assert_eq!(owed(&topics, &lower, Generation::default()).len(), 1);
     }
 
     /// The other half: a HELLO that went records what went with it, so the peer is owed nothing
@@ -1146,13 +1151,13 @@ mod tests {
             admission.admit(accepting, Role::Accept, &from),
         );
 
-        admitted.expect("the dialler sent a HELLO of its own");
+        let admitted = admitted.expect("the dialler sent a HELLO of its own");
         assert!(
             state(&dialled.unwrap().state)
                 .table
                 .resolve(TopicId::new(0))
                 .is_some()
         );
-        assert!(owed(&topics, &lower).is_empty());
+        assert!(owed(&topics, &lower, admitted.generation).is_empty());
     }
 }

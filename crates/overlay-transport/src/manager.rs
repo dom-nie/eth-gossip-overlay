@@ -42,6 +42,7 @@ use overlay_core::progress::PROGRESS_TICK;
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::subs::PeerState;
 use overlay_core::topic::Topic;
+use overlay_core::topic::table::Generation;
 use quinn::VarInt;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
@@ -166,6 +167,10 @@ pub struct PeerInfo {
     /// The peer's topic ids and the bitmap over them, shared with the live view: the reader
     /// task T-027 spawns on `control` is what writes to it, and every route plan reads it.
     pub state: Arc<Mutex<PeerState>>,
+    /// The HELLO this connection's record of what the peer has been told belongs to, which its
+    /// announce loop advances the record under (T-104). A superseded connection's loop
+    /// announces under an older one and records nothing.
+    pub generation: Generation,
 }
 
 /// What the manager tells the router as connections come and go. T-033 restarts a peer's sender
@@ -1387,6 +1392,7 @@ mod tests {
             connection,
             control,
             state: Arc::new(Mutex::new(PeerState::default())),
+            generation: Generation::default(),
         }
     }
 

@@ -215,12 +215,22 @@ pub enum PeerTableError {
     Unparsable(TopicId, TopicError),
 }
 
+/// Which HELLO a peer's record of what it was told belongs to. [`Announcer::hello_sent`] mints
+/// one per connection that finished HELLO, and only that connection's announce loop may
+/// advance the record: a superseded connection's loop is still alive for a moment after the
+/// new one is recorded, and what it announces on a stream that is closing reached nobody.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Generation(u64);
+
 /// What each peer has already been told, and the only place a `TOPIC_ADD` is built.
 #[derive(Clone, Debug, Default)]
 pub struct Announcer {
-    /// How many of the own table's ids each peer has been told. Ids are handed out in order and
-    /// never withdrawn, so one count per peer says which bindings are still owed.
-    told: HashMap<Hostname, usize>,
+    /// How many of the own table's ids each peer has been told, under the HELLO the record
+    /// belongs to. Ids are handed out in order and never withdrawn, so one count per peer says
+    /// which bindings are still owed.
+    told: HashMap<Hostname, (Generation, usize)>,
+    /// The last generation minted.
+    minted: u64,
 }
 
 impl Announcer {
@@ -248,8 +258,15 @@ impl Announcer {
     /// peer whose second connection was refused (D15) is still owed everything its surviving
     /// connection has not been sent. Either mistake ends the same way: frames carrying ids the
     /// peer was never told, dropped as `unknown_topic_id_total`.
-    pub fn hello_sent(&mut self, peer: &Hostname, sent: usize) {
-        self.told.insert(peer.clone(), sent);
+    ///
+    /// Returns the generation the connection's announce loop passes to [`Self::announce`]. The
+    /// record belongs to that connection from here on, and whatever an older connection's loop
+    /// still announces is not counted.
+    pub fn hello_sent(&mut self, peer: &Hostname, sent: usize) -> Generation {
+        self.minted += 1;
+        let generation = Generation(self.minted);
+        self.told.insert(peer.clone(), (generation, sent));
+        generation
     }
 
     /// Whether `peer` has already been told what `id` stands for. A relay asks before it names
@@ -259,13 +276,25 @@ impl Announcer {
     pub fn told(&self, peer: &Hostname, id: TopicId) -> bool {
         self.told
             .get(peer)
-            .is_some_and(|told| usize::from(id.get()) < *told)
+            .is_some_and(|(_, told)| usize::from(id.get()) < *told)
     }
 
     /// The bindings `peer` has not been told, which this call records as told. T-027 puts them
     /// on that peer's control stream.
-    pub fn announce(&mut self, peer: &Hostname, table: &OwnTopicTable) -> Vec<Frame> {
-        let told = self.told.entry(peer.clone()).or_default();
+    ///
+    /// Nothing under a `generation` the record has moved past. The connection it belonged to is
+    /// closing, and counting what goes out on it would leave the connection that replaced it
+    /// never sent those ids (R3.1).
+    pub fn announce(
+        &mut self,
+        peer: &Hostname,
+        generation: Generation,
+        table: &OwnTopicTable,
+    ) -> Vec<Frame> {
+        let (current, told) = self.told.entry(peer.clone()).or_default();
+        if *current != generation {
+            return Vec::new();
+        }
         let frames: Vec<Frame> = table
             .entries_from(*told)
             .map(|(id, topic)| Frame::TopicAdd {
@@ -287,7 +316,7 @@ impl Announcer {
 /// the SUBS bitmap leaves those topics out (D06, D12).
 pub fn on_changed<'a>(
     sets: &SubscriptionSets,
-    peers: impl IntoIterator<Item = &'a Hostname>,
+    peers: impl IntoIterator<Item = (&'a Hostname, Generation)>,
     table: &mut OwnTopicTable,
     announcer: &mut Announcer,
 ) -> Result<Vec<(&'a Hostname, Vec<Frame>)>, TableFull> {
@@ -296,7 +325,7 @@ pub fn on_changed<'a>(
     }
     Ok(peers
         .into_iter()
-        .map(|peer| (peer, announcer.announce(peer, table)))
+        .map(|(peer, generation)| (peer, announcer.announce(peer, generation, table)))
         .filter(|(_, owed)| !owed.is_empty())
         .collect())
 }
@@ -498,18 +527,25 @@ mod tests {
         own.intern(&column(0)).unwrap();
         own.intern(&column(1)).unwrap();
 
-        let first = announcer.announce(&host("a"), &own);
+        let first = announcer.announce(&host("a"), Generation::default(), &own);
 
         assert_eq!(first, [topic_add(0, 0), topic_add(1, 1)]);
-        assert!(announcer.announce(&host("a"), &own).is_empty());
+        assert!(
+            announcer
+                .announce(&host("a"), Generation::default(), &own)
+                .is_empty()
+        );
         assert_eq!(
-            announcer.announce(&host("b"), &own),
+            announcer.announce(&host("b"), Generation::default(), &own),
             [topic_add(0, 0), topic_add(1, 1)]
         );
 
         own.intern(&column(2)).unwrap();
 
-        assert_eq!(announcer.announce(&host("a"), &own), [topic_add(2, 2)]);
+        assert_eq!(
+            announcer.announce(&host("a"), Generation::default(), &own),
+            [topic_add(2, 2)]
+        );
     }
 
     #[test]
@@ -520,14 +556,17 @@ mod tests {
         own.intern(&column(1)).unwrap();
 
         let hello = announcer.snapshot(&own);
-        announcer.hello_sent(&host("c"), hello.len());
+        let generation = announcer.hello_sent(&host("c"), hello.len());
 
         assert_eq!(hello.len(), 2);
-        assert!(announcer.announce(&host("c"), &own).is_empty());
+        assert!(announcer.announce(&host("c"), generation, &own).is_empty());
 
         own.intern(&column(2)).unwrap();
 
-        assert_eq!(announcer.announce(&host("c"), &own), [topic_add(2, 2)]);
+        assert_eq!(
+            announcer.announce(&host("c"), generation, &own),
+            [topic_add(2, 2)]
+        );
     }
 
     /// The mirror interns from its own task, so a topic can appear between the snapshot and the
@@ -541,10 +580,29 @@ mod tests {
 
         let hello = announcer.snapshot(&own);
         own.intern(&column(1)).unwrap();
-        announcer.hello_sent(&host("d"), hello.len());
+        let generation = announcer.hello_sent(&host("d"), hello.len());
 
         assert_eq!(hello, [(TopicId::new(0), column(0).to_string())]);
-        assert_eq!(announcer.announce(&host("d"), &own), [topic_add(1, 1)]);
+        assert_eq!(
+            announcer.announce(&host("d"), generation, &own),
+            [topic_add(1, 1)]
+        );
+    }
+
+    /// A superseded connection's loop can still announce after the HELLO of the connection
+    /// that replaced it was recorded. What it says goes on a stream that is closing, so the
+    /// record must not move: the new connection is owed those ids (R3.1).
+    #[test]
+    fn an_announce_under_a_superseded_generation_records_nothing() {
+        let mut own = OwnTopicTable::new();
+        let mut announcer = Announcer::new();
+        own.intern(&column(0)).unwrap();
+        let old = announcer.hello_sent(&host("a"), 1);
+        let new = announcer.hello_sent(&host("a"), 1);
+        own.intern(&column(1)).unwrap();
+
+        assert!(announcer.announce(&host("a"), old, &own).is_empty());
+        assert_eq!(announcer.announce(&host("a"), new, &own), [topic_add(1, 1)]);
     }
 
     /// A snapshot that never reached its peer records nothing. A HELLO can fail after the
@@ -561,7 +619,7 @@ mod tests {
 
         assert_eq!(hello.len(), 2);
         assert_eq!(
-            announcer.announce(&host("e"), &own),
+            announcer.announce(&host("e"), Generation::default(), &own),
             [topic_add(0, 0), topic_add(1, 1)]
         );
     }
@@ -579,7 +637,9 @@ mod tests {
         let mut own = OwnTopicTable::new();
         let mut announcer = Announcer::new();
 
-        let owed = on_changed(&sets, peers.iter(), &mut own, &mut announcer).unwrap();
+        let untold = || peers.iter().map(|peer| (peer, Generation::default()));
+
+        let owed = on_changed(&sets, untold(), &mut own, &mut announcer).unwrap();
 
         let expected = vec![
             Frame::TopicAdd {
@@ -590,7 +650,7 @@ mod tests {
         ];
         assert_eq!(owed, [(&peers[0], expected.clone()), (&peers[1], expected)]);
         assert!(
-            on_changed(&sets, peers.iter(), &mut own, &mut announcer)
+            on_changed(&sets, untold(), &mut own, &mut announcer)
                 .unwrap()
                 .is_empty()
         );

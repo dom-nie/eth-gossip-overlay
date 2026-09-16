@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use overlay_core::roster::Hostname;
 use overlay_core::subs::{self, Bitmap, PeerState};
 use overlay_core::topic::SubscriptionSets;
-use overlay_core::topic::table::{OwnTopicTable, TopicId, on_changed};
+use overlay_core::topic::table::{Generation, OwnTopicTable, TopicId, on_changed};
 use overlay_core::wire::{Frame, Read};
 use tokio::sync::{mpsc, watch};
 use tokio::task::{AbortHandle, JoinHandle, JoinSet};
@@ -115,19 +115,25 @@ async fn peer(
         connection,
         control,
         state,
+        generation,
         ..
     } = info;
     let (send, recv) = control.split();
     tokio::select! {
-        () = announce(&hostname, send, sets, &topics) => {}
+        () = announce(&hostname, generation, send, sets, &topics) => {}
         () = read(&hostname, recv, &state, &connection, stats.as_ref()) => {}
     }
 }
 
 /// Sends what the peer is owed now, and again on every change the mirror reports. It ends when
 /// the mirror is gone or the peer stopped taking frames, either of which leaves nothing to say.
+///
+/// `generation` is the connection this loop speaks for. Once a newer connection to the same
+/// peer has been recorded, what this loop announces is not counted as told: it is on its way
+/// out, and the new connection's loop owes those ids (R3.1).
 async fn announce(
     peer: &Hostname,
+    generation: Generation,
     mut send: ControlSend,
     mut sets: watch::Receiver<SubscriptionSets>,
     topics: &Mutex<OwnTopics>,
@@ -136,7 +142,7 @@ async fn announce(
     loop {
         // The borrow ends before the first write: it is a read lock on the mirror's value, and
         // holding one across a network write would stall the mirror behind a slow peer.
-        let frames = owed(peer, &sets.borrow_and_update(), topics);
+        let frames = owed(peer, generation, &sets.borrow_and_update(), topics);
         for frame in frames {
             if let Err(error) = send.write_frame(&frame).await {
                 tracing::debug!(%peer, %error, "control stream stopped taking frames");
@@ -159,12 +165,17 @@ async fn announce(
 /// The frames `peer` is owed for the subscription set as it stands: the bindings it has not been
 /// told, then the bitmap those ids are read against. Built under one lock and with nothing
 /// awaited, so the mirror's next change is never held up by a peer's flow control.
-fn owed(peer: &Hostname, sets: &SubscriptionSets, topics: &Mutex<OwnTopics>) -> Vec<Frame> {
+fn owed(
+    peer: &Hostname,
+    generation: Generation,
+    sets: &SubscriptionSets,
+    topics: &Mutex<OwnTopics>,
+) -> Vec<Frame> {
     let mut own = crate::hello::lock(topics);
     let OwnTopics {
         table, announcer, ..
     } = &mut *own;
-    let mut frames = match on_changed(sets, [peer], table, announcer) {
+    let mut frames = match on_changed(sets, [(peer, generation)], table, announcer) {
         Ok(owed) => owed.into_iter().flat_map(|(_, frames)| frames).collect(),
         Err(error) => {
             tracing::error!(%peer, %error, "cannot announce topics this host has no id left for");
@@ -415,6 +426,7 @@ mod tests {
 
         let mut first = cluster.dial_with_hello(0, 1, &cluster.self_hello(0)).await;
         let old = next_up(&mut cluster, 1, &peer).await;
+        let old_generation = old.generation;
         let old_loop = tokio::spawn(super::peer(
             old,
             sets.clone(),
@@ -441,7 +453,7 @@ mod tests {
             .unwrap();
         hello::lock(&topics).intern(&carried).unwrap();
         // The old loop's turn, as it goes when the intern lands inside the window.
-        super::owed(&peer, &sets.borrow(), &topics);
+        super::owed(&peer, old_generation, &sets.borrow(), &topics);
 
         tokio::spawn(super::peer(new, sets, topics, stats));
 
