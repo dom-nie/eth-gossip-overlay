@@ -21,6 +21,9 @@ RestartSec=2
 # RestartSteps= and RestartMaxDelaySec= need systemd 254 or newer.
 RestartSteps=6
 RestartMaxDelaySec=60
+# The sidecar bounds its own stop to two seconds and gives up on a hung ethtool two seconds
+# after that. This is the fence behind both, in place of systemd's ninety-second default.
+TimeoutStopSec=10
 
 ExecStart=/usr/local/bin/eth-gossip-overlay run
 # systemctl reload re-reads config.yaml and roster.yaml without dropping a connection.

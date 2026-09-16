@@ -78,8 +78,9 @@ impl IoHandle {
     pub async fn shutdown(self) {
         let Some(worker) = self.worker else { return };
         let _ = worker.stop.send(());
-        // Joined on the blocking pool, so a shutdown deadline can still fire over a thread that
-        // will not end (§11's two seconds).
+        // Joined on the blocking pool, so the shutdown deadline can fire over a thread that
+        // will not end (§11's two seconds). The join itself is then abandoned by the runtime
+        // teardown in `main`, which is what bounds it.
         let _ = tokio::task::spawn_blocking(move || worker.thread.join()).await;
     }
 }

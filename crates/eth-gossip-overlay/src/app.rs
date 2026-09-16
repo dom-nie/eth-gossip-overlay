@@ -691,8 +691,8 @@ impl App {
         self.io.shutdown().await;
         // Last, and after the socket has gone: a flow rule that outlived the process would send
         // the next thing to bind that port to a queue nothing told it about. On the blocking
-        // pool because it runs `ethtool`, and the shutdown deadline can only fire over a task
-        // that yields.
+        // pool because it runs `ethtool`. The deadline in `run` fires over this await, and an
+        // `ethtool` still running after that is bounded by the runtime teardown in `main`.
         let steering = self.steering;
         let _ = tokio::task::spawn_blocking(move || steering::undo(&steering)).await;
     }

@@ -215,12 +215,20 @@ pub fn exit_on_panic() {
 }
 
 /// Runs `serve` to completion on a runtime of its own, which is how `main` runs the sidecar,
-/// and returns what it produced.
-pub fn run_to_completion<T>(serve: impl Future<Output = T>) -> io::Result<T> {
+/// and returns what it produced once the runtime is gone.
+///
+/// Dropping a runtime waits for every `spawn_blocking` closure still running, with no limit.
+/// The stop path runs two, the NIC undo's `ethtool` and the I/O thread join, and the deadline
+/// `App::run` puts on `stop` fires over the await without ending either. `teardown` bounds the
+/// wait for them: after it the closure is abandoned and the process exits, which is what ends
+/// an `ethtool` stuck behind a driver reset (R3.3).
+pub fn run_to_completion<T>(serve: impl Future<Output = T>, teardown: Duration) -> io::Result<T> {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    Ok(runtime.block_on(serve))
+    let served = runtime.block_on(serve);
+    runtime.shutdown_timeout(teardown);
+    Ok(served)
 }
 
 /// Resolves on the first `SIGTERM` or `SIGINT`, which is the shutdown future the app runs
@@ -241,7 +249,6 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::app::SHUTDOWN_DEADLINE;
 
     fn progress() -> Progress {
         Progress::default()
@@ -253,18 +260,22 @@ mod tests {
     /// deadline `App::run` promises, for as long as `ethtool` took (R3.3).
     #[test]
     fn shutdown_returns_inside_the_deadline_over_a_hung_blocking_task() {
+        let deadline = Duration::from_millis(100);
         let started = Instant::now();
 
-        run_to_completion(async {
-            tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_secs(5)));
-            // Running, not queued: a closure that has not started is dropped at shutdown.
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        })
+        run_to_completion(
+            async {
+                tokio::task::spawn_blocking(|| std::thread::sleep(Duration::from_secs(1)));
+                // Running, not queued: a closure that has not started is dropped at shutdown.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            },
+            deadline,
+        )
         .unwrap();
 
         let took = started.elapsed();
         assert!(
-            took < SHUTDOWN_DEADLINE + Duration::from_secs(1),
+            took < deadline + Duration::from_millis(500),
             "the stop took {took:?}"
         );
     }

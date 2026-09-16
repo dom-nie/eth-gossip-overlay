@@ -94,8 +94,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let cfg = Config::load(&cli.config)?;
             let log = Arc::new(logging::init(&cfg.log));
             lifecycle::exit_on_panic();
-            let served =
-                lifecycle::run_to_completion(app::serve(cli.config, cfg, log, cli.test_panic))?;
+            // The deadline in `App::run` fires over an await. A `spawn_blocking` closure still
+            // running after it, the NIC undo's `ethtool` or the I/O thread join, is what the
+            // runtime's teardown would otherwise wait for with no limit.
+            let served = lifecycle::run_to_completion(
+                app::serve(cli.config, cfg, log, cli.test_panic),
+                app::SHUTDOWN_DEADLINE,
+            )?;
             served?;
         }
         Command::PeerId => {
