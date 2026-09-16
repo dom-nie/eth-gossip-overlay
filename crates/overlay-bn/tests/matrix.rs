@@ -11,9 +11,10 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use libp2p::gossipsub::PublishError;
 use libp2p::{Multiaddr, PeerId};
@@ -24,11 +25,15 @@ use overlay_bn::link::{
     BACKOFF_MAX, BACKOFF_MIN, BnCommand, BnEvent, BnLink, BnMessage, LinkConfig,
 };
 use overlay_bn::node_key::NodeKey;
+use overlay_bn::rpc::proto::Protocol;
+use overlay_bn::rpc::{ByRootCache, ByRootOutcome, ByRootStats};
 use overlay_bn::spec::spec_watch;
+use overlay_bn::testutil::by_root_off;
 use overlay_core::backoff::Backoff;
 use overlay_core::custody::SharedCustody;
 use overlay_core::events::Arrivals;
 use overlay_core::lanes::ClassLanes;
+use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
 use overlay_core::time::SystemClock;
 use overlay_core::topic::{SubscriptionSets, Topic};
 use prometheus_client::registry::Registry;
@@ -74,12 +79,25 @@ struct Sidecar {
 }
 
 fn spawn(env: &Env) -> Sidecar {
-    spawn_with(env, &env.key, env.listen.clone(), env.p2p.clone())
+    spawn_with(
+        env,
+        &env.key,
+        env.listen.clone(),
+        env.p2p.clone(),
+        by_root_off(),
+    )
 }
 
-/// A link under `key`, listening on `listen` and dialling `libp2p_addr`. The three differ from
-/// the environment's only for the peers a test attaches itself.
-fn spawn_with(env: &Env, key: &NodeKey, listen: Multiaddr, libp2p_addr: Multiaddr) -> Sidecar {
+/// A link under `key`, listening on `listen` and dialling `libp2p_addr`, answering by-root
+/// requests out of `by_root`. The addresses differ from the environment's only for the peers a
+/// test attaches itself; the cache is counted only by the test that watches refusals.
+fn spawn_with(
+    env: &Env,
+    key: &NodeKey,
+    listen: Multiaddr,
+    libp2p_addr: Multiaddr,
+    by_root: ByRootCache,
+) -> Sidecar {
     let (commands, commands_rx) = mpsc::channel(64);
     let (spec_tx, _spec) = spec_watch();
     let (_sets, sets) = watch::channel(SubscriptionSets::default());
@@ -105,7 +123,7 @@ fn spawn_with(env: &Env, key: &NodeKey, listen: Multiaddr, libp2p_addr: Multiadd
         sets,
         commands_rx,
         Arc::default(),
-        overlay_bn::testutil::by_root_off(),
+        by_root,
     );
     Sidecar {
         peer_id: key.peer_id(),
@@ -380,6 +398,7 @@ async fn matrix_bn_dials_the_listening_sidecar_when_its_inbound_cap_is_full() {
         &dummy_key,
         "/ip4/127.0.0.1/tcp/0".parse().unwrap(),
         env.p2p.clone(),
+        by_root_off(),
     );
     let filled = Instant::now() + CONNECT;
     dummy
@@ -414,7 +433,13 @@ async fn matrix_bn_dials_the_listening_sidecar_when_its_inbound_cap_is_full() {
 #[ignore = "needs a Lighthouse beacon node: scripts/lighthouse-matrix.sh"]
 async fn matrix_bn_startup_flags_dial_the_listening_sidecar() {
     let env = env();
-    let mut sidecar = spawn_with(&env, &env.key, env.listen.clone(), closed_port());
+    let mut sidecar = spawn_with(
+        &env,
+        &env.key,
+        env.listen.clone(),
+        closed_port(),
+        by_root_off(),
+    );
 
     let deadline = Instant::now() + Duration::from_secs(30);
     sidecar
@@ -560,4 +585,214 @@ fn every_column_topic(columns: u64) -> SubscriptionSets {
         advertised,
         ..SubscriptionSets::default()
     }
+}
+
+/// T-101 test 1 on a real node, and the assumption `COMPATIBILITY.md` names for it: Lighthouse
+/// seeds a parent lookup with the block's sender and nobody else (`block_lookups/mod.rs:175-189`
+/// at v8.2.2), asks that peer again at once on `ResourceUnavailable`
+/// (`single_block_lookup.rs:609-618`) and drops the lookup and the block on the fourth failure
+/// (`mod.rs:657-661`). The sidecar hands the node its own head block rewritten with a parent
+/// root nobody has, at the slot after the head's so the node has observed no proposal for the
+/// pair and the parent check is the first to fail, then counts what the node asks it: four
+/// refusals on `beacon_blocks_by_root` and no more. With `LIGHTHOUSE_METRICS` naming the node's
+/// metrics port, its `sync_lookups_dropped_total{reason="TooManyAttempts"}` is read before and
+/// after as well.
+///
+/// The publish here goes straight to gossipsub, past the check `receive.rs` puts in front of a
+/// real one, which is what makes the four refusals observable; the check itself is pinned on the
+/// transport cluster and the fleet. A release on which this count changes is the one that
+/// retires the check, and this test is where that shows.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a Lighthouse beacon node following the chain: MATRIX_FOLLOWING_CHAIN=1"]
+async fn matrix_a_block_whose_parent_the_node_lacks_is_dropped_by_lighthouse_after_four_refusals() {
+    if std::env::var("MATRIX_FOLLOWING_CHAIN").as_deref() != Ok("1") {
+        println!("MATRIX_FOLLOWING_CHAIN is not 1; this one needs a node following the chain");
+        return;
+    }
+    let env = env();
+    let refusals = Arc::new(Refusals::default());
+    let mut sidecar = spawn_with(
+        &env,
+        &env.key,
+        env.listen.clone(),
+        env.p2p.clone(),
+        counting(&refusals),
+    );
+    let deadline = sidecar.connect().await;
+    let topic = sidecar
+        .subscription(deadline, |topic| topic.contains("/beacon_block/"))
+        .await;
+    let dropped_before = lookups_dropped().await;
+
+    let mut child = beacon_ssz(&env, "/eth/v2/beacon/blocks/head").await;
+    let slot = u64::from_le_bytes(child[100..108].try_into().unwrap()) + 1;
+    child[100..108].copy_from_slice(&slot.to_le_bytes());
+    child[116..148].copy_from_slice(&rand::random::<[u8; 32]>());
+    wait_for_slot(&env, slot).await;
+    sidecar
+        .publish(&topic, &child)
+        .await
+        .expect("the beacon node takes the block off the wire");
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let refused = refusals.blocks.load(Ordering::Relaxed);
+    println!("beacon_blocks_by_root refusals: {refused}");
+    assert_eq!(
+        refused, 4,
+        "v8.2.2 asks its only lookup peer four times and then drops the lookup"
+    );
+    if let Some(before) = dropped_before {
+        let after = lookups_dropped().await;
+        println!(
+            "sync_lookups_dropped_total{{reason=\"TooManyAttempts\"}}: {before} then {after:?}"
+        );
+        assert_eq!(after, Some(before + 1));
+    }
+}
+
+/// T-101 test 6: the `block` event fires for a block the node imported over RPC, not only for
+/// one that came by gossip, which is what lets the sidecar anchor its parent check on it.
+/// `import_block_update_metrics_and_events` registers the event on every import path
+/// (`beacon_chain/src/beacon_chain.rs:4803-4811`): gossip, RPC by root or by range, and the
+/// node's own proposal. `block_gossip` fires inside gossip verification only
+/// (`block_verification.rs:1068-1076`), so a `block` for a root no `block_gossip` named is an
+/// import that did not come by gossip. A node in step with the chain may see none inside the
+/// window; then the source is what says so, and this prints as much.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a Lighthouse beacon node following the chain: MATRIX_FOLLOWING_CHAIN=1"]
+async fn matrix_the_block_event_fires_for_an_rpc_imported_block() {
+    if std::env::var("MATRIX_FOLLOWING_CHAIN").as_deref() != Ok("1") {
+        println!("MATRIX_FOLLOWING_CHAIN is not 1; this one needs a node following the chain");
+        return;
+    }
+    let env = env();
+    let mut response = reqwest::get(format!(
+        "{}/eth/v1/events?topics=block,block_gossip",
+        env.http
+    ))
+    .await
+    .unwrap()
+    .error_for_status()
+    .unwrap();
+    let mut gossiped = HashSet::new();
+    let mut buf = Vec::new();
+    let deadline = Instant::now() + THREE_SLOTS;
+    while let Ok(Ok(Some(chunk))) = tokio::time::timeout_at(deadline.into(), response.chunk()).await
+    {
+        buf.extend_from_slice(&chunk);
+        while let Some(end) = buf.windows(2).position(|pair| pair == b"\n\n") {
+            let frame = String::from_utf8_lossy(&buf[..end]).into_owned();
+            buf.drain(..end + 2);
+            let name = frame.lines().find_map(|line| line.strip_prefix("event: "));
+            let data = frame.lines().find_map(|line| line.strip_prefix("data: "));
+            let root = data
+                .and_then(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+                .and_then(|data| data["block"].as_str().map(str::to_owned));
+            let (Some(name), Some(root)) = (name, root) else {
+                continue;
+            };
+            match name {
+                "block_gossip" => {
+                    gossiped.insert(root);
+                }
+                "block" if !gossiped.contains(&root) => {
+                    println!("block {root} imported with no block_gossip before it");
+                    return;
+                }
+                _ => {}
+            }
+        }
+    }
+    println!(
+        "every block imported inside {THREE_SLOTS:?} came by gossip; start the node a few slots \
+         behind the head to watch an RPC import register the block event \
+         (beacon_chain.rs:4803-4811)"
+    );
+}
+
+/// What the sidecar's responder was asked while the cache is off: the `refused` outcome of
+/// `by_root_requests_total`, for blocks.
+#[derive(Default)]
+struct Refusals {
+    blocks: AtomicUsize,
+}
+
+impl ByRootStats for Refusals {
+    fn by_root_request(&self, protocol: Protocol, outcome: ByRootOutcome) {
+        if matches!(protocol, Protocol::BlocksByRootV2) && outcome == ByRootOutcome::Refused {
+            self.blocks.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The shipped default, cache off and inject on, counted on `refusals`.
+fn counting(refusals: &Arc<Refusals>) -> ByRootCache {
+    ByRootCache::new(
+        SharedRecentLarge::new(RecentLarge::new(RECENT_TTL, RECENT_MAX_BYTES)),
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(true)),
+        refusals.clone(),
+    )
+}
+
+/// `GET {path}` on the beacon API as SSZ.
+async fn beacon_ssz(env: &Env, path: &str) -> Vec<u8> {
+    reqwest::Client::new()
+        .get(format!("{}{path}", env.http))
+        .header("Accept", "application/octet-stream")
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap()
+        .to_vec()
+}
+
+/// `GET {path}` on the beacon API as JSON.
+async fn beacon_json(env: &Env, path: &str) -> serde_json::Value {
+    reqwest::get(format!("{}{path}", env.http))
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+/// Sleeps until `slot` has begun on the node's clock, a little past the boundary so the block
+/// is inside the clock disparity the node allows rather than ahead of it.
+async fn wait_for_slot(env: &Env, slot: u64) {
+    let quoted = |value: &serde_json::Value| -> u64 { value.as_str().unwrap().parse().unwrap() };
+    let genesis_time =
+        quoted(&beacon_json(env, "/eth/v1/beacon/genesis").await["data"]["genesis_time"]);
+    let seconds_per_slot =
+        quoted(&beacon_json(env, "/eth/v1/config/spec").await["data"]["SECONDS_PER_SLOT"]);
+    let starts = UNIX_EPOCH
+        + Duration::from_secs(genesis_time + slot * seconds_per_slot)
+        + Duration::from_millis(200);
+    if let Ok(wait) = starts.duration_since(SystemTime::now()) {
+        tokio::time::sleep(wait).await;
+    }
+}
+
+/// The node's `sync_lookups_dropped_total{reason="TooManyAttempts"}`, from the metrics port
+/// `LIGHTHOUSE_METRICS` names as an origin; `None` when the variable is not set.
+async fn lookups_dropped() -> Option<u64> {
+    let origin = std::env::var("LIGHTHOUSE_METRICS").ok()?;
+    let text = reqwest::get(format!("{origin}/metrics"))
+        .await
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+    let series = "sync_lookups_dropped_total{reason=\"TooManyAttempts\"} ";
+    let value = text
+        .lines()
+        .find_map(|line| line.strip_prefix(series))
+        .map_or(0.0, |value| value.trim().parse::<f64>().unwrap_or(0.0));
+    Some(value as u64)
 }

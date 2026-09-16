@@ -270,9 +270,9 @@ impl Watch {
     }
 }
 
-/// The seven Lighthouse behaviours the design leans on that no specification promises (CL-N2),
-/// each with the test that fails by name when a release changes it.
-const ASSUMPTIONS: [(&str, &str); 7] = [
+/// The eight Lighthouse behaviours the design leans on, or works around, that no specification
+/// promises (CL-N2), each with the test that fails by name when a release changes it.
+const ASSUMPTIONS: [(&str, &str); 8] = [
     (
         "A trusted peer is admitted whenever the beacon node is under its inbound cap, is dialled by the beacon node through `--libp2p-addresses` at startup and through `add_peer` on demand under the outbound cap, and is never pruned once connected (MD-01)",
         "under the cap and never pruned: `matrix_trusted_peer_is_admitted_under_the_inbound_cap_and_never_pruned` (matrix); the beacon node dialling a sidecar it has no inbound room for: `matrix_bn_dials_the_listening_sidecar_when_its_inbound_cap_is_full` (matrix); the startup flag: `matrix_bn_startup_flags_dial_the_listening_sidecar` (matrix)",
@@ -301,11 +301,15 @@ const ASSUMPTIONS: [(&str, &str); 7] = [
         "The event stream fires `block_gossip` inside gossip verification, after the proposer-signature and duplicate checks, and `data_column_sidecar` after KZG verification for a column from any of its four sources: gossip, partial-message merges, the execution layer's `getBlobs` and RPC by root (MD-06)",
         "`matrix_event_stream_reports_accepted_blocks_and_verified_columns` (matrix), which pins that both events reach the custody tracker on a running node; which of the four sources a column came from is not in the payload and is not asserted",
     ),
+    (
+        "A parent lookup for a gossip block is seeded with the block's sender and nobody else, a `ResourceUnavailable` answer is re-requested from that peer at once, and the fourth failure drops the lookup and the block. Affected: v8.2.2, the whole supported range. `sigp/lighthouse#9542`, on `unstable` since 2026-06-26 and in no release, de-prioritises failed lookup peers but still picks from that set, so it changes nothing here. The sidecar works around it by keeping back a block whose parent its node has not imported (T-101, D42); a release that leaves trusted peers out of a lookup's peers, or widens the set once they have all failed, retires that",
+        "`matrix_a_block_whose_parent_the_node_lacks_is_dropped_by_lighthouse_after_four_refusals` (matrix, `MATRIX_FOLLOWING_CHAIN=1`), which counts the four refusals on the sidecar and the dropped lookup on the node; `a_block_whose_parent_the_node_lacks_is_dropped_by_lighthouse_after_four_refusals` plays the node's side against `FakeBn` and pins that the sidecar no longer offers such a block",
+    ),
 ];
 
 /// The Lighthouse section of `COMPATIBILITY.md`, so the file follows the constants instead
-/// of drifting from them: the range, the pinned tag, the date, the six assumptions and the
-/// note on other clients. A test compares the file with this and regenerates it on request.
+/// of drifting from them: the range, the pinned tag, the date, the assumptions and the note on
+/// other clients. A test compares the file with this and regenerates it on request.
 pub fn render_compatibility_section() -> String {
     let (start, end) = (SUPPORTED.start(), SUPPORTED.end());
     let range = if start == end {
@@ -321,10 +325,11 @@ pub fn render_compatibility_section() -> String {
          through the `[patch]` table. A beacon node above the range is reported `untested` \
          and one below it `unsupported`, on every connect, in the log and in \
          `overlay_bn_compat{{state}}`; the sidecar keeps running either way.\n\n\
-         The design leans on seven Lighthouse behaviours that no specification promises. Each \
-         has a named test, so a release that changes one fails the matrix by name instead of \
-         degrading the fleet quietly. Tests marked matrix need a real beacon node and run in \
-         the nightly matrix; the others run on every pull request against `FakeBn`.\n\n\
+         The design leans on, or works around, eight Lighthouse behaviours that no \
+         specification promises. Each has a named test, so a release that changes one fails \
+         the matrix by name instead of degrading the fleet quietly. Tests marked matrix need a \
+         real beacon node and run in the nightly matrix; the others run on every pull request \
+         against `FakeBn`.\n\n\
          | Assumption | Test |\n|---|---|\n"
     );
     for (assumption, test) in ASSUMPTIONS {
