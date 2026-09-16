@@ -59,9 +59,14 @@ pub const MAX_PAYLOAD_BYTES: usize = 10_485_760;
 /// figure to tune.
 pub const MAX_TOPIC_BYTES: usize = 256;
 
-/// The most indices one `REPAIR_REQ` may ask for. A message is at most `MAX_PAYLOAD_BYTES` of
-/// 2 KiB chunks, so a request past this is asking for something that cannot exist.
-pub const MAX_MISSING_INDICES: usize = 4096;
+/// The most indices one `REPAIR_REQ` may ask for: the count field's own range. A payload of
+/// `MAX_PAYLOAD_BYTES` over the smallest `chunk_bytes` that splits it is tens of thousands of
+/// chunks, and a requester holding one of them asks for all the rest in one frame, so nothing
+/// short of the field's range is safe: 4096, the earlier figure, refused any repair of a message
+/// past 8 MiB at 2 KiB chunks or past 2 MiB at 512, both of which `Config::validate` accepts
+/// (T-105). A lying count costs a responder a 128 KiB allocation inside a frame the stream cap
+/// already bounds, and it answers `NotFound` to more indices than the split has.
+pub const MAX_MISSING_INDICES: usize = u16::MAX as usize;
 
 /// The most topics one HELLO may announce. A beacon node subscribes to a few hundred topics
 /// across a fork transition; this leaves room for several forks at once.
@@ -543,9 +548,6 @@ impl Frame {
                 0 => {
                     let msg_id = MessageId(read_array(buf)?);
                     let count = read_u16(buf)? as usize;
-                    if count > MAX_MISSING_INDICES {
-                        return Err(DecodeError::OverLimit("missing"));
-                    }
                     let mut missing = Vec::with_capacity(count);
                     for _ in 0..count {
                         missing.push(read_u16(buf)?);

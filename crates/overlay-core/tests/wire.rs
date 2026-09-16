@@ -127,10 +127,7 @@ fn frame() -> impl Strategy<Value = Frame> {
             chunk(),
         )
             .prop_map(|(flags, chunk)| Frame::Chunk { flags, chunk }),
-        (
-            msg_id(),
-            prop::collection::vec(any::<u16>(), 0..=MAX_MISSING_INDICES),
-        )
+        (msg_id(), prop::collection::vec(any::<u16>(), 0..=64),)
             .prop_map(|(msg_id, missing)| Frame::RepairReq(RepairReq::Missing { msg_id, missing })),
         (any::<[u8; 32]>(), any::<u8>()).prop_map(|(block_root, index)| Frame::RepairReq(
             RepairReq::Column { block_root, index }
@@ -581,7 +578,7 @@ fn flag_sets_report_which_bits_are_set() {
 }
 
 #[test]
-fn counts_past_the_hello_and_repair_limits_are_over_limit() {
+fn a_hello_topic_count_past_the_limit_is_over_limit() {
     assert_eq!(
         Frame::decode(&mut hello_of(MAX_TOPIC_SNAPSHOT_ENTRIES + 1)),
         Err(DecodeError::OverLimit("topics"))
@@ -591,15 +588,15 @@ fn counts_past_the_hello_and_repair_limits_are_over_limit() {
         Err(DecodeError::Truncated),
         "a count at the limit is read, not refused"
     );
+}
 
-    assert_eq!(
-        Frame::decode(&mut repair_req_of(MAX_MISSING_INDICES + 1)),
-        Err(DecodeError::OverLimit("missing"))
-    );
+/// The limit is the count field's own range, so no frame can name a count past it; whatever
+/// the field says, the decoder reads.
+#[test]
+fn a_repair_count_at_the_field_maximum_is_read_not_refused() {
     assert_eq!(
         Frame::decode(&mut repair_req_of(MAX_MISSING_INDICES)),
-        Err(DecodeError::Truncated),
-        "a count at the limit is read, not refused"
+        Err(DecodeError::Truncated)
     );
 }
 
