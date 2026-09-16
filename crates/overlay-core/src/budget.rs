@@ -252,6 +252,9 @@ impl MemoryBudget {
         let receive_window = usable(memory_max)
             .saturating_sub(rows.iter().map(|(_, bytes)| bytes).sum())
             / roster_len.max(1) as u64;
+        // Pinned one crate over: overlay-transport's endpoint test
+        // receive_window_shrinks_with_roster_size_and_never_below_the_stream_window asserts the
+        // floor at 100 000 hosts, where the remainder is nothing; no test here reaches it.
         let receive_window = receive_window.max(STREAM_RECEIVE_WINDOW);
         rows.push(("quic_receive_windows", peers * receive_window));
 

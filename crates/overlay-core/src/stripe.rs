@@ -52,6 +52,10 @@ pub fn assign(msg_id: &MessageId, hosts_sorted: &[Hostname], n_chunks: usize) ->
 fn rotation(msg_id: &MessageId) -> u64 {
     let mut head = [0u8; 8];
     head.copy_from_slice(&msg_id.0[..8]);
+    // Pinned one crate over: overlay-transport's router tests
+    // route_large_sends_a_host_without_the_striping_bit_the_whole_message and
+    // route_large_in_region_direct_sends_the_own_region_whole_and_stripes_the_others stripe over
+    // two hosts, where the byte order picks the first host; nothing in this crate would notice.
     u64::from_le_bytes(head)
 }
 
