@@ -68,10 +68,11 @@ The `log` section sets the level and format of the one output stream, events inc
 [events.md](events.md) has the fields, the queries, and why `tracing-journald` is an option
 rather than the default.
 
-`bn.by_root_cache` trades memory for latency and is off. On, the sidecar answers the node's block
-lookups from its store, saving a public round trip; columns are asked of custody peers only, which
-the sidecar is not. Lighthouse picks the peer at random; `overlay_by_root_requests_total` says
-whether it pays. Each slot costs 5.2 MiB of receive window ([performance.md](performance.md)).
+`bn.by_root_cache` trades memory for latency and is off. On, it answers the node's block lookups
+from its store; columns are asked of custody peers, which the sidecar is not. Lighthouse asks the
+child's sender, so only a block the sidecar delivered lands here; `overlay_by_root_requests_total`
+counts hits, misses and refusals. Each slot costs 5.2 MiB of receive window
+([performance.md](performance.md)).
 
 ## Every key
 
