@@ -244,6 +244,7 @@ pub struct CountingStats {
     queue_drops: Mutex<HashMap<(Hostname, Class, DropReason), u64>>,
     stale_dropped: Mutex<HashMap<StaleReason, u64>>,
     repair_requests: Mutex<HashMap<(RepairForm, RepairOutcome), u64>>,
+    parent_unknown: AtomicU64,
 }
 
 impl CountingStats {
@@ -341,6 +342,11 @@ impl CountingStats {
             .get(&class)
             .copied()
             .unwrap_or_default()
+    }
+
+    /// `publish_suppressed_total{class="large", reason="parent_unknown"}` (T-101).
+    pub fn parent_unknown(&self) -> u64 {
+        self.parent_unknown.load(Ordering::Relaxed)
     }
 
     /// `fanout_suppressed_total{peer, kind}`.
@@ -583,6 +589,10 @@ impl ReceiveStats for CountingStats {
 
     fn relay_same_region(&self, peer: &Hostname) {
         add(&self.relay_same_region, peer.clone());
+    }
+
+    fn parent_unknown(&self) {
+        self.parent_unknown.fetch_add(1, Ordering::Relaxed);
     }
 }
 

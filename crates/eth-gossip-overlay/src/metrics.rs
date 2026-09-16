@@ -253,6 +253,9 @@ pub const OUTCOME_MISS: &str = "miss";
 pub const REASON_CAPACITY: &str = "capacity";
 /// The `inject: false` kill switch.
 pub const REASON_INJECT_OFF: &str = "inject_off";
+/// A block whose parent the beacon node has not imported, which the sidecar keeps from it so
+/// the node's parent lookup goes to a public peer that has it (T-101, D42).
+pub const REASON_PARENT_UNKNOWN: &str = "parent_unknown";
 /// Control events share the lane counter under a class of their own.
 pub const CLASS_CONTROL: &str = "control";
 
@@ -998,6 +1001,12 @@ impl ReceiveStats for Metrics {
     fn repair_request(&self, form: RepairForm, outcome: RepairOutcome) {
         self.repair_requests
             .with_label_values(&[form.as_str(), outcome.as_str()])
+            .inc();
+    }
+
+    fn parent_unknown(&self) {
+        self.publish_suppressed
+            .with_label_values(&[class_label(Class::Large), REASON_PARENT_UNKNOWN])
             .inc();
     }
 }

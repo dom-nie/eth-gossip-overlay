@@ -167,6 +167,12 @@ pub trait ReceiveStats: ManagerStats + TrafficStats {
     /// left to send (§12, D24). `rate_limited` is the one outcome the answering host counts, for
     /// a peer asking faster than [`Deps::repair_limit`] allows (R2.3).
     fn repair_request(&self, form: RepairForm, outcome: RepairOutcome);
+
+    /// `publish_suppressed_total{class="large", reason="parent_unknown"}`: a block whose parent
+    /// this host's beacon node has not imported, kept from it rather than offered (T-101, D42).
+    /// One per beacon node restart on an injecting host is normal; a steady climb is a node
+    /// that has stopped importing.
+    fn parent_unknown(&self);
 }
 
 impl ReceiveStats for () {
@@ -182,6 +188,7 @@ impl ReceiveStats for () {
     fn parity_used(&self) {}
     fn reconstructed(&self, _: Class, _: Duration) {}
     fn repair_request(&self, _: RepairForm, _: RepairOutcome) {}
+    fn parent_unknown(&self) {}
 }
 
 /// What a payload's arrival owes.
@@ -3724,6 +3731,70 @@ mod tests {
         })
         .await;
         assert_eq!(cluster.header_reads(1), 1);
+    }
+
+    /// A `SignedBeaconBlock` as far as the receive path reads one: the offset to `message`, a
+    /// 96-byte signature, `slot`, `proposer_index` and then `parent_root`, with `body` behind
+    /// them so two blocks under one parent still differ. Compressed, as the wire carries it.
+    fn signed_block(parent_root: [u8; 32], body: &[u8]) -> Vec<u8> {
+        let mut ssz = 100u32.to_le_bytes().to_vec();
+        ssz.extend_from_slice(&[0; 96 + 8 + 8]);
+        ssz.extend_from_slice(&parent_root);
+        ssz.extend_from_slice(body);
+        payload(&ssz)
+    }
+
+    /// T-101 test 2 (D42): a block whose parent this host's beacon node has not imported is not
+    /// offered to it, on either overlay path. Offered, the node would ask this sidecar, and
+    /// only this sidecar, for the parent, and drop the block after four refusals. Kept back,
+    /// the node takes the block from a public peer that has the parent, which is the
+    /// no-overlay baseline §9 names. The arrival is still filed and counted: the overlay did
+    /// reach this host first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_block_whose_parent_the_node_has_not_imported_is_not_published() {
+        let block = topic("beacon_block");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        let whole_block = signed_block([0x11; 32], b"a block sent whole");
+        let striped_block = signed_block([0x22; 32], &incompressible(4096));
+        let (_, params, frames) = striped(0, &block, &striped_block, 512);
+
+        send(&peer, &[whole(0, &block, &whole_block)]).await;
+        send(&peer, &frames[..usize::from(params.k)]).await;
+
+        eventually("both blocks to be kept from the beacon node", || {
+            cluster.stats(1).parent_unknown() == 2
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert!(cluster.published(1).is_empty());
+        assert_eq!(cluster.stats(1).first_seen(Class::Large), 2);
+    }
+
+    /// T-101 test 3, the honest path: the beacon node imported the parent a slot ago, so the
+    /// check is one map probe and the block is queued as it always was, with nothing awaited
+    /// between the seen-cache insert and the enqueue.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_block_whose_parent_the_node_imported_is_published_unchanged() {
+        let block = topic("beacon_block");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        let parent = [0x33; 32];
+        // The beacon node's `block` event for the parent, as the event stream files it.
+        cluster.arrivals(1).imported(4_241, parent);
+        let child = signed_block(parent, b"a child of a block the node imported");
+        let msg_id = msgid::compute(&block.to_string(), &child, wire::MAX_PAYLOAD_BYTES).id;
+
+        send(&peer, &[whole(0, &block, &child)]).await;
+
+        eventually("the block to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        let published = cluster.published(1);
+        assert_eq!(published[0].id, msg_id);
+        assert_eq!(published[0].payload, child);
+        assert_eq!(published[0].class, Class::Large);
+        assert_eq!(cluster.held_when_published(1), vec![true]);
+        assert_eq!(cluster.stats(1).parent_unknown(), 0);
     }
 
     /// DX-N1 at the third ingress site: a host reassembles a message for a topic its own beacon

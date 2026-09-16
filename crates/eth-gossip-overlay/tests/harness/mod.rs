@@ -75,13 +75,13 @@ use eth_gossip_overlay::app::App;
 use eth_gossip_overlay::logging::{self, LogHandle};
 use eth_gossip_overlay::metrics::{LABEL_DIRECTION, LABEL_PEER, MESSAGES_TOTAL};
 use overlay_bn::node_key::NodeKey;
-use overlay_bn::testutil::{FakeBn, FakeBnEvent};
+use overlay_bn::testutil::{FakeBn, FakeBnEvent, RpcAnswer, hash256};
 use overlay_core::config::{Config, LargeClass, LargeFanout, Log, LogFormat, LogLevel, Overlay};
 use overlay_core::relay;
 use overlay_core::roster::Hostname;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpStream, UnixStream};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
 /// Long enough for a fleet to pair and deliver on a loaded machine, short enough that a
@@ -876,12 +876,14 @@ pub struct Bn {
     subscribed: Arc<Mutex<Vec<String>>>,
     connects: Arc<AtomicUsize>,
     disconnects: Arc<AtomicUsize>,
+    answers: tokio::sync::Mutex<mpsc::Receiver<RpcAnswer>>,
     drains: Vec<JoinHandle<()>>,
 }
 
 impl Bn {
     fn new(mut fake: FakeBn) -> Self {
         let (received, subscribed) = (Arc::default(), Arc::<Mutex<Vec<String>>>::default());
+        let answers = tokio::sync::Mutex::new(fake.responses());
         let mut messages = fake.received();
         let sink: Arc<Mutex<Vec<Message>>> = Arc::clone(&received);
         let reading = tokio::spawn(async move {
@@ -916,6 +918,7 @@ impl Bn {
             subscribed,
             connects,
             disconnects,
+            answers,
             drains: vec![reading, watching],
         }
     }
@@ -928,6 +931,17 @@ impl Bn {
             .publish(topic, payload)
             .await
             .unwrap_or_else(|err| panic!("{topic}: {err}"));
+    }
+
+    /// Asks the sidecar for the block under `root` on `beacon_blocks_by_root/2`, the request a
+    /// missing-parent lookup makes, and returns what came back (T-101).
+    pub async fn lookup_block(&self, root: [u8; 32]) -> RpcAnswer {
+        let mut answers = self.answers.lock().await;
+        self.fake.request_blocks_by_root(&[hash256(root)]).await;
+        tokio::time::timeout(WAIT, answers.recv())
+            .await
+            .expect("the sidecar never answered the by-root request")
+            .expect("the fake's answer channel closed")
     }
 
     /// The same, for a probe that is allowed to find no subscriber yet.

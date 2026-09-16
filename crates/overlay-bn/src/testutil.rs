@@ -1018,6 +1018,12 @@ impl Fixture {
     }
 }
 
+/// A root as `types` spells it, for a test crate that names roots as bytes and links no
+/// consensus type of its own.
+pub fn hash256(root: [u8; 32]) -> Hash256 {
+    Hash256::from_slice(&root)
+}
+
 /// A BLS signature in its infinity form, the one 96-byte value `types` decodes without a curve
 /// point behind it. Nothing here verifies a signature; the fixtures only need the field present.
 fn infinity_signature() -> Vec<u8> {
