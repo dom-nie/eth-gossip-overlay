@@ -495,9 +495,13 @@ pub(crate) mod tests {
             assert_eq!(offset_of!(libc::epoll_params, busy_poll_budget), 4);
             assert_eq!(offset_of!(libc::epoll_params, prefer_busy_poll), 6);
             // The request number encodes the direction and the argument's size, so a struct
-            // that grew would send the kernel a number it does not answer to.
-            assert_eq!(libc::EPIOCSPARAMS as u64, 0x4008_8a01);
-            assert_eq!(libc::EPIOCGPARAMS as u64, 0x8008_8a02);
+            // that grew would send the kernel a number it does not answer to. The literals
+            // take libc's own `Ioctl` type rather than a cast: on GNU targets that is
+            // already `u64`, and clippy on Linux refuses a cast to the same type.
+            let set_params: libc::Ioctl = 0x4008_8a01;
+            let get_params: libc::Ioctl = 0x8008_8a02;
+            assert_eq!(libc::EPIOCSPARAMS, set_params);
+            assert_eq!(libc::EPIOCGPARAMS, get_params);
         }
     }
 
