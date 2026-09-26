@@ -158,9 +158,14 @@ jobs:
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
           "$HOME/.cargo/bin/rustup" toolchain install
 
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      # cargo-deny-action is a Docker action, and ubuntu-slim is a container with no Docker
+      # daemon to build it on.
+      - uses: taiki-e/install-action@v2
         with:
-          command: check licenses advisories bans sources
+          tool: cargo-deny@0.20.2
+
+      - name: cargo deny
+        run: cargo deny check licenses advisories bans sources
 
   links:
     name: markdown links
