@@ -20,7 +20,7 @@ use crate::spec::SpecSnapshot;
 pub const PINNED: Version = Version {
     major: 8,
     minor: 2,
-    patch: 2,
+    patch: 3,
 };
 
 /// Exactly the versions the compatibility matrix has passed, so the range grows only with a
