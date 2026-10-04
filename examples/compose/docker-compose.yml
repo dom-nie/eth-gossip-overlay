@@ -28,7 +28,7 @@ x-sidecar: &sidecar
   restart: unless-stopped
 
 x-beacon-node: &beacon-node
-  image: sigp/lighthouse:${LIGHTHOUSE_VERSION:-v8.2.2}
+  image: sigp/lighthouse:${LIGHTHOUSE_VERSION:-v8.2.3}
   entrypoint: ["/bin/sh", "-euc"]
   command:
     - |

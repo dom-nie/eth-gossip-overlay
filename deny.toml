@@ -35,8 +35,8 @@ exceptions = [
   { crate = "tiny-keccak", allow = ["CC0-1.0"] },
 ]
 # Lighthouse's internal crates carry no `license` field. They inherit the Apache-2.0 LICENSE at
-# the root of the repository, at the rev the lock pins for v8.2.2,
-# e423a66763bb1bd780492d635123f208d80c3538. The list is what `cargo deny check licenses` named;
+# the root of the repository, at the rev the lock pins for v8.2.3,
+# 6db6ae9382b7d6f5bd1e0ca0d349bc0dc94adba2. The list is what `cargo deny check licenses` named;
 # a Lighthouse bump that pulls in another one shows up as a new unlicensed error here.
 clarify = [
   { crate = "bls", expression = "Apache-2.0", license-files = [] },

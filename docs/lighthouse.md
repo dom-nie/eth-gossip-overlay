@@ -74,7 +74,7 @@ message itself, so a public copy of the same block or column that reaches the no
 sidecar is publishing is not pushed back over the localhost socket. The node honouring that from
 an explicit peer is one of the assumptions listed in [COMPATIBILITY.md](../COMPATIBILITY.md), with
 the test that checks it named beside it. The minimum version is the bottom of the supported range
-in that file, v8.2.2 today, because that is the only version the assumption has been run against;
+in that file, v8.2.2 today, because that is the oldest version the assumption has been run against;
 nothing is claimed for releases below it. `bn.idontwant_on_publish: false` turns the sidecar's
 half of it off.
 

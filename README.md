@@ -36,7 +36,7 @@ Rust is pinned by `rust-toolchain.toml`; rustup picks it up on the first `cargo`
 cargo build --release          # binaries in target/release/{eth-gossip-overlay,eth-gossip-overlayctl}
 ```
 
-`overlay-bn` links `libp2p` from Lighthouse's fork (`sigp/rust-libp2p`) at the revision Lighthouse **v8.2.2** pins, through the `[patch]` table in the root `Cargo.toml`. Bumping Lighthouse means updating that tag, the rev next to it, and rerunning T-018's compatibility matrix.
+`overlay-bn` links `libp2p` from Lighthouse's fork (`sigp/rust-libp2p`) at the revision Lighthouse **v8.2.3** pins, through the `[patch]` table in the root `Cargo.toml`. Bumping Lighthouse means updating that tag, the rev next to it, and rerunning T-018's compatibility matrix.
 
 ## Container
 

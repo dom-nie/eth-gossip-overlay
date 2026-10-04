@@ -26,10 +26,14 @@ pub const PINNED: Version = Version {
 /// Exactly the versions the compatibility matrix has passed, so the range grows only with a
 /// matrix run, never by reasoning that a release "should" still work. [`LAST_VERIFIED`] is
 /// the date of that run and is updated with the range.
-pub const SUPPORTED: RangeInclusive<Version> = PINNED..=PINNED;
+pub const SUPPORTED: RangeInclusive<Version> = Version {
+    major: 8,
+    minor: 2,
+    patch: 2,
+}..=PINNED;
 
 /// When the matrix last passed on every version in [`SUPPORTED`].
-pub const LAST_VERIFIED: &str = "2026-09-06";
+pub const LAST_VERIFIED: &str = "2026-10-05";
 
 /// The `state` label values of `overlay_bn_compat`. T-012 named `size_mismatch` without a
 /// constant; these are the shared definitions the gauge, the watch and T-041 use.
@@ -302,7 +306,7 @@ const ASSUMPTIONS: [(&str, &str); 8] = [
         "`matrix_event_stream_reports_accepted_blocks_and_verified_columns` (matrix), which pins that both events reach the custody tracker on a running node; which of the four sources a column came from is not in the payload and is not asserted",
     ),
     (
-        "A parent lookup for a gossip block is seeded with the block's sender and nobody else, a `ResourceUnavailable` answer is re-requested from that peer at once, and the fourth failure drops the lookup and the block. Affected: v8.2.2, the whole supported range. `sigp/lighthouse#9542`, on `unstable` since 2026-06-26 and in no release, de-prioritises failed lookup peers but still picks from that set, so it changes nothing here. The sidecar works around it by keeping back a block whose parent its node has not imported (T-101, D42); a release that leaves trusted peers out of a lookup's peers, or widens the set once they have all failed, retires that",
+        "A parent lookup for a gossip block is seeded with the block's sender and nobody else, a `ResourceUnavailable` answer is re-requested from that peer at once, and the fourth failure drops the lookup and the block. Affected: v8.2.2 through v8.2.3, the whole supported range. `sigp/lighthouse#9542`, on `unstable` since 2026-06-26 and in no release, de-prioritises failed lookup peers but still picks from that set, so it changes nothing here. The sidecar works around it by keeping back a block whose parent its node has not imported (T-101, D42); a release that leaves trusted peers out of a lookup's peers, or widens the set once they have all failed, retires that",
         "`matrix_a_block_whose_parent_the_node_lacks_is_dropped_by_lighthouse_after_four_refusals` (matrix, `MATRIX_FOLLOWING_CHAIN=1`), which counts the four refusals on the sidecar and the dropped lookup on the node; `a_block_whose_parent_the_node_lacks_is_dropped_by_lighthouse_after_four_refusals` plays the node's side against `FakeBn` and pins that the sidecar no longer offers such a block",
     ),
 ];
@@ -342,7 +346,7 @@ pub fn render_compatibility_section() -> String {
     out
 }
 
-/// [`SUPPORTED`] as `8.2.2..=8.2.2`, for the logs.
+/// [`SUPPORTED`] as `8.2.2..=8.2.3`, for the logs.
 struct Supported;
 
 impl fmt::Display for Supported {
