@@ -1978,7 +1978,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "minijinja",
- "nix 0.29.0",
+ "nix 0.31.3",
  "overlay-bn",
  "overlay-core",
  "overlay-transport",
@@ -4224,19 +4224,6 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.29.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
-dependencies = [
- "bitflags 2.13.2",
- "cfg-if",
- "cfg_aliases",
- "libc",
- "memoffset",
-]
-
-[[package]]
-name = "nix"
 version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
@@ -4245,6 +4232,19 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+]
+
+[[package]]
+name = "nix"
+version = "0.31.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
+dependencies = [
+ "bitflags 2.13.2",
+ "cfg-if",
+ "cfg_aliases",
+ "libc",
+ "memoffset",
 ]
 
 [[package]]
@@ -4438,7 +4438,7 @@ dependencies = [
  "ed25519-dalek 3.0.0",
  "libc",
  "mutants",
- "nix 0.29.0",
+ "nix 0.31.3",
  "overlay-core",
  "quinn",
  "rand 0.10.3",

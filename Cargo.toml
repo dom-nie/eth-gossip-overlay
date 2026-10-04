@@ -84,7 +84,7 @@ proptest = "1"
 # a real SIGHUP at a test process, which is the only way to prove the signal loop is wired to
 # the handler. `sched` is `sched_setaffinity` for T-091's I/O thread, which is why
 # overlay-transport takes this crate on Linux only.
-nix = { version = "0.29", features = ["signal", "sched", "socket", "time", "net"] }
+nix = { version = "0.31", features = ["signal", "sched", "socket", "time", "net"] }
 # The no-op #[mutants::skip] attribute cargo-mutants reads (T-009). A dev-dependency, not a
 # normal one: every use is inside cfg_attr(test, ...), so nothing but a test build sees it.
 mutants = "0.0.4"
