@@ -28,6 +28,8 @@ jobs:
     # on: 2.31 covers Debian 11, Ubuntu 20.04 and RHEL 9 and everything after them. The runner
     # images themselves are far newer than that, which is why the build happens in here and not
     # on them; a native runner per architecture is what keeps aarch64 off an emulator.
+    # 1.98 is the last Rust the official images publish on bullseye. Only the glibc and rustup
+    # are used from it: the step below installs the toolchain rust-toolchain.toml pins.
     container: rust:1.98-bullseye
     strategy:
       fail-fast: false

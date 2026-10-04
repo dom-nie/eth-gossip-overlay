@@ -2,7 +2,7 @@
 
 ## Rust
 
-The supported Rust is the latest stable minus two minor versions. `rust-toolchain.toml` pins the exact toolchain the project builds with, currently 1.98.1, and rustup installs it on the first `cargo` call. Nothing older than the pinned toolchain has been tested, so the crates carry no `rust-version` field; one arrives together with a CI job that builds on the oldest supported version.
+The supported Rust is the latest stable minus two minor versions. `rust-toolchain.toml` pins the exact toolchain the project builds with, currently 1.99.0, and rustup installs it on the first `cargo` call. Nothing older than the pinned toolchain has been tested, so the crates carry no `rust-version` field; one arrives together with a CI job that builds on the oldest supported version.
 
 ## Lighthouse
 

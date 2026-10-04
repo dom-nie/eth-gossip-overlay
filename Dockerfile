@@ -7,7 +7,7 @@
 # Run it with --network host. QUIC through a port mapping adds a hop of latency and hides path
 # MTU discovery from the endpoint; examples/compose/README.md has the detail.
 
-FROM rust:1.98-bookworm AS builder
+FROM rust:1.99-bookworm AS builder
 
 # The state directory the runtime stage takes as it is. It is made here because the runtime has
 # no shell to make one there.
