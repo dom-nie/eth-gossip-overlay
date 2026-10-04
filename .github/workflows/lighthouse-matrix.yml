@@ -30,7 +30,7 @@ jobs:
       matrix:
         version: ["v8.2.2", "v8.2.3"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install the toolchain pinned in rust-toolchain.toml
         run: |

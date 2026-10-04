@@ -17,7 +17,7 @@ jobs:
     name: N=30
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install the toolchain pinned in rust-toolchain.toml
         run: |
@@ -37,7 +37,7 @@ jobs:
     name: compose demo with beacon nodes
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The pull-request job starts the sidecars alone, which proves the mesh. This one starts
       # the demo a newcomer starts: three Lighthouse nodes checkpoint syncing a testnet, and
@@ -51,7 +51,7 @@ jobs:
     name: alerts fire in the compose demo
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # T-052 check 6. Breaks the demo in two ways the rules are meant to notice and waits for
       # each alert to go pending: one sidecar stopped, and beacon nodes started without the

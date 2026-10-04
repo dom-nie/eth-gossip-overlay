@@ -17,7 +17,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install the toolchain pinned in rust-toolchain.toml
         run: |
@@ -53,7 +53,7 @@ jobs:
     name: deployment examples
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install the toolchain pinned in rust-toolchain.toml
         run: rustup toolchain install
@@ -82,7 +82,7 @@ jobs:
     name: alert rules, dashboard and rollout guide
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install the toolchain pinned in rust-toolchain.toml
         run: rustup toolchain install
@@ -106,7 +106,7 @@ jobs:
     steps:
       # Not shallow: build.rs reads the commit date out of .git for SOURCE_DATE_EPOCH, which is
       # what makes two builds of one commit produce one binary.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Builds the image and runs T-047's checks against it: check-config on the shipped
       # examples, a non-root user, the size budget, a node key that survives its container, and
@@ -120,7 +120,7 @@ jobs:
     runs-on: ubuntu-slim
     steps:
       # The whole history, because the check is a diff against the base commit.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -142,9 +142,9 @@ jobs:
     runs-on: ubuntu-slim
     timeout-minutes: 14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -171,7 +171,7 @@ jobs:
     name: markdown links
     runs-on: ubuntu-slim
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: lycheeverse/lychee-action@v2
         with:
           args: --offline --no-progress --exclude-path target '**/*.md'

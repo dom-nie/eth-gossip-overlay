@@ -20,7 +20,7 @@ jobs:
       matrix:
         crate: [overlay-core, overlay-transport]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install the toolchain pinned in rust-toolchain.toml
         run: |
@@ -39,7 +39,7 @@ jobs:
       - name: Mutants in ${{ matrix.crate }}
         run: cargo mutants --in-place -p ${{ matrix.crate }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: mutants-${{ matrix.crate }}
