@@ -269,7 +269,7 @@ pub fn sighup_loop(handle: ReloadHandle) -> std::io::Result<impl Future<Output =
     })
 }
 
-/// How often the roster file's modification time is read (D26). Ten seconds is the bound
+/// How often the roster file's [`Stamp`] is read (D26). Ten seconds is the bound
 /// `docs/configuration.md` promises a discovery tool, and a constant rather than a key because
 /// no fleet has a reason to want another number: inotify would notice sooner, at the cost of a
 /// Linux-only dependency for a saving a membership change does not need.
@@ -282,21 +282,21 @@ pub const ROSTER_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// tool that wrote half a file and a fleet that loses half its hosts. The reload it runs is the
 /// one SIGHUP runs, so a roster picked up here drops no connection either.
 ///
-/// The modification time is remembered before the file is read rather than after, so a writer
-/// that is not finished cannot be applied and then forgotten: a half-written file fails to parse
-/// and leaves the roster alone, and the write that finishes it moves the time again, so the next
-/// poll reads the whole file. Writing to a temp file and renaming it, which
-/// `docs/configuration.md` asks for, spares that poll.
+/// A change is any move in the file's [`Stamp`], which is remembered before the file is read
+/// rather than after, so a writer that is not finished cannot be applied and then forgotten: a
+/// half-written file fails to parse and leaves the roster alone, and the write that finishes it
+/// moves the stamp again, so the next poll reads the whole file. Writing to a temp file and
+/// renaming it, which `docs/configuration.md` asks for, spares that poll.
 pub struct RosterWatcher {
     path: PathBuf,
     handle: ReloadHandle,
-    seen: Option<SystemTime>,
+    seen: Option<Stamp>,
 }
 
 impl RosterWatcher {
     /// Watches `path`, taking what it says now as the roster already in force.
     pub fn new(path: PathBuf, handle: ReloadHandle) -> Self {
-        let seen = mtime(&path);
+        let seen = stamp(&path);
         Self { path, handle, seen }
     }
 
@@ -313,23 +313,31 @@ impl RosterWatcher {
 
     /// One poll, and whether there is any point in another.
     async fn poll(&mut self) -> bool {
-        let Some(mtime) = mtime(&self.path) else {
+        let Some(stamp) = stamp(&self.path) else {
             return true;
         };
-        if self.seen == Some(mtime) {
+        if self.seen == Some(stamp) {
             return true;
         }
-        self.seen = Some(mtime);
+        self.seen = Some(stamp);
         self.handle.reload(Trigger::Automatic).await.is_some()
     }
 }
 
-/// The file's modification time, or nothing when it cannot be read. A roster that is missing for
-/// a moment is one the sidecar keeps running on, so the failure is a line an operator can find
-/// afterwards and the next poll tries again.
-fn mtime(path: &Path) -> Option<SystemTime> {
-    match std::fs::metadata(path).and_then(|meta| meta.modified()) {
-        Ok(mtime) => Some(mtime),
+/// What a poll compares: modification time, length and inode. The time alone is not enough on
+/// Linux, which stamps files from a clock that moves once per scheduler tick, so two writes inside
+/// one tick leave the same time; the length or the inode a rename brings almost always moves.
+// ponytail: an in-place rewrite of the same length inside one tick still goes unseen; compare
+// the file's bytes if that ever matters, the roster is small.
+type Stamp = (SystemTime, u64, u64);
+
+/// The file's [`Stamp`], or nothing when it cannot be read. A roster that is missing for a moment
+/// is one the sidecar keeps running on, so the failure is a line an operator can find afterwards
+/// and the next poll tries again.
+fn stamp(path: &Path) -> Option<Stamp> {
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::metadata(path).and_then(|meta| Ok((meta.modified()?, meta.len(), meta.ino()))) {
+        Ok(stamp) => Some(stamp),
         Err(err) => {
             tracing::warn!(%err, path = %path.display(), "cannot stat the roster file");
             None

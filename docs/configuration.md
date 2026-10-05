@@ -41,7 +41,7 @@ hosts:
 ```
 
 Every host carries the same roster, and `region` is the fan-out's failure and latency domain.
-Have your discovery tool write `roster.yaml`: the sidecar checks the file's modification time
+Have your discovery tool write `roster.yaml`: the sidecar checks the file for changes
 every 10 seconds and reloads what changed, so membership needs no interface beyond the file.
 Write to a temporary file in the same directory and rename it into place: a poll landing halfway
 through a direct write reads a file that does not parse, keeps the roster it has, and picks up
