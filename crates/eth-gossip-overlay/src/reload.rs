@@ -1681,6 +1681,47 @@ mod tests {
             assert_eq!(h.roster.borrow_and_update().hosts.len(), 4);
         }
 
+        /// Puts `path`'s modification time back to `mtime`, which is what a second write inside
+        /// one tick of Linux's coarse filesystem clock looks like to a stat.
+        fn set_mtime(path: &Path, mtime: SystemTime) {
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(mtime)
+                .unwrap();
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_write_in_the_same_mtime_tick_still_reloads() {
+            let mut h = Watched::start(3).await;
+            let seen = fs::metadata(&h.roster_path).unwrap().modified().unwrap();
+            h.write(&roster_yaml(4));
+            set_mtime(&h.roster_path, seen);
+
+            h.poll().await;
+
+            assert_eq!(h.stats.last().applied, ["roster"]);
+            assert_eq!(h.roster.borrow_and_update().hosts.len(), 4);
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn a_rename_into_place_with_the_same_mtime_reloads() {
+            let mut h = Watched::start(3).await;
+            let seen = fs::metadata(&h.roster_path).unwrap().modified().unwrap();
+            let moved = roster_yaml(3).replace("127.0.0.3:", "127.0.0.9:");
+            let tmp = h.roster_path.with_extension("tmp");
+            fs::write(&tmp, moved).unwrap();
+            set_mtime(&tmp, seen);
+            fs::rename(&tmp, &h.roster_path).unwrap();
+
+            h.poll().await;
+
+            assert_eq!(h.stats.last().applied, ["roster"]);
+            let published = h.roster.borrow_and_update();
+            assert_eq!(published.hosts[2].addr.to_string(), "127.0.0.9:7788");
+        }
+
         #[tokio::test(start_paused = true)]
         async fn automatic_reload_removing_more_than_half_the_hosts_is_rejected_and_counted() {
             let mut h = Watched::start(8).await;
