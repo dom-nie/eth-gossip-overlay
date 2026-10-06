@@ -10,12 +10,12 @@ env:
 
 jobs:
   check:
-    name: ${{ matrix.os }}
+    name: build and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v7
 
@@ -26,23 +26,40 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Clippy and the tests run on ubuntu-latest and macos-latest, because the code behind
+      # cfg(target_os = "linux") has a fallback on macOS that nothing else compiles. The arm runner
+      # only builds: aarch64 is a release target, and this is where an arm-only compile break
+      # shows up before a tag does. Format, docs, shellcheck and the dependency check read the
+      # same files on every runner, so ubuntu-latest alone runs them.
       - name: Format
-        if: runner.os == 'Linux'
+        if: matrix.os == 'ubuntu-latest'
         run: cargo fmt --all --check
 
       - name: Clippy
-        if: runner.os == 'Linux'
+        if: matrix.os != 'ubuntu-24.04-arm'
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Docs
+        if: matrix.os == 'ubuntu-latest'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
+      # Warning and above: the info-level findings are cleanup functions run by trap and the
+      # quickstart's stand-ins that the scripts call through eval, which shellcheck cannot see.
+      - name: shellcheck
+        if: matrix.os == 'ubuntu-latest'
+        run: shellcheck -S warning scripts/*.sh
 
       - name: Build
         run: cargo build --workspace
 
       - name: Test
-        if: runner.os == 'Linux'
+        if: matrix.os != 'ubuntu-24.04-arm'
         run: cargo test --workspace
 
       - name: overlay-bn ships without lighthouse_network
-        if: runner.os == 'Linux'
+        if: matrix.os == 'ubuntu-latest'
         run: |
           if cargo tree -p overlay-bn -e normal | grep -E '(^|[[:space:]])lighthouse_network v[0-9]'; then
             echo "lighthouse_network is a production dependency of overlay-bn; D38 keeps it a dev-dependency, for the cross-check tests only"
@@ -97,7 +114,7 @@ jobs:
           docker run --rm -v "$PWD:/w" -w /w --entrypoint promtool \
             prom/prometheus:latest check rules deploy/prometheus/alerts.yml
 
-      - name: Checks 1 to 5
+      - name: Observability tests
         run: cargo test -p eth-gossip-overlay --test observability
 
   container:
