@@ -50,8 +50,8 @@
 //!   did before the feature existed.
 //!
 //! The roster is not a config key and has no applier. It goes on its own watch channel, which
-//! T-023's connection manager and [`spawn_pin_table`] follow, and is the one entry in
-//! [`ReloadReport::applied`] that is not a dotted path.
+//! T-023's connection manager follows once `apply_roster` has rebuilt the pin table from it,
+//! and is the one entry in [`ReloadReport::applied`] that is not a dotted path.
 //!
 //! Adding a reloadable key is one path in [`RELOADABLE`] and one closure in [`Reloader::new`],
 //! registered on that path or on the section it belongs to.
@@ -269,7 +269,7 @@ pub fn sighup_loop(handle: ReloadHandle) -> std::io::Result<impl Future<Output =
     })
 }
 
-/// How often the roster file's [`Stamp`] is read (D26). Ten seconds is the bound
+/// How often the roster file's `Stamp` is read (D26). Ten seconds is the bound
 /// `docs/configuration.md` promises a discovery tool, and a constant rather than a key because
 /// no fleet has a reason to want another number: inotify would notice sooner, at the cost of a
 /// Linux-only dependency for a saving a membership change does not need.
@@ -282,7 +282,7 @@ pub const ROSTER_POLL_INTERVAL: Duration = Duration::from_secs(10);
 /// tool that wrote half a file and a fleet that loses half its hosts. The reload it runs is the
 /// one SIGHUP runs, so a roster picked up here drops no connection either.
 ///
-/// A change is any move in the file's [`Stamp`], which is remembered before the file is read
+/// A change is any move in the file's `Stamp`, which is remembered before the file is read
 /// rather than after, so a writer that is not finished cannot be applied and then forgotten: a
 /// half-written file fails to parse and leaves the roster alone, and the write that finishes it
 /// moves the stamp again, so the next poll reads the whole file. Writing to a temp file and

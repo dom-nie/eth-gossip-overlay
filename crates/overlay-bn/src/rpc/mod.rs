@@ -280,7 +280,7 @@ const SYNCNETS_BITS: u8 = 4;
 const MAX_REQUEST_BLOCKS: usize = 128;
 
 /// The largest `DataColumnSidecarsByRoot` body Lighthouse's own inbound codec accepts, which is
-/// the largest of everything the sidecar reads: [`MAX_REQUEST_BLOCKS`] identifiers of a 4-byte
+/// the largest of everything the sidecar reads: `MAX_REQUEST_BLOCKS` identifiers of a 4-byte
 /// outer offset, a 32-byte root, a 4-byte offset and one 8-byte index per column
 /// (`max_data_columns_by_root_request_common` in `consensus/types/src/core/chain_spec.rs`).
 pub const MAX_REQUEST_LEN: usize =
