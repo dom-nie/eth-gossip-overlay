@@ -437,7 +437,7 @@ fn every_ci_job_runs_on_the_runner_the_table_names() {
     let jobs = &workflow["jobs"];
 
     let table: [(&str, &[&str]); 7] = [
-        ("check", &["ubuntu-latest", "macos-latest"]),
+        ("check", &["ubuntu-latest", "macos-latest", "ubuntu-24.04-arm"]),
         ("deploy-examples", &["ubuntu-latest"]),
         ("observability", &["ubuntu-latest"]),
         ("container", &["ubuntu-latest"]),
