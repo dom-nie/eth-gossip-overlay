@@ -10,7 +10,7 @@ env:
 
 jobs:
   check:
-    name: ${{ matrix.os }}
+    name: build and test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -26,19 +26,32 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Clippy and the tests run on both, because the code behind cfg(target_os = "linux") has a
+      # fallback on macOS that nothing else compiles. Format, docs and shellcheck read the same
+      # files either way, so Linux alone runs them.
       - name: Format
         if: runner.os == 'Linux'
         run: cargo fmt --all --check
 
       - name: Clippy
-        if: runner.os == 'Linux'
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Docs
+        if: runner.os == 'Linux'
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
+      # Warning and above: the info-level findings are cleanup functions run by trap and the
+      # quickstart's stand-ins that the scripts call through eval, which shellcheck cannot see.
+      - name: shellcheck
+        if: runner.os == 'Linux'
+        run: shellcheck -S warning scripts/*.sh
 
       - name: Build
         run: cargo build --workspace
 
       - name: Test
-        if: runner.os == 'Linux'
         run: cargo test --workspace
 
       - name: overlay-bn ships without lighthouse_network
@@ -97,7 +110,7 @@ jobs:
           docker run --rm -v "$PWD:/w" -w /w --entrypoint promtool \
             prom/prometheus:latest check rules deploy/prometheus/alerts.yml
 
-      - name: Checks 1 to 5
+      - name: Observability tests
         run: cargo test -p eth-gossip-overlay --test observability
 
   container:
