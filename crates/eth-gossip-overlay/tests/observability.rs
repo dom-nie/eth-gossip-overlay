@@ -25,9 +25,9 @@ const ROLLOUT: &str = "docs/rollout.md";
 const TROUBLESHOOTING: &str = "docs/troubleshooting.md";
 const EVENTS: &str = "docs/events.md";
 
-/// The image `promtool` comes out of where the host has no local one. Pinned to a tag rather
-/// than a digest on purpose: the check is "does a current Prometheus accept these rules".
-const PROMETHEUS_IMAGE: &str = "prom/prometheus:latest";
+/// The image `promtool` comes out of where the host has no local one: the Prometheus the
+/// compose demo runs, so the rules are checked by the version that loads them there.
+const PROMETHEUS_IMAGE: &str = "prom/prometheus:v3.15.1";
 
 /// The process collector's series the rules and the dashboard read. The collector is Linux-only
 /// in the `prometheus` crate, so the names are listed here and

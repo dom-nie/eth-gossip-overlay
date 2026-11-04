@@ -106,13 +106,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # promtool comes out of the Prometheus image, so there is nothing to install and the
-      # version is whatever a current Prometheus ships. The Rust checks below find it the same
-      # way, and skip where a host has neither it nor a docker daemon.
+      # promtool comes out of the Prometheus image, so there is nothing to install, and the tag
+      # is the one examples/compose runs, so the rules are checked by the Prometheus that loads
+      # them in the demo. The Rust checks below find it the same way, and skip where a host has
+      # neither it nor a docker daemon.
       - name: promtool on the alert rules
         run: |
           docker run --rm -v "$PWD:/w" -w /w --entrypoint promtool \
-            prom/prometheus:latest check rules deploy/prometheus/alerts.yml
+            prom/prometheus:v3.15.1 check rules deploy/prometheus/alerts.yml
 
       - name: Observability tests
         run: cargo test -p eth-gossip-overlay --test observability
