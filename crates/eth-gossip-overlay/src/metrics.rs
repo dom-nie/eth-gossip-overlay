@@ -480,6 +480,10 @@ impl Metrics {
             "Messages on a topic name the fork-topic table does not list.",
             per_class,
         )?;
+        // At 0 from the start, so OverlayUnknownTopicKind's increase() sees the first one.
+        for class in [Class::Small, Class::Large] {
+            unknown_topic_kind.with_label_values(&[class_label(class)]);
+        }
         let handshake_failures = b.counter_vec(
             HANDSHAKE_FAILURES_TOTAL,
             "Handshakes that did not produce a peer.",
