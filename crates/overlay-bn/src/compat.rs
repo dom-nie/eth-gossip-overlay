@@ -19,8 +19,8 @@ use crate::spec::SpecSnapshot;
 /// to the tag.
 pub const PINNED: Version = Version {
     major: 8,
-    minor: 2,
-    patch: 3,
+    minor: 3,
+    patch: 2,
 };
 
 /// Exactly the versions the compatibility matrix has passed, so the range grows only with a
