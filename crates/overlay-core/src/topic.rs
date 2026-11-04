@@ -293,7 +293,7 @@ impl fmt::Display for TopicKind {
 
 /// `str::parse` takes a sign and leading zeros. Those are refused here because the parsed
 /// index has to print back as the exact text it came from.
-fn index(digits: &str) -> Result<u8, TopicError> {
+pub(crate) fn index(digits: &str) -> Result<u8, TopicError> {
     let leading_zero = digits.len() > 1 && digits.starts_with('0');
     let all_digits = digits.bytes().all(|b| b.is_ascii_digit());
     if leading_zero || !all_digits {

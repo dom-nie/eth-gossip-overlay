@@ -4,7 +4,7 @@
 //! Lighthouse bump that adds, drops or renames a topic fails by fork and name instead of
 //! falling silently into `TopicKind::Other`.
 
-use crate::topic::{Class, TopicKind};
+use crate::topic::{self, Class, TopicKind};
 
 /// Lighthouse's `ForkName`s in order, as they display. A row is live from its
 /// [`since`](ForkTopic::since) fork onwards.
@@ -160,10 +160,11 @@ impl ForkTopic {
     }
 
     /// The index `name` carries if it is one of this row's names: `Some(0)` for an exact match
-    /// on a row without `{i}`, the parsed index for a row with one, `None` otherwise.
+    /// on a row without `{i}`, the index for a row with one, read by the same rule as
+    /// [`Topic::parse`](crate::topic::Topic::parse), and `None` otherwise.
     pub fn index_of(&self, name: &str) -> Option<u8> {
         match self.name.strip_suffix("{i}") {
-            Some(prefix) => name.strip_prefix(prefix)?.parse().ok(),
+            Some(prefix) => topic::index(name.strip_prefix(prefix)?).ok(),
             None => (self.name == name).then_some(0),
         }
     }
