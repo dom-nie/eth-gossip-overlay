@@ -233,7 +233,7 @@ mod tests {
     use types::{
         BeaconBlock, BeaconBlockAltair, BeaconBlockBase, BeaconBlockBellatrix, BeaconBlockCapella,
         BeaconBlockDeneb, BeaconBlockElectra, BeaconBlockFulu, BeaconBlockGloas, ChainSpec,
-        DataColumnSidecarFulu, EmptyBlock,
+        DataColumnSidecar, DataColumnSidecarFulu, DataColumnSidecarGloas, EmptyBlock, ForkName,
     };
 
     use super::*;
@@ -494,5 +494,66 @@ mod tests {
                 "first offset {offset}"
             );
         }
+    }
+
+    /// What [`column_header`] does with each fork's sidecar: reads it, because its first offset
+    /// is the fixed length the decoder knows.
+    #[derive(Debug)]
+    enum Layout {
+        Read(usize),
+    }
+
+    /// The decoder's fork list. Every fork with column sidecars is here, Heze included,
+    /// because Lighthouse maps every fork after Gloas to Gloas's sidecar until it says
+    /// otherwise.
+    const COLUMN_LAYOUTS: [(ForkName, Layout); 1] =
+        [(ForkName::Fulu, Layout::Read(COLUMN_FIXED_LEN))];
+
+    /// MD-10: for every fork with column sidecars, the first offset of the sidecar `types`
+    /// encodes for it is the fixed length [`column_header`] reads, or the fork is listed as
+    /// refused and the decoder does refuse it. A fork whose sidecar changes shape, or a new fork
+    /// with columns, fails here by name before a sidecar of it reaches the recent store.
+    #[test]
+    fn column_fixed_len_per_fork_matches_types() {
+        let fulu = column_sidecar(1, 0).0.as_ssz_bytes();
+        let gloas = DataColumnSidecarGloas::<MainnetEthSpec> {
+            index: 0,
+            column: Default::default(),
+            kzg_proofs: Default::default(),
+            slot: Slot::new(1),
+            beacon_block_root: Hash256::repeat_byte(1),
+        }
+        .as_ssz_bytes();
+
+        let mut problems = Vec::new();
+        for fork in ForkName::list_all()
+            .into_iter()
+            .filter(|f| f.fulu_enabled())
+        {
+            let Some(sidecar) = [&fulu, &gloas].into_iter().find_map(|bytes| {
+                DataColumnSidecar::<MainnetEthSpec>::from_ssz_bytes_for_fork(bytes, fork).ok()
+            }) else {
+                problems.push(format!(
+                    "{fork}: no sidecar this test builds decodes; add one"
+                ));
+                continue;
+            };
+            let bytes = sidecar.as_ssz_bytes();
+            let first_offset = u32_at(&bytes, 8) as usize;
+            let read = column_header_ssz(&bytes);
+            match COLUMN_LAYOUTS.iter().find(|(known, _)| *known == fork) {
+                None => problems.push(format!(
+                    "{fork}: not in the decoder's fork list; its sidecar's first offset is {first_offset}"
+                )),
+                Some((_, Layout::Read(len))) if first_offset != *len || read.is_err() => {
+                    problems.push(format!(
+                        "{fork}: the decoder reads a fixed part of {len} bytes, types encodes \
+                         {first_offset}, and the read gave {read:?}"
+                    ))
+                }
+                Some(_) => {}
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
     }
 }
