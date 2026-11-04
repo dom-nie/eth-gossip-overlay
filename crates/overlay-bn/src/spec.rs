@@ -107,3 +107,53 @@ mod tests {
         assert_eq!(SpecSnapshot::from(SpecWire::default()), MAINNET);
     }
 }
+
+#[cfg(test)]
+mod drift {
+    use serde_json::json;
+    use types::{ChainSpec, ConfigAndPreset, MainnetEthSpec};
+
+    use super::*;
+
+    /// The keys [`SpecWire`] reads, by the name the beacon node sends.
+    const KEYS: [&str; 6] = [
+        "DATA_COLUMN_SIDECAR_SUBNET_COUNT",
+        "NUMBER_OF_COLUMNS",
+        "NUMBER_OF_CUSTODY_GROUPS",
+        "MAX_PAYLOAD_SIZE",
+        "SECONDS_PER_SLOT",
+        "SLOTS_PER_EPOCH",
+    ];
+
+    /// MD-10: a key Lighthouse stops sending would leave the sidecar on the mainnet value
+    /// without a word, so every key the sidecar reads is held against what the handler of
+    /// `/eth/v1/config/spec` serialises for mainnet at the pinned tag. The first assertion is
+    /// what makes the list the struct's: six keys each set to 1 leave no field at its default.
+    #[test]
+    fn spec_keys_the_sidecar_reads_are_in_lighthouse_config() {
+        let ones: serde_json::Map<_, _> =
+            KEYS.iter().map(|k| (k.to_string(), json!("1"))).collect();
+        let wire: SpecWire = serde_json::from_value(ones.into()).unwrap();
+        assert_eq!(
+            SpecSnapshot::from(wire),
+            SpecSnapshot {
+                data_column_sidecar_subnet_count: 1,
+                number_of_columns: 1,
+                number_of_custody_groups: 1,
+                max_payload_size: 1,
+                seconds_per_slot: 1,
+                slots_per_epoch: 1,
+            }
+        );
+
+        let lighthouse = serde_json::to_value(ConfigAndPreset::from_chain_spec::<MainnetEthSpec>(
+            &ChainSpec::mainnet(),
+        ))
+        .unwrap();
+        let missing: Vec<&str> = KEYS
+            .into_iter()
+            .filter(|key| lighthouse.get(key).is_none())
+            .collect();
+        assert!(missing.is_empty(), "Lighthouse no longer sends {missing:?}");
+    }
+}
