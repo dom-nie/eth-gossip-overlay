@@ -1,10 +1,10 @@
-//! The gossipsub values that must equal the beacon node's, copied from Lighthouse v8.2.2
-//! (`e423a66763bb1bd780492d635123f208d80c3538`) because the module that builds them,
+//! The gossipsub values that must equal the beacon node's, copied from Lighthouse and checked
+//! against v8.3.2 (`a376defa30470923556d91bdeb15a802e297f31f`) because the module that builds them,
 //! `beacon_node/lighthouse_network/src/config.rs`, is private. Each constant names its source
 //! line; the drift tests fail when a Lighthouse bump moves the value.
 
 /// The protocol ids both sides negotiate, newest first. Lighthouse sets no prefix
-/// (`gossipsub_config` in `beacon_node/lighthouse_network/src/config.rs:450-523` never calls
+/// (`gossipsub_config` in `beacon_node/lighthouse_network/src/config.rs:459-532` never calls
 /// `protocol_id_prefix`), so these are the fork's defaults from
 /// `protocols/gossipsub/src/protocol.rs:49-66` and `Default for ProtocolConfig` at rev
 /// `accba72bb4eafc692ac518339ef2c4080b6f8461`, the one Lighthouse v8.3.2 declares. `1.3.0` is
@@ -17,30 +17,30 @@ pub const PROTOCOL_IDS: [&str; 4] = [
 ];
 
 /// Publish messages the sidecar accepts in one RPC, `gossipsub_config` at
-/// `beacon_node/lighthouse_network/src/config.rs:511`. The beacon node packs IWANT responses
+/// `beacon_node/lighthouse_network/src/config.rs:520`. The beacon node packs IWANT responses
 /// by its own limit, so the sidecar must take at least as many. No drift test: the module is
 /// private.
 pub const MAX_PUBLISH_MESSAGES: usize = 500;
-/// Control messages sent in one RPC, `config.rs:512`. No drift test: the module is private.
+/// Control messages sent in one RPC, `config.rs:521`. No drift test: the module is private.
 pub const MAX_CONTROL_MESSAGES_SENT: usize = 500;
-/// The largest control message or subscription accepted in one RPC, `config.rs:513`. The
+/// The largest control message or subscription accepted in one RPC, `config.rs:522`. The
 /// beacon node subscribes to hundreds of topics at a fork and the fork's 16 KiB default would
 /// reject that RPC. No drift test: the module is private.
 pub const MAX_CONTROL_MESSAGE_SIZE: usize = 128 << 10;
 
 /// The most a payload may decompress to. The beacon node's `SnappyTransform::inbound_transform`
 /// (`beacon_node/lighthouse_network/src/types/pubsub.rs:106`) refuses anything past
-/// `max_uncompressed_len`, which `service/mod.rs:343` sets to `spec.max_payload_size`, so the
+/// `max_uncompressed_len`, which `service/mod.rs:345` sets to `spec.max_payload_size`, so the
 /// message id must use the same bound or it would give a valid-domain id to a payload the BN
 /// never accepts.
 pub const MAX_PAYLOAD_SIZE: u64 = crate::spec::MAINNET.max_payload_size;
 
 /// The largest gossipsub RPC either side sends or accepts, from
-/// `beacon_node/lighthouse_network/src/service/mod.rs:243` (`ctx.chain_spec.max_message_size()`
+/// `beacon_node/lighthouse_network/src/service/mod.rs:245` (`ctx.chain_spec.max_message_size()`
 /// into `gossipsub_max_transmit_size`) with mainnet's `MAX_PAYLOAD_SIZE`.
 pub const MAX_TRANSMIT_SIZE: u64 = max_transmit_size_for(crate::spec::MAINNET.max_payload_size);
 
-/// `ChainSpec::max_message_size` from `consensus/types/src/core/chain_spec.rs:859-882`: snappy's
+/// `ChainSpec::max_message_size` from `consensus/types/src/core/chain_spec.rs:958-981`: snappy's
 /// worst-case compressed length of the payload, 1024 bytes for framing, floored at 1 MiB.
 pub const fn max_transmit_size_for(max_payload_size: u64) -> u64 {
     let compressed = 32 + max_payload_size + max_payload_size / 6;
