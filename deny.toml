@@ -10,6 +10,15 @@ ignore = [
   # Linux only) and alloy-primitives (Lighthouse's crates); no newer compatible version of either
   # drops it, so nothing in this workspace can fix it.
   { id = "RUSTSEC-2024-0436", reason = "paste is pinned by libp2p's if-watch and by Lighthouse's alloy-primitives; not fixable from this workspace" },
+  # Four advisories on `ZipArchive::extract` and the stream extractor. zip 6 is a build-dependency
+  # of Lighthouse's eth2_network_config, whose build script reads one genesis file by name out of
+  # the archives in Lighthouse's own source tree. It never calls the extractors, never sees an
+  # archive from outside, and is not linked into any binary. The fix is zip 9, which only a
+  # Lighthouse release can take.
+  { id = "RUSTSEC-2026-0367", reason = "zip 6 is a build-dependency of Lighthouse's eth2_network_config, which never calls extract; fixed by a Lighthouse release" },
+  { id = "RUSTSEC-2026-0368", reason = "zip 6 is a build-dependency of Lighthouse's eth2_network_config, which never calls extract; fixed by a Lighthouse release" },
+  { id = "RUSTSEC-2026-0369", reason = "zip 6 is a build-dependency of Lighthouse's eth2_network_config, which never calls extract; fixed by a Lighthouse release" },
+  { id = "RUSTSEC-2026-0429", reason = "zip 6 is a build-dependency of Lighthouse's eth2_network_config, which never calls extract; fixed by a Lighthouse release" },
 ]
 
 [licenses]
