@@ -1,8 +1,11 @@
 # cargo deny check licenses advisories bans sources
 #
-# The checked graph is the workspace's normal dependency graph: dev-dependencies such as
-# lighthouse_network are not walked, but cargo metadata unifies their features onto crates the
-# workspace also uses, which is how reqwest's TLS tree reaches the licence check below.
+# The checked graph includes Lighthouse's crates. lighthouse_network is an optional normal
+# dependency of overlay-bn, switched on by overlay-bn's own test-util feature, which its
+# dev-dependency on itself enables, so cargo deny walks lighthouse_network and everything under
+# it, build-dependencies included. That is why Lighthouse's advisories and licences show up
+# below although no binary links them. cargo metadata also unifies features onto crates the
+# workspace uses, which is how reqwest's TLS tree reaches the licence check.
 
 [advisories]
 ignore = [
