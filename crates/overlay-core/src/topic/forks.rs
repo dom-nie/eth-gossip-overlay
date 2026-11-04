@@ -38,8 +38,8 @@ pub enum Sidecar {
     /// A kind the sidecar names, built from the name's index (0 for a name without one), and
     /// the class that kind always takes.
     Named(fn(u8) -> TopicKind, Class),
-    /// `TopicKind::Other`: classed by payload size under D02, and counted by
-    /// `overlay_unknown_topic_kind_total` on every message.
+    /// `TopicKind::Other`: classed by payload size under D02 and relayed, but, being listed
+    /// here, never counted in `overlay_unknown_topic_kind_total` (MD-10 amended).
     Other,
 }
 
