@@ -91,7 +91,7 @@ small-message way below it. Some of these names are expected, and the fork-topic
   `proposer_preferences`, the Gloas topics, until a release names them.
 - `light_client_finality_update` and `light_client_optimistic_update`, whenever the beacon node
   serves light clients, which Lighthouse does unless it runs with `--disable-light-client-server`.
-- `execution_proof`, only on a node started with `--enable-execution-proof`, and `inclusion_list`,
+- `execution_proof`, only on a node started with `--proof-engine-endpoint`, and `inclusion_list`,
   only after a Heze fork, which no network has scheduled.
 
 A name the table does not list is one nobody has reviewed. Each message on it counts in

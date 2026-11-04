@@ -115,7 +115,7 @@ pub const FORK_TOPICS: &[ForkTopic] = &[
     other("gloas", "execution_payload_bid"),
     other("gloas", "payload_attestation_message"),
     other("gloas", "proposer_preferences"),
-    // Other by decision (MD-08): subscribed only with the node's `--enable-execution-proof`.
+    // Other by decision (MD-08): subscribed only when the node runs with `--proof-engine-endpoint`.
     other("gloas", "execution_proof"),
     // Other by decision (MD-08): Heze is scheduled on no network.
     other("heze", "inclusion_list"),
