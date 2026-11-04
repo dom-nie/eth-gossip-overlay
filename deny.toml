@@ -19,6 +19,12 @@ ignore = [
   { id = "RUSTSEC-2026-0368", reason = "zip 6 is a build-dependency of Lighthouse's eth2_network_config, which never calls extract; fixed by a Lighthouse release" },
   { id = "RUSTSEC-2026-0369", reason = "zip 6 is a build-dependency of Lighthouse's eth2_network_config, which never calls extract; fixed by a Lighthouse release" },
   { id = "RUSTSEC-2026-0429", reason = "zip 6 is a build-dependency of Lighthouse's eth2_network_config, which never calls extract; fixed by a Lighthouse release" },
+  # Secret-dependent branches in crypto-bigint 0.5, fixed in 0.7.6. elliptic-curve 0.13 requires
+  # 0.5, and enr 0.13 and libp2p-identity reach it through k256 0.13. The sidecar signs with
+  # ed25519 (D01): the only secp256k1 key it handles is the beacon node's public key, which it
+  # verifies, so no secret goes through the affected arithmetic. Lifted when Lighthouse and
+  # libp2p move to k256 0.14.
+  { id = "RUSTSEC-2026-0387", reason = "crypto-bigint 0.5 is required by elliptic-curve 0.13 under enr and libp2p-identity; the sidecar only verifies secp256k1 public keys" },
 ]
 
 [licenses]
