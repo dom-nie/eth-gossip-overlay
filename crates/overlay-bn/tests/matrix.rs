@@ -426,9 +426,10 @@ async fn matrix_bn_dials_the_listening_sidecar_when_its_inbound_cap_is_full() {
 /// The beacon node was started with both flags of the env file MD-01 specifies, and the
 /// sidecar's own dial goes to a closed port, so the only way the two can meet is the beacon
 /// node dialling the sidecar's listen address. What actually connects them here is the ENR the
-/// link registers: `--libp2p-addresses` is dialled once when the network service starts, long
-/// before a test process is listening on that port. Its value in this matrix is that the
-/// beacon node accepted the flag at all, which is what breaks the day a release removes it.
+/// link registers: on v8.2 `--libp2p-addresses` is dialled once when the network service
+/// starts, long before a test process is listening on that port, and from v8.3.0 it is never
+/// dialled at all. Its value in this matrix is that the beacon node accepted the flag at all,
+/// which is what breaks the day a release removes it.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a Lighthouse beacon node: scripts/lighthouse-matrix.sh"]
 async fn matrix_bn_startup_flags_dial_the_listening_sidecar() {

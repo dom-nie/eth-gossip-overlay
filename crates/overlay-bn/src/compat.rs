@@ -15,8 +15,8 @@ use crate::spec::SpecSnapshot;
 
 /// The Lighthouse release the workspace is built against: the tag the root `Cargo.toml` pins
 /// for `lighthouse_network` and `types`, whose own `Cargo.toml` names the `sigp/rust-libp2p`
-/// rev in the `[patch]` table. The three move together; the drift test below holds this one
-/// to the tag.
+/// rev the root `Cargo.toml` copies. The three move together; the drift test below holds this
+/// one to the tag.
 pub const PINNED: Version = Version {
     major: 8,
     minor: 3,
@@ -33,7 +33,7 @@ pub const SUPPORTED: RangeInclusive<Version> = Version {
 }..=PINNED;
 
 /// When the matrix last passed on every version in [`SUPPORTED`].
-pub const LAST_VERIFIED: &str = "2026-10-05";
+pub const LAST_VERIFIED: &str = "2026-11-04";
 
 /// The `state` label values of `overlay_bn_compat`. T-012 named `size_mismatch` without a
 /// constant; these are the shared definitions the gauge, the watch and T-041 use.
@@ -274,11 +274,11 @@ impl Watch {
     }
 }
 
-/// The eight Lighthouse behaviours the design leans on, or works around, that no specification
+/// The nine Lighthouse behaviours the design leans on, or works around, that no specification
 /// promises (CL-N2), each with the test that fails by name when a release changes it.
-const ASSUMPTIONS: [(&str, &str); 8] = [
+const ASSUMPTIONS: [(&str, &str); 9] = [
     (
-        "A trusted peer is admitted whenever the beacon node is under its inbound cap, is dialled by the beacon node through `--libp2p-addresses` at startup and through `add_peer` on demand under the outbound cap, and is never pruned once connected (MD-01)",
+        "A trusted peer is admitted whenever the beacon node is under its inbound cap, is dialled by the beacon node through `add_peer` on demand under the outbound cap (and before v8.3.0 through `--libp2p-addresses` at startup), and is never pruned once connected (MD-01)",
         "under the cap and never pruned: `matrix_trusted_peer_is_admitted_under_the_inbound_cap_and_never_pruned` (matrix); the beacon node dialling a sidecar it has no inbound room for: `matrix_bn_dials_the_listening_sidecar_when_its_inbound_cap_is_full` (matrix); the startup flag: `matrix_bn_startup_flags_dial_the_listening_sidecar` (matrix)",
     ),
     (
@@ -306,8 +306,12 @@ const ASSUMPTIONS: [(&str, &str); 8] = [
         "`matrix_event_stream_reports_accepted_blocks_and_verified_columns` (matrix), which pins that both events reach the custody tracker on a running node; which of the four sources a column came from is not in the payload and is not asserted",
     ),
     (
-        "A parent lookup for a gossip block is seeded with the block's sender and nobody else, a `ResourceUnavailable` answer is re-requested from that peer at once, and the fourth failure drops the lookup and the block. Affected: v8.2.2 through v8.2.3, the whole supported range. `sigp/lighthouse#9542`, on `unstable` since 2026-06-26 and in no release, de-prioritises failed lookup peers but still picks from that set, so it changes nothing here. The sidecar works around it by keeping back a block whose parent its node has not imported (T-101, D42); a release that leaves trusted peers out of a lookup's peers, or widens the set once they have all failed, retires that",
+        "A parent lookup for a gossip block is seeded with the block's sender and nobody else, a `ResourceUnavailable` answer is re-requested from that peer at once, and the fourth failure drops the lookup and the block. Affected: v8.2.2 through v8.3.2, the whole supported range. `sigp/lighthouse#9542`, released in v8.3.0, de-prioritises failed lookup peers but still picks from that set, so it changes nothing here. The sidecar works around it by keeping back a block whose parent its node has not imported (T-101, D42); a release that leaves trusted peers out of a lookup's peers, or widens the set once they have all failed, retires that",
         "`matrix_a_block_whose_parent_the_node_lacks_is_dropped_by_lighthouse_after_four_refusals` (matrix, `MATRIX_FOLLOWING_CHAIN=1`), which counts the four refusals on the sidecar and the dropped lookup on the node; `a_block_whose_parent_the_node_lacks_is_dropped_by_lighthouse_after_four_refusals` plays the node's side against `FakeBn` and pins that the sidecar no longer offers such a block",
+    ),
+    (
+        "From v8.3.0 the beacon node still accepts `--libp2p-addresses` but never dials it (`sigp/lighthouse#10229`), so on those releases `add_peer` registration alone admits the sidecar. The env file keeps the flag while the supported range includes a v8.2 release (MD-01 amended)",
+        "`matrix_bn_dials_the_listening_sidecar_when_its_inbound_cap_is_full` (matrix), which on v8.3.0 and later passes through `add_peer` alone; the flag still being accepted: `matrix_bn_startup_flags_dial_the_listening_sidecar` (matrix)",
     ),
 ];
 
@@ -326,10 +330,10 @@ pub fn render_compatibility_section() -> String {
          versions the compatibility matrix has passed and grows only with a matrix run. The \
          workspace is built against v{PINNED}: the tag the root `Cargo.toml` pins for \
          `lighthouse_network` and `types`, and the `sigp/rust-libp2p` revision that tag pins, \
-         through the `[patch]` table. A beacon node above the range is reported `untested` \
+         which the root `Cargo.toml` copies. A beacon node above the range is reported `untested` \
          and one below it `unsupported`, on every connect, in the log and in \
          `overlay_bn_compat{{state}}`; the sidecar keeps running either way.\n\n\
-         The design leans on, or works around, eight Lighthouse behaviours that no \
+         The design leans on, or works around, nine Lighthouse behaviours that no \
          specification promises. Each has a named test, so a release that changes one fails \
          the matrix by name instead of degrading the fleet quietly. Tests marked matrix need a \
          real beacon node and run in the nightly matrix; the others run on every pull request \
@@ -346,7 +350,7 @@ pub fn render_compatibility_section() -> String {
     out
 }
 
-/// [`SUPPORTED`] as `8.2.2..=8.2.3`, for the logs.
+/// [`SUPPORTED`] as `start..=end`, for the logs.
 struct Supported;
 
 impl fmt::Display for Supported {
@@ -743,15 +747,21 @@ mod drift {
 
     use super::*;
 
-    /// The tags the matrix workflow runs: the ends of `SUPPORTED`, once each. A range wider
-    /// than its ends needs the versions in between listed by hand, and this is where the
-    /// comparison would have to learn about them.
+    /// Every Lighthouse release in `SUPPORTED`, which is the list the matrix workflow runs. The
+    /// releases between the ends cannot be derived from the range, so they are listed here,
+    /// and the test holds the ends to the range.
+    const MATRIX_RELEASES: [&str; 5] = ["v8.2.2", "v8.2.3", "v8.3.0", "v8.3.1", "v8.3.2"];
+
     fn matrix_versions() -> Vec<String> {
-        let mut versions = vec![format!("v{}", SUPPORTED.start())];
-        if SUPPORTED.start() != SUPPORTED.end() {
-            versions.push(format!("v{}", SUPPORTED.end()));
-        }
-        versions
+        assert_eq!(
+            MATRIX_RELEASES.first().copied(),
+            Some(&*format!("v{}", SUPPORTED.start()))
+        );
+        assert_eq!(
+            MATRIX_RELEASES.last().copied(),
+            Some(&*format!("v{}", SUPPORTED.end()))
+        );
+        MATRIX_RELEASES.iter().map(|v| v.to_string()).collect()
     }
 
     /// `PINNED` and the tag the root `Cargo.toml` pins for Lighthouse's crates move together;
