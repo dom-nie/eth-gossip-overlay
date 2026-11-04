@@ -23,6 +23,7 @@ const COMPOSE_ROSTER: &str = "examples/compose/roster.yaml";
 const COMPOSE_CONFIG: &str = "examples/compose/config.yaml";
 const COMPOSE: &str = "examples/compose/docker-compose.yml";
 const DOCKERFILE: &str = "Dockerfile";
+const TOOLCHAIN: &str = "rust-toolchain.toml";
 const CI: &str = ".github/workflows/ci.yml";
 
 fn workspace_root() -> PathBuf {
@@ -424,6 +425,25 @@ fn dockerfile_labels_the_version_the_workspace_builds() {
     assert!(
         read(DOCKERFILE).contains(&expected),
         "{DOCKERFILE} does not carry {expected}"
+    );
+}
+
+/// The image is built with the toolchain the workspace is tested on. A builder on another Rust
+/// would compile the shipped binary with a compiler CI never ran.
+#[test]
+fn dockerfile_builds_with_the_pinned_toolchain() {
+    let toolchain = read(TOOLCHAIN);
+    let channel = toolchain
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("channel"))
+        .and_then(|rest| rest.trim().strip_prefix('='))
+        .map(|value| value.trim().trim_matches('"'))
+        .unwrap_or_else(|| panic!("{TOOLCHAIN} has no channel"));
+    let expected = format!("FROM rust:{channel}-");
+
+    assert!(
+        read(DOCKERFILE).contains(&expected),
+        "{DOCKERFILE} does not build {expected}"
     );
 }
 
