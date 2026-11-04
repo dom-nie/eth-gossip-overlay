@@ -82,22 +82,22 @@ half of it off.
 
 The sidecar mirrors every topic the beacon node subscribes to, including ones it has no name for.
 Those still travel: a message on such a topic goes the large-message way from 16 KiB up and the
-small-message way below it. Each one counts in `overlay_unknown_topic_kind_total`, any increase
-raises `OverlayUnknownTopicKind`, and the warn line `relaying a topic kind the sidecar does not
-know` names the topic once per process. Some names are expected, and the fork-topic table in
-`crates/overlay-core/src/topic/forks.rs` lists them:
+small-message way below it. Some of these names are expected, and the fork-topic table in
+`crates/overlay-core/src/topic/forks.rs` lists them, so they are relayed without a word:
 
 - `execution_payload`, `execution_payload_bid`, `payload_attestation_message` and
-  `proposer_preferences`, the Gloas topics. On a network past its Gloas fork, Sepolia today, the
-  alert fires until a release names them. That is the detection working, not a fault.
+  `proposer_preferences`, the Gloas topics, until a release names them.
 - `light_client_finality_update` and `light_client_optimistic_update`, whenever the beacon node
   serves light clients, which Lighthouse does unless it runs with `--disable-light-client-server`.
 - `execution_proof`, only on a node started with `--enable-execution-proof`, and `inclusion_list`,
   only after a Heze fork, which no network has scheduled.
 
-Any other name means the beacon node runs a newer Lighthouse than the one this sidecar was built
-against, which `eth-gossip-overlayctl status` shows as `untested`. Upgrade the sidecar to a release
-built against that Lighthouse.
+A name the table does not list is one nobody has reviewed. Each message on it counts in
+`overlay_unknown_topic_kind_total`, any increase raises `OverlayUnknownTopicKind`, and the warn
+line `relaying a topic kind the sidecar does not know` names the topic once per process. It means
+the beacon node runs a newer Lighthouse than the one this sidecar was built against, which
+`eth-gossip-overlayctl status` shows as `untested`. Upgrade the sidecar to a release built against
+that Lighthouse.
 
 ## The flags that were already yours
 
