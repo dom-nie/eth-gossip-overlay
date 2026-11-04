@@ -53,17 +53,17 @@ cap. Trust exempts a peer from pruning and scoring, not from admission. The beac
 outbound dials run under a separate, larger limit, so the connection is made from the side that
 has room.
 
-Two things make that happen. `--libp2p-addresses` is dialled once inside Lighthouse's network
-startup and never retried, so it covers the case systemd's ordering gives you: sidecar already
-listening when the beacon node starts. Everything else is covered by the sidecar registering
-itself through `POST /lighthouse/add_peer` on every reconnect, with an ENR signed by its node
-key. Lighthouse adds that ENR to the trusted set and dials it at once, and again on every
-heartbeat while it is disconnected, which is what recovers a sidecar restart against a beacon
-node that is full.
+What makes it happen is the sidecar registering itself through `POST /lighthouse/add_peer` on
+every reconnect, with an ENR signed by its node key. Lighthouse adds that ENR to the trusted set
+and dials it at once, and again on every heartbeat while it is disconnected, which is what
+recovers a sidecar restart against a beacon node that is full. On v8.2, `--libp2p-addresses` is
+also dialled once inside Lighthouse's network startup and never retried, which covers the case
+systemd's ordering gives you: sidecar already listening when the beacon node starts.
 
-`--libp2p-addresses` is marked deprecated at v8.2.2. The nightly compatibility matrix runs
-against a real beacon node and would fail on the release that drops it; if that happens, the
-registration alone still works and the env file loses its second flag. `bn.listen_addr` is the
+From v8.3.0 Lighthouse still accepts `--libp2p-addresses`, with the deprecation warning it has
+carried since v8.2.2, and never dials it; registration alone admits the sidecar, and the nightly
+compatibility matrix checks that on every supported release. The env file keeps the flag while
+the supported range includes a v8.2 release, and loses it after. `bn.listen_addr` is the
 address in it, `/ip4/127.0.0.1/tcp/7787` by default, and changing it needs a sidecar restart and
 a beacon node restart, because it is on the beacon node's command line.
 
