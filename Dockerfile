@@ -7,7 +7,9 @@
 # Run it with --network host. QUIC through a port mapping adds a hop of latency and hides path
 # MTU discovery from the endpoint; examples/compose/README.md has the detail.
 
-FROM rust:1.99-bookworm AS builder
+# The exact toolchain rust-toolchain.toml pins, so rustup has nothing to fetch, and the Debian
+# release both later stages are built on, so the binaries link the libc they run against.
+FROM rust:1.99.1-trixie AS builder
 
 # The state directory the runtime stage takes as it is. It is made here because the runtime has
 # no shell to make one there.
@@ -31,11 +33,11 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # The same binaries with a shell around them, for the setup step in examples/compose that has to
 # write a file and hand over a volume. Not the image an operator runs.
-FROM debian:bookworm-slim AS toolbox
+FROM debian:trixie-slim AS toolbox
 COPY --from=builder /usr/local/bin/eth-gossip-overlay /usr/local/bin/eth-gossip-overlayctl /usr/local/bin/
 ENTRYPOINT ["/usr/local/bin/eth-gossip-overlay"]
 
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian13:nonroot
 
 LABEL org.opencontainers.image.source="https://github.com/dom-nie/eth-gossip-overlay" \
       org.opencontainers.image.version="0.1.0" \
