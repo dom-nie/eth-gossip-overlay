@@ -77,7 +77,7 @@ rand = "0.10"
 
 # Renders the nftables template in T-046's deployment tests, the way an operator's own
 # configuration management renders it. eth-gossip-overlay's dev-dependencies alone.
-minijinja = "2"
+minijinja = { version = "3", features = ["serde"] }
 
 proptest = "1"
 # `gethostname` for the sidecar's own identity (T-003 keeps it out of overlay-core), and raising

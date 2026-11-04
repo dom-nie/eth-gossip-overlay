@@ -23,6 +23,7 @@ const COMPOSE_ROSTER: &str = "examples/compose/roster.yaml";
 const COMPOSE_CONFIG: &str = "examples/compose/config.yaml";
 const COMPOSE: &str = "examples/compose/docker-compose.yml";
 const DOCKERFILE: &str = "Dockerfile";
+const TOOLCHAIN: &str = "rust-toolchain.toml";
 const CI: &str = ".github/workflows/ci.yml";
 
 fn workspace_root() -> PathBuf {
@@ -207,7 +208,7 @@ fn render_nft(roster_yaml: &str) -> String {
         serde_yaml_bw::from_str(roster_yaml).unwrap_or_else(|err| panic!("{ROSTER}: {err}"));
 
     minijinja::Environment::new()
-        .render_str(&read(NFT_TEMPLATE), roster)
+        .render_str(&read(NFT_TEMPLATE), minijinja::value::Serde(roster))
         .unwrap_or_else(|err| panic!("{NFT_TEMPLATE}: {err}"))
 }
 
@@ -424,6 +425,30 @@ fn dockerfile_labels_the_version_the_workspace_builds() {
     assert!(
         read(DOCKERFILE).contains(&expected),
         "{DOCKERFILE} does not carry {expected}"
+    );
+}
+
+/// `COPY . .` brings rust-toolchain.toml into the build, so rustup compiles the binary with the
+/// pinned toolchain whatever the builder's tag says. A builder image on another Rust makes every
+/// uncached build download that whole toolchain on top of the one it ships, because the rustup
+/// directory is not a cache mount. With the tag matching, rustup only adds the components the
+/// file lists.
+#[test]
+fn dockerfile_builder_image_carries_the_pinned_toolchain() {
+    let toolchain = read(TOOLCHAIN);
+    let channel = toolchain
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("channel"))
+        .and_then(|rest| rest.trim().strip_prefix('='))
+        .map(|value| value.trim().trim_matches('"'))
+        .unwrap_or_else(|| panic!("{TOOLCHAIN} has no channel"));
+    let expected = format!("FROM rust:{channel}-");
+
+    assert!(
+        read(DOCKERFILE)
+            .lines()
+            .any(|line| line.trim().starts_with(&expected)),
+        "{DOCKERFILE} does not build {expected}"
     );
 }
 
