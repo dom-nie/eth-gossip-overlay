@@ -207,7 +207,7 @@ fn render_nft(roster_yaml: &str) -> String {
         serde_yaml_bw::from_str(roster_yaml).unwrap_or_else(|err| panic!("{ROSTER}: {err}"));
 
     minijinja::Environment::new()
-        .render_str(&read(NFT_TEMPLATE), roster)
+        .render_str(&read(NFT_TEMPLATE), minijinja::value::Serde(roster))
         .unwrap_or_else(|err| panic!("{NFT_TEMPLATE}: {err}"))
 }
 
