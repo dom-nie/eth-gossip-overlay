@@ -497,17 +497,22 @@ mod tests {
     }
 
     /// What [`column_header`] does with each fork's sidecar: reads it, because its first offset
-    /// is the fixed length the decoder knows.
+    /// is the fixed length the decoder knows, or refuses it, until the ticket named here
+    /// teaches the decoder its layout.
     #[derive(Debug)]
     enum Layout {
         Read(usize),
+        Refused(&'static str),
     }
 
     /// The decoder's fork list. Every fork with column sidecars is here, Heze included,
     /// because Lighthouse maps every fork after Gloas to Gloas's sidecar until it says
     /// otherwise.
-    const COLUMN_LAYOUTS: [(ForkName, Layout); 1] =
-        [(ForkName::Fulu, Layout::Read(COLUMN_FIXED_LEN))];
+    const COLUMN_LAYOUTS: [(ForkName, Layout); 3] = [
+        (ForkName::Fulu, Layout::Read(COLUMN_FIXED_LEN)),
+        (ForkName::Gloas, Layout::Refused("T-120")),
+        (ForkName::Heze, Layout::Refused("T-120")),
+    ];
 
     /// MD-10: for every fork with column sidecars, the first offset of the sidecar `types`
     /// encodes for it is the fixed length [`column_header`] reads, or the fork is listed as
@@ -515,15 +520,18 @@ mod tests {
     /// with columns, fails here by name before a sidecar of it reaches the recent store.
     #[test]
     fn column_fixed_len_per_fork_matches_types() {
-        let fulu = column_sidecar(1, 0).0.as_ssz_bytes();
+        // The same cell and proof in both, so each is past the Fulu fixed length the way a
+        // real sidecar is, and a refusal is the first-offset check rather than a short read.
+        let (fulu, _) = column_sidecar(1, 0);
         let gloas = DataColumnSidecarGloas::<MainnetEthSpec> {
             index: 0,
-            column: Default::default(),
-            kzg_proofs: Default::default(),
+            column: fulu.column.to_vec().try_into().unwrap(),
+            kzg_proofs: fulu.kzg_proofs.to_vec().try_into().unwrap(),
             slot: Slot::new(1),
             beacon_block_root: Hash256::repeat_byte(1),
         }
         .as_ssz_bytes();
+        let fulu = fulu.as_ssz_bytes();
 
         let mut problems = Vec::new();
         for fork in ForkName::list_all()
@@ -549,6 +557,11 @@ mod tests {
                     problems.push(format!(
                         "{fork}: the decoder reads a fixed part of {len} bytes, types encodes \
                          {first_offset}, and the read gave {read:?}"
+                    ))
+                }
+                Some((_, Layout::Refused(ticket))) if read != Err(HeaderError::Ssz) => {
+                    problems.push(format!(
+                        "{fork}: listed as refused until {ticket}, but the decoder gave {read:?}"
                     ))
                 }
                 Some(_) => {}
