@@ -21,6 +21,7 @@ const ALERTS_DIR: &str = "deploy/prometheus";
 const ALERTS_FILE: &str = "alerts.yml";
 const DASHBOARD: &str = "deploy/grafana/eth-gossip-overlay.json";
 const COMPOSE: &str = "examples/compose/docker-compose.yml";
+const CI: &str = ".github/workflows/ci.yml";
 const ROLLOUT: &str = "docs/rollout.md";
 const TROUBLESHOOTING: &str = "docs/troubleshooting.md";
 const EVENTS: &str = "docs/events.md";
@@ -494,6 +495,26 @@ fn the_compose_demo_mounts_the_shipped_dashboard_and_alert_rules() {
     ] {
         assert!(compose.contains(mount), "{COMPOSE} does not mount {mount}");
     }
+}
+
+/// The rules are checked by the Prometheus that loads them in the demo: this suite's container
+/// fallback and CI's own promtool step name the same tag as the compose default, so a bump that
+/// misses one of the three fails here instead of checking against a different release.
+#[test]
+fn promtool_image_is_the_prometheus_the_demo_runs() {
+    let tag = PROMETHEUS_IMAGE
+        .strip_prefix("prom/prometheus:")
+        .unwrap_or_else(|| panic!("{PROMETHEUS_IMAGE} is not a prom/prometheus image"));
+    let compose_image = format!("prom/prometheus:${{PROMETHEUS_VERSION:-{tag}}}");
+
+    assert!(
+        read(COMPOSE).contains(&compose_image),
+        "{COMPOSE} does not default to {compose_image}"
+    );
+    assert!(
+        read(CI).contains(PROMETHEUS_IMAGE),
+        "{CI} does not run promtool from {PROMETHEUS_IMAGE}"
+    );
 }
 
 /// The bodies of a Markdown file's ```language blocks, in order.
