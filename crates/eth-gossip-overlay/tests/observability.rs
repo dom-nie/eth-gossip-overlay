@@ -398,8 +398,9 @@ fn every_alert_holds_for_a_window_and_carries_a_summary_and_a_runbook() {
 
 /// MD-10: the alert on topic kinds the sidecar does not know fires for a host whose counter
 /// rose inside the window and stays quiet for one whose counter sat still, however high. The
-/// expected annotations are the rule's own, filled in for the host, because promtool compares
-/// them whole.
+/// rising counter stops at 10m, so the alert holds at 20m, with the rise inside the 15-minute
+/// window, and is gone at 30m, which pins the window. The expected annotations are the rule's
+/// own, filled in for the host, because promtool compares them whole.
 #[test]
 fn overlay_unknown_topic_kind_fires_on_an_increase_and_not_on_a_flat_counter() {
     let rule = alert_rules()
@@ -413,10 +414,11 @@ fn overlay_unknown_topic_kind_fires_on_an_increase_and_not_on_a_flat_counter() {
     let test = format!(
         "rule_files:\n  - {ALERTS_FILE}\nevaluation_interval: 1m\ntests:\n  - interval: 1m\n    \
          input_series:\n      - series: 'overlay_unknown_topic_kind_total{{instance=\"rising\",class=\"small\"}}'\n        \
-         values: '0+1x30'\n      - series: 'overlay_unknown_topic_kind_total{{instance=\"flat\",class=\"large\"}}'\n        \
+         values: '0+1x10 10x30'\n      - series: 'overlay_unknown_topic_kind_total{{instance=\"flat\",class=\"large\"}}'\n        \
          values: '7x30'\n    alert_rule_test:\n      - eval_time: 20m\n        alertname: OverlayUnknownTopicKind\n        \
          exp_alerts:\n          - exp_labels:\n              instance: rising\n              severity: warning\n            \
-         exp_annotations:\n              summary: \"{summary}\"\n              runbook: {}\n",
+         exp_annotations:\n              summary: \"{summary}\"\n              runbook: {}\n      \
+         - eval_time: 30m\n        alertname: OverlayUnknownTopicKind\n        exp_alerts: []\n",
         rule.annotations.runbook
     );
 
