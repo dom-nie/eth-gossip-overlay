@@ -50,11 +50,12 @@ exceptions = [
   { crate = "tiny-keccak", allow = ["CC0-1.0"] },
 ]
 # Lighthouse's internal crates carry no `license` field. They inherit the Apache-2.0 LICENSE at
-# the root of the repository, at the rev the lock pins for v8.2.3,
-# 6db6ae9382b7d6f5bd1e0ca0d349bc0dc94adba2. The list is what `cargo deny check licenses` named;
+# the root of the repository, at the rev the lock pins for v8.3.2,
+# a376defa30470923556d91bdeb15a802e297f31f. The list is what `cargo deny check licenses` named;
 # a Lighthouse bump that pulls in another one shows up as a new unlicensed error here.
 clarify = [
   { crate = "bls", expression = "Apache-2.0", license-files = [] },
+  { crate = "builder_types", expression = "Apache-2.0", license-files = [] },
   { crate = "clap_utils", expression = "Apache-2.0", license-files = [] },
   { crate = "directory", expression = "Apache-2.0", license-files = [] },
   { crate = "eip_3076", expression = "Apache-2.0", license-files = [] },
@@ -65,6 +66,7 @@ clarify = [
   { crate = "eth2_keystore", expression = "Apache-2.0", license-files = [] },
   { crate = "eth2_network_config", expression = "Apache-2.0", license-files = [] },
   { crate = "fixed_bytes", expression = "Apache-2.0", license-files = [] },
+  { crate = "fork_choice", expression = "Apache-2.0", license-files = [] },
   { crate = "int_to_bytes", expression = "Apache-2.0", license-files = [] },
   { crate = "kzg", expression = "Apache-2.0", license-files = [] },
   { crate = "lighthouse_network", expression = "Apache-2.0", license-files = [] },
@@ -76,6 +78,7 @@ clarify = [
   { crate = "network_utils", expression = "Apache-2.0", license-files = [] },
   { crate = "pretty_reqwest_error", expression = "Apache-2.0", license-files = [] },
   { crate = "proto_array", expression = "Apache-2.0", license-files = [] },
+  { crate = "state_processing", expression = "Apache-2.0", license-files = [] },
   { crate = "swap_or_not_shuffle", expression = "Apache-2.0", license-files = [] },
   { crate = "task_executor", expression = "Apache-2.0", license-files = [] },
   { crate = "types", expression = "Apache-2.0", license-files = [] },
@@ -94,7 +97,10 @@ allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
   "https://github.com/sigp/lighthouse",
   "https://github.com/sigp/rust-libp2p",
-  # Declared in workspace.dependencies and rewritten by the [patch] table to sigp's fork, so the
-  # lock never carries it; cargo deny reports the entry as unmatched, which is expected.
-  "https://github.com/libp2p/rust-libp2p",
+  # The EIP-7688 forks Lighthouse's [patch.crates-io] table points at, which the root Cargo.toml
+  # copies. Its warp entry is left out: nothing here depends on warp, so the lock never has it.
+  "https://github.com/sigp/ssz_types",
+  "https://github.com/sigp/milhouse",
+  "https://github.com/sigp/ethereum_ssz",
+  "https://github.com/sigp/tree_hash",
 ]

@@ -13,23 +13,24 @@ overlay-core = { path = "crates/overlay-core" }
 overlay-transport = { path = "crates/overlay-transport" }
 overlay-bn = { path = "crates/overlay-bn" }
 
-# Lighthouse v8.2.3. Bumping Lighthouse means changing this tag, the sigp/rust-libp2p rev in the
-# patch table at the bottom, and rerunning T-018's compatibility matrix.
-lighthouse_network = { git = "https://github.com/sigp/lighthouse.git", tag = "v8.2.3" }
-types = { git = "https://github.com/sigp/lighthouse.git", tag = "v8.2.3", features = ["saturating-arith"] }
+# Lighthouse v8.3.2. Bumping Lighthouse means changing this tag, copying the libp2p source and
+# rev below and the [patch.crates-io] table at the bottom from Lighthouse's root Cargo.toml at
+# the new tag, and rerunning T-018's compatibility matrix.
+lighthouse_network = { git = "https://github.com/sigp/lighthouse.git", tag = "v8.3.2" }
+types = { git = "https://github.com/sigp/lighthouse.git", tag = "v8.3.2", features = ["saturating-arith"] }
 # secp256k1 is what lets the sidecar verify the beacon node's key: a Lighthouse identity is
 # always secp256k1, so without the feature the noise handshake cannot decode it and every dial
 # ends in `Invalid public key: Key decoding error: cargo feature secp256k1 is not enabled`. The
 # sidecar still signs with ed25519 (D01). Leaving it out is invisible to the matrix, because
 # overlay-bn's dev-dependency on lighthouse_network turns the feature on for every test build;
 # only the shipped binary, which has no lighthouse_network, can tell the difference.
-libp2p = { git = "https://github.com/libp2p/rust-libp2p.git", default-features = false, features = ["tcp", "noise", "yamux", "identify", "gossipsub", "gossipsub-partial-messages", "request-response", "metrics", "tokio", "macros", "secp256k1"] }
+libp2p = { git = "https://github.com/sigp/rust-libp2p", rev = "accba72bb4eafc692ac518339ef2c4080b6f8461", default-features = false, features = ["tcp", "noise", "yamux", "identify", "gossipsub", "gossipsub-partial-messages", "request-response", "metrics", "tokio", "macros", "secp256k1"] }
 # The version Lighthouse's discv5 already resolves to, so the sidecar signs the records the
 # beacon node parses. The sidecar only signs with ed25519, but `CombinedKey` and the
 # `ed25519_dalek` re-export that names the dalek version the crate signs with are both behind
 # `all(ed25519, k256)`, so k256 comes along. Without it the crate compiles and neither type can
 # be named; a test build hides that, because Lighthouse's own discv5 turns k256 on.
-enr = { version = "0.13", default-features = false, features = ["ed25519", "k256"] }
+enr = { version = "0.14", default-features = false, features = ["ed25519", "k256"] }
 
 tokio = "1"
 # No platform-verifier: the overlay pins peer keys and must never reach for a system trust store.
@@ -58,7 +59,7 @@ ed25519-dalek = "3"
 zeroize = "1"
 reed-solomon-simd = "3"
 prometheus = { version = "0.14", default-features = false, features = ["process"] }
-prometheus-client = "0.24"
+prometheus-client = "0.25"
 # hyper 1 ships its runtime bridge and its body helpers as separate crates and is not usable
 # as a server without them.
 hyper = "1"
@@ -106,9 +107,16 @@ lto = "fat"
 codegen-units = 1
 strip = true
 
-# Copied verbatim from Lighthouse v8.2.3's root Cargo.toml so libp2p resolves to the fork revision
-# the beacon node itself compiles. Patches only take effect in the workspace root.
-[patch."https://github.com/libp2p/rust-libp2p.git"]
-libp2p = { git = "https://github.com/sigp/rust-libp2p.git", rev = "c774d4e71357d7cd2f792c4767d616d2dd369ee3" }
-libp2p-mplex = { git = "https://github.com/sigp/rust-libp2p.git", rev = "c774d4e71357d7cd2f792c4767d616d2dd369ee3" }
-libp2p-quic = { git = "https://github.com/sigp/rust-libp2p.git", rev = "c774d4e71357d7cd2f792c4767d616d2dd369ee3" }
+# Copied verbatim from Lighthouse v8.3.2's root Cargo.toml. Lighthouse's types need
+# ProgressiveVariableList, which only these revisions have, and patches only take effect in the
+# workspace root, so without this copy types would build against crates.io ssz_types and fail.
+[patch.crates-io]
+# FIXME(eip-7688): EIP-7688 development patches
+ssz_types = { git = "https://github.com/sigp/ssz_types", rev = "8955d22edc7633f26fe3b5ac933facb5121d717a" }
+milhouse = { git = "https://github.com/sigp/milhouse", rev = "d67aabd2a7c405b3c16f4aaff159b137dc5b5e38" }
+ethereum_ssz = { git = "https://github.com/sigp/ethereum_ssz", rev = "974f78f421fbf70cba4e8f84e0fa28c23ad54f34" }
+ethereum_ssz_derive = { git = "https://github.com/sigp/ethereum_ssz", rev = "974f78f421fbf70cba4e8f84e0fa28c23ad54f34" }
+tree_hash = { git = "https://github.com/sigp/tree_hash", rev = "e5ea1875edddf12438506c3751cbb313f9c52d08" }
+tree_hash_derive = { git = "https://github.com/sigp/tree_hash", rev = "e5ea1875edddf12438506c3751cbb313f9c52d08" }
+# Temporary patch until the axum migration is complete
+warp = { git = "https://github.com/macladson/warp", rev = "6f5f21beab6a240e59470caaab56afd46d46b709" }
