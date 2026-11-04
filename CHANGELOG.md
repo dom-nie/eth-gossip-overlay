@@ -68,4 +68,5 @@ The first release, so all of it is new.
 
 ### Security
 
-- The TLS under the overlay's QUIC connections, rustls, took the fix for RUSTSEC-2026-0285: 0.23.43 accepted TLS 1.3 handshake messages across encryption-level boundaries, and the lock now pins 0.23.45.
+- The TLS under the overlay's QUIC connections, rustls, took the fix for RUSTSEC-2026-0285: 0.23.43 accepted TLS 1.3 handshake messages across encryption-level boundaries, and the lock now pins 0.23.46.
+- rustls 0.23.46 also fixes RUSTSEC-2026-0346, -0347, -0348 and -0349. None of them could be reached in this build, so the overlay was never exposed: the sidecar has no custom client session store (0346), never turns on ECH (0347), is built without the brotli feature (0348), and its dialer turns resumption off and offers no hybrid key exchange to downgrade from, because its only crypto provider is ring (0349).
