@@ -43,12 +43,112 @@ pub enum Sidecar {
     Other,
 }
 
-/// The table. Empty until the drift test says what belongs in it.
-pub const FORK_TOPICS: &[ForkTopic] = &[];
+/// The table, checked against Lighthouse v8.3.2. Lighthouse's own list is its worst case:
+/// every subnet and column, the light-client server and execution proofs all switched on.
+pub const FORK_TOPICS: &[ForkTopic] = &[
+    named(
+        "phase0",
+        "beacon_block",
+        |_| TopicKind::BeaconBlock,
+        Class::Large,
+    ),
+    named(
+        "phase0",
+        "beacon_aggregate_and_proof",
+        |_| TopicKind::BeaconAggregateAndProof,
+        Class::Small,
+    ),
+    named(
+        "phase0",
+        "beacon_attestation_{i}",
+        TopicKind::Attestation,
+        Class::Small,
+    ),
+    named(
+        "phase0",
+        "voluntary_exit",
+        |_| TopicKind::VoluntaryExit,
+        Class::Small,
+    ),
+    named(
+        "phase0",
+        "proposer_slashing",
+        |_| TopicKind::ProposerSlashing,
+        Class::Small,
+    ),
+    named(
+        "phase0",
+        "attester_slashing",
+        |_| TopicKind::AttesterSlashing,
+        Class::Small,
+    ),
+    named(
+        "altair",
+        "sync_committee_{i}",
+        TopicKind::SyncCommittee,
+        Class::Small,
+    ),
+    named(
+        "altair",
+        "sync_committee_contribution_and_proof",
+        |_| TopicKind::SyncContributionAndProof,
+        Class::Small,
+    ),
+    // Lighthouse serves light clients by default (`--disable-light-client-server` turns it
+    // off), so a default beacon node subscribes to both and the sidecar mirrors them.
+    other("altair", "light_client_finality_update"),
+    other("altair", "light_client_optimistic_update"),
+    named(
+        "capella",
+        "bls_to_execution_change",
+        |_| TopicKind::BlsToExecutionChange,
+        Class::Small,
+    ),
+    named(
+        "fulu",
+        "data_column_sidecar_{i}",
+        TopicKind::DataColumnSidecar,
+        Class::Large,
+    ),
+    // MD-08 names these four; until T-119 does, they are Other.
+    other("gloas", "execution_payload"),
+    other("gloas", "execution_payload_bid"),
+    other("gloas", "payload_attestation_message"),
+    other("gloas", "proposer_preferences"),
+    // Other by decision (MD-08): subscribed only with the node's `--enable-execution-proof`.
+    other("gloas", "execution_proof"),
+    // Other by decision (MD-08): Heze is scheduled on no network.
+    other("heze", "inclusion_list"),
+];
 
 /// Kinds the sidecar names that no Lighthouse fork subscribes to, each with the reason it is
 /// kept. Holding these here is what lets a test insist that every other kind has a row.
-pub const KINDS_WITHOUT_A_TOPIC: [(&str, &str); 0] = [];
+pub const KINDS_WITHOUT_A_TOPIC: [(&str, &str); 1] = [(
+    "blob_sidecar_{i}",
+    "D02 made blob sidecars a known Large kind; Lighthouse v8.2.3 and v8.3.2 subscribe to \
+     blob_sidecar at no fork, Deneb and Electra included",
+)];
+
+const fn named(
+    since: &'static str,
+    name: &'static str,
+    kind: fn(u8) -> TopicKind,
+    class: Class,
+) -> ForkTopic {
+    ForkTopic {
+        since,
+        name,
+        sidecar: Sidecar::Named(kind, class),
+    }
+}
+
+const fn other(since: &'static str, name: &'static str) -> ForkTopic {
+    ForkTopic {
+        since,
+        name,
+        sidecar: Sidecar::Other,
+    }
+}
 
 impl ForkTopic {
     /// Whether the row is live at `fork`. A fork missing from [`FORKS`] has no rows.
