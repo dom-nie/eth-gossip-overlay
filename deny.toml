@@ -74,7 +74,7 @@ clarify = [
 ]
 
 [bans]
-# Lighthouse's tree pins older rand, hkdf and ed25519-dalek next to the versions this workspace
+# Lighthouse's tree pins older rand, sha2 and prometheus next to the versions this workspace
 # uses, and cannot be unified from here.
 multiple-versions = "warn"
 
