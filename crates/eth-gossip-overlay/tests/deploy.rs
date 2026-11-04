@@ -445,7 +445,9 @@ fn dockerfile_builder_image_carries_the_pinned_toolchain() {
     let expected = format!("FROM rust:{channel}-");
 
     assert!(
-        read(DOCKERFILE).contains(&expected),
+        read(DOCKERFILE)
+            .lines()
+            .any(|line| line.trim().starts_with(&expected)),
         "{DOCKERFILE} does not build {expected}"
     );
 }

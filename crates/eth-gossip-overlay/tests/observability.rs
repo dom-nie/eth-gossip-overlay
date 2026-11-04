@@ -512,7 +512,10 @@ fn promtool_image_is_the_prometheus_the_demo_runs() {
         "{COMPOSE} does not default to {compose_image}"
     );
     assert!(
-        read(CI).contains(PROMETHEUS_IMAGE),
+        read(CI)
+            .lines()
+            .map(str::trim)
+            .any(|line| { !line.starts_with('#') && line.contains(PROMETHEUS_IMAGE) }),
         "{CI} does not run promtool from {PROMETHEUS_IMAGE}"
     );
 }
