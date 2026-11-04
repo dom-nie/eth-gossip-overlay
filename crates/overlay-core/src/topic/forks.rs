@@ -217,6 +217,8 @@ mod tests {
             "beacon_attestation_",
             "beacon_attestation_x",
             "execution_payload_bids",
+            "beacon_attestation_+5",
+            "data_column_sidecar_007",
         ] {
             assert!(!lists(name), "{name}");
         }
