@@ -17,7 +17,7 @@ operator documentation. Commands run from this directory, on the host.
 | `sysctl/90-eth-gossip-overlay.conf` | socket buffers, `fq`, the RFS flow table | recommended |
 | `nftables/eth-gossip-overlay.nft.j2` | UDP 7788 allowlist from the roster | recommended |
 | `nftables/eth-gossip-overlay.nft.example` | the template rendered from `examples/roster.yaml` | example |
-| `prometheus/alerts.yml` | the ten alert rules, for your own Prometheus | recommended |
+| `prometheus/alerts.yml` | the alert rules, for your own Prometheus | recommended |
 | `grafana/eth-gossip-overlay.json` | the dashboard, for your own Grafana | recommended |
 
 The fleet seed at `/etc/eth-gossip-overlay/seed` is required and is not in this directory: you

@@ -1170,8 +1170,9 @@ mod tests {
         assert!(harness.link.connected.load(Ordering::Relaxed));
     }
 
-    /// `--libp2p-addresses` is read once when the beacon node starts, so a sidecar that
-    /// restarts afterwards is only dialled again if it says so itself. The link posts its ENR
+    /// On v8.2 `--libp2p-addresses` is read once when the beacon node starts, and from v8.3.0
+    /// not at all, so a sidecar that restarts afterwards is only dialled again if it says so
+    /// itself. The link posts its ENR
     /// before every dial, and the beacon node's peer manager dials that ENR at once and again
     /// on every heartbeat while it is disconnected.
     #[tokio::test(flavor = "multi_thread")]

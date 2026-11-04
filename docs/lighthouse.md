@@ -100,7 +100,8 @@ line `relaying a topic kind the sidecar does not know` names the topic once per 
 the beacon node runs a newer Lighthouse than the one this sidecar was built against. The same host
 then shows `overlay_bn_compat{state="untested"}` at 1 and logs `beacon node is newer than any
 version the sidecar was tested with`, and `eth-gossip-overlayctl status` prints the version on its
-`bn` line. Upgrade the sidecar to a release built against that Lighthouse.
+`bn` line. Upgrade the sidecar to a release built against that Lighthouse. Until one exists the
+topic still travels, so the alert can be silenced for that host.
 
 ## The flags that were already yours
 
