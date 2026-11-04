@@ -69,7 +69,9 @@ major() {
 # The bit positions of `features added: NAME (bit N), ...`, one per line and nothing for `none`.
 bits() {
   local line features
-  line=$(section "$1" | grep -m1 '^Protocol: major ') || {
+  # A here-string rather than a pipe: grep -m1 quits at its match, and under pipefail the
+  # writer's SIGPIPE would fail a lookup that succeeded.
+  line=$(grep -m1 '^Protocol: major ' <<<"$(section "$1")") || {
     echo "no \`Protocol:\` line in the [$1] section of CHANGELOG.md" >&2
     return 1
   }
@@ -95,7 +97,7 @@ check() {
     echo "no crate source in $base...$head, nothing to note"
     return 0
   fi
-  if printf '%s\n' "$changed" | grep -qx 'CHANGELOG.md'; then
+  if grep -qx 'CHANGELOG.md' <<<"$changed"; then
     echo "CHANGELOG.md is in $base...$head"
     return 0
   fi
