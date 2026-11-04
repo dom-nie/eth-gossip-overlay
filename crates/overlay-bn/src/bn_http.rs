@@ -19,6 +19,8 @@
 //! ignores the rest. `POST /lighthouse/add_peer` takes `api_types::AdminPeer`, one `enr`
 //! string, and answers an empty 200.
 
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use libp2p::PeerId;
@@ -43,6 +45,9 @@ pub struct BnClient {
     peers: Url,
     spec: Url,
     add_peer: Url,
+    /// Spec keys already reported missing. Shared by every clone, so a key is named once for
+    /// the life of the process rather than on every reconnect.
+    missing_logged: Arc<Mutex<BTreeSet<&'static str>>>,
 }
 
 /// What the beacon node knows about one of its peers, cut down to what the sidecar acts on.
@@ -177,6 +182,7 @@ impl BnClient {
             spec: sibling(&identity_url, SPEC),
             add_peer: sibling(&identity_url, ADD_PEER),
             identity: identity_url,
+            missing_logged: Arc::default(),
         }
     }
 
@@ -229,9 +235,24 @@ impl BnClient {
         }
     }
 
-    /// The spec constants as the beacon node runs them.
+    /// The spec constants as the beacon node runs them. A key the answer lacks takes the
+    /// mainnet value, and is named in a warning the first time, because a Lighthouse that
+    /// stops sending one would otherwise leave the sidecar sized for mainnet in silence (MD-10).
     pub async fn spec(&self) -> Result<SpecSnapshot, BnHttpError> {
         let Data { data } = self.get::<Data<SpecWire>>(&self.spec, SPEC).await?;
+        let mut logged = self
+            .missing_logged
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for key in data.missing() {
+            if logged.insert(key) {
+                tracing::warn!(
+                    key,
+                    url = %self.spec,
+                    "the beacon node's spec lacks a key the sidecar reads; using the mainnet value"
+                );
+            }
+        }
         Ok(data.into())
     }
 

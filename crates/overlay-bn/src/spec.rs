@@ -24,54 +24,67 @@ pub const MAINNET: SpecSnapshot = SpecSnapshot {
     slots_per_epoch: 32,
 };
 
+/// The keys [`SpecWire`] reads, in its field order, by the name the beacon node sends.
+pub const SPEC_KEYS: [&str; 6] = [
+    "DATA_COLUMN_SIDECAR_SUBNET_COUNT",
+    "NUMBER_OF_COLUMNS",
+    "NUMBER_OF_CUSTODY_GROUPS",
+    "MAX_PAYLOAD_SIZE",
+    "SECONDS_PER_SLOT",
+    "SLOTS_PER_EPOCH",
+];
+
 /// The snapshot as the beacon node sends it. Lighthouse serialises every number as a quoted
-/// decimal string, so each field parses one; a key it does not send, an older fork, keeps
-/// [`MAINNET`]'s value for that field.
-#[derive(Deserialize)]
+/// decimal string, so each field parses one. A key it does not send stays `None`, so the
+/// client can say which before [`MAINNET`]'s value stands in for it.
+#[derive(Default, Deserialize)]
 #[serde(default, rename_all = "UPPERCASE")]
 pub struct SpecWire {
     #[serde(deserialize_with = "quoted")]
-    data_column_sidecar_subnet_count: u64,
+    data_column_sidecar_subnet_count: Option<u64>,
     #[serde(deserialize_with = "quoted")]
-    number_of_columns: u64,
+    number_of_columns: Option<u64>,
     #[serde(deserialize_with = "quoted")]
-    number_of_custody_groups: u64,
+    number_of_custody_groups: Option<u64>,
     #[serde(deserialize_with = "quoted")]
-    max_payload_size: u64,
+    max_payload_size: Option<u64>,
     #[serde(deserialize_with = "quoted")]
-    seconds_per_slot: u64,
+    seconds_per_slot: Option<u64>,
     #[serde(deserialize_with = "quoted")]
-    slots_per_epoch: u64,
+    slots_per_epoch: Option<u64>,
 }
 
-impl Default for SpecWire {
-    fn default() -> Self {
-        Self::from(MAINNET)
-    }
-}
-
-impl From<SpecSnapshot> for SpecWire {
-    fn from(spec: SpecSnapshot) -> Self {
-        Self {
-            data_column_sidecar_subnet_count: spec.data_column_sidecar_subnet_count,
-            number_of_columns: spec.number_of_columns,
-            number_of_custody_groups: spec.number_of_custody_groups,
-            max_payload_size: spec.max_payload_size,
-            seconds_per_slot: spec.seconds_per_slot,
-            slots_per_epoch: spec.slots_per_epoch,
-        }
+impl SpecWire {
+    /// The keys this answer did not carry, each of which takes [`MAINNET`]'s value.
+    pub fn missing(&self) -> impl Iterator<Item = &'static str> {
+        let values = [
+            self.data_column_sidecar_subnet_count,
+            self.number_of_columns,
+            self.number_of_custody_groups,
+            self.max_payload_size,
+            self.seconds_per_slot,
+            self.slots_per_epoch,
+        ];
+        SPEC_KEYS
+            .into_iter()
+            .zip(values)
+            .filter_map(|(key, value)| value.is_none().then_some(key))
     }
 }
 
 impl From<SpecWire> for SpecSnapshot {
     fn from(wire: SpecWire) -> Self {
         Self {
-            data_column_sidecar_subnet_count: wire.data_column_sidecar_subnet_count,
-            number_of_columns: wire.number_of_columns,
-            number_of_custody_groups: wire.number_of_custody_groups,
-            max_payload_size: wire.max_payload_size,
-            seconds_per_slot: wire.seconds_per_slot,
-            slots_per_epoch: wire.slots_per_epoch,
+            data_column_sidecar_subnet_count: wire
+                .data_column_sidecar_subnet_count
+                .unwrap_or(MAINNET.data_column_sidecar_subnet_count),
+            number_of_columns: wire.number_of_columns.unwrap_or(MAINNET.number_of_columns),
+            number_of_custody_groups: wire
+                .number_of_custody_groups
+                .unwrap_or(MAINNET.number_of_custody_groups),
+            max_payload_size: wire.max_payload_size.unwrap_or(MAINNET.max_payload_size),
+            seconds_per_slot: wire.seconds_per_slot.unwrap_or(MAINNET.seconds_per_slot),
+            slots_per_epoch: wire.slots_per_epoch.unwrap_or(MAINNET.slots_per_epoch),
         }
     }
 }
@@ -83,9 +96,9 @@ pub fn spec_watch() -> (watch::Sender<SpecSnapshot>, watch::Receiver<SpecSnapsho
 }
 
 /// A number the BN sends as `"12"`, never as `12`.
-fn quoted<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+fn quoted<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<u64>, D::Error> {
     let text = String::deserialize(deserializer)?;
-    text.parse().map_err(|err| {
+    text.parse().map(Some).map_err(|err| {
         serde::de::Error::custom(format!("{text:?} is not a decimal integer: {err}"))
     })
 }
@@ -115,24 +128,16 @@ mod drift {
 
     use super::*;
 
-    /// The keys [`SpecWire`] reads, by the name the beacon node sends.
-    const KEYS: [&str; 6] = [
-        "DATA_COLUMN_SIDECAR_SUBNET_COUNT",
-        "NUMBER_OF_COLUMNS",
-        "NUMBER_OF_CUSTODY_GROUPS",
-        "MAX_PAYLOAD_SIZE",
-        "SECONDS_PER_SLOT",
-        "SLOTS_PER_EPOCH",
-    ];
-
     /// MD-10: a key Lighthouse stops sending would leave the sidecar on the mainnet value
     /// without a word, so every key the sidecar reads is held against what the handler of
     /// `/eth/v1/config/spec` serialises for mainnet at the pinned tag. The first assertion is
     /// what makes the list the struct's: six keys each set to 1 leave no field at its default.
     #[test]
     fn spec_keys_the_sidecar_reads_are_in_lighthouse_config() {
-        let ones: serde_json::Map<_, _> =
-            KEYS.iter().map(|k| (k.to_string(), json!("1"))).collect();
+        let ones: serde_json::Map<_, _> = SPEC_KEYS
+            .iter()
+            .map(|k| (k.to_string(), json!("1")))
+            .collect();
         let wire: SpecWire = serde_json::from_value(ones.into()).unwrap();
         assert_eq!(
             SpecSnapshot::from(wire),
@@ -150,7 +155,7 @@ mod drift {
             &ChainSpec::mainnet(),
         ))
         .unwrap();
-        let missing: Vec<&str> = KEYS
+        let missing: Vec<&str> = SPEC_KEYS
             .into_iter()
             .filter(|key| lighthouse.get(key).is_none())
             .collect();
