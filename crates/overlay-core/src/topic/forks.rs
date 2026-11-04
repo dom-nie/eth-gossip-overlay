@@ -169,6 +169,13 @@ impl ForkTopic {
     }
 }
 
+/// Whether the table lists `name` at any fork: a named kind's name, or one it lists as
+/// `Other` by decision. A name it does not list is one nobody has reviewed, and only that is
+/// what `overlay_unknown_topic_kind_total` counts (MD-10 amended).
+pub fn lists(name: &str) -> bool {
+    FORK_TOPICS.iter().any(|row| row.index_of(name).is_some())
+}
+
 fn position(fork: &str) -> Option<usize> {
     FORKS.iter().position(|known| *known == fork)
 }
@@ -191,6 +198,29 @@ mod tests {
         TopicKind::DataColumnSidecar(0),
         TopicKind::BlobSidecar(0),
     ];
+
+    #[test]
+    fn lists_every_name_the_table_has_and_nothing_else() {
+        for name in [
+            "beacon_block",
+            "beacon_attestation_17",
+            "data_column_sidecar_127",
+            "light_client_finality_update",
+            "execution_payload_bid",
+            "inclusion_list",
+        ] {
+            assert!(lists(name), "{name}");
+        }
+        for name in [
+            "made_up_topic",
+            "blob_sidecar_0",
+            "beacon_attestation_",
+            "beacon_attestation_x",
+            "execution_payload_bids",
+        ] {
+            assert!(!lists(name), "{name}");
+        }
+    }
 
     /// A named kind with no row would be a kind the sidecar can parse that the beacon node never
     /// sends, which is either dead code or a topic the table forgot.
