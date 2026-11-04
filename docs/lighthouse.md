@@ -97,9 +97,10 @@ small-message way below it. Some of these names are expected, and the fork-topic
 A name the table does not list is one nobody has reviewed. Each message on it counts in
 `overlay_unknown_topic_kind_total`, any increase raises `OverlayUnknownTopicKind`, and the warn
 line `relaying a topic kind the sidecar does not know` names the topic once per process. It means
-the beacon node runs a newer Lighthouse than the one this sidecar was built against, which
-`eth-gossip-overlayctl status` shows as `untested`. Upgrade the sidecar to a release built against
-that Lighthouse.
+the beacon node runs a newer Lighthouse than the one this sidecar was built against. The same host
+then shows `overlay_bn_compat{state="untested"}` at 1 and logs `beacon node is newer than any
+version the sidecar was tested with`, and `eth-gossip-overlayctl status` prints the version on its
+`bn` line. Upgrade the sidecar to a release built against that Lighthouse.
 
 ## The flags that were already yours
 
