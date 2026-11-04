@@ -618,7 +618,34 @@ mod tests {
         );
     }
 
-    /// The name is used nowhere else, so its count in the shared log is this test's alone.
+    /// MD-10 amended: a name the fork-topic table lists as `Other` by decision is classed by
+    /// size like any other `Other`, and still relayed, but it is not unknown. A default
+    /// Lighthouse gossips light-client updates, so counting them would hold the alert on for
+    /// good. Nothing else in this binary relays this topic, so its absence from the shared log
+    /// is this test's to assert.
+    #[tokio::test]
+    async fn a_topic_the_fork_table_lists_as_other_is_relayed_without_counting_or_warning() {
+        let log = &*LOG;
+        let topic = "/eth2/00000000/light_client_finality_update/ssz_snappy";
+        let mut h = Harness::new();
+        for payload in [b"one", b"two", b"six"] {
+            h.push(Class::Small, message(topic, payload));
+        }
+        h.start();
+
+        for _ in 0..3 {
+            assert_eq!(h.out.recv().await.class, Class::Small);
+        }
+
+        assert_eq!(h.stats.count("first_seen", Class::Small), 3);
+        assert_eq!(h.stats.count("unknown_kind", Class::Small), 0);
+        assert_eq!(h.stats.count("unknown_kind", Class::Large), 0);
+        let text = log.text();
+        assert!(!text.contains("light_client_finality_update"), "{text:?}");
+    }
+
+    /// A name no fork has, which is what the counter and the warning are for. The name is used
+    /// nowhere else, so its count in the shared log is this test's alone.
     #[tokio::test]
     async fn unknown_kind_increments_counter_by_class_and_logs_the_name_once() {
         let log = &*LOG;
