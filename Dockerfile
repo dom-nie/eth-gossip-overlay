@@ -7,8 +7,9 @@
 # Run it with --network host. QUIC through a port mapping adds a hop of latency and hides path
 # MTU discovery from the endpoint; examples/compose/README.md has the detail.
 
-# The exact toolchain rust-toolchain.toml pins, so rustup has nothing to fetch, and the Debian
-# release both later stages are built on, so the binaries link the libc they run against.
+# The exact toolchain rust-toolchain.toml pins, so the image already carries it and rustup only
+# adds the components that file lists, and the Debian release both later stages are built on,
+# so the binaries link the libc they run against.
 FROM rust:1.99.1-trixie AS builder
 
 # The state directory the runtime stage takes as it is. It is made here because the runtime has
