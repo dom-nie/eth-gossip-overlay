@@ -42,7 +42,9 @@ ETH_GOSSIP_OVERLAY_TRUSTED_PEER_ARGS=--trusted-peers 12D3KooWJ6JBbaSGzLK7jZj7qte
 ```
 
 `--trusted-peers` is what stops the beacon node scoring and pruning the sidecar like an ordinary
-peer. `--libp2p-addresses` is what makes the beacon node dial it.
+peer. `--libp2p-addresses` makes a v8.2 beacon node dial it once at startup and does nothing from
+v8.3.0; what makes the beacon node dial the sidecar is the sidecar's own `add_peer` registration,
+below.
 
 ## Why the beacon node dials the sidecar
 
