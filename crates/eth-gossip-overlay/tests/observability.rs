@@ -547,7 +547,10 @@ fn promtool_image_is_the_prometheus_the_demo_runs() {
     let compose_image = format!("prom/prometheus:${{PROMETHEUS_VERSION:-{tag}}}");
 
     assert!(
-        read(COMPOSE).contains(&compose_image),
+        read(COMPOSE).lines().map(str::trim).any(|line| {
+            !line.starts_with('#')
+                && line.strip_prefix("image:").map(str::trim) == Some(&*compose_image)
+        }),
         "{COMPOSE} does not default to {compose_image}"
     );
     assert!(
