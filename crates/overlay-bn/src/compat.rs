@@ -747,23 +747,6 @@ mod drift {
 
     use super::*;
 
-    /// Every Lighthouse release in `SUPPORTED`, which is the list the matrix workflow runs. The
-    /// releases between the ends cannot be derived from the range, so they are listed here,
-    /// and the test holds the ends to the range.
-    const MATRIX_RELEASES: [&str; 5] = ["v8.2.2", "v8.2.3", "v8.3.0", "v8.3.1", "v8.3.2"];
-
-    fn matrix_versions() -> Vec<String> {
-        assert_eq!(
-            MATRIX_RELEASES.first().copied(),
-            Some(&*format!("v{}", SUPPORTED.start()))
-        );
-        assert_eq!(
-            MATRIX_RELEASES.last().copied(),
-            Some(&*format!("v{}", SUPPORTED.end()))
-        );
-        MATRIX_RELEASES.iter().map(|v| v.to_string()).collect()
-    }
-
     /// `PINNED` and the tag the root `Cargo.toml` pins for Lighthouse's crates move together;
     /// a bump that forgets one of them would report the wrong version as supported.
     #[test]
@@ -788,7 +771,9 @@ mod drift {
     }
 
     /// The Lighthouse section of `COMPATIBILITY.md` is what the generator renders, and the
-    /// matrix workflow's version list is `SUPPORTED`. With `UPDATE_COMPATIBILITY_MD` set the
+    /// matrix workflow's version list spans `SUPPORTED`: its ends are the range's ends and it
+    /// climbs one release at a time, compared as versions rather than strings. The releases in
+    /// between cannot be derived from the range, so the workflow is the one list. With `UPDATE_COMPATIBILITY_MD` set the
     /// test rewrites the section between the markers first, which is how it is regenerated.
     #[test]
     fn compatibility_md_matches_the_constant() {
@@ -823,7 +808,31 @@ mod drift {
             .split(',')
             .map(|v| v.trim().trim_matches('"').to_owned())
             .collect();
-        assert_eq!(listed, matrix_versions());
+        let workflow_file = ".github/workflows/lighthouse-matrix.yml";
+        assert_eq!(
+            listed.first().map(String::as_str),
+            Some(&*format!("v{}", SUPPORTED.start())),
+            "the first version in {workflow_file} must be the start of SUPPORTED in compat.rs; \
+             edit whichever of the two is wrong"
+        );
+        assert_eq!(
+            listed.last().map(String::as_str),
+            Some(&*format!("v{}", SUPPORTED.end())),
+            "the last version in {workflow_file} must be the end of SUPPORTED in compat.rs; \
+             add the new release to the list, or move SUPPORTED"
+        );
+        let versions: Vec<Version> = listed
+            .iter()
+            .map(|v| {
+                parse(&format!("Lighthouse/{v}"))
+                    .unwrap_or_else(|err| panic!("{workflow_file} lists {v:?}: {err}"))
+                    .version
+            })
+            .collect();
+        assert!(
+            versions.is_sorted_by(|a, b| a < b),
+            "{workflow_file} must list each release once, oldest first: {listed:?}"
+        );
     }
 
     /// MD-10: the fork-topic table names exactly what Lighthouse subscribes to at every fork it
