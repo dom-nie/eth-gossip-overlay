@@ -177,7 +177,7 @@ services:
       - shared:/shared:ro
 
   prometheus:
-    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.5.0}
+    image: prom/prometheus:${PROMETHEUS_VERSION:-v3.15.1}
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ../../deploy/prometheus/alerts.yml:/etc/prometheus/rules/eth-gossip-overlay.yml:ro
@@ -187,7 +187,7 @@ services:
     restart: unless-stopped
 
   grafana:
-    image: grafana/grafana:${GRAFANA_VERSION:-12.0.0}
+    image: grafana/grafana:${GRAFANA_VERSION:-13.3.0}
     environment:
       # A demo on a laptop, so no login.
       GF_AUTH_ANONYMOUS_ENABLED: "true"
