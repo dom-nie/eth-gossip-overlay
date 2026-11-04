@@ -130,8 +130,10 @@ mod drift {
 
     /// MD-10: a key Lighthouse stops sending would leave the sidecar on the mainnet value
     /// without a word, so every key the sidecar reads is held against what the handler of
-    /// `/eth/v1/config/spec` serialises for mainnet at the pinned tag. The first assertion is
-    /// what makes the list the struct's: six keys each set to 1 leave no field at its default.
+    /// `/eth/v1/config/spec` serialises for mainnet at the pinned tag, read back through
+    /// `SpecWire` so that a value format the sidecar cannot parse, or a compiled-in default that
+    /// is not mainnet's, fails too. The first assertion is what makes the list the struct's:
+    /// six keys each set to 1 leave no field at its default.
     #[test]
     fn spec_keys_the_sidecar_reads_are_in_lighthouse_config() {
         let ones: serde_json::Map<_, _> = SPEC_KEYS
@@ -160,6 +162,13 @@ mod drift {
             .filter(|key| lighthouse.get(key).is_none())
             .collect();
         assert!(missing.is_empty(), "Lighthouse no longer sends {missing:?}");
+
+        // Present is not enough: each value has to parse the way `SpecWire` reads it, and the
+        // compiled-in defaults have to be what Lighthouse's own mainnet says.
+        let wire: SpecWire = serde_json::from_value(lighthouse)
+            .unwrap_or_else(|err| panic!("Lighthouse's spec no longer parses: {err}"));
+        assert_eq!(wire.missing().collect::<Vec<_>>(), Vec::<&str>::new());
+        assert_eq!(SpecSnapshot::from(wire), MAINNET);
     }
 
     /// The warning names what `missing()` returns, so each name has to be the key whose value
