@@ -559,6 +559,26 @@ fn compat_stats_keeps_one_state_at_one_and_one_version_series() {
     assert_eq!(series(&registry, "overlay_bn_trusted"), 0);
 }
 
+/// `increase()` needs a sample before the first unknown message to see it, so both class
+/// series exist at 0 from startup; otherwise `OverlayUnknownTopicKind` would miss the first one.
+#[test]
+fn unknown_topic_kind_has_a_zero_series_for_both_classes_at_startup() {
+    let registry = Registry::new();
+    let _metrics = Metrics::new(&registry).unwrap();
+
+    for class in ["small", "large"] {
+        assert_eq!(
+            sample(
+                &registry,
+                "overlay_unknown_topic_kind_total",
+                &[("class", class)]
+            ),
+            Some(0.0),
+            "{class}"
+        );
+    }
+}
+
 #[test]
 fn inbound_stats_labels_the_beacon_node_as_the_source() {
     let registry = Registry::new();
