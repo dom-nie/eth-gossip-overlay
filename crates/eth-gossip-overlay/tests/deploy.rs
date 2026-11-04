@@ -428,10 +428,13 @@ fn dockerfile_labels_the_version_the_workspace_builds() {
     );
 }
 
-/// The image is built with the toolchain the workspace is tested on. A builder on another Rust
-/// would compile the shipped binary with a compiler CI never ran.
+/// `COPY . .` brings rust-toolchain.toml into the build, so rustup compiles the binary with the
+/// pinned toolchain whatever the builder's tag says. A builder image on another Rust makes every
+/// uncached build download that whole toolchain on top of the one it ships, because the rustup
+/// directory is not a cache mount. With the tag matching, rustup only adds the components the
+/// file lists.
 #[test]
-fn dockerfile_builds_with_the_pinned_toolchain() {
+fn dockerfile_builder_image_carries_the_pinned_toolchain() {
     let toolchain = read(TOOLCHAIN);
     let channel = toolchain
         .lines()
