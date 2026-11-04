@@ -266,6 +266,7 @@ mod tests {
 
     use super::*;
     use crate::spec::SpecSnapshot;
+    use crate::testutil::{FakeBn, LOG, ok_json};
 
     fn client(server: &MockServer) -> BnClient {
         client_at(&format!("{}/eth/v1/node/identity", server.uri()))
@@ -557,6 +558,46 @@ mod tests {
                 ..MOCKED
             }
         );
+    }
+
+    /// MD-10: a key the beacon node stops sending is said once, by name, and the mainnet value
+    /// stands in for it; a reconnect asks again and says nothing more. The line carries the
+    /// fake's own address, which is what makes the count this test's in the shared log.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_missing_spec_key_is_logged_once_and_falls_back() {
+        let log = &*LOG;
+        let mut bn = FakeBn::start().await;
+        bn.set_spec_response(ok_json(json!({"data": {
+            "DATA_COLUMN_SIDECAR_SUBNET_COUNT": "128",
+            "NUMBER_OF_COLUMNS": "128",
+            "NUMBER_OF_CUSTODY_GROUPS": "128",
+            "MAX_PAYLOAD_SIZE": "10485760",
+            "SLOTS_PER_EPOCH": "8"
+        }})))
+        .await;
+        let client = BnClient::new(bn.http_addr(), Duration::from_secs(2));
+
+        let mut answers = Vec::new();
+        for _ in 0..3 {
+            answers.push(client.spec().await.unwrap());
+        }
+
+        for spec in answers {
+            assert_eq!(spec.seconds_per_slot, crate::spec::MAINNET.seconds_per_slot);
+            assert_eq!(
+                spec.slots_per_epoch, 8,
+                "the rest of the answer is still read"
+            );
+        }
+        let addr = bn.http_addr();
+        let ours = format!("{}:{}", addr.host_str().unwrap(), addr.port().unwrap());
+        let text = log.text();
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains(&ours) && line.contains("SECONDS_PER_SLOT"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(lines[0].contains("WARN"), "{}", lines[0]);
     }
 
     #[tokio::test]
