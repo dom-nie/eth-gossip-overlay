@@ -161,4 +161,21 @@ mod drift {
             .collect();
         assert!(missing.is_empty(), "Lighthouse no longer sends {missing:?}");
     }
+
+    /// The warning names what `missing()` returns, so each name has to be the key whose value
+    /// is absent and not its neighbour's: every key is dropped from an otherwise complete
+    /// answer in turn, and that key alone must come back.
+    #[test]
+    fn missing_names_exactly_the_key_the_answer_lacks() {
+        for absent in SPEC_KEYS {
+            let rest: serde_json::Map<_, _> = SPEC_KEYS
+                .iter()
+                .filter(|key| **key != absent)
+                .map(|key| (key.to_string(), json!("1")))
+                .collect();
+            let wire: SpecWire = serde_json::from_value(rest.into()).unwrap();
+
+            assert_eq!(wire.missing().collect::<Vec<_>>(), [absent]);
+        }
+    }
 }
