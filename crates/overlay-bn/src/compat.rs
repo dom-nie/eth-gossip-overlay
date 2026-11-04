@@ -736,6 +736,11 @@ mod tests {
 
 #[cfg(test)]
 mod drift {
+    use lighthouse_network::types::{GossipEncoding, GossipTopic, all_topics_at_fork};
+    use overlay_core::topic::forks::{FORK_TOPICS, FORKS, Sidecar};
+    use overlay_core::topic::{Class, Topic, TopicKind};
+    use types::{ChainSpec, ForkName, MainnetEthSpec};
+
     use super::*;
 
     /// The tags the matrix workflow runs: the ends of `SUPPORTED`, once each. A range wider
@@ -809,5 +814,85 @@ mod drift {
             .map(|v| v.trim().trim_matches('"').to_owned())
             .collect();
         assert_eq!(listed, matrix_versions());
+    }
+
+    /// MD-10: the fork-topic table names exactly what Lighthouse subscribes to at every fork it
+    /// knows, scheduled or not, and every name parses to its row's kind and class. Lighthouse's
+    /// list is its worst case: every subnet, every column, the light-client server and execution
+    /// proofs switched on.
+    #[test]
+    fn fork_topics_match_lighthouse() {
+        // `all_topics_at_fork` reads only the subnet counts from the spec, not the schedule.
+        // Every fork is scheduled anyway, so a release that starts reading it still answers for
+        // a fork no network has a date for.
+        let spec = ForkName::latest().make_genesis_spec(ChainSpec::mainnet());
+        let forks: Vec<String> = ForkName::list_all().iter().map(|f| f.to_string()).collect();
+        assert_eq!(forks, FORKS, "Lighthouse's forks are not the table's");
+
+        let mut problems = Vec::new();
+        let mut report = |problem: String| {
+            if !problems.contains(&problem) {
+                problems.push(problem);
+            }
+        };
+        for fork in ForkName::list_all() {
+            // The name as it goes on the wire, which `GossipKind`'s own `Display` is not for two
+            // of them (`signed_contribution_and_proof`, `payload_attestation`).
+            let topics: Vec<String> = all_topics_at_fork::<MainnetEthSpec>(fork, &spec)
+                .into_iter()
+                .map(|kind| {
+                    let wire = GossipTopic::new(kind, GossipEncoding::SSZSnappy, [0; 4]);
+                    wire.to_string().split('/').nth(3).unwrap().to_owned()
+                })
+                .collect();
+            let rows: Vec<_> = FORK_TOPICS
+                .iter()
+                .filter(|row| row.live_at(&fork.to_string()))
+                .collect();
+            for topic in &topics {
+                let Some((row, index)) = rows
+                    .iter()
+                    .find_map(|row| Some((row, row.index_of(topic)?)))
+                else {
+                    report(format!(
+                        "{fork}: Lighthouse has {}, the table has no row for it",
+                        family(topic)
+                    ));
+                    continue;
+                };
+                let parsed = Topic::parse(&format!("/eth2/00000000/{topic}/ssz_snappy"))
+                    .map(|topic| topic.kind().clone());
+                let matches = match (&parsed, row.sidecar) {
+                    (Ok(kind), Sidecar::Named(make, class)) => {
+                        *kind == make(index) && Class::of(kind, 0) == class
+                    }
+                    (Ok(kind), Sidecar::Other) => matches!(kind, TopicKind::Other(_)),
+                    (Err(_), _) => false,
+                };
+                if !matches {
+                    report(format!(
+                        "{fork}: {topic} parses to {parsed:?}, its row says {:?}",
+                        row.sidecar
+                    ));
+                }
+            }
+            for row in rows {
+                if !topics.iter().any(|topic| row.index_of(topic).is_some()) {
+                    report(format!(
+                        "{fork}: the table has {}, Lighthouse does not",
+                        row.name
+                    ));
+                }
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    /// `beacon_attestation_17` as `beacon_attestation_{i}`, so a missing family is one line.
+    fn family(topic: &str) -> String {
+        match topic.trim_end_matches(|c: char| c.is_ascii_digit()) {
+            stem if stem.len() < topic.len() => format!("{stem}{{i}}"),
+            _ => topic.to_owned(),
+        }
     }
 }

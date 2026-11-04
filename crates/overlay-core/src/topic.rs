@@ -5,6 +5,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 
+pub mod forks;
 pub mod table;
 
 /// Payloads on a topic name the sidecar does not know travel as [`Class::Large`] from this size
