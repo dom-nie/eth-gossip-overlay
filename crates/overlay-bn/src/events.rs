@@ -463,6 +463,27 @@ mod tests {
         }
     }
 
+    /// The shipped `bn.events_url` asks for every topic this module reads, or the beacon node
+    /// never sends it: without `execution_payload_gossip` no Gloas slot would start a deadline.
+    #[test]
+    fn the_default_event_stream_asks_for_every_topic_read_here() {
+        let url = overlay_core::config::Config::default().bn.events_url;
+        let topics: Vec<String> = url
+            .query_pairs()
+            .filter(|(key, _)| key == "topics")
+            .flat_map(|(_, value)| value.split(',').map(str::to_owned).collect::<Vec<String>>())
+            .collect();
+
+        for read in [
+            BLOCK,
+            BLOCK_GOSSIP,
+            DATA_COLUMN_SIDECAR,
+            EXECUTION_PAYLOAD_GOSSIP,
+        ] {
+            assert!(topics.iter().any(|topic| topic == read), "{read}: {url}");
+        }
+    }
+
     /// The two events the tracker is built on. `block_gossip` opens the entry and fixes what the
     /// beacon node is owed; `data_column_sidecar` takes a column back out of it.
     #[test]
