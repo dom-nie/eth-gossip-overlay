@@ -293,7 +293,7 @@ const DATA_COLUMN_SIDECAR: &str = "data_column_sidecar";
 const EXECUTION_PAYLOAD_GOSSIP: &str = "execution_payload_gossip";
 
 /// Every event topic the sidecar reads, which `bn.events_url` has to ask for.
-pub const TOPICS_READ: [&str; 4] = [
+const TOPICS_READ: [&str; 4] = [
     BLOCK,
     BLOCK_GOSSIP,
     DATA_COLUMN_SIDECAR,
@@ -530,25 +530,9 @@ mod tests {
         }
     }
 
-    /// The shipped `bn.events_url` asks for every topic this module reads, or the beacon node
-    /// never sends it: without `execution_payload_gossip` no Gloas slot would start a deadline.
-    #[test]
-    fn the_default_event_stream_asks_for_every_topic_read_here() {
-        let url = overlay_core::config::Config::default().bn.events_url;
-        let topics: Vec<String> = url
-            .query_pairs()
-            .filter(|(key, _)| key == "topics")
-            .flat_map(|(_, value)| value.split(',').map(str::to_owned).collect::<Vec<String>>())
-            .collect();
-
-        for read in TOPICS_READ {
-            assert!(topics.iter().any(|topic| topic == read), "{read}: {url}");
-        }
-    }
-
     /// A hand-set `bn.events_url` that leaves a topic out turns off what that topic feeds, so
-    /// the topics it lacks are named. Lighthouse takes a comma list, a repeated `topics` key or
-    /// both, and a URL with no `topics` at all lacks every one.
+    /// the topics it lacks are named; the shipped default lacks none. Lighthouse takes a comma
+    /// list, a repeated `topics` key or both, and a URL with no `topics` at all lacks every one.
     #[test]
     fn an_events_url_names_the_topics_it_lacks() {
         let at = |query: &str| -> Url {
