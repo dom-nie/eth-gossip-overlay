@@ -847,20 +847,27 @@ mod tests {
             .collect();
         assert_eq!(lines.len(), 1, "{text}");
         assert!(lines[0].contains("WARN"), "{}", lines[0]);
+        assert!(
+            lines[0].contains("add them to bn.events_url"),
+            "{}",
+            lines[0]
+        );
     }
 
     /// A beacon node that refuses the request, an older one that does not know a topic for
-    /// one, is retried, and the refusal is said at warn once with its status and body rather
-    /// than left to a debug line and a connected gauge stuck at zero.
+    /// one, is retried, and the refusal is said at warn once with its status, the start of its
+    /// body and what to check, rather than left to a debug line and a connected gauge stuck at
+    /// zero. A proxy's error page can be kilobytes, so only the first 512 bytes are logged.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_refused_event_stream_is_warned_once_and_retried() {
         let log = &*crate::testutil::LOG;
         let bn = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path(EVENTS))
-            .respond_with(
-                ResponseTemplate::new(400).set_body_string("unknown topic: refused_topic_t120"),
-            )
+            .respond_with(ResponseTemplate::new(400).set_body_string(format!(
+                "unknown topic: refused_topic_t120 {}",
+                "x".repeat(2_000)
+            )))
             .mount(&bn)
             .await;
         let (_spec, spec) = spec_watch();
@@ -891,6 +898,13 @@ mod tests {
         assert_eq!(lines.len(), 1, "{text}");
         assert!(lines[0].contains("WARN"), "{}", lines[0]);
         assert!(lines[0].contains("400"), "{}", lines[0]);
+        assert!(lines[0].contains("bn.events_url"), "{}", lines[0]);
+        assert!(lines[0].contains("restart"), "{}", lines[0]);
+        assert!(
+            !lines[0].contains(&"x".repeat(600)),
+            "the body is not cut short: {} bytes",
+            lines[0].len()
+        );
     }
 
     #[tokio::test]
