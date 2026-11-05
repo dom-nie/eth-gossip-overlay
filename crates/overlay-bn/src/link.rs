@@ -28,7 +28,7 @@ use overlay_core::backoff::Backoff;
 use overlay_core::config::Bn;
 use overlay_core::lanes::LanePusher;
 use overlay_core::progress::PROGRESS_TICK;
-use overlay_core::topic::{Class, SubscriptionSets, UNKNOWN_LARGE_THRESHOLD_BYTES};
+use overlay_core::topic::{Class, SubscriptionSets, Topic, TopicKind};
 use prometheus_client::registry::Registry;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot, watch};
@@ -63,13 +63,6 @@ const RPC_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// dropped one is a topic T-014 never mirrors until the next reconnect, so the channel
 /// holds the burst with room to spare.
 pub const CONTROL_CHANNEL_CAPACITY: usize = 1024;
-
-/// Topic names that take the large lane on sight: D02's known large kinds, matched by prefix
-/// as the §7 row "Lane classification in the swarm loop" has it. Any other name is large only
-/// from [`UNKNOWN_LARGE_THRESHOLD_BYTES`] up. The lane is a queueing priority; T-016 computes
-/// the authoritative class.
-pub const LARGE_NAME_PREFIXES: [&str; 3] =
-    ["beacon_block", "data_column_sidecar_", "blob_sidecar_"];
 
 /// What the link needs from the operator's config.
 #[derive(Clone, Debug)]
@@ -628,17 +621,13 @@ pub fn lighthouse_env_line(peer_id: &PeerId, listen: &Multiaddr) -> String {
     )
 }
 
-/// The lane a message queues in: a known large name by prefix, else by size (D02). The name
-/// is the third `/`-separated field of `/eth2/<digest>/<name>/ssz_snappy`.
+/// The lane a message queues in: [`Class::of`] its topic's kind, the function T-016 classes it
+/// with, so the lane and the class cannot disagree (MD-08). A topic string that does not parse
+/// is classed like a name nobody knows, by size (D02).
 fn lane_for(topic: &str, payload_len: usize) -> Class {
-    let name = topic.split('/').nth(3).unwrap_or("");
-    let large_name = LARGE_NAME_PREFIXES
-        .iter()
-        .any(|prefix| name.starts_with(prefix));
-    if large_name || payload_len >= UNKNOWN_LARGE_THRESHOLD_BYTES {
-        Class::Large
-    } else {
-        Class::Small
+    match Topic::parse(topic) {
+        Ok(topic) => Class::of(topic.kind(), payload_len),
+        Err(_) => Class::of(&TopicKind::Other(String::new()), payload_len),
     }
 }
 
@@ -2305,27 +2294,29 @@ mod tests {
     }
 
     #[test]
-    fn lane_for_takes_known_large_names_by_prefix_and_others_by_size() {
+    fn lane_for_takes_the_class_of_a_known_kind_and_others_by_size() {
         let topic = |name: &str| format!("/eth2/6a95a1a9/{name}/ssz_snappy");
         let threshold = overlay_core::topic::UNKNOWN_LARGE_THRESHOLD_BYTES;
 
-        for name in ["beacon_block", "data_column_sidecar_127", "blob_sidecar_3"] {
+        for name in [
+            "beacon_block",
+            "data_column_sidecar_127",
+            "blob_sidecar_3",
+            "execution_payload",
+        ] {
             assert_eq!(lane_for(&topic(name), 1), Class::Large, "{name}");
         }
         for name in [
             "beacon_attestation_63",
             "beacon_aggregate_and_proof",
             "sync_committee_contribution_and_proof",
-            "execution_payload",
         ] {
-            assert_eq!(
-                lane_for(&topic(name), threshold - 1),
-                Class::Small,
-                "{name}"
-            );
-            assert_eq!(lane_for(&topic(name), threshold), Class::Large, "{name}");
+            assert_eq!(lane_for(&topic(name), threshold), Class::Small, "{name}");
         }
-        assert_eq!(lane_for("not a topic", 1), Class::Small);
+        let unknown = topic("made_up_topic");
+        assert_eq!(lane_for(&unknown, threshold - 1), Class::Small);
+        assert_eq!(lane_for(&unknown, threshold), Class::Large);
+        assert_eq!(lane_for("not a topic", threshold - 1), Class::Small);
         assert_eq!(lane_for("not a topic", threshold), Class::Large);
     }
 
