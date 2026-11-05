@@ -753,6 +753,50 @@ mod tests {
         events.task.abort();
     }
 
+    /// A beacon node that refuses the request, an older one that does not know a topic for
+    /// one, is retried, and the refusal is said at warn once with its status and body rather
+    /// than left to a debug line and a connected gauge stuck at zero.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_event_stream_is_warned_once_and_retried() {
+        let log = &*crate::testutil::LOG;
+        let bn = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(EVENTS))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_string("unknown topic: refused_topic_t120"),
+            )
+            .mount(&bn)
+            .await;
+        let (_spec, spec) = spec_watch();
+        let arrivals = Arc::new(Arrivals::new(Arc::new(FakeClock::new()), spec));
+
+        let events = BlockEvents::spawn(
+            format!("{}{EVENTS}{TOPICS}", bn.uri()).parse().unwrap(),
+            Backoff::new(Duration::from_millis(5), Duration::from_millis(5)),
+            arrivals,
+            untracked(),
+            Arc::new(FakeClock::new()),
+            Arc::new(()),
+        );
+        timeout(PATIENCE, async {
+            while bn.received_requests().await.unwrap().len() < 3 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        events.task.abort();
+
+        let text = log.text();
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains("refused_topic_t120"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(lines[0].contains("WARN"), "{}", lines[0]);
+        assert!(lines[0].contains("400"), "{}", lines[0]);
+    }
+
     #[tokio::test]
     async fn a_beacon_node_without_the_event_endpoint_is_not_retried() {
         // No mock is mounted, so every request is answered 404.
