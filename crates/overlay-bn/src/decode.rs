@@ -491,6 +491,30 @@ mod tests {
         assert_eq!(block_root, bytes32(sidecar.beacon_block_root));
     }
 
+    /// A Gloas sidecar cut inside its fixed part is `Truncated` before a field is read, and one
+    /// cut short of where its own `kzg_proofs` offset points is refused, so a slot or a root is
+    /// never read out of bytes that stop early.
+    #[test]
+    fn gloas_column_cut_short_is_truncated() {
+        let (_, wire) = gloas_column_sidecar(1, 0, Hash256::repeat_byte(1));
+        let proofs_at = u32_at(&wire, 12) as usize;
+
+        for cut in 0..GLOAS_COLUMN_FIXED_LEN {
+            assert_eq!(
+                column_header(&snappy(&wire[..cut])),
+                Err(HeaderError::Truncated),
+                "cut at {cut}"
+            );
+        }
+        for cut in GLOAS_COLUMN_FIXED_LEN..proofs_at {
+            assert_eq!(
+                column_header(&snappy(&wire[..cut])),
+                Err(HeaderError::Ssz),
+                "cut at {cut}"
+            );
+        }
+    }
+
     /// A Gloas column sidecar for `slot` carrying `index` and naming `block_root`, as `types`
     /// encodes it, with the Fulu fixture's cell and proof behind the fixed part.
     fn gloas_column_sidecar(
