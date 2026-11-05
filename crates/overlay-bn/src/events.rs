@@ -533,6 +533,28 @@ mod tests {
         );
     }
 
+    /// v8.3.0 dropped `kzg_commitments` and `versioned_hashes` from the `data_column_sidecar`
+    /// event, leaving `SseDataColumnSidecar`'s three fields in this order at v8.3.2
+    /// (`common/eth2/src/types.rs`). Only those three were ever read.
+    #[test]
+    fn a_v8_3_column_event_without_commitments_parses() {
+        let frame = format!(
+            "event: data_column_sidecar\ndata: {{\"block_root\":\"{}\",\"index\":\"127\",\"slot\":\"11511776\"}}\n\n",
+            root(0xbb)
+        );
+
+        let events = Frames::default().feed(frame.as_bytes());
+
+        assert_eq!(
+            events,
+            [Event::Column {
+                slot: 11_511_776,
+                index: 127,
+                block_root: [0xbb; 32],
+            }]
+        );
+    }
+
     #[tokio::test]
     async fn reconnects_after_the_stream_closes_and_resumes_emitting() {
         let bn = MockServer::start().await;
