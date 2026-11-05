@@ -56,6 +56,14 @@ pub enum TopicKind {
     DataColumnSidecar(u8),
     /// `blob_sidecar_{i}`.
     BlobSidecar(u8),
+    /// `execution_payload`: Gloas's `SignedExecutionPayloadEnvelope`.
+    ExecutionPayload,
+    /// `execution_payload_bid`: Gloas's `SignedExecutionPayloadBid`.
+    ExecutionPayloadBid,
+    /// `payload_attestation_message`.
+    PayloadAttestation,
+    /// `proposer_preferences`.
+    ProposerPreferences,
     /// A name the sidecar does not know, kept verbatim. Such a topic is still relayed; only the
     /// transport class has to be guessed from the payload size.
     Other(String),
@@ -108,8 +116,20 @@ impl Class {
             | TopicKind::ProposerSlashing
             | TopicKind::AttesterSlashing
             | TopicKind::BlsToExecutionChange => Self::Small,
-            TopicKind::Other(_) if payload_len >= UNKNOWN_LARGE_THRESHOLD_BYTES => Self::Large,
-            TopicKind::Other(_) => Self::Small,
+            TopicKind::ExecutionPayload
+            | TopicKind::ExecutionPayloadBid
+            | TopicKind::PayloadAttestation
+            | TopicKind::ProposerPreferences
+            | TopicKind::Other(_)
+                if payload_len >= UNKNOWN_LARGE_THRESHOLD_BYTES =>
+            {
+                Self::Large
+            }
+            TopicKind::ExecutionPayload
+            | TopicKind::ExecutionPayloadBid
+            | TopicKind::PayloadAttestation
+            | TopicKind::ProposerPreferences
+            | TopicKind::Other(_) => Self::Small,
         }
     }
 }
@@ -255,6 +275,10 @@ impl TopicKind {
             "proposer_slashing" => Self::ProposerSlashing,
             "attester_slashing" => Self::AttesterSlashing,
             "bls_to_execution_change" => Self::BlsToExecutionChange,
+            "execution_payload" => Self::ExecutionPayload,
+            "execution_payload_bid" => Self::ExecutionPayloadBid,
+            "payload_attestation_message" => Self::PayloadAttestation,
+            "proposer_preferences" => Self::ProposerPreferences,
             _ => {
                 if let Some(i) = name.strip_prefix("beacon_attestation_") {
                     Self::Attestation(index(i)?)
@@ -286,6 +310,10 @@ impl fmt::Display for TopicKind {
             Self::BlsToExecutionChange => f.write_str("bls_to_execution_change"),
             Self::DataColumnSidecar(i) => write!(f, "data_column_sidecar_{i}"),
             Self::BlobSidecar(i) => write!(f, "blob_sidecar_{i}"),
+            Self::ExecutionPayload => f.write_str("execution_payload"),
+            Self::ExecutionPayloadBid => f.write_str("execution_payload_bid"),
+            Self::PayloadAttestation => f.write_str("payload_attestation_message"),
+            Self::ProposerPreferences => f.write_str("proposer_preferences"),
             Self::Other(name) => f.write_str(name),
         }
     }
