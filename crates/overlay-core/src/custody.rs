@@ -676,6 +676,101 @@ mod tests {
         assert_eq!(stats.mismatches(), 1);
     }
 
+    /// The first Gloas slot in the tests below: epoch 10 of mainnet's 32 slots.
+    const FIRST_GLOAS_SLOT: u64 = 320;
+
+    /// A tracker on a network whose Gloas fork starts at [`FIRST_GLOAS_SLOT`], with a block
+    /// for `slot` seen now, expecting columns 0, 3 and 7.
+    fn tracking_gloas(clock: &FakeClock, slot: u64) -> CustodyTracker {
+        let mut tracker = CustodyTracker::new(&SpecSnapshot {
+            gloas_fork_epoch: 10,
+            ..mainnet()
+        });
+        let expected = tracker.expected_columns(&subscribed(&[0, 3, 7]));
+        tracker.on_block(slot, ROOT, expected, clock.now());
+        tracker
+    }
+
+    /// MD-09: under Gloas the columns are built from the payload the builder reveals after the
+    /// block, so a deadline started at the block would find every column missing every slot.
+    #[test]
+    fn a_gloas_slot_starts_no_deadline_at_the_block() {
+        let clock = FakeClock::new();
+        let tracker = tracking_gloas(&clock, FIRST_GLOAS_SLOT);
+
+        clock.advance(DEADLINE);
+
+        assert_eq!(gaps(&tracker, &clock), Vec::new());
+    }
+
+    /// The envelope is the anchor: the deadline runs from it, the same 250 ms it runs from a
+    /// block before the fork (MD-09).
+    #[test]
+    fn a_gloas_slot_starts_the_deadline_at_the_envelope() {
+        let clock = FakeClock::new();
+        let mut tracker = tracking_gloas(&clock, FIRST_GLOAS_SLOT);
+        clock.advance(Duration::from_secs(1));
+
+        tracker.on_envelope(FIRST_GLOAS_SLOT, ROOT, clock.now());
+        clock.advance(DEADLINE - Duration::from_millis(1));
+        assert_eq!(gaps(&tracker, &clock), Vec::new());
+
+        clock.advance(Duration::from_millis(1));
+        assert_eq!(
+            gaps(&tracker, &clock),
+            vec![ColumnGap {
+                block_root: ROOT,
+                missing: vec![0, 3, 7],
+                have_count: 0,
+            }]
+        );
+    }
+
+    /// A withheld payload, or the node's own envelope, which fires no gossip event: no columns
+    /// exist to repair, so the slot asks for nothing however long it is tracked, columns
+    /// arriving or not.
+    #[test]
+    fn a_gloas_slot_with_no_envelope_asks_for_nothing() {
+        let clock = FakeClock::new();
+        let mut tracker = tracking_gloas(&clock, FIRST_GLOAS_SLOT + 5);
+
+        tracker.on_column(FIRST_GLOAS_SLOT + 5, 3, ROOT);
+        clock.advance(Duration::from_secs(12));
+
+        assert_eq!(gaps(&tracker, &clock), Vec::new());
+    }
+
+    /// Before the fork nothing changes: the block is the anchor up to the slot before the
+    /// first Gloas one.
+    #[test]
+    fn the_last_fulu_slot_still_anchors_on_the_block() {
+        let clock = FakeClock::new();
+        let tracker = tracking_gloas(&clock, FIRST_GLOAS_SLOT - 1);
+
+        clock.advance(DEADLINE);
+
+        assert_eq!(gaps(&tracker, &clock).len(), 1);
+    }
+
+    /// An envelope only starts the deadline of a block the beacon node reported accepting. One
+    /// for another root, or for a block whose columns came first and whose `block_gossip` had
+    /// not, opens nothing that a later block event would turn into a running deadline.
+    #[test]
+    fn an_envelope_for_an_unseen_block_starts_nothing() {
+        let clock = FakeClock::new();
+        let mut tracker = tracking_gloas(&clock, FIRST_GLOAS_SLOT);
+        tracker.on_envelope(FIRST_GLOAS_SLOT, [8; 32], clock.now());
+
+        let other = FIRST_GLOAS_SLOT + 1;
+        tracker.on_column(other, 3, [9; 32]);
+        tracker.on_envelope(other, [9; 32], clock.now());
+        let expected = tracker.expected_columns(&subscribed(&[0, 3, 7]));
+        tracker.on_block(other, [9; 32], expected, clock.now());
+        clock.advance(Duration::from_secs(12));
+
+        assert_eq!(gaps(&tracker, &clock), Vec::new());
+    }
+
     /// Counts the two series column repair adds, which are zero on an honest fleet (§12).
     #[derive(Default)]
     struct CountingColumns(AtomicU64);
