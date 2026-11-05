@@ -786,6 +786,52 @@ mod tests {
         events.task.abort();
     }
 
+    /// A hand-set `bn.events_url` that leaves a topic out is said once at start, naming what it
+    /// lacks, and is used exactly as written: the sidecar never rewrites a URL a proxy in front
+    /// of the node may expect.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_events_url_missing_a_topic_is_warned_once_and_left_alone() {
+        let log = &*crate::testutil::LOG;
+        let bn = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(EVENTS))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("", SSE))
+            .mount(&bn)
+            .await;
+        let (_spec, spec) = spec_watch();
+        let arrivals = Arc::new(Arrivals::new(Arc::new(FakeClock::new()), spec));
+
+        let events = BlockEvents::spawn(
+            format!("{}{EVENTS}?topics=block", bn.uri())
+                .parse()
+                .unwrap(),
+            Backoff::new(Duration::from_millis(5), Duration::from_millis(5)),
+            arrivals,
+            untracked(),
+            Arc::new(FakeClock::new()),
+            Arc::new(()),
+        );
+        timeout(PATIENCE, async {
+            while bn.received_requests().await.unwrap().len() < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        events.task.abort();
+
+        let requests = bn.received_requests().await.unwrap();
+        assert_eq!(requests[0].url.query(), Some("topics=block"));
+        let address = bn.address().to_string();
+        let text = log.text();
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains(&address) && line.contains("execution_payload_gossip"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(lines[0].contains("WARN"), "{}", lines[0]);
+    }
+
     /// A beacon node that refuses the request, an older one that does not know a topic for
     /// one, is retried, and the refusal is said at warn once with its status and body rather
     /// than left to a debug line and a connected gauge stuck at zero.
