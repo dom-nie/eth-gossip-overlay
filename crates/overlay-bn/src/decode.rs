@@ -482,7 +482,8 @@ mod tests {
     /// the Fulu fixture carries.
     #[test]
     fn a_gloas_column_sidecar_decodes_to_its_root_and_index() {
-        let (sidecar, wire) = gloas_column_sidecar(9_001, 77, Hash256::repeat_byte(0x5a));
+        let wire = crate::testutil::gloas_column_sidecar(9_001, 77, Hash256::repeat_byte(0x5a)).ssz;
+        let sidecar = DataColumnSidecarGloas::<MainnetEthSpec>::from_ssz_bytes(&wire).unwrap();
 
         let (slot, index, block_root) = column_header(&snappy(&wire)).unwrap();
 
@@ -496,7 +497,7 @@ mod tests {
     /// never read out of bytes that stop early.
     #[test]
     fn gloas_column_cut_short_is_truncated() {
-        let (_, wire) = gloas_column_sidecar(1, 0, Hash256::repeat_byte(1));
+        let wire = crate::testutil::gloas_column_sidecar(1, 0, Hash256::repeat_byte(1)).ssz;
         let proofs_at = u32_at(&wire, 12) as usize;
 
         for cut in 0..GLOAS_COLUMN_FIXED_LEN {
@@ -513,25 +514,6 @@ mod tests {
                 "cut at {cut}"
             );
         }
-    }
-
-    /// A Gloas column sidecar for `slot` carrying `index` and naming `block_root`, as `types`
-    /// encodes it, with the Fulu fixture's cell and proof behind the fixed part.
-    fn gloas_column_sidecar(
-        slot: u64,
-        index: u64,
-        block_root: Hash256,
-    ) -> (DataColumnSidecarGloas<MainnetEthSpec>, Vec<u8>) {
-        let (fulu, _) = column_sidecar(slot, index);
-        let sidecar = DataColumnSidecarGloas::<MainnetEthSpec> {
-            index,
-            column: fulu.column.to_vec().try_into().unwrap(),
-            kzg_proofs: fulu.kzg_proofs.to_vec().try_into().unwrap(),
-            slot: Slot::new(slot),
-            beacon_block_root: block_root,
-        };
-        let wire = sidecar.as_ssz_bytes();
-        (sidecar, wire)
     }
 
     /// The refusal the exact first offset is for: a first offset that is neither layout's fixed
@@ -640,7 +622,7 @@ mod tests {
             // The same cell and proof in both, so each is past the Fulu fixed length the way a
             // real sidecar is.
             let (fulu, _) = column_sidecar(1, 0);
-            let (_, gloas) = gloas_column_sidecar(1, 0, Hash256::repeat_byte(1));
+            let gloas = crate::testutil::gloas_column_sidecar(1, 0, Hash256::repeat_byte(1)).ssz;
             let fulu = fulu.as_ssz_bytes();
 
             let mut problems = Vec::new();
