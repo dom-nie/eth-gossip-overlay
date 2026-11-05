@@ -100,8 +100,9 @@ impl Class {
     /// payload envelopes are Large. Known kinds ignore `payload_len`.
     ///
     /// A Gloas envelope is bounded only by `MAX_PAYLOAD_SIZE`, so it is Large even when it is
-    /// small; a bid can reach 196932 bytes but is normally a few hundred, and a Small payload
-    /// too big for a datagram already goes alone on a stream (MD-08).
+    /// small; a bid is 324 bytes plus 48 per blob commitment, about 1.3 KB at 21 blobs, and can
+    /// reach 196932, and a Small payload too big for a datagram already goes alone on a stream
+    /// (MD-08).
     ///
     /// A name the sidecar does not know is Large when `payload_len` is at least
     /// [`UNKNOWN_LARGE_THRESHOLD_BYTES`] and Small below it. A small payload on the large path
