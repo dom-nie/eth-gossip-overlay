@@ -331,7 +331,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::spec::spec_watch;
+    use crate::spec::{SpecSnapshot, spec_watch};
 
     /// The path of the beacon node's event stream.
     const EVENTS: &str = "/eth/v1/events";
@@ -454,6 +454,57 @@ mod tests {
         assert_eq!(
             gaps.first().map(|gap| gap.missing.clone()),
             Some(vec![0]),
+            "{gaps:?}"
+        );
+    }
+
+    /// The frame Lighthouse v8.3.2 writes when gossip verification accepts a payload envelope,
+    /// `SseExecutionPayloadGossip` field for field (`common/eth2/src/types.rs:1221`).
+    fn envelope_frame(slot: u64, root: &str) -> String {
+        format!(
+            "event: execution_payload_gossip\ndata: {{\"slot\":\"{slot}\",\"builder_index\":\"9\",\"block_hash\":\"0x23c03281b3168438a99a7833ceaea27982d36aa7d71b4125e92a05abf23959bc\",\"block_root\":\"{root}\"}}\n\n"
+        )
+    }
+
+    /// MD-09's anchor. The builder index and the execution block hash ride along and are not
+    /// read; the slot and the block root are what custody keys a block by.
+    #[test]
+    fn execution_payload_gossip_event_parses() {
+        let events = Frames::default().feed(envelope_frame(11_511_776, &root(0xbb)).as_bytes());
+
+        assert_eq!(
+            events,
+            [Event::Envelope {
+                slot: 11_511_776,
+                block_root: [0xbb; 32],
+            }]
+        );
+    }
+
+    /// On a Gloas slot `block_gossip` records the block and `execution_payload_gossip` is what
+    /// starts its deadline, so the envelope event has to reach the tracker.
+    #[test]
+    fn execution_payload_gossip_reaches_the_tracker() {
+        let clock = FakeClock::new();
+        let gloas = SpecSnapshot {
+            gloas_fork_epoch: 0,
+            ..crate::spec::MAINNET
+        };
+        let custody = SharedCustody::new(
+            watch::Sender::new(gloas).subscribe(),
+            watch::Sender::new(subscribed(&[0, 1])).subscribe(),
+            Arc::new(()),
+        );
+        let none = custody.column_set([]);
+
+        consume(&gossip_frame(9, &root(0xaa)), &custody, &clock);
+        assert_eq!(custody.gaps(Duration::ZERO, clock.now(), &none), Vec::new());
+
+        consume(&envelope_frame(9, &root(0xaa)), &custody, &clock);
+        let gaps = custody.gaps(Duration::ZERO, clock.now(), &none);
+        assert_eq!(
+            gaps.first().map(|gap| gap.missing.clone()),
+            Some(vec![0, 1]),
             "{gaps:?}"
         );
     }
