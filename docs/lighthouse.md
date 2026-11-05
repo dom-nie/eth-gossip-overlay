@@ -66,8 +66,9 @@ From v8.3.0 Lighthouse still accepts `--libp2p-addresses`, with the deprecation 
 carried since v8.2.2, and never dials it; registration alone admits the sidecar, and the nightly
 compatibility matrix checks that on every supported release. The env file keeps the flag while
 the supported range includes a v8.2 release, and loses it after. `bn.listen_addr` is the
-address in it, `/ip4/127.0.0.1/tcp/7787` by default, and changing it needs a sidecar restart and
-a beacon node restart, because it is on the beacon node's command line.
+address in it, `/ip4/127.0.0.1/tcp/7787` by default. From v8.3.0 changing it needs only a
+sidecar restart, because the beacon node dials the address in the ENR the sidecar posts through
+`add_peer`. A v8.2 beacon node also needs a restart, because the address is on its command line.
 
 ## IDONTWANT before a big publish
 

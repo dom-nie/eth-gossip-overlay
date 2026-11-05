@@ -72,8 +72,15 @@ learns the new one on its next backoff cycle, a few seconds later, and the link 
 does not, the beacon node is not answering `bn.identity_url` and the problem is there.
 
 Changing `bn.listen_addr`, the address the beacon node dials the sidecar at, needs a sidecar
-restart and then a beacon node restart, because the address goes onto the beacon node's command
-line through `lighthouse.env`.
+restart. From Lighthouse v8.3.0 that is all, because the beacon node dials the address in the
+ENR the sidecar posts through `add_peer`. A v8.2 beacon node also needs a restart, because the
+address goes onto its command line through `lighthouse.env`.
+
+## The beacon node's spec lacks a key the sidecar reads
+
+The warn line `the beacon node's spec lacks a key the sidecar reads; using the mainnet value`
+names a key the node's `/eth/v1/config/spec` no longer sends, so the sidecar sized that value
+for mainnet. The node runs a Lighthouse newer than this sidecar knows; upgrade the sidecar.
 
 ## Socket buffers smaller than the sidecar asked for
 
