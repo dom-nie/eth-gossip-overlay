@@ -236,8 +236,10 @@ impl BnClient {
     }
 
     /// The spec constants as the beacon node runs them. A key the answer lacks takes the
-    /// mainnet value, and is named in a warning the first time, because a Lighthouse that
-    /// stops sending one would otherwise leave the sidecar sized for mainnet in silence (MD-10).
+    /// sidecar's default, which is mainnet's value for every key but `GLOAS_FORK_EPOCH` (missing
+    /// means not scheduled), and is named in a warning the first time, because a Lighthouse
+    /// that stops sending one would otherwise leave the sidecar on that default in silence
+    /// (MD-10).
     pub async fn spec(&self) -> Result<SpecSnapshot, BnHttpError> {
         let Data { data } = self.get::<Data<SpecWire>>(&self.spec, SPEC).await?;
         let mut logged = self
@@ -249,7 +251,8 @@ impl BnClient {
                 tracing::warn!(
                     key,
                     url = %self.spec,
-                    "the beacon node's spec lacks a key the sidecar reads; using the mainnet value"
+                    "the beacon node's spec lacks a key the sidecar reads; using the sidecar's \
+                     default"
                 );
             }
         }
@@ -534,6 +537,7 @@ mod tests {
             "MAX_PAYLOAD_SIZE": "1048576",
             "SECONDS_PER_SLOT": "6",
             "SLOTS_PER_EPOCH": "8",
+            "GLOAS_FORK_EPOCH": "412672",
             "BLOB_SCHEDULE": [{"EPOCH": "412608", "MAX_BLOBS_PER_BLOCK": "15"}]
         });
         for n in 0..100 {
@@ -549,6 +553,7 @@ mod tests {
         max_payload_size: 1_048_576,
         seconds_per_slot: 6,
         slots_per_epoch: 8,
+        gloas_fork_epoch: 412_672,
     };
 
     #[tokio::test]
@@ -581,8 +586,8 @@ mod tests {
         );
     }
 
-    /// MD-10: a key the beacon node stops sending is said once, by name, and the mainnet value
-    /// stands in for it; a reconnect asks again and says nothing more. The line carries the
+    /// MD-10: a key the beacon node stops sending is said once, by name, and the sidecar's
+    /// default stands in for it; a reconnect asks again and says nothing more. The line carries the
     /// fake's own address, which is what makes the count this test's in the shared log.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_missing_spec_key_is_logged_once_and_falls_back() {

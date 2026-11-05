@@ -2,7 +2,7 @@
 //! thing that writes the custody tracker (§6.4, MD-06).
 //!
 //! `GET /eth/v1/events?topics=...` is Server-Sent Events: a frame per event, fields one to a
-//! line, a blank line closing the frame. Three topics are read.
+//! line, a blank line closing the frame. Four topics are read.
 //!
 //! `block` fires when the node has imported the block, which is the moment §2 says arrival is
 //! not, so this is where the 200 to 500 ms of `newPayload` and column verification becomes a
@@ -17,10 +17,15 @@
 //! returns on no wire the sidecar watches, and a tracker fed from the receive path would go
 //! blinder the better the overlay worked (MD-06).
 //!
+//! `execution_payload_gossip` fires inside gossip verification of a Gloas payload envelope, once
+//! per envelope, and only for a block the node has in fork choice. From the Gloas fork the
+//! columns are built from that payload, so it is what starts a slot's repair deadline (MD-09).
+//!
 //! What a peer sends cannot reach any of this. That is the whole point: a payload off the wire
 //! decodes without being authentic, and the state column repair acts on has to come from the
 //! node that validated it.
 
+use std::collections::HashSet;
 use std::ops::ControlFlow;
 use std::str::from_utf8;
 use std::sync::Arc;
@@ -49,6 +54,13 @@ pub enum Event {
         /// The slot the block was proposed for.
         slot: u64,
         /// Its root, which its columns name.
+        block_root: [u8; 32],
+    },
+    /// `execution_payload_gossip`: gossip verification accepted this block's payload envelope.
+    Envelope {
+        /// The slot of the block the envelope reveals the payload for.
+        slot: u64,
+        /// That block's root.
         block_root: [u8; 32],
     },
     /// `data_column_sidecar`: the beacon node has verified this column.
@@ -90,6 +102,9 @@ pub struct BlockEvents {
 impl BlockEvents {
     /// Starts reading `url`. The beacon node ends the stream on its own restart and on any
     /// hiccup between the two processes, so every end is a reconnect under `backoff` (T-013).
+    ///
+    /// A `url` whose `topics` leaves out one this module reads is warned about once and used as
+    /// given, since a proxy in front of the node may expect exactly that URL.
     #[expect(
         clippy::expect_used,
         reason = "with no TLS backend compiled in, a client can only fail to build on proxy \
@@ -103,6 +118,15 @@ impl BlockEvents {
         clock: Arc<dyn Clock>,
         stats: Arc<dyn BlockEventStats>,
     ) -> Self {
+        let missing = missing_topics(&url);
+        if !missing.is_empty() {
+            tracing::warn!(
+                %url,
+                ?missing,
+                "bn.events_url does not ask for every event topic the sidecar reads, so import \
+                 telemetry or column repair goes without them; add them to bn.events_url"
+            );
+        }
         // No request timeout: this one is meant to stay open between blocks.
         let http = reqwest::Client::builder()
             .build()
@@ -123,8 +147,18 @@ async fn run(
     clock: Arc<dyn Clock>,
     stats: Arc<dyn BlockEventStats>,
 ) {
+    let mut refusals = HashSet::new();
     loop {
-        let outcome = read(&http, &url, &arrivals, &custody, &clock, &stats).await;
+        let outcome = read(
+            &http,
+            &url,
+            &arrivals,
+            &custody,
+            &clock,
+            &stats,
+            &mut refusals,
+        )
+        .await;
         stats.set_connected(false);
         match outcome {
             // The beacon node closed a stream it had been serving, so the next one is worth
@@ -140,6 +174,11 @@ async fn run(
 
 /// One connection, until the beacon node closes it or the read fails. It breaks when the beacon
 /// node has no such endpoint, which no amount of retrying will change.
+///
+/// Any other 4xx is retried too, but said at warn the first time each status is seen, with the
+/// start of the body the node gave: a topic an older node does not know, or a URL with no `topics`, would
+/// otherwise show only as `overlay_bn_events_connected` stuck at zero. `refusals` holds the
+/// statuses already said.
 async fn read(
     http: &reqwest::Client,
     url: &Url,
@@ -147,6 +186,7 @@ async fn read(
     custody: &SharedCustody,
     clock: &Arc<dyn Clock>,
     stats: &Arc<dyn BlockEventStats>,
+    refusals: &mut HashSet<StatusCode>,
 ) -> Result<ControlFlow<()>, reqwest::Error> {
     let response = http.get(url.clone()).send().await?;
     if response.status() == StatusCode::NOT_FOUND {
@@ -156,6 +196,24 @@ async fn read(
              for this host"
         );
         return Ok(ControlFlow::Break(()));
+    }
+    let status = response.status();
+    if status.is_client_error()
+        && let Err(err) = response.error_for_status_ref()
+    {
+        if refusals.insert(status) {
+            let body = response.text().await.unwrap_or_default();
+            let body = &body[..body.floor_char_boundary(LOGGED_BODY_BYTES)];
+            tracing::warn!(
+                %url,
+                %status,
+                body,
+                "the beacon node refused its event stream, so import telemetry and column repair \
+                 are off for this host; check bn.events_url's topics against this beacon node's \
+                 Lighthouse version (restart-required)"
+            );
+        }
+        return Err(err);
     }
     // Any other refusal is worth waiting out: a beacon node that is still starting answers 503.
     let mut response = response.error_for_status()?;
@@ -170,7 +228,8 @@ async fn read(
 }
 
 /// Where one event goes. This is the whole write side of the custody tracker; grep the workspace
-/// for `on_block` and `on_column` and the only callers outside tests are here (MD-06).
+/// for `on_block`, `on_envelope` and `on_column` and the only callers outside tests are here
+/// (MD-06).
 fn apply(
     event: &Event,
     arrivals: &Arrivals,
@@ -183,6 +242,9 @@ fn apply(
             stats.imported(arrivals.imported(slot, block_root));
         }
         Event::Accepted { slot, block_root } => custody.on_block(slot, block_root, clock.now()),
+        Event::Envelope { slot, block_root } => {
+            custody.on_envelope(slot, block_root, clock.now());
+        }
         Event::Column {
             slot,
             index,
@@ -217,11 +279,46 @@ struct ColumnData {
     block_root: String,
 }
 
+/// The `data` of an `execution_payload_gossip` event. `builder_index` and `block_hash` ride
+/// along and are not read.
+#[derive(Deserialize)]
+struct EnvelopeData {
+    slot: String,
+    block_root: String,
+}
+
 /// The event names the sidecar reads. Every other topic on the stream is skipped, and so is
 /// every comment but the one the beacon node writes when it has thrown events away.
 const BLOCK: &str = "block";
 const BLOCK_GOSSIP: &str = "block_gossip";
 const DATA_COLUMN_SIDECAR: &str = "data_column_sidecar";
+const EXECUTION_PAYLOAD_GOSSIP: &str = "execution_payload_gossip";
+
+/// Every event topic the sidecar reads, which `bn.events_url` has to ask for.
+const TOPICS_READ: [&str; 4] = [
+    BLOCK,
+    BLOCK_GOSSIP,
+    DATA_COLUMN_SIDECAR,
+    EXECUTION_PAYLOAD_GOSSIP,
+];
+
+/// The topics in [`TOPICS_READ`] that `url` does not ask for. Lighthouse reads every `topics`
+/// key, each a comma list.
+fn missing_topics(url: &Url) -> Vec<&'static str> {
+    let asked: Vec<String> = url
+        .query_pairs()
+        .filter(|(key, _)| key == "topics")
+        .flat_map(|(_, value)| value.split(',').map(str::to_owned).collect::<Vec<String>>())
+        .collect();
+    TOPICS_READ
+        .into_iter()
+        .filter(|topic| !asked.iter().any(|asked| asked == topic))
+        .collect()
+}
+
+/// How much of a refused request's body is logged. A proxy's HTML error page can run to
+/// kilobytes, and the first few hundred bytes say what went wrong.
+const LOGGED_BODY_BYTES: usize = 512;
 
 /// What Lighthouse writes as a comment when its broadcast channel lagged and this reader lost
 /// events. Everything after the prefix is the count and the word `messages`.
@@ -282,6 +379,13 @@ fn event(frame: &str) -> Option<Event> {
                 block_root: root(&data.block)?,
             })
         }
+        Some(EXECUTION_PAYLOAD_GOSSIP) => {
+            let data: EnvelopeData = serde_json::from_str(data?).ok()?;
+            Some(Event::Envelope {
+                slot: data.slot.parse().ok()?,
+                block_root: root(&data.block_root)?,
+            })
+        }
         Some(DATA_COLUMN_SIDECAR) => {
             let data: ColumnData = serde_json::from_str(data?).ok()?;
             Some(Event::Column {
@@ -331,7 +435,7 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     use super::*;
-    use crate::spec::spec_watch;
+    use crate::spec::{SpecSnapshot, spec_watch};
 
     /// The path of the beacon node's event stream.
     const EVENTS: &str = "/eth/v1/events";
@@ -357,7 +461,7 @@ mod tests {
     }
 
     /// The whole stream the sidecar asks for, so a test connects the way a sidecar does.
-    const TOPICS: &str = "?topics=block,block_gossip,data_column_sidecar";
+    const TOPICS: &str = "?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip";
 
     /// A tracker for a test that is not about the tracker.
     fn untracked() -> SharedCustody {
@@ -432,6 +536,68 @@ mod tests {
         }
     }
 
+    /// A hand-set `bn.events_url` that leaves a topic out turns off what that topic feeds, so
+    /// the topics it lacks are named; the shipped default lacks none. Lighthouse takes a comma
+    /// list, a repeated `topics` key or both, and a URL with no `topics` at all lacks every one.
+    #[test]
+    fn an_events_url_names_the_topics_it_lacks() {
+        let at = |query: &str| -> Url {
+            format!("http://127.0.0.1:5052/eth/v1/events{query}")
+                .parse()
+                .unwrap()
+        };
+
+        assert_eq!(
+            missing_topics(&overlay_core::config::Config::default().bn.events_url),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            missing_topics(&at("?topics=block,block_gossip,data_column_sidecar")),
+            [EXECUTION_PAYLOAD_GOSSIP]
+        );
+        assert_eq!(
+            missing_topics(&at(
+                "?topics=block&topics=block_gossip,execution_payload_gossip&topics=data_column_sidecar"
+            )),
+            Vec::<&str>::new()
+        );
+        let every = [
+            "block",
+            "block_gossip",
+            "data_column_sidecar",
+            "execution_payload_gossip",
+        ];
+        assert_eq!(missing_topics(&at("?topics=head")), every);
+        assert_eq!(missing_topics(&at("")), every);
+    }
+
+    /// Every name the URL check asks for is one the parser reads, so the list and the parser
+    /// cannot drift apart: a name dropped from the list would go unchecked in a hand-set URL,
+    /// and one the parser skipped would be asked for and thrown away.
+    #[test]
+    fn every_topic_asked_for_is_one_the_parser_reads() {
+        for name in TOPICS_READ {
+            let data = match name {
+                BLOCK | BLOCK_GOSSIP => format!("{{\"slot\":\"1\",\"block\":\"{}\"}}", root(0x01)),
+                DATA_COLUMN_SIDECAR => format!(
+                    "{{\"block_root\":\"{}\",\"index\":\"1\",\"slot\":\"1\"}}",
+                    root(0x01)
+                ),
+                EXECUTION_PAYLOAD_GOSSIP => format!(
+                    "{{\"slot\":\"1\",\"builder_index\":\"9\",\"block_hash\":\"{}\",\"block_root\":\"{}\"}}",
+                    root(0x02),
+                    root(0x01)
+                ),
+                other => panic!("{other}: no event body here; add one"),
+            };
+
+            assert!(
+                event(&format!("event: {name}\ndata: {data}\n")).is_some(),
+                "{name}"
+            );
+        }
+    }
+
     /// The two events the tracker is built on. `block_gossip` opens the entry and fixes what the
     /// beacon node is owed; `data_column_sidecar` takes a column back out of it.
     #[test]
@@ -454,6 +620,57 @@ mod tests {
         assert_eq!(
             gaps.first().map(|gap| gap.missing.clone()),
             Some(vec![0]),
+            "{gaps:?}"
+        );
+    }
+
+    /// The frame Lighthouse v8.3.2 writes when gossip verification accepts a payload envelope,
+    /// `SseExecutionPayloadGossip` field for field (`common/eth2/src/types.rs:1221`).
+    fn envelope_frame(slot: u64, root: &str) -> String {
+        format!(
+            "event: execution_payload_gossip\ndata: {{\"slot\":\"{slot}\",\"builder_index\":\"9\",\"block_hash\":\"0x23c03281b3168438a99a7833ceaea27982d36aa7d71b4125e92a05abf23959bc\",\"block_root\":\"{root}\"}}\n\n"
+        )
+    }
+
+    /// MD-09's anchor. The builder index and the execution block hash ride along and are not
+    /// read; the slot and the block root are what custody keys a block by.
+    #[test]
+    fn execution_payload_gossip_event_parses() {
+        let events = Frames::default().feed(envelope_frame(11_511_776, &root(0xbb)).as_bytes());
+
+        assert_eq!(
+            events,
+            [Event::Envelope {
+                slot: 11_511_776,
+                block_root: [0xbb; 32],
+            }]
+        );
+    }
+
+    /// On a Gloas slot `block_gossip` records the block and `execution_payload_gossip` is what
+    /// starts its deadline, so the envelope event has to reach the tracker.
+    #[test]
+    fn execution_payload_gossip_reaches_the_tracker() {
+        let clock = FakeClock::new();
+        let gloas = SpecSnapshot {
+            gloas_fork_epoch: 0,
+            ..crate::spec::MAINNET
+        };
+        let custody = SharedCustody::new(
+            watch::Sender::new(gloas).subscribe(),
+            watch::Sender::new(subscribed(&[0, 1])).subscribe(),
+            Arc::new(()),
+        );
+        let none = custody.column_set([]);
+
+        consume(&gossip_frame(9, &root(0xaa)), &custody, &clock);
+        assert_eq!(custody.gaps(Duration::ZERO, clock.now(), &none), Vec::new());
+
+        consume(&envelope_frame(9, &root(0xaa)), &custody, &clock);
+        let gaps = custody.gaps(Duration::ZERO, clock.now(), &none);
+        assert_eq!(
+            gaps.first().map(|gap| gap.missing.clone()),
+            Some(vec![0, 1]),
             "{gaps:?}"
         );
     }
@@ -533,6 +750,28 @@ mod tests {
         );
     }
 
+    /// v8.3.0 dropped `kzg_commitments` and `versioned_hashes` from the `data_column_sidecar`
+    /// event, leaving `SseDataColumnSidecar`'s three fields in this order at v8.3.2
+    /// (`common/eth2/src/types.rs`). Only those three were ever read.
+    #[test]
+    fn a_v8_3_column_event_without_commitments_parses() {
+        let frame = format!(
+            "event: data_column_sidecar\ndata: {{\"block_root\":\"{}\",\"index\":\"127\",\"slot\":\"11511776\"}}\n\n",
+            root(0xbb)
+        );
+
+        let events = Frames::default().feed(frame.as_bytes());
+
+        assert_eq!(
+            events,
+            [Event::Column {
+                slot: 11_511_776,
+                index: 127,
+                block_root: [0xbb; 32],
+            }]
+        );
+    }
+
     #[tokio::test]
     async fn reconnects_after_the_stream_closes_and_resumes_emitting() {
         let bn = MockServer::start().await;
@@ -568,6 +807,110 @@ mod tests {
         assert_eq!(next(&mut imports).await, Some(false));
         assert_eq!(next(&mut imports).await, Some(true));
         events.task.abort();
+    }
+
+    /// A hand-set `bn.events_url` that leaves a topic out is said once at start, naming what it
+    /// lacks, and is used exactly as written: the sidecar never rewrites a URL a proxy in front
+    /// of the node may expect.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_events_url_missing_a_topic_is_warned_once_and_left_alone() {
+        let log = &*crate::testutil::LOG;
+        let bn = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(EVENTS))
+            .respond_with(ResponseTemplate::new(200).set_body_raw("", SSE))
+            .mount(&bn)
+            .await;
+        let (_spec, spec) = spec_watch();
+        let arrivals = Arc::new(Arrivals::new(Arc::new(FakeClock::new()), spec));
+
+        let events = BlockEvents::spawn(
+            format!("{}{EVENTS}?topics=block", bn.uri())
+                .parse()
+                .unwrap(),
+            Backoff::new(Duration::from_millis(5), Duration::from_millis(5)),
+            arrivals,
+            untracked(),
+            Arc::new(FakeClock::new()),
+            Arc::new(()),
+        );
+        timeout(PATIENCE, async {
+            while bn.received_requests().await.unwrap().len() < 2 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        events.task.abort();
+
+        let requests = bn.received_requests().await.unwrap();
+        assert_eq!(requests[0].url.query(), Some("topics=block"));
+        let address = bn.address().to_string();
+        let text = log.text();
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains(&address) && line.contains("execution_payload_gossip"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(lines[0].contains("WARN"), "{}", lines[0]);
+        assert!(
+            lines[0].contains("add them to bn.events_url"),
+            "{}",
+            lines[0]
+        );
+    }
+
+    /// A beacon node that refuses the request, an older one that does not know a topic for
+    /// one, is retried, and the refusal is said at warn once with its status, the start of its
+    /// body and what to check, rather than left to a debug line and a connected gauge stuck at
+    /// zero. A proxy's error page can be kilobytes, so only the first 512 bytes are logged.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_refused_event_stream_is_warned_once_and_retried() {
+        let log = &*crate::testutil::LOG;
+        let bn = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(EVENTS))
+            .respond_with(ResponseTemplate::new(400).set_body_string(format!(
+                "unknown topic: refused_topic_t120 {}",
+                "x".repeat(2_000)
+            )))
+            .mount(&bn)
+            .await;
+        let (_spec, spec) = spec_watch();
+        let arrivals = Arc::new(Arrivals::new(Arc::new(FakeClock::new()), spec));
+
+        let events = BlockEvents::spawn(
+            format!("{}{EVENTS}{TOPICS}", bn.uri()).parse().unwrap(),
+            Backoff::new(Duration::from_millis(5), Duration::from_millis(5)),
+            arrivals,
+            untracked(),
+            Arc::new(FakeClock::new()),
+            Arc::new(()),
+        );
+        timeout(PATIENCE, async {
+            while bn.received_requests().await.unwrap().len() < 3 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        events.task.abort();
+
+        let text = log.text();
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains("refused_topic_t120"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(lines[0].contains("WARN"), "{}", lines[0]);
+        assert!(lines[0].contains("400"), "{}", lines[0]);
+        assert!(lines[0].contains("bn.events_url"), "{}", lines[0]);
+        assert!(lines[0].contains("restart"), "{}", lines[0]);
+        assert!(
+            !lines[0].contains(&"x".repeat(600)),
+            "the body is not cut short: {} bytes",
+            lines[0].len()
+        );
     }
 
     #[tokio::test]

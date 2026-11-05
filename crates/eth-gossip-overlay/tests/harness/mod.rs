@@ -188,6 +188,9 @@ pub struct Settings {
     /// a real fleet without starting one. They sort below every node and are never dialled;
     /// what they cost is a key derivation each in every pin table rebuild (T-104).
     pub fillers: usize,
+    /// `bn.by_root_cache.enabled`: answer the beacon node's by-root lookups from the recent
+    /// store (§5.8). Off, as shipped, unless a scenario asks.
+    pub by_root_cache: bool,
 }
 
 impl Default for Settings {
@@ -201,6 +204,7 @@ impl Default for Settings {
             initial_window_bytes: Overlay::default().initial_window_bytes,
             pin_cpu: None,
             fillers: 0,
+            by_root_cache: false,
         }
     }
 }
@@ -534,6 +538,7 @@ impl Fleet {
              classes:\n  large:\n    parity_ratio: {}\n\
              bn:\n  node_key_file: {}\n  identity_url: \"{}\"\n  libp2p_addr: \"{}\"\n\
              \x20 listen_addr: \"/ip4/127.0.0.1/tcp/0\"\n\
+             \x20 by_root_cache:\n    enabled: {}\n\
              inject: {}\nadmin_socket: {}\nmetrics_listen: \"{}\"\n\
              log:\n  level: warn\n  format: json\n",
             node.overlay,
@@ -549,6 +554,7 @@ impl Fleet {
             path("node.key"),
             node.bn_http,
             node.bn_addr,
+            self.settings.by_root_cache,
             self.settings.inject,
             path("admin.sock"),
             node.metrics,
@@ -938,6 +944,19 @@ impl Bn {
     pub async fn lookup_block(&self, root: [u8; 32]) -> RpcAnswer {
         let mut answers = self.answers.lock().await;
         self.fake.request_blocks_by_root(&[hash256(root)]).await;
+        tokio::time::timeout(WAIT, answers.recv())
+            .await
+            .expect("the sidecar never answered the by-root request")
+            .expect("the fake's answer channel closed")
+    }
+
+    /// Asks the sidecar for column `index` of the block `root` on
+    /// `data_column_sidecars_by_root/1` and returns the first chunk that came back.
+    pub async fn lookup_column(&self, root: [u8; 32], index: u64) -> RpcAnswer {
+        let mut answers = self.answers.lock().await;
+        self.fake
+            .request_columns_by_root(hash256(root), &[index])
+            .await;
         tokio::time::timeout(WAIT, answers.recv())
             .await
             .expect("the sidecar never answered the by-root request")

@@ -13,6 +13,7 @@ use eth_gossip_overlay::metrics::{
     UNIT_BYTES, UNKNOWN_TOPIC_ID_TOTAL, UNWANTED_TOPIC_TOTAL,
 };
 use harness::{Fleet, SETTLE, Scrape, WAIT, incompressible, topic};
+use overlay_bn::testutil::{RpcAnswer, gloas_column_sidecar, gloas_fork_digest, hash256};
 use overlay_core::protocol::features;
 use overlay_core::relay;
 use overlay_core::roster::Hostname;
@@ -1391,4 +1392,46 @@ async fn a_roster_add_never_dials_against_the_old_pin_table() {
         refused, 0.0,
         "node 0 dialled node 1 against a pin table that did not hold it"
     );
+}
+
+/// T-120: a Gloas column one host's beacon node gossips is filed on another host under the
+/// block root and index its own bytes carry, and that host's by-root cache serves it back to its
+/// beacon node by root (§5.8). The column is striped, because a host keeps what it reassembled
+/// and not what arrived whole. The topic carries the fake's Gloas fork digest, so the answer's
+/// context bytes make the fake's codec read the bytes as a Gloas sidecar.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_gloas_column_delivered_on_one_host_is_served_from_the_others_cache_by_root() {
+    let [a, b, c, d] = gloas_fork_digest();
+    let columns = format!("/eth2/{a:02x}{b:02x}{c:02x}{d:02x}/data_column_sidecar_5/ssz_snappy");
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", 3)])
+        .config(|settings| {
+            settings.stripe_min_recipients = 2;
+            settings.by_root_cache = true;
+        })
+        .start()
+        .await;
+    for node in fleet.nodes() {
+        node.subscribe(&columns).await;
+    }
+    fleet.wait_full_mesh(WAIT).await;
+    let root = [0x5a; 32];
+    let column = gloas_column_sidecar(11_511_776, 5, hash256(root));
+
+    fleet.node(0).bn().publish(&columns, &column.ssz).await;
+    fleet
+        .wait_for(
+            "node 1's beacon node to receive the column",
+            WAIT,
+            |fleet| fleet.node(1).bn().count(&columns, &column.ssz) == 1,
+        )
+        .await;
+
+    let answer = fleet.node(1).bn().lookup_column(root, 5).await;
+    let RpcAnswer::ColumnByRoot(served) = &answer else {
+        panic!("the Gloas column was not served by root: {answer:?}");
+    };
+    assert_eq!(served.block_root(), column.root);
+    assert_eq!(*served.index(), 5);
+    assert_eq!(served.slot().as_u64(), 11_511_776);
 }

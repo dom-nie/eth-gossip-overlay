@@ -5,9 +5,10 @@
 //! `--trusted-peers`); the tests the beacon node has to dial into also read `SIDECAR_LISTEN`,
 //! the address it was given in `--libp2p-addresses`. The ten-minute test also reads
 //! `LIGHTHOUSE_LOG`, the beacon node's debug-level file log, and runs only under
-//! `MATRIX_TEN_MINUTES=1`, which the nightly job sets. The event-stream test needs a beacon
-//! node that is following the chain rather than the script's genesis-only node, and runs only
-//! under `MATRIX_FOLLOWING_CHAIN=1`.
+//! `MATRIX_TEN_MINUTES=1`, which the nightly job sets. The test that reads events into the
+//! custody tracker needs a beacon node that is following the chain rather than the script's
+//! genesis-only node, and runs only under `MATRIX_FOLLOWING_CHAIN=1`; the one that checks the
+//! node accepts the shipped topics does not.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -30,6 +31,7 @@ use overlay_bn::rpc::{ByRootCache, ByRootOutcome, ByRootStats};
 use overlay_bn::spec::spec_watch;
 use overlay_bn::testutil::by_root_off;
 use overlay_core::backoff::Backoff;
+use overlay_core::config::Config;
 use overlay_core::custody::SharedCustody;
 use overlay_core::events::Arrivals;
 use overlay_core::lanes::ClassLanes;
@@ -509,6 +511,42 @@ async fn matrix_discovery_is_not_satisfied_by_the_sidecar() {
     );
 }
 
+/// T-120: the beacon node accepts every topic the shipped `bn.events_url` asks for. Lighthouse
+/// answers 400 to a topic it does not know, which would leave import telemetry and column repair
+/// off, so a 200 with the event-stream content type on every release in `SUPPORTED` is the
+/// proof. A genesis-only node sends no events, so only the response head is read, and this
+/// test needs no node following the chain.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs a Lighthouse beacon node: scripts/lighthouse-matrix.sh"]
+async fn matrix_node_accepts_the_shipped_event_topics() {
+    let env = env();
+    let shipped = Config::default().bn.events_url;
+    let url = format!(
+        "{}{}?{}",
+        env.http,
+        shipped.path(),
+        shipped
+            .query()
+            .expect("the shipped events_url names its topics")
+    );
+
+    let response = tokio::time::timeout(CONNECT, reqwest::get(&url))
+        .await
+        .expect("the beacon node answered the event stream request")
+        .expect("the event stream request reached the beacon node");
+
+    assert_eq!(response.status(), reqwest::StatusCode::OK, "{url}");
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default();
+    assert!(
+        content_type.starts_with("text/event-stream"),
+        "{url}: {content_type}"
+    );
+}
+
 /// CL-N2 (7), the assumption T-087's custody tracker rests on. Two event names carry the whole
 /// of what column repair knows, and neither is promised by the beacon API specification:
 /// `block_gossip` fires inside gossip verification, after the proposer-signature check and after
@@ -533,10 +571,15 @@ async fn matrix_event_stream_reports_accepted_blocks_and_verified_columns() {
     let (_sets_tx, sets) = watch::channel(every_column_topic(columns));
     let custody = SharedCustody::new(spec, sets, Arc::new(()));
 
+    let shipped = Config::default().bn.events_url;
     let events = BlockEvents::spawn(
         format!(
-            "{}/eth/v1/events?topics=block,block_gossip,data_column_sidecar",
-            env.http
+            "{}{}?{}",
+            env.http,
+            shipped.path(),
+            shipped
+                .query()
+                .expect("the shipped events_url names its topics")
         )
         .parse()
         .unwrap(),

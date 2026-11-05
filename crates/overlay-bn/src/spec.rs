@@ -8,13 +8,14 @@
 use serde::Deserialize;
 use tokio::sync::watch;
 
-pub use overlay_core::spec::SpecSnapshot;
+pub use overlay_core::spec::{FAR_FUTURE_EPOCH, SpecSnapshot};
 
 /// Mainnet as the pinned Lighthouse v8.3.2 ships it. `DATA_COLUMN_SIDECAR_SUBNET_COUNT`,
 /// `NUMBER_OF_CUSTODY_GROUPS`, `MAX_PAYLOAD_SIZE` and `SECONDS_PER_SLOT` come from
 /// `common/eth2_network_config/built_in_network_configs/mainnet/config.yaml`,
 /// `NUMBER_OF_COLUMNS` from `consensus/types/presets/mainnet/fulu.yaml` and
-/// `SLOTS_PER_EPOCH` from `consensus/types/presets/mainnet/phase0.yaml`.
+/// `SLOTS_PER_EPOCH` from `consensus/types/presets/mainnet/phase0.yaml`. Mainnet has not
+/// scheduled Gloas.
 pub const MAINNET: SpecSnapshot = SpecSnapshot {
     data_column_sidecar_subnet_count: 128,
     number_of_columns: 128,
@@ -22,21 +23,24 @@ pub const MAINNET: SpecSnapshot = SpecSnapshot {
     max_payload_size: 10_485_760,
     seconds_per_slot: 12,
     slots_per_epoch: 32,
+    gloas_fork_epoch: FAR_FUTURE_EPOCH,
 };
 
 /// The keys [`SpecWire`] reads, in its field order, by the name the beacon node sends.
-pub const SPEC_KEYS: [&str; 6] = [
+pub const SPEC_KEYS: [&str; 7] = [
     "DATA_COLUMN_SIDECAR_SUBNET_COUNT",
     "NUMBER_OF_COLUMNS",
     "NUMBER_OF_CUSTODY_GROUPS",
     "MAX_PAYLOAD_SIZE",
     "SECONDS_PER_SLOT",
     "SLOTS_PER_EPOCH",
+    "GLOAS_FORK_EPOCH",
 ];
 
 /// The snapshot as the beacon node sends it. Lighthouse serialises every number as a quoted
 /// decimal string, so each field parses one. A key it does not send stays `None`, so the
-/// client can say which before [`MAINNET`]'s value stands in for it.
+/// client can say which before the sidecar's default stands in for it: [`MAINNET`]'s value for
+/// every key but `GLOAS_FORK_EPOCH`, which is [`FAR_FUTURE_EPOCH`] (not scheduled).
 #[derive(Default, Deserialize)]
 #[serde(default, rename_all = "UPPERCASE")]
 pub struct SpecWire {
@@ -52,10 +56,12 @@ pub struct SpecWire {
     seconds_per_slot: Option<u64>,
     #[serde(deserialize_with = "quoted")]
     slots_per_epoch: Option<u64>,
+    #[serde(deserialize_with = "quoted")]
+    gloas_fork_epoch: Option<u64>,
 }
 
 impl SpecWire {
-    /// The keys this answer did not carry, each of which takes [`MAINNET`]'s value.
+    /// The keys this answer did not carry, each of which takes the sidecar's default.
     pub fn missing(&self) -> impl Iterator<Item = &'static str> {
         let values = [
             self.data_column_sidecar_subnet_count,
@@ -64,28 +70,37 @@ impl SpecWire {
             self.max_payload_size,
             self.seconds_per_slot,
             self.slots_per_epoch,
+            self.gloas_fork_epoch,
         ];
         SPEC_KEYS
             .into_iter()
             .zip(values)
             .filter_map(|(key, value)| value.is_none().then_some(key))
     }
+
+    /// The snapshot this answer gives, each missing key taking its value from `defaults`, except
+    /// `GLOAS_FORK_EPOCH`, which is [`FAR_FUTURE_EPOCH`] when missing whatever `defaults` says:
+    /// a node that names no Gloas epoch has not scheduled one.
+    fn snapshot(self, defaults: &SpecSnapshot) -> SpecSnapshot {
+        SpecSnapshot {
+            data_column_sidecar_subnet_count: self
+                .data_column_sidecar_subnet_count
+                .unwrap_or(defaults.data_column_sidecar_subnet_count),
+            number_of_columns: self.number_of_columns.unwrap_or(defaults.number_of_columns),
+            number_of_custody_groups: self
+                .number_of_custody_groups
+                .unwrap_or(defaults.number_of_custody_groups),
+            max_payload_size: self.max_payload_size.unwrap_or(defaults.max_payload_size),
+            seconds_per_slot: self.seconds_per_slot.unwrap_or(defaults.seconds_per_slot),
+            slots_per_epoch: self.slots_per_epoch.unwrap_or(defaults.slots_per_epoch),
+            gloas_fork_epoch: self.gloas_fork_epoch.unwrap_or(FAR_FUTURE_EPOCH),
+        }
+    }
 }
 
 impl From<SpecWire> for SpecSnapshot {
     fn from(wire: SpecWire) -> Self {
-        Self {
-            data_column_sidecar_subnet_count: wire
-                .data_column_sidecar_subnet_count
-                .unwrap_or(MAINNET.data_column_sidecar_subnet_count),
-            number_of_columns: wire.number_of_columns.unwrap_or(MAINNET.number_of_columns),
-            number_of_custody_groups: wire
-                .number_of_custody_groups
-                .unwrap_or(MAINNET.number_of_custody_groups),
-            max_payload_size: wire.max_payload_size.unwrap_or(MAINNET.max_payload_size),
-            seconds_per_slot: wire.seconds_per_slot.unwrap_or(MAINNET.seconds_per_slot),
-            slots_per_epoch: wire.slots_per_epoch.unwrap_or(MAINNET.slots_per_epoch),
-        }
+        wire.snapshot(&MAINNET)
     }
 }
 
@@ -105,6 +120,8 @@ fn quoted<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<u6
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -117,7 +134,64 @@ mod tests {
     #[test]
     fn mainnet_is_the_pinned_lighthouse_column_count() {
         assert_eq!(MAINNET.number_of_columns, 128);
-        assert_eq!(SpecSnapshot::from(SpecWire::default()), MAINNET);
+        assert_eq!(
+            SpecSnapshot::from(SpecWire::default()),
+            SpecSnapshot {
+                gloas_fork_epoch: FAR_FUTURE_EPOCH,
+                ..MAINNET
+            }
+        );
+    }
+
+    /// An answer without `GLOAS_FORK_EPOCH` is a network that has not scheduled Gloas, whatever
+    /// the compiled defaults say. Mainnet scheduling it must not make a silent node a Gloas one,
+    /// so the defaults here schedule it and the missing key still comes out unscheduled.
+    #[test]
+    fn a_missing_gloas_fork_epoch_means_not_scheduled_whatever_mainnet_says() {
+        let scheduled = SpecSnapshot {
+            gloas_fork_epoch: 5,
+            ..MAINNET
+        };
+
+        assert_eq!(
+            SpecWire::default().snapshot(&scheduled),
+            SpecSnapshot {
+                gloas_fork_epoch: FAR_FUTURE_EPOCH,
+                ..scheduled
+            }
+        );
+    }
+
+    /// MD-09: column repair anchors on the envelope from the first slot of the Gloas fork
+    /// epoch, so the epoch is read from the beacon node like every other spec value. Sepolia's.
+    #[test]
+    fn gloas_fork_epoch_is_read_from_the_spec() {
+        let wire: SpecWire = serde_json::from_value(json!({
+            "GLOAS_FORK_EPOCH": "353024",
+            "SLOTS_PER_EPOCH": "32",
+        }))
+        .unwrap();
+
+        let spec = SpecSnapshot::from(wire);
+
+        assert_eq!(spec.gloas_fork_epoch, 353_024);
+        assert_eq!(spec.first_gloas_slot(), Some(11_296_768));
+    }
+
+    /// Lighthouse sends `FAR_FUTURE_EPOCH` for a fork it has not scheduled, and a node that
+    /// sends no `GLOAS_FORK_EPOCH` at all has not scheduled it either: no slot is a Gloas slot.
+    #[test]
+    fn an_unscheduled_gloas_fork_epoch_means_no_gloas_slot() {
+        let wire: SpecWire = serde_json::from_value(json!({
+            "GLOAS_FORK_EPOCH": "18446744073709551615",
+            "SLOTS_PER_EPOCH": "32",
+        }))
+        .unwrap();
+        let silent: SpecWire = serde_json::from_value(json!({"SLOTS_PER_EPOCH": "32"})).unwrap();
+
+        assert_eq!(SpecSnapshot::from(wire).first_gloas_slot(), None);
+        assert_eq!(SpecSnapshot::from(silent).first_gloas_slot(), None);
+        assert_eq!(MAINNET.first_gloas_slot(), None);
     }
 }
 
@@ -133,7 +207,7 @@ mod drift {
     /// `/eth/v1/config/spec` serialises for mainnet at the pinned tag, read back through
     /// `SpecWire` so that a value format the sidecar cannot parse, or a compiled-in default that
     /// is not mainnet's, fails too. The first assertion is what makes the list the struct's:
-    /// six keys each set to 1 leave no field at its default.
+    /// every key set to 1 leaves no field at its default.
     #[test]
     fn spec_keys_the_sidecar_reads_are_in_lighthouse_config() {
         let ones: serde_json::Map<_, _> = SPEC_KEYS
@@ -150,6 +224,7 @@ mod drift {
                 max_payload_size: 1,
                 seconds_per_slot: 1,
                 slots_per_epoch: 1,
+                gloas_fork_epoch: 1,
             }
         );
 

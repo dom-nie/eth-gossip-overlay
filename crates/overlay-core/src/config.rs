@@ -197,7 +197,8 @@ pub enum Steering {
 pub struct Bn {
     /// `identity_url`: the beacon API endpoint that reports the node's peer id.
     pub identity_url: Url,
-    /// `events_url`: the beacon API event stream.
+    /// `events_url`: the beacon API event stream, asking for `block`, `block_gossip`,
+    /// `data_column_sidecar` and `execution_payload_gossip`.
     pub events_url: Url,
     /// `libp2p_addr`: the multiaddr the sidecar dials to join the beacon node's gossipsub.
     pub libp2p_addr: String,
@@ -277,7 +278,8 @@ pub struct LargeClass {
     /// `parity_ratio`: parity chunks as a fraction of data chunks.
     pub parity_ratio: f64,
     /// `repair_deadline_ms`: how long after the first chunk a receiver waits before asking peers
-    /// for the missing ones.
+    /// for the missing ones. For custody columns it runs from the block, or from the payload
+    /// envelope from the Gloas fork on.
     #[serde(rename = "repair_deadline_ms", deserialize_with = "millis")]
     pub repair_deadline: Duration,
     /// `column_repair`: ask in-region peers for the custody columns the beacon node is still
@@ -402,7 +404,7 @@ impl Default for Bn {
         Self {
             identity_url: url("http://127.0.0.1:5052/eth/v1/node/identity"),
             events_url: url(
-                "http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar",
+                "http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip",
             ),
             libp2p_addr: "/ip4/127.0.0.1/tcp/9000".to_owned(),
             node_key_file: PathBuf::from("/var/lib/eth-gossip-overlay/node.key"),
@@ -708,7 +710,7 @@ overlay:
     steering: off               # auto: ntuple flow rule if the NIC supports it, else RFS
 bn:
   identity_url: http://127.0.0.1:5052/eth/v1/node/identity
-  events_url: http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar
+  events_url: http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip
   libp2p_addr: /ip4/127.0.0.1/tcp/9000
   node_key_file: /var/lib/eth-gossip-overlay/node.key   # per-host libp2p identity, created on first start
   listen_addr: /ip4/127.0.0.1/tcp/7787            # where the beacon node dials the sidecar (MD-01); restart-required

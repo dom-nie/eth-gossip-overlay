@@ -41,26 +41,25 @@ hosts:
 ```
 
 Every host carries the same roster, and `region` is the fan-out's failure and latency domain.
-Have your discovery tool write `roster.yaml`: the sidecar checks the file for changes
-every 10 seconds and reloads what changed, so membership needs no interface beyond the file.
-Write to a temporary file in the same directory and rename it into place: a poll landing halfway
-through a direct write reads a file that does not parse, keeps the roster it has, and picks up
-the finished one next poll.
+Have your discovery tool write `roster.yaml`: the sidecar polls it every 10 seconds and reloads
+what changed, so membership needs no interface beyond the file.
+Write a temporary file in the same directory and rename it into place: a poll landing mid-write
+reads a file that does not parse and keeps the roster it has.
 
 An automatic reload is refused if it would drop more than half the sidecar's hosts, since a
-truncated file is likelier than half a fleet leaving at once. The refusal counts
+truncated file is likelier than half a fleet leaving. The refusal counts
 `roster_reload_rejected_total`, which is alerted on; `eth-gossip-overlayctl roster reload`
-applies the file anyway, which is how a genuine shrink is done.
+applies the file anyway, for a genuine shrink.
 
 ## The seed, the node key and the logs
 
 `overlay.fleet_seed_file` names the fleet seed, but `$CREDENTIALS_DIRECTORY/seed` wins whenever
-systemd sets it, which is what the shipped unit's `LoadCredential=` does. Set
+systemd sets it, as the shipped unit's `LoadCredential=` does. Set
 `overlay.fleet_seed_previous_file` only while a seed rotation is running;
 [security.md](security.md) is the procedure.
 
 `bn.node_key_file` holds this host's libp2p identity, created on first start with mode 0600: the
-peer id the beacon node trusts, not derived from the seed. Deleting it gives the sidecar a new
+peer id the beacon node trusts, not derived from the seed. Deleting it means a new
 identity on the next start, so `lighthouse.env` changes and the beacon node has to restart to
 read it; keep the file, and on a container the volume under it.
 
@@ -101,7 +100,7 @@ Every key below ships in 0.1.0, the first release.
 | `overlay.io_thread.irq_suspend_timeout_ms` | `20` | restart | how long the NIC queue's interrupt stays masked while polling keeps finding packets. Needs `CAP_NET_ADMIN`; `0` asks for the busy polling without the suspension. |
 | `overlay.io_thread.steering` | `off` | restart | how the overlay's packets are steered to the pinned core's NIC queue. One of `auto`, `ntuple`, `rfs`, `off`. |
 | `bn.identity_url` | `http://127.0.0.1:5052/eth/v1/node/identity` | restart | the beacon API endpoint that reports the node's peer id. |
-| `bn.events_url` | `http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar` | restart | the beacon API event stream. |
+| `bn.events_url` | `http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip` | restart | the beacon API event stream, asking for `block`, `block_gossip`, `data_column_sidecar` and `execution_payload_gossip`. |
 | `bn.libp2p_addr` | `/ip4/127.0.0.1/tcp/9000` | restart | the multiaddr the sidecar dials to join the beacon node's gossipsub. |
 | `bn.node_key_file` | `/var/lib/eth-gossip-overlay/node.key` | restart | the sidecar's own libp2p identity, per host, created on first start. |
 | `bn.listen_addr` | `/ip4/127.0.0.1/tcp/7787` | restart | where the sidecar listens for the beacon node's dial. Lighthouse caps inbound connections before it knows the peer, so a sidecar that only dialled would wait for churn on a busy node (MD-01). Restart-required, sidecar only: the beacon node dials the ENR the sidecar posts through `add_peer`. |
@@ -115,7 +114,7 @@ Every key below ships in 0.1.0, the first release.
 | `classes.small.stale_after_ms` | `1000` | reload | a batch older than this is dropped rather than delivered late. |
 | `classes.large.chunk_bytes` | `2048` | restart | the fixed chunk size. The Reed-Solomon shards need an even length; a multiple of 64 is the stricter rule the sidecar holds them to, so a chunk lands on a cache line and the SIMD paths run at their widest stride. |
 | `classes.large.parity_ratio` | `0.1` | restart | parity chunks as a fraction of data chunks. |
-| `classes.large.repair_deadline_ms` | `250` | reload | how long after the first chunk a receiver waits before asking peers for the missing ones. |
+| `classes.large.repair_deadline_ms` | `250` | reload | how long after the first chunk a receiver waits before asking peers for the missing ones. For custody columns it runs from the block, or from the payload envelope from the Gloas fork on. |
 | `classes.large.column_repair` | `true` | reload | ask in-region peers for the custody columns the beacon node is still short of past the same deadline. Off, the node fetches them itself as it always has. |
 | `inject` | `true` | reload | whether the sidecar publishes what it receives into the beacon node. `false` is the kill switch: the sidecar keeps observing and reporting but changes nothing. |
 | `admin_socket` | `/run/eth-gossip-overlay/admin.sock` | restart | the Unix socket `eth-gossip-overlayctl` connects to. |

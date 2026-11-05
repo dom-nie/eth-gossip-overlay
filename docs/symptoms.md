@@ -77,9 +77,23 @@ ENR the sidecar posts through `add_peer`.
 
 ## The beacon node's spec lacks a key the sidecar reads
 
-The warn line `the beacon node's spec lacks a key the sidecar reads; using the mainnet value`
-names a key the node's `/eth/v1/config/spec` no longer sends, so the sidecar sized that value
-for mainnet. The node runs a Lighthouse newer than this sidecar knows; upgrade the sidecar.
+The warn line `the beacon node's spec lacks a key the sidecar reads; using the sidecar's default`
+names a key the node's `/eth/v1/config/spec` no longer sends, so the sidecar used mainnet's
+value for it, or for `GLOAS_FORK_EPOCH` took Gloas as not scheduled. The node runs a Lighthouse
+newer than this sidecar knows; upgrade the sidecar.
+
+## The event stream is missing topics or refused
+
+`bn.events_url does not ask for every event topic the sidecar reads, so import telemetry or
+column repair goes without them; add them to bn.events_url` is logged once at start, with the
+missing topics: a hand-set URL leaves out some of `block`, `block_gossip`,
+`data_column_sidecar` and `execution_payload_gossip`. Add them and restart the sidecar.
+
+`the beacon node refused its event stream, so import telemetry and column repair are off for
+this host; check bn.events_url's topics against this beacon node's Lighthouse version
+(restart-required)` carries the status and the start of the node's answer, and
+`overlay_bn_events_connected` stays at 0. The usual cause is a topic this Lighthouse does not
+know, a typo, or no `topics` at all. Fix the URL and restart the sidecar.
 
 ## Socket buffers smaller than the sidecar asked for
 

@@ -566,6 +566,11 @@ impl Link {
         {
             tracing::warn!(%err, "connect probe failed");
         }
+        // ponytail: the spec is fetched once per connect and only a good answer replaces the
+        // watch, so until a fetch succeeds it holds MAINNET (or the last good answer), and a
+        // healthy link may not reconnect for days. Before the first good answer custody treats
+        // Gloas as unscheduled and a Gloas slot's deadline starts at the block. Upgrade path:
+        // retry the spec fetch on failure.
         if let Ok(snapshot) = spec {
             self.spec.send_replace(snapshot);
         }
@@ -2077,8 +2082,8 @@ mod tests {
         assert!(text.contains(protocol), "{text}");
     }
 
-    /// The topic a payload of `name` arrived on, under the fork digest the fake stands in. The
-    /// digest is where a by-root answer takes its context bytes from.
+    /// The topic a payload of `name` arrived on, under Fulu's fork digest. The digest is where a
+    /// by-root answer takes its context bytes from.
     fn fulu_topic(name: &str) -> Topic {
         let [a, b, c, d] = testutil::fulu_fork_digest();
         Topic::parse(&format!(
