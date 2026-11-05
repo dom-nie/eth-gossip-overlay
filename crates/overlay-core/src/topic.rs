@@ -451,6 +451,10 @@ mod tests {
             (TopicKind::BlsToExecutionChange, Class::Small),
             (TopicKind::DataColumnSidecar(0), Class::Large),
             (TopicKind::BlobSidecar(0), Class::Large),
+            (TopicKind::ExecutionPayload, Class::Large),
+            (TopicKind::ExecutionPayloadBid, Class::Small),
+            (TopicKind::PayloadAttestation, Class::Small),
+            (TopicKind::ProposerPreferences, Class::Small),
         ] {
             for payload_len in [0, 1 << 20] {
                 assert_eq!(
@@ -460,6 +464,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn execution_payload_is_large_at_any_size() {
+        assert_eq!(Class::of(&TopicKind::ExecutionPayload, 100), Class::Large);
+    }
+
+    #[test]
+    fn execution_payload_bid_is_small_at_any_size() {
+        assert_eq!(
+            Class::of(&TopicKind::ExecutionPayloadBid, 64 * 1024),
+            Class::Small
+        );
+    }
+
+    #[test]
+    fn payload_attestation_is_small_at_any_size() {
+        assert_eq!(
+            Class::of(&TopicKind::PayloadAttestation, 64 * 1024),
+            Class::Small
+        );
+    }
+
+    #[test]
+    fn proposer_preferences_is_small_at_any_size() {
+        assert_eq!(
+            Class::of(&TopicKind::ProposerPreferences, 64 * 1024),
+            Class::Small
+        );
     }
 
     #[test]
