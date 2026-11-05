@@ -616,11 +616,11 @@ impl Link {
     }
 }
 
-/// The `lighthouse.env` line that makes the beacon node trust the sidecar and dial it: the
-/// only place the file's content is built, so what T-045 writes cannot drift from what the
-/// link listens on. `--libp2p-addresses` is dialled once at beacon-node startup and is
-/// deprecated at v8.2.2; the ENR the link registers on every reconnect is what covers a
-/// sidecar restart (MD-01).
+/// The `lighthouse.env` line that makes the beacon node trust the sidecar: the only place the
+/// file's content is built, so what T-045 writes cannot drift from what the link listens on.
+/// `--libp2p-addresses` makes a v8.2 beacon node dial the sidecar once at startup, is
+/// deprecated from v8.2.2 and inert from v8.3.0 (MD-01 amended); the ENR the link registers
+/// through `add_peer` on every reconnect is what makes the beacon node dial it (MD-01).
 pub fn lighthouse_env_line(peer_id: &PeerId, listen: &Multiaddr) -> String {
     format!(
         "ETH_GOSSIP_OVERLAY_TRUSTED_PEER_ARGS=--trusted-peers {peer_id} \
@@ -1170,8 +1170,9 @@ mod tests {
         assert!(harness.link.connected.load(Ordering::Relaxed));
     }
 
-    /// `--libp2p-addresses` is read once when the beacon node starts, so a sidecar that
-    /// restarts afterwards is only dialled again if it says so itself. The link posts its ENR
+    /// On v8.2 `--libp2p-addresses` is read once when the beacon node starts, and from v8.3.0
+    /// not at all, so a sidecar that restarts afterwards is only dialled again if it says so
+    /// itself. The link posts its ENR
     /// before every dial, and the beacon node's peer manager dials that ENR at once and again
     /// on every heartbeat while it is disconnected.
     #[tokio::test(flavor = "multi_thread")]

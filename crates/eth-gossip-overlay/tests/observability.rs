@@ -359,7 +359,7 @@ fn overlay_peers_low_evaluates_on_a_host_with_no_live_peers() {
     assert_promtool_accepted(&output);
 }
 
-/// The eleven alerts §12 and the design panel asked for, each holding for a window and pointing
+/// The alerts §12, the design panel and MD-10 asked for, each holding for a window and pointing
 /// at the section of the troubleshooting guide that says what to do about it.
 #[test]
 fn every_alert_holds_for_a_window_and_carries_a_summary_and_a_runbook() {
@@ -380,6 +380,7 @@ fn every_alert_holds_for_a_window_and_carries_a_summary_and_a_runbook() {
             "OverlaySidecarRestarting",
             "OverlayRepairRateRising",
             "OverlayColumnIndexConflict",
+            "OverlayUnknownTopicKind",
         ]
     );
 
@@ -393,6 +394,46 @@ fn every_alert_holds_for_a_window_and_carries_a_summary_and_a_runbook() {
         assert!(!rule.annotations.summary.is_empty(), "{}", rule.alert);
         assert!(!rule.annotations.runbook.is_empty(), "{}", rule.alert);
     }
+}
+
+/// MD-10: the alert on topic kinds the sidecar does not know fires for a host whose counter
+/// rose inside the window and stays quiet for one whose counter sat still, however high. The
+/// rising counter stops at 10m, so the alert holds at 20m, with the rise inside the 15-minute
+/// window, and is gone at 30m, which pins the window. The expected annotations are the rule's
+/// own, filled in for the host, because promtool compares them whole.
+#[test]
+fn overlay_unknown_topic_kind_fires_on_an_increase_and_not_on_a_flat_counter() {
+    let rule = alert_rules()
+        .into_iter()
+        .find(|rule| rule.alert == "OverlayUnknownTopicKind")
+        .unwrap();
+    let summary = rule
+        .annotations
+        .summary
+        .replace("{{ $labels.instance }}", "rising");
+    let test = format!(
+        "rule_files:\n  - {ALERTS_FILE}\nevaluation_interval: 1m\ntests:\n  - interval: 1m\n    \
+         input_series:\n      - series: 'overlay_unknown_topic_kind_total{{instance=\"rising\",class=\"small\"}}'\n        \
+         values: '0+1x10 10x30'\n      - series: 'overlay_unknown_topic_kind_total{{instance=\"flat\",class=\"large\"}}'\n        \
+         values: '7x30'\n    alert_rule_test:\n      - eval_time: 20m\n        alertname: OverlayUnknownTopicKind\n        \
+         exp_alerts:\n          - exp_labels:\n              instance: rising\n              severity: warning\n            \
+         exp_annotations:\n              summary: \"{summary}\"\n              runbook: {}\n      \
+         - eval_time: 30m\n        alertname: OverlayUnknownTopicKind\n        exp_alerts: []\n",
+        rule.annotations.runbook
+    );
+
+    let dir = scratch();
+    std::fs::copy(
+        workspace_root().join(ALERTS_DIR).join(ALERTS_FILE),
+        dir.join(ALERTS_FILE),
+    )
+    .unwrap();
+    let file = "unknown-topic-kind.yml";
+    std::fs::write(dir.join(file), &test).unwrap();
+    let Some(output) = run_promtool(&dir, &["test", "rules", file]) else {
+        return;
+    };
+    assert_promtool_accepted(&output);
 }
 
 /// The process collector is Linux-only in the `prometheus` crate, so this is the one check the
@@ -508,7 +549,10 @@ fn promtool_image_is_the_prometheus_the_demo_runs() {
     let compose_image = format!("prom/prometheus:${{PROMETHEUS_VERSION:-{tag}}}");
 
     assert!(
-        read(COMPOSE).contains(&compose_image),
+        read(COMPOSE).lines().map(str::trim).any(|line| {
+            !line.starts_with('#')
+                && line.strip_prefix("image:").map(str::trim) == Some(&*compose_image)
+        }),
         "{COMPOSE} does not default to {compose_image}"
     );
     assert!(

@@ -15,12 +15,12 @@ use crate::spec::SpecSnapshot;
 
 /// The Lighthouse release the workspace is built against: the tag the root `Cargo.toml` pins
 /// for `lighthouse_network` and `types`, whose own `Cargo.toml` names the `sigp/rust-libp2p`
-/// rev in the `[patch]` table. The three move together; the drift test below holds this one
-/// to the tag.
+/// rev the root `Cargo.toml` copies. The three move together; the drift test below holds this
+/// one to the tag.
 pub const PINNED: Version = Version {
     major: 8,
-    minor: 2,
-    patch: 3,
+    minor: 3,
+    patch: 2,
 };
 
 /// Exactly the versions the compatibility matrix has passed, so the range grows only with a
@@ -33,7 +33,7 @@ pub const SUPPORTED: RangeInclusive<Version> = Version {
 }..=PINNED;
 
 /// When the matrix last passed on every version in [`SUPPORTED`].
-pub const LAST_VERIFIED: &str = "2026-10-05";
+pub const LAST_VERIFIED: &str = "2026-11-04";
 
 /// The `state` label values of `overlay_bn_compat`. T-012 named `size_mismatch` without a
 /// constant; these are the shared definitions the gauge, the watch and T-041 use.
@@ -274,11 +274,11 @@ impl Watch {
     }
 }
 
-/// The eight Lighthouse behaviours the design leans on, or works around, that no specification
+/// The nine Lighthouse behaviours the design leans on, or works around, that no specification
 /// promises (CL-N2), each with the test that fails by name when a release changes it.
-const ASSUMPTIONS: [(&str, &str); 8] = [
+const ASSUMPTIONS: [(&str, &str); 9] = [
     (
-        "A trusted peer is admitted whenever the beacon node is under its inbound cap, is dialled by the beacon node through `--libp2p-addresses` at startup and through `add_peer` on demand under the outbound cap, and is never pruned once connected (MD-01)",
+        "A trusted peer is admitted whenever the beacon node is under its inbound cap, is dialled by the beacon node through `add_peer` on demand under the outbound cap (and before v8.3.0 through `--libp2p-addresses` at startup), and is never pruned once connected (MD-01)",
         "under the cap and never pruned: `matrix_trusted_peer_is_admitted_under_the_inbound_cap_and_never_pruned` (matrix); the beacon node dialling a sidecar it has no inbound room for: `matrix_bn_dials_the_listening_sidecar_when_its_inbound_cap_is_full` (matrix); the startup flag: `matrix_bn_startup_flags_dial_the_listening_sidecar` (matrix)",
     ),
     (
@@ -306,8 +306,12 @@ const ASSUMPTIONS: [(&str, &str); 8] = [
         "`matrix_event_stream_reports_accepted_blocks_and_verified_columns` (matrix), which pins that both events reach the custody tracker on a running node; which of the four sources a column came from is not in the payload and is not asserted",
     ),
     (
-        "A parent lookup for a gossip block is seeded with the block's sender and nobody else, a `ResourceUnavailable` answer is re-requested from that peer at once, and the fourth failure drops the lookup and the block. Affected: v8.2.2 through v8.2.3, the whole supported range. `sigp/lighthouse#9542`, on `unstable` since 2026-06-26 and in no release, de-prioritises failed lookup peers but still picks from that set, so it changes nothing here. The sidecar works around it by keeping back a block whose parent its node has not imported (T-101, D42); a release that leaves trusted peers out of a lookup's peers, or widens the set once they have all failed, retires that",
+        "A parent lookup for a gossip block is seeded with the block's sender and nobody else, a `ResourceUnavailable` answer is re-requested from that peer at once, and the fourth failure drops the lookup and the block. Affected: v8.2.2 through v8.3.2, the whole supported range. `sigp/lighthouse#9542`, released in v8.3.0, de-prioritises failed lookup peers but still picks from that set, so it changes nothing here. The sidecar works around it by keeping back a block whose parent its node has not imported (T-101, D42); a release that leaves trusted peers out of a lookup's peers, or widens the set once they have all failed, retires that",
         "`matrix_a_block_whose_parent_the_node_lacks_is_dropped_by_lighthouse_after_four_refusals` (matrix, `MATRIX_FOLLOWING_CHAIN=1`), which counts the four refusals on the sidecar and the dropped lookup on the node; `a_block_whose_parent_the_node_lacks_is_dropped_by_lighthouse_after_four_refusals` plays the node's side against `FakeBn` and pins that the sidecar no longer offers such a block",
+    ),
+    (
+        "From v8.3.0 the beacon node still accepts `--libp2p-addresses` but never dials it (`sigp/lighthouse#10229`), so on those releases `add_peer` registration alone admits the sidecar. The env file keeps the flag while the supported range includes a v8.2 release (MD-01 amended)",
+        "`matrix_bn_dials_the_listening_sidecar_when_its_inbound_cap_is_full` (matrix), which on v8.3.0 and later passes through `add_peer` alone; the flag still being accepted: `matrix_bn_startup_flags_dial_the_listening_sidecar` (matrix)",
     ),
 ];
 
@@ -326,10 +330,10 @@ pub fn render_compatibility_section() -> String {
          versions the compatibility matrix has passed and grows only with a matrix run. The \
          workspace is built against v{PINNED}: the tag the root `Cargo.toml` pins for \
          `lighthouse_network` and `types`, and the `sigp/rust-libp2p` revision that tag pins, \
-         through the `[patch]` table. A beacon node above the range is reported `untested` \
+         which the root `Cargo.toml` copies. A beacon node above the range is reported `untested` \
          and one below it `unsupported`, on every connect, in the log and in \
          `overlay_bn_compat{{state}}`; the sidecar keeps running either way.\n\n\
-         The design leans on, or works around, eight Lighthouse behaviours that no \
+         The design leans on, or works around, nine Lighthouse behaviours that no \
          specification promises. Each has a named test, so a release that changes one fails \
          the matrix by name instead of degrading the fleet quietly. Tests marked matrix need a \
          real beacon node and run in the nightly matrix; the others run on every pull request \
@@ -346,7 +350,7 @@ pub fn render_compatibility_section() -> String {
     out
 }
 
-/// [`SUPPORTED`] as `8.2.2..=8.2.3`, for the logs.
+/// [`SUPPORTED`] as `start..=end`, for the logs.
 struct Supported;
 
 impl fmt::Display for Supported {
@@ -736,18 +740,12 @@ mod tests {
 
 #[cfg(test)]
 mod drift {
-    use super::*;
+    use lighthouse_network::types::{GossipEncoding, GossipTopic, all_topics_at_fork};
+    use overlay_core::topic::forks::{FORK_TOPICS, FORKS, Sidecar};
+    use overlay_core::topic::{Class, Topic, TopicKind};
+    use types::{ChainSpec, ForkName, MainnetEthSpec};
 
-    /// The tags the matrix workflow runs: the ends of `SUPPORTED`, once each. A range wider
-    /// than its ends needs the versions in between listed by hand, and this is where the
-    /// comparison would have to learn about them.
-    fn matrix_versions() -> Vec<String> {
-        let mut versions = vec![format!("v{}", SUPPORTED.start())];
-        if SUPPORTED.start() != SUPPORTED.end() {
-            versions.push(format!("v{}", SUPPORTED.end()));
-        }
-        versions
-    }
+    use super::*;
 
     /// `PINNED` and the tag the root `Cargo.toml` pins for Lighthouse's crates move together;
     /// a bump that forgets one of them would report the wrong version as supported.
@@ -773,7 +771,9 @@ mod drift {
     }
 
     /// The Lighthouse section of `COMPATIBILITY.md` is what the generator renders, and the
-    /// matrix workflow's version list is `SUPPORTED`. With `UPDATE_COMPATIBILITY_MD` set the
+    /// matrix workflow's version list spans `SUPPORTED`: its ends are the range's ends and it
+    /// climbs one release at a time, compared as versions rather than strings. The releases in
+    /// between cannot be derived from the range, so the workflow is the one list. With `UPDATE_COMPATIBILITY_MD` set the
     /// test rewrites the section between the markers first, which is how it is regenerated.
     #[test]
     fn compatibility_md_matches_the_constant() {
@@ -808,6 +808,110 @@ mod drift {
             .split(',')
             .map(|v| v.trim().trim_matches('"').to_owned())
             .collect();
-        assert_eq!(listed, matrix_versions());
+        let workflow_file = ".github/workflows/lighthouse-matrix.yml";
+        assert_eq!(
+            listed.first().map(String::as_str),
+            Some(&*format!("v{}", SUPPORTED.start())),
+            "the first version in {workflow_file} must be the start of SUPPORTED in compat.rs; \
+             edit whichever of the two is wrong"
+        );
+        assert_eq!(
+            listed.last().map(String::as_str),
+            Some(&*format!("v{}", SUPPORTED.end())),
+            "the last version in {workflow_file} must be the end of SUPPORTED in compat.rs; \
+             add the new release to the list, or move SUPPORTED"
+        );
+        let versions: Vec<Version> = listed
+            .iter()
+            .map(|v| {
+                parse(&format!("Lighthouse/{v}"))
+                    .unwrap_or_else(|err| panic!("{workflow_file} lists {v:?}: {err}"))
+                    .version
+            })
+            .collect();
+        assert!(
+            versions.is_sorted_by(|a, b| a < b),
+            "{workflow_file} must list each release once, oldest first: {listed:?}"
+        );
+    }
+
+    /// MD-10: the fork-topic table names exactly what Lighthouse subscribes to at every fork it
+    /// knows, scheduled or not, and every name parses to its row's kind and class. Lighthouse's
+    /// list is its worst case: every subnet, every column, the light-client server and execution
+    /// proofs switched on.
+    #[test]
+    fn fork_topics_match_lighthouse() {
+        // `all_topics_at_fork` reads only the subnet counts from the spec, not the schedule.
+        // Every fork is scheduled anyway, so a release that starts reading it still answers for
+        // a fork no network has a date for.
+        let spec = ForkName::latest().make_genesis_spec(ChainSpec::mainnet());
+        let forks: Vec<String> = ForkName::list_all().iter().map(|f| f.to_string()).collect();
+        assert_eq!(forks, FORKS, "Lighthouse's forks are not the table's");
+
+        let mut problems = Vec::new();
+        let mut report = |problem: String| {
+            if !problems.contains(&problem) {
+                problems.push(problem);
+            }
+        };
+        for fork in ForkName::list_all() {
+            // The name as it goes on the wire, which `GossipKind`'s own `Display` is not for two
+            // of them (`signed_contribution_and_proof`, `payload_attestation`).
+            let topics: Vec<String> = all_topics_at_fork::<MainnetEthSpec>(fork, &spec)
+                .into_iter()
+                .map(|kind| {
+                    let wire = GossipTopic::new(kind, GossipEncoding::SSZSnappy, [0; 4]);
+                    wire.to_string().split('/').nth(3).unwrap().to_owned()
+                })
+                .collect();
+            let rows: Vec<_> = FORK_TOPICS
+                .iter()
+                .filter(|row| row.live_at(&fork.to_string()))
+                .collect();
+            for topic in &topics {
+                let Some((row, index)) = rows
+                    .iter()
+                    .find_map(|row| Some((row, row.index_of(topic)?)))
+                else {
+                    report(format!(
+                        "{fork}: Lighthouse has {}, the table has no row for it",
+                        family(topic)
+                    ));
+                    continue;
+                };
+                let parsed = Topic::parse(&format!("/eth2/00000000/{topic}/ssz_snappy"))
+                    .map(|topic| topic.kind().clone());
+                let matches = match (&parsed, row.sidecar) {
+                    (Ok(kind), Sidecar::Named(make, class)) => {
+                        *kind == make(index) && Class::of(kind, 0) == class
+                    }
+                    (Ok(kind), Sidecar::Other) => matches!(kind, TopicKind::Other(_)),
+                    (Err(_), _) => false,
+                };
+                if !matches {
+                    report(format!(
+                        "{fork}: {topic} parses to {parsed:?}, its row says {:?}",
+                        row.sidecar
+                    ));
+                }
+            }
+            for row in rows {
+                if !topics.iter().any(|topic| row.index_of(topic).is_some()) {
+                    report(format!(
+                        "{fork}: the table has {}, Lighthouse does not",
+                        row.name
+                    ));
+                }
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
+    /// `beacon_attestation_17` as `beacon_attestation_{i}`, so a missing family is one line.
+    fn family(topic: &str) -> String {
+        match topic.trim_end_matches(|c: char| c.is_ascii_digit()) {
+            stem if stem.len() < topic.len() => format!("{stem}{{i}}"),
+            _ => topic.to_owned(),
+        }
     }
 }

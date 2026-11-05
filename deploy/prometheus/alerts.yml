@@ -1,4 +1,5 @@
-# Alert rules for the sidecar, Architecture.md §12's list plus the five the design panel added.
+# Alert rules for the sidecar: Architecture.md §12's list, the five the design panel added and
+# the one MD-10 added.
 # Load them into your own Prometheus:
 #
 #   rule_files:
@@ -149,3 +150,17 @@ groups:
         annotations:
           summary: "{{ $labels.instance }} saw two payloads claim one custody column"
           runbook: docs/troubleshooting.md#overlaycolumnindexconflict
+
+      # MD-10: any increase. The counter moves only for a topic name the fork-topic table does
+      # not list, which is a beacon node ahead of the Lighthouse this build was checked against.
+      # The message still travels, with its class guessed from the payload size, so this is a
+      # sidecar to upgrade rather than an outage. Names the table lists as Other by decision
+      # (light-client updates, the Gloas four, execution_proof, inclusion_list) never count.
+      - alert: OverlayUnknownTopicKind
+        expr: sum by (instance) (increase(overlay_unknown_topic_kind_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} is relaying a gossip topic kind the sidecar does not know"
+          runbook: docs/troubleshooting.md#overlayunknowntopickind

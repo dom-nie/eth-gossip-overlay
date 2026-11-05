@@ -19,6 +19,8 @@
 //! ignores the rest. `POST /lighthouse/add_peer` takes `api_types::AdminPeer`, one `enr`
 //! string, and answers an empty 200.
 
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use libp2p::PeerId;
@@ -43,6 +45,9 @@ pub struct BnClient {
     peers: Url,
     spec: Url,
     add_peer: Url,
+    /// Spec keys already reported missing. Shared by every clone, so a key is named once for
+    /// the life of the process rather than on every reconnect.
+    missing_logged: Arc<Mutex<BTreeSet<&'static str>>>,
 }
 
 /// What the beacon node knows about one of its peers, cut down to what the sidecar acts on.
@@ -177,6 +182,7 @@ impl BnClient {
             spec: sibling(&identity_url, SPEC),
             add_peer: sibling(&identity_url, ADD_PEER),
             identity: identity_url,
+            missing_logged: Arc::default(),
         }
     }
 
@@ -229,9 +235,24 @@ impl BnClient {
         }
     }
 
-    /// The spec constants as the beacon node runs them.
+    /// The spec constants as the beacon node runs them. A key the answer lacks takes the
+    /// mainnet value, and is named in a warning the first time, because a Lighthouse that
+    /// stops sending one would otherwise leave the sidecar sized for mainnet in silence (MD-10).
     pub async fn spec(&self) -> Result<SpecSnapshot, BnHttpError> {
         let Data { data } = self.get::<Data<SpecWire>>(&self.spec, SPEC).await?;
+        let mut logged = self
+            .missing_logged
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        for key in data.missing() {
+            if logged.insert(key) {
+                tracing::warn!(
+                    key,
+                    url = %self.spec,
+                    "the beacon node's spec lacks a key the sidecar reads; using the mainnet value"
+                );
+            }
+        }
         Ok(data.into())
     }
 
@@ -266,6 +287,7 @@ mod tests {
 
     use super::*;
     use crate::spec::SpecSnapshot;
+    use crate::testutil::{FakeBn, LOG, ok_json};
 
     fn client(server: &MockServer) -> BnClient {
         client_at(&format!("{}/eth/v1/node/identity", server.uri()))
@@ -557,6 +579,46 @@ mod tests {
                 ..MOCKED
             }
         );
+    }
+
+    /// MD-10: a key the beacon node stops sending is said once, by name, and the mainnet value
+    /// stands in for it; a reconnect asks again and says nothing more. The line carries the
+    /// fake's own address, which is what makes the count this test's in the shared log.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_missing_spec_key_is_logged_once_and_falls_back() {
+        let log = &*LOG;
+        let mut bn = FakeBn::start().await;
+        bn.set_spec_response(ok_json(json!({"data": {
+            "DATA_COLUMN_SIDECAR_SUBNET_COUNT": "128",
+            "NUMBER_OF_COLUMNS": "128",
+            "NUMBER_OF_CUSTODY_GROUPS": "128",
+            "MAX_PAYLOAD_SIZE": "10485760",
+            "SLOTS_PER_EPOCH": "8"
+        }})))
+        .await;
+        let client = BnClient::new(bn.http_addr(), Duration::from_secs(2));
+
+        let mut answers = Vec::new();
+        for _ in 0..3 {
+            answers.push(client.spec().await.unwrap());
+        }
+
+        for spec in answers {
+            assert_eq!(spec.seconds_per_slot, crate::spec::MAINNET.seconds_per_slot);
+            assert_eq!(
+                spec.slots_per_epoch, 8,
+                "the rest of the answer is still read"
+            );
+        }
+        let addr = bn.http_addr();
+        let ours = format!("{}:{}", addr.host_str().unwrap(), addr.port().unwrap());
+        let text = log.text();
+        let lines: Vec<&str> = text
+            .lines()
+            .filter(|line| line.contains(&ours) && line.contains("SECONDS_PER_SLOT"))
+            .collect();
+        assert_eq!(lines.len(), 1, "{text}");
+        assert!(lines[0].contains("WARN"), "{}", lines[0]);
     }
 
     #[tokio::test]

@@ -1,8 +1,7 @@
 # Troubleshooting
 
 One section per alert in [`deploy/prometheus/alerts.yml`](../deploy/prometheus/alerts.yml): what
-the alert is telling you, and the first thing to look at. Each rule's `runbook` annotation points
-at its section, so the link in the notification lands on the right paragraph.
+the alert is telling you, and the first thing to look at.
 
 [symptoms.md](symptoms.md) is the other half: what no rule fires on, because the healthy value
 is a judgement call or because it only ever happens on a first install.
@@ -160,3 +159,8 @@ requester loses one round trip.
 The warn line names `held` and `refused`. Join `held` to its `first_arrival` line for
 `origin_peer`, check `overlay_invalid_payload_total{peer}` on the same window, and take that peer
 out of the roster.
+
+## OverlayUnknownTopicKind
+
+The warn line `relaying a topic kind the sidecar does not know` names it;
+[lighthouse.md](lighthouse.md#topics-the-sidecar-does-not-name) says what it means.

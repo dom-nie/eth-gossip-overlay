@@ -26,8 +26,9 @@
 # attaches its own dummy peer to fill it, so the other tests still connect the way they did.
 #
 # --libp2p-addresses is deprecated at v8.2.2 in favour of --boot-nodes, which cannot carry a
-# local peer without replacing the network's boot ENRs. Passing it here is what tells us the
-# day a Lighthouse release removes it: the beacon node refuses to start and the matrix fails.
+# local peer without replacing the network's boot ENRs, and from v8.3.0 it is accepted and never
+# dialled. Passing it here is what tells us the day a Lighthouse release removes it: the beacon
+# node refuses to start and the matrix fails.
 set -euo pipefail
 
 version=${1:?usage: $0 <version> [--ten-minutes]}

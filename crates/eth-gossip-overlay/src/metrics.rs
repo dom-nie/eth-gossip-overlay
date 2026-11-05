@@ -128,7 +128,7 @@ pub const UNKNOWN_TOPIC_ID_TOTAL: &str = "overlay_unknown_topic_id_total";
 pub const UNKNOWN_FRAME_TYPE_TOTAL: &str = "overlay_unknown_frame_type_total";
 /// Messages on a topic outside this host's advertised set.
 pub const UNWANTED_TOPIC_TOTAL: &str = "overlay_unwanted_topic_total";
-/// Messages on a topic name the sidecar does not know, classified by payload size.
+/// Messages on a topic name the fork-topic table does not list, classified by payload size.
 pub const UNKNOWN_TOPIC_KIND_TOTAL: &str = "overlay_unknown_topic_kind_total";
 /// Handshakes that did not produce a peer.
 pub const HANDSHAKE_FAILURES_TOTAL: &str = "overlay_handshake_failures_total";
@@ -477,9 +477,13 @@ impl Metrics {
         )?;
         let unknown_topic_kind = b.counter_vec(
             UNKNOWN_TOPIC_KIND_TOTAL,
-            "Messages on a topic name the sidecar does not know.",
+            "Messages on a topic name the fork-topic table does not list.",
             per_class,
         )?;
+        // At 0 from the start, so OverlayUnknownTopicKind's increase() sees the first one.
+        for class in [Class::Small, Class::Large] {
+            unknown_topic_kind.with_label_values(&[class_label(class)]);
+        }
         let handshake_failures = b.counter_vec(
             HANDSHAKE_FAILURES_TOTAL,
             "Handshakes that did not produce a peer.",

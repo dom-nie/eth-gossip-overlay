@@ -42,7 +42,9 @@ ETH_GOSSIP_OVERLAY_TRUSTED_PEER_ARGS=--trusted-peers 12D3KooWJ6JBbaSGzLK7jZj7qte
 ```
 
 `--trusted-peers` is what stops the beacon node scoring and pruning the sidecar like an ordinary
-peer. `--libp2p-addresses` is what makes the beacon node dial it.
+peer. `--libp2p-addresses` makes a v8.2 beacon node dial it once at startup and does nothing from
+v8.3.0; what makes the beacon node dial the sidecar is the sidecar's own `add_peer` registration,
+below.
 
 ## Why the beacon node dials the sidecar
 
@@ -53,17 +55,17 @@ cap. Trust exempts a peer from pruning and scoring, not from admission. The beac
 outbound dials run under a separate, larger limit, so the connection is made from the side that
 has room.
 
-Two things make that happen. `--libp2p-addresses` is dialled once inside Lighthouse's network
-startup and never retried, so it covers the case systemd's ordering gives you: sidecar already
-listening when the beacon node starts. Everything else is covered by the sidecar registering
-itself through `POST /lighthouse/add_peer` on every reconnect, with an ENR signed by its node
-key. Lighthouse adds that ENR to the trusted set and dials it at once, and again on every
-heartbeat while it is disconnected, which is what recovers a sidecar restart against a beacon
-node that is full.
+What makes it happen is the sidecar registering itself through `POST /lighthouse/add_peer` on
+every reconnect, with an ENR signed by its node key. Lighthouse adds that ENR to the trusted set
+and dials it at once, and again on every heartbeat while it is disconnected, which is what
+recovers a sidecar restart against a beacon node that is full. On v8.2, `--libp2p-addresses` is
+also dialled once inside Lighthouse's network startup and never retried, which covers the case
+systemd's ordering gives you: sidecar already listening when the beacon node starts.
 
-`--libp2p-addresses` is marked deprecated at v8.2.2. The nightly compatibility matrix runs
-against a real beacon node and would fail on the release that drops it; if that happens, the
-registration alone still works and the env file loses its second flag. `bn.listen_addr` is the
+From v8.3.0 Lighthouse still accepts `--libp2p-addresses`, with the deprecation warning it has
+carried since v8.2.2, and never dials it; registration alone admits the sidecar, and the nightly
+compatibility matrix checks that on every supported release. The env file keeps the flag while
+the supported range includes a v8.2 release, and loses it after. `bn.listen_addr` is the
 address in it, `/ip4/127.0.0.1/tcp/7787` by default, and changing it needs a sidecar restart and
 a beacon node restart, because it is on the beacon node's command line.
 
@@ -77,6 +79,29 @@ the test that checks it named beside it. The minimum version is the bottom of th
 in that file, v8.2.2 today, because that is the oldest version the assumption has been run against;
 nothing is claimed for releases below it. `bn.idontwant_on_publish: false` turns the sidecar's
 half of it off.
+
+## Topics the sidecar does not name
+
+The sidecar mirrors every topic the beacon node subscribes to, including ones it has no name for.
+Those still travel: a message on such a topic goes the large-message way from 16 KiB up and the
+small-message way below it. Some of these names are expected, and the fork-topic table in
+`crates/overlay-core/src/topic/forks.rs` lists them, so they are relayed without a word:
+
+- `execution_payload`, `execution_payload_bid`, `payload_attestation_message` and
+  `proposer_preferences`, the Gloas topics, until a release names them.
+- `light_client_finality_update` and `light_client_optimistic_update`, whenever the beacon node
+  serves light clients, which Lighthouse does unless it runs with `--disable-light-client-server`.
+- `execution_proof`, only on a node started with `--proof-engine-endpoint`, and `inclusion_list`,
+  only after a Heze fork, which no network has scheduled.
+
+A name the table does not list is one nobody has reviewed. Each message on it counts in
+`overlay_unknown_topic_kind_total`, any increase raises `OverlayUnknownTopicKind`, and the warn
+line `relaying a topic kind the sidecar does not know` names the topic once per process. It means
+the beacon node runs a newer Lighthouse than the one this sidecar was built against. The same host
+then shows `overlay_bn_compat{state="untested"}` at 1 and logs `beacon node is newer than any
+version the sidecar was tested with`, and `eth-gossip-overlayctl status` prints the version on its
+`bn` line. Upgrade the sidecar to a release built against that Lighthouse. Until one exists the
+topic still travels, so the alert can be silenced for that host.
 
 ## The flags that were already yours
 

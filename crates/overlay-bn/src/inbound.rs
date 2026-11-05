@@ -24,7 +24,7 @@ use overlay_core::recent::SharedRecentLarge;
 use overlay_core::roster::SelfIdentity;
 use overlay_core::seen::SharedSeenCache;
 use overlay_core::time::Clock;
-use overlay_core::topic::{Class, Topic, TopicKind};
+use overlay_core::topic::{Class, Topic, TopicKind, forks};
 use overlay_core::wire::MAX_PAYLOAD_BYTES;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TrySendError;
@@ -48,9 +48,10 @@ pub trait InboundStats: Send + Sync {
     /// counts the same drop on the [`LaneStats`](overlay_core::lanes::LaneStats) the fanout
     /// lanes were built with, so pass `()` there when this is the only series wanted.
     fn dropped_full(&self, class: Class);
-    /// A message on a topic name the sidecar does not know, classified by payload size
-    /// (D02). Its name is logged once so a fork that adds a topic is visible before a release
-    /// names it.
+    /// A message on a topic name the fork-topic table does not list, classified by payload
+    /// size (D02). Its name is logged once so a fork that adds a topic is visible before a
+    /// release names it. A name the table lists as `Other` by decision is classed the same way
+    /// but is not counted (MD-10 amended).
     fn unknown_kind(&self, class: Class);
 }
 
@@ -155,7 +156,10 @@ impl Inbound {
             }
         };
         let class = Class::of(topic.kind(), msg.data.len());
-        if let TopicKind::Other(name) = topic.kind() {
+        // MD-10 amended: an `Other` the fork-topic table lists was decided, not missed.
+        if let TopicKind::Other(name) = topic.kind()
+            && !forks::lists(name)
+        {
             self.stats.unknown_kind(class);
             if self.warned.insert(name.clone()) {
                 tracing::warn!(
@@ -618,7 +622,34 @@ mod tests {
         );
     }
 
-    /// The name is used nowhere else, so its count in the shared log is this test's alone.
+    /// MD-10 amended: a name the fork-topic table lists as `Other` by decision is classed by
+    /// size like any other `Other`, and still relayed, but it is not unknown. A default
+    /// Lighthouse gossips light-client updates, so counting them would hold the alert on for
+    /// good. Nothing else in this binary relays this topic, so its absence from the shared log
+    /// is this test's to assert.
+    #[tokio::test]
+    async fn a_topic_the_fork_table_lists_as_other_is_relayed_without_counting_or_warning() {
+        let log = &*LOG;
+        let topic = "/eth2/00000000/light_client_finality_update/ssz_snappy";
+        let mut h = Harness::new();
+        for payload in [b"one", b"two", b"six"] {
+            h.push(Class::Small, message(topic, payload));
+        }
+        h.start();
+
+        for _ in 0..3 {
+            assert_eq!(h.out.recv().await.class, Class::Small);
+        }
+
+        assert_eq!(h.stats.count("first_seen", Class::Small), 3);
+        assert_eq!(h.stats.count("unknown_kind", Class::Small), 0);
+        assert_eq!(h.stats.count("unknown_kind", Class::Large), 0);
+        let text = log.text();
+        assert!(!text.contains("light_client_finality_update"), "{text:?}");
+    }
+
+    /// A name no fork has, which is what the counter and the warning are for. The name is used
+    /// nowhere else, so its count in the shared log is this test's alone.
     #[tokio::test]
     async fn unknown_kind_increments_counter_by_class_and_logs_the_name_once() {
         let log = &*LOG;

@@ -231,9 +231,8 @@ mod tests {
     use overlay_core::time::{Clock, FakeClock};
     use ssz::{Decode, Encode};
     use types::{
-        BeaconBlock, BeaconBlockAltair, BeaconBlockBase, BeaconBlockBellatrix, BeaconBlockCapella,
-        BeaconBlockDeneb, BeaconBlockElectra, BeaconBlockFulu, BeaconBlockGloas, ChainSpec,
-        DataColumnSidecarFulu, EmptyBlock,
+        BeaconBlock, BeaconBlockFulu, ChainSpec, DataColumnSidecar, DataColumnSidecarFulu,
+        DataColumnSidecarGloas, EmptyBlock, ForkName,
     };
 
     use super::*;
@@ -348,47 +347,6 @@ mod tests {
         }
     }
 
-    /// T-101 test 4: `parent_root` sits at bytes 116..148 of a `SignedBeaconBlock` on every
-    /// fork Lighthouse knows, which is what lets the receive path read it with no consensus
-    /// type. A block of each fork gets a parent root of its own written at that offset, and the
-    /// typed decode reads the same root back, so the offset is the field and not a coincidence
-    /// of one layout. The wire is built here rather than by `signed_block`, whose fork check
-    /// an empty Electra block fails: it has Fulu's layout and the decoder tries Fulu first.
-    #[test]
-    fn parent_root_is_read_at_the_fixed_ssz_offset_for_every_fork() {
-        let spec = ChainSpec::mainnet();
-        let forks: [BeaconBlock<MainnetEthSpec>; 8] = [
-            BeaconBlock::Base(BeaconBlockBase::empty(&spec)),
-            BeaconBlock::Altair(BeaconBlockAltair::empty(&spec)),
-            BeaconBlock::Bellatrix(BeaconBlockBellatrix::empty(&spec)),
-            BeaconBlock::Capella(BeaconBlockCapella::empty(&spec)),
-            BeaconBlock::Deneb(BeaconBlockDeneb::empty(&spec)),
-            BeaconBlock::Electra(BeaconBlockElectra::empty(&spec)),
-            BeaconBlock::Fulu(BeaconBlockFulu::empty(&spec)),
-            BeaconBlock::Gloas(BeaconBlockGloas::empty(&spec)),
-        ];
-        for (n, block) in forks.into_iter().enumerate() {
-            let fork = block.to_ref().fork_name_unchecked();
-            let parent = [n as u8 + 1; 32];
-            let mut wire = 100u32.to_le_bytes().to_vec();
-            wire.extend_from_slice(&infinity_signature());
-            wire.extend_from_slice(&block.as_ssz_bytes());
-            wire[116..148].copy_from_slice(&parent);
-
-            let decoded = SignedBeaconBlock::<MainnetEthSpec>::any_from_ssz_bytes(&wire)
-                .unwrap_or_else(|err| panic!("{fork}: {err:?}"));
-
-            assert_eq!(bytes32(decoded.parent_root()), parent, "{fork}");
-            assert_eq!(block_parent_root(&wire), Some(parent), "{fork}");
-        }
-        assert_eq!(block_parent_root(&[0; 148]), None, "not a signed block");
-        assert_eq!(
-            block_parent_root(&fulu_block(1).1[..147]),
-            None,
-            "cut short"
-        );
-    }
-
     #[test]
     fn column_header_decodes_slot_index_and_root() {
         let (sidecar, wire) = column_sidecar(9_001, 200);
@@ -493,6 +451,122 @@ mod tests {
                 Err(HeaderError::Ssz),
                 "first offset {offset}"
             );
+        }
+    }
+
+    /// What `cargo test -p overlay-bn drift` runs from this module: the byte offsets this
+    /// module reads, held against every fork `types` knows (MD-10).
+    mod drift {
+        use super::*;
+
+        /// T-101 test 4: `parent_root` sits at bytes 116..148 of a `SignedBeaconBlock` on every
+        /// fork Lighthouse knows, which is what lets the receive path read it with no consensus
+        /// type. A block of each fork gets a parent root of its own written at that offset, and the
+        /// typed decode reads the same root back, so the offset is the field and not a coincidence
+        /// of one layout. The forks come from `ForkName::list_all()`, so one Lighthouse adds is
+        /// covered without anyone naming it here (MD-10). The wire is built here rather than by
+        /// `signed_block`, which reads blocks back the way [`block_header`] does.
+        #[test]
+        fn parent_root_offset_holds_for_every_fork() {
+            for (n, fork) in ForkName::list_all().into_iter().enumerate() {
+                let spec = fork.make_genesis_spec(ChainSpec::mainnet());
+                let block = BeaconBlock::<MainnetEthSpec>::empty(&spec);
+                assert_eq!(block.to_ref().fork_name_unchecked(), fork);
+                let parent = [n as u8 + 1; 32];
+                let mut wire = 100u32.to_le_bytes().to_vec();
+                wire.extend_from_slice(&infinity_signature());
+                wire.extend_from_slice(&block.as_ssz_bytes());
+                wire[116..148].copy_from_slice(&parent);
+
+                // Decoded as its own fork: `any_from_ssz_bytes` stops at Gloas, and a Heze block,
+                // whose bid differs from Gloas's, is not one it can read.
+                let decoded = SignedBeaconBlock::<MainnetEthSpec>::from_ssz_bytes(&wire, &spec)
+                    .unwrap_or_else(|err| panic!("{fork}: {err:?}"));
+
+                assert_eq!(decoded.fork_name_unchecked(), fork);
+                assert_eq!(bytes32(decoded.parent_root()), parent, "{fork}");
+                assert_eq!(block_parent_root(&wire), Some(parent), "{fork}");
+            }
+            assert_eq!(block_parent_root(&[0; 148]), None, "not a signed block");
+            assert_eq!(
+                block_parent_root(&fulu_block(1).1[..147]),
+                None,
+                "cut short"
+            );
+        }
+
+        /// What [`column_header`] does with each fork's sidecar: reads it, because its first offset
+        /// is the fixed length the decoder knows, or refuses it, until the ticket named here
+        /// teaches the decoder its layout.
+        #[derive(Debug)]
+        enum Layout {
+            Read(usize),
+            Refused(&'static str),
+        }
+
+        /// The decoder's fork list. Every fork with column sidecars is here, Heze included,
+        /// because Lighthouse maps every fork after Gloas to Gloas's sidecar until it says
+        /// otherwise.
+        const COLUMN_LAYOUTS: [(ForkName, Layout); 3] = [
+            (ForkName::Fulu, Layout::Read(COLUMN_FIXED_LEN)),
+            (ForkName::Gloas, Layout::Refused("T-120")),
+            (ForkName::Heze, Layout::Refused("T-120")),
+        ];
+
+        /// MD-10: for every fork with column sidecars, the first offset of the sidecar `types`
+        /// encodes for it is the fixed length [`column_header`] reads, or the fork is listed as
+        /// refused and the decoder does refuse it. A fork whose sidecar changes shape, or a new fork
+        /// with columns, fails here by name before a sidecar of it reaches the recent store.
+        #[test]
+        fn column_fixed_len_per_fork_matches_types() {
+            // The same cell and proof in both, so each is past the Fulu fixed length the way a
+            // real sidecar is, and a refusal is the first-offset check rather than a short read.
+            let (fulu, _) = column_sidecar(1, 0);
+            let gloas = DataColumnSidecarGloas::<MainnetEthSpec> {
+                index: 0,
+                column: fulu.column.to_vec().try_into().unwrap(),
+                kzg_proofs: fulu.kzg_proofs.to_vec().try_into().unwrap(),
+                slot: Slot::new(1),
+                beacon_block_root: Hash256::repeat_byte(1),
+            }
+            .as_ssz_bytes();
+            let fulu = fulu.as_ssz_bytes();
+
+            let mut problems = Vec::new();
+            for fork in ForkName::list_all()
+                .into_iter()
+                .filter(|f| f.fulu_enabled())
+            {
+                let Some(sidecar) = [&fulu, &gloas].into_iter().find_map(|bytes| {
+                    DataColumnSidecar::<MainnetEthSpec>::from_ssz_bytes_for_fork(bytes, fork).ok()
+                }) else {
+                    problems.push(format!(
+                        "{fork}: no sidecar this test builds decodes; add one"
+                    ));
+                    continue;
+                };
+                let bytes = sidecar.as_ssz_bytes();
+                let first_offset = u32_at(&bytes, 8) as usize;
+                let read = column_header_ssz(&bytes);
+                match COLUMN_LAYOUTS.iter().find(|(known, _)| *known == fork) {
+                    None => problems.push(format!(
+                        "{fork}: not in the decoder's fork list; its sidecar's first offset is {first_offset}"
+                    )),
+                    Some((_, Layout::Read(len))) if first_offset != *len || read.is_err() => {
+                        problems.push(format!(
+                            "{fork}: the decoder reads a fixed part of {len} bytes, types encodes \
+                             {first_offset}, and the read gave {read:?}"
+                        ))
+                    }
+                    Some((_, Layout::Refused(ticket))) if read != Err(HeaderError::Ssz) => {
+                        problems.push(format!(
+                            "{fork}: listed as refused until {ticket}, but the decoder gave {read:?}"
+                        ))
+                    }
+                    Some(_) => {}
+                }
+            }
+            assert!(problems.is_empty(), "{}", problems.join("\n"));
         }
     }
 }
