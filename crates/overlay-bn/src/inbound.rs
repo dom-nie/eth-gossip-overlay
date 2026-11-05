@@ -809,4 +809,37 @@ mod tests {
         assert_eq!(outbound.id.0[..], bn_id.0[..]);
         assert!(hop.seen.contains(&outbound.id));
     }
+
+    /// MD-08: on a Gloas network the node gossips envelopes and payload attestations, and
+    /// neither is a kind the sidecar does not know. The envelope is a few bytes here and still
+    /// goes Large.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn gloas_envelope_and_payload_attestation_count_nothing_as_unknown() {
+        const ENVELOPE: &str = "/eth2/00000000/execution_payload/ssz_snappy";
+        const PAYLOAD_ATTESTATION: &str = "/eth2/00000000/payload_attestation_message/ssz_snappy";
+        let mut bn = FakeBn::start().await;
+        let stats = Arc::new(Recorded::default());
+        let mut hop = first_hop(&mut bn, stats.clone(), &[ENVELOPE, PAYLOAD_ATTESTATION]).await;
+
+        bn.publish(ENVELOPE, b"an envelope").await.unwrap();
+        bn.publish(PAYLOAD_ATTESTATION, b"a payload attestation")
+            .await
+            .unwrap();
+
+        let envelope = tokio::time::timeout(WAIT, hop.out.recv_from(Class::Large))
+            .await
+            .expect("no envelope arrived in time");
+        let attestation = tokio::time::timeout(WAIT, hop.out.recv_from(Class::Small))
+            .await
+            .expect("no payload attestation arrived in time");
+        assert_eq!(envelope.topic, Topic::parse(ENVELOPE).unwrap());
+        assert_eq!(
+            attestation.topic,
+            Topic::parse(PAYLOAD_ATTESTATION).unwrap()
+        );
+        assert_eq!(stats.count("first_seen", Class::Large), 1);
+        assert_eq!(stats.count("first_seen", Class::Small), 1);
+        assert_eq!(stats.count("unknown_kind", Class::Large), 0);
+        assert_eq!(stats.count("unknown_kind", Class::Small), 0);
+    }
 }
