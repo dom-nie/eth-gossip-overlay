@@ -6,10 +6,11 @@
 //!
 //! # How little is read
 //!
-//! [`column_header`] reads the fixed part of a `DataColumnSidecar` and stops: the index, and the
-//! 112 bytes of the `BeaconBlockHeader` inside its `signed_block_header`, whose tree hash is the
-//! block root. The cells are about 40 KB of the payload and are never looked at, which is what
-//! keeps a decode per column down to one hash of five leaves.
+//! [`column_header`] reads the fixed part of a `DataColumnSidecar` and stops. Under Fulu that is
+//! the index and the 112 bytes of the `BeaconBlockHeader` inside its `signed_block_header`, whose
+//! tree hash is the block root; under Gloas the sidecar carries its slot and block root as plain
+//! fields and nothing is hashed. The cells are about 40 KB of the payload and are never looked
+//! at, which is what keeps a decode per column down to one hash of five leaves at most.
 //!
 //! [`block_header`] cannot do the same. A block root is the tree hash of a `BeaconBlock`, and one
 //! of its five leaves is the tree hash of the body, so the body has to be walked before the root
@@ -75,6 +76,11 @@ const PROOF_BYTES: usize = 4 * 32;
 /// which is what a payload is checked against before anything is read out of it.
 const COLUMN_FIXED_LEN: usize = COLUMN_HEADER_AT + BEACON_BLOCK_HEADER_LEN + 96 + PROOF_BYTES;
 
+/// A Gloas `DataColumnSidecar`'s fixed part: the index, the offsets of `column` and
+/// `kzg_proofs`, the slot and the block root. It has no block header, commitments or proof; the
+/// block root is a field of its own.
+const GLOAS_COLUMN_FIXED_LEN: usize = 8 + 2 * 4 + 8 + 32;
+
 /// The slot a block is for and its block root, from the payload the beacon node gossips.
 ///
 /// This is the compressed-payload form the ticket names and the one the tests here drive; the
@@ -114,27 +120,36 @@ pub fn column_header(payload: &[u8]) -> Result<(u64, u8, [u8; 32]), HeaderError>
 }
 
 /// The same from bytes already decompressed, which is what the receive path holds (T-006).
+///
+/// The first offset of an SSZ container is the length of its fixed part, which is 356 for a Fulu
+/// sidecar and 56 for a Gloas one on every preset. That tells the two layouts apart from the
+/// bytes alone, without a fork schedule, and any other first offset is a payload nobody built,
+/// refused rather than read as if a header were where this expects it.
 fn column_header_ssz(bytes: &[u8]) -> Result<(u64, u8, [u8; 32]), HeaderError> {
+    let first = bytes.get(..12).ok_or(HeaderError::Truncated)?;
+    match u32_at(first, 8) as usize {
+        COLUMN_FIXED_LEN => fulu_column_header(bytes),
+        GLOAS_COLUMN_FIXED_LEN => gloas_column_header(bytes),
+        _ => Err(HeaderError::Ssz),
+    }
+}
+
+/// A Fulu sidecar's header. The other two offsets are read for their bounds only, which is what
+/// tells a sidecar cut short from a whole one; the bytes they point at are the cells and the
+/// commitments, and nothing here looks at those.
+fn fulu_column_header(bytes: &[u8]) -> Result<(u64, u8, [u8; 32]), HeaderError> {
     let fixed = bytes
         .get(..COLUMN_FIXED_LEN)
         .ok_or(HeaderError::Truncated)?;
-    // The first offset of an SSZ container is the length of its fixed part, and a Fulu column
-    // sidecar's is [`COLUMN_FIXED_LEN`] on every preset. Anything else is not one: a Gloas
-    // sidecar, whose fixed part is 56 bytes, and every payload a peer made up, both refused here
-    // rather than read as if the header were where this expects it. The other two offsets are
-    // read for their bounds only, which is what tells a sidecar cut short from a whole one; the
-    // bytes they point at are the cells and the commitments, and nothing here looks at those.
     let bounds = [
         COLUMN_FIXED_LEN,
-        u32_at(fixed, 8) as usize,
         u32_at(fixed, 12) as usize,
         u32_at(fixed, 16) as usize,
         bytes.len(),
     ];
-    if !bounds.is_sorted() || bounds[1] != COLUMN_FIXED_LEN {
+    if !bounds.is_sorted() {
         return Err(HeaderError::Ssz);
     }
-    let index = u8::try_from(u64_at(fixed, 0)).map_err(|_| HeaderError::Index)?;
     let header = BeaconBlockHeader {
         slot: Slot::new(u64_at(fixed, COLUMN_HEADER_AT)),
         proposer_index: u64_at(fixed, COLUMN_HEADER_AT + 8),
@@ -144,9 +159,35 @@ fn column_header_ssz(bytes: &[u8]) -> Result<(u64, u8, [u8; 32]), HeaderError> {
     };
     Ok((
         header.slot.as_u64(),
-        index,
+        column_index(fixed)?,
         bytes32(header.canonical_root()),
     ))
+}
+
+/// A Gloas sidecar's header, which is three fields of its fixed part: nothing is hashed. The
+/// `kzg_proofs` offset is read for its bounds, as Fulu's are.
+fn gloas_column_header(bytes: &[u8]) -> Result<(u64, u8, [u8; 32]), HeaderError> {
+    let fixed = bytes
+        .get(..GLOAS_COLUMN_FIXED_LEN)
+        .ok_or(HeaderError::Truncated)?;
+    let bounds = [
+        GLOAS_COLUMN_FIXED_LEN,
+        u32_at(fixed, 12) as usize,
+        bytes.len(),
+    ];
+    if !bounds.is_sorted() {
+        return Err(HeaderError::Ssz);
+    }
+    Ok((
+        u64_at(fixed, 16),
+        column_index(fixed)?,
+        bytes32(root_at(fixed, 24)),
+    ))
+}
+
+/// The index both layouts open with, which has to fit a subnet index.
+fn column_index(fixed: &[u8]) -> Result<u8, HeaderError> {
+    u8::try_from(u64_at(fixed, 0)).map_err(|_| HeaderError::Index)
 }
 
 /// The two decoders behind the trait `overlay-core` holds them by, so the recent store and the
