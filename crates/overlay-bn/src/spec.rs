@@ -60,8 +60,8 @@ pub struct SpecWire {
 }
 
 impl SpecWire {
-    /// The keys this answer did not carry. Each takes [`MAINNET`]'s value, except
-    /// `GLOAS_FORK_EPOCH`, which is not scheduled when it is missing whatever mainnet does.
+    /// The keys this answer did not carry, each of which takes the sidecar's default
+    /// ([`SpecWire::snapshot`]).
     pub fn missing(&self) -> impl Iterator<Item = &'static str> {
         let values = [
             self.data_column_sidecar_subnet_count,
@@ -79,21 +79,30 @@ impl SpecWire {
     }
 }
 
+impl SpecWire {
+    /// The snapshot this answer gives, each missing key taking its value from `defaults`, except
+    /// `GLOAS_FORK_EPOCH`, which is [`FAR_FUTURE_EPOCH`] when missing whatever `defaults` says:
+    /// a node that names no Gloas epoch has not scheduled one.
+    pub fn snapshot(self, defaults: &SpecSnapshot) -> SpecSnapshot {
+        SpecSnapshot {
+            data_column_sidecar_subnet_count: self
+                .data_column_sidecar_subnet_count
+                .unwrap_or(defaults.data_column_sidecar_subnet_count),
+            number_of_columns: self.number_of_columns.unwrap_or(defaults.number_of_columns),
+            number_of_custody_groups: self
+                .number_of_custody_groups
+                .unwrap_or(defaults.number_of_custody_groups),
+            max_payload_size: self.max_payload_size.unwrap_or(defaults.max_payload_size),
+            seconds_per_slot: self.seconds_per_slot.unwrap_or(defaults.seconds_per_slot),
+            slots_per_epoch: self.slots_per_epoch.unwrap_or(defaults.slots_per_epoch),
+            gloas_fork_epoch: self.gloas_fork_epoch.unwrap_or(FAR_FUTURE_EPOCH),
+        }
+    }
+}
+
 impl From<SpecWire> for SpecSnapshot {
     fn from(wire: SpecWire) -> Self {
-        Self {
-            data_column_sidecar_subnet_count: wire
-                .data_column_sidecar_subnet_count
-                .unwrap_or(MAINNET.data_column_sidecar_subnet_count),
-            number_of_columns: wire.number_of_columns.unwrap_or(MAINNET.number_of_columns),
-            number_of_custody_groups: wire
-                .number_of_custody_groups
-                .unwrap_or(MAINNET.number_of_custody_groups),
-            max_payload_size: wire.max_payload_size.unwrap_or(MAINNET.max_payload_size),
-            seconds_per_slot: wire.seconds_per_slot.unwrap_or(MAINNET.seconds_per_slot),
-            slots_per_epoch: wire.slots_per_epoch.unwrap_or(MAINNET.slots_per_epoch),
-            gloas_fork_epoch: wire.gloas_fork_epoch.unwrap_or(FAR_FUTURE_EPOCH),
-        }
+        wire.snapshot(&MAINNET)
     }
 }
 

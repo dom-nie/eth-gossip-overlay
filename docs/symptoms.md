@@ -77,9 +77,9 @@ ENR the sidecar posts through `add_peer`.
 
 ## The beacon node's spec lacks a key the sidecar reads
 
-The warn line `the beacon node's spec lacks a key the sidecar reads; using the mainnet value`
-names a key the node's `/eth/v1/config/spec` no longer sends, so the sidecar sized that value
-for mainnet. The node runs a Lighthouse newer than this sidecar knows; upgrade the sidecar.
+The warn line `the beacon node's spec lacks a key the sidecar reads; using the sidecar's default`
+names a key the node's `/eth/v1/config/spec` no longer sends, so the sidecar used mainnet's
+value for it, or for `GLOAS_FORK_EPOCH` took Gloas as not scheduled. The node runs a Lighthouse newer than this sidecar knows; upgrade the sidecar.
 
 ## Socket buffers smaller than the sidecar asked for
 
