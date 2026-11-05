@@ -593,41 +593,26 @@ mod tests {
             );
         }
 
-        /// What [`column_header`] does with each fork's sidecar: reads it, because its first offset
-        /// is the fixed length the decoder knows, or refuses it, until the ticket named here
-        /// teaches the decoder its layout.
-        #[derive(Debug)]
-        enum Layout {
-            Read(usize),
-            Refused(&'static str),
-        }
-
-        /// The decoder's fork list. Every fork with column sidecars is here, Heze included,
-        /// because Lighthouse maps every fork after Gloas to Gloas's sidecar until it says
-        /// otherwise.
-        const COLUMN_LAYOUTS: [(ForkName, Layout); 3] = [
-            (ForkName::Fulu, Layout::Read(COLUMN_FIXED_LEN)),
-            (ForkName::Gloas, Layout::Refused("T-120")),
-            (ForkName::Heze, Layout::Refused("T-120")),
+        /// The decoder's fork list: the fixed length [`column_header`] reads each fork's sidecar
+        /// at. Every fork with column sidecars is here, Heze included, because Lighthouse maps
+        /// every fork after Gloas to Gloas's sidecar until it says otherwise.
+        const COLUMN_LAYOUTS: [(ForkName, usize); 3] = [
+            (ForkName::Fulu, COLUMN_FIXED_LEN),
+            (ForkName::Gloas, GLOAS_COLUMN_FIXED_LEN),
+            (ForkName::Heze, GLOAS_COLUMN_FIXED_LEN),
         ];
 
         /// MD-10: for every fork with column sidecars, the first offset of the sidecar `types`
-        /// encodes for it is the fixed length [`column_header`] reads, or the fork is listed as
-        /// refused and the decoder does refuse it. A fork whose sidecar changes shape, or a new fork
-        /// with columns, fails here by name before a sidecar of it reaches the recent store.
+        /// encodes for it is the fixed length [`column_header`] reads, and the read gives the
+        /// slot, index and block root `types` says the sidecar has. A fork whose sidecar changes
+        /// shape, or a new fork with columns, fails here by name before a sidecar of it reaches
+        /// the recent store.
         #[test]
         fn column_fixed_len_per_fork_matches_types() {
             // The same cell and proof in both, so each is past the Fulu fixed length the way a
-            // real sidecar is, and a refusal is the first-offset check rather than a short read.
+            // real sidecar is.
             let (fulu, _) = column_sidecar(1, 0);
-            let gloas = DataColumnSidecarGloas::<MainnetEthSpec> {
-                index: 0,
-                column: fulu.column.to_vec().try_into().unwrap(),
-                kzg_proofs: fulu.kzg_proofs.to_vec().try_into().unwrap(),
-                slot: Slot::new(1),
-                beacon_block_root: Hash256::repeat_byte(1),
-            }
-            .as_ssz_bytes();
+            let (_, gloas) = gloas_column_sidecar(1, 0, Hash256::repeat_byte(1));
             let fulu = fulu.as_ssz_bytes();
 
             let mut problems = Vec::new();
@@ -646,19 +631,19 @@ mod tests {
                 let bytes = sidecar.as_ssz_bytes();
                 let first_offset = u32_at(&bytes, 8) as usize;
                 let read = column_header_ssz(&bytes);
+                let wanted = Ok((
+                    sidecar.slot().as_u64(),
+                    *sidecar.index() as u8,
+                    bytes32(sidecar.block_root()),
+                ));
                 match COLUMN_LAYOUTS.iter().find(|(known, _)| *known == fork) {
                     None => problems.push(format!(
                         "{fork}: not in the decoder's fork list; its sidecar's first offset is {first_offset}"
                     )),
-                    Some((_, Layout::Read(len))) if first_offset != *len || read.is_err() => {
+                    Some((_, len)) if first_offset != *len || read != wanted => {
                         problems.push(format!(
                             "{fork}: the decoder reads a fixed part of {len} bytes, types encodes \
-                             {first_offset}, and the read gave {read:?}"
-                        ))
-                    }
-                    Some((_, Layout::Refused(ticket))) if read != Err(HeaderError::Ssz) => {
-                        problems.push(format!(
-                            "{fork}: listed as refused until {ticket}, but the decoder gave {read:?}"
+                             {first_offset}, and the read gave {read:?}, not {wanted:?}"
                         ))
                     }
                     Some(_) => {}
