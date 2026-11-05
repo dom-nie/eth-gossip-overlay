@@ -96,8 +96,14 @@ impl Class {
     /// The class of a message on `kind`, following Appendix B: "Small class topics:
     /// `beacon_attestation_{0..63}`, `beacon_aggregate_and_proof`, `sync_committee_{0..3}`,
     /// `sync_committee_contribution_and_proof`, `voluntary_exit`, `proposer_slashing`,
-    /// `attester_slashing`, `bls_to_execution_change`. Large class topics: `beacon_block`,
-    /// `data_column_sidecar_{0..127}`, `blob_sidecar_*`." Known kinds ignore `payload_len`.
+    /// `attester_slashing`, `bls_to_execution_change`, `execution_payload_bid`,
+    /// `payload_attestation_message`, `proposer_preferences`. Large class topics:
+    /// `beacon_block`, `data_column_sidecar_{0..127}`, `blob_sidecar_*`, `execution_payload`."
+    /// Known kinds ignore `payload_len`.
+    ///
+    /// A Gloas envelope is bounded only by `MAX_PAYLOAD_SIZE`, so it is Large even when it is
+    /// small; a bid can reach 196932 bytes but is normally a few hundred, and a Small payload
+    /// too big for a datagram already goes alone on a stream (MD-08).
     ///
     /// A name the sidecar does not know is Large when `payload_len` is at least
     /// [`UNKNOWN_LARGE_THRESHOLD_BYTES`] and Small below it. A small payload on the large path
@@ -107,7 +113,8 @@ impl Class {
         match kind {
             TopicKind::BeaconBlock
             | TopicKind::DataColumnSidecar(_)
-            | TopicKind::BlobSidecar(_) => Self::Large,
+            | TopicKind::BlobSidecar(_)
+            | TopicKind::ExecutionPayload => Self::Large,
             TopicKind::BeaconAggregateAndProof
             | TopicKind::Attestation(_)
             | TopicKind::SyncCommittee(_)
@@ -115,21 +122,12 @@ impl Class {
             | TopicKind::VoluntaryExit
             | TopicKind::ProposerSlashing
             | TopicKind::AttesterSlashing
-            | TopicKind::BlsToExecutionChange => Self::Small,
-            TopicKind::ExecutionPayload
+            | TopicKind::BlsToExecutionChange
             | TopicKind::ExecutionPayloadBid
             | TopicKind::PayloadAttestation
-            | TopicKind::ProposerPreferences
-            | TopicKind::Other(_)
-                if payload_len >= UNKNOWN_LARGE_THRESHOLD_BYTES =>
-            {
-                Self::Large
-            }
-            TopicKind::ExecutionPayload
-            | TopicKind::ExecutionPayloadBid
-            | TopicKind::PayloadAttestation
-            | TopicKind::ProposerPreferences
-            | TopicKind::Other(_) => Self::Small,
+            | TopicKind::ProposerPreferences => Self::Small,
+            TopicKind::Other(_) if payload_len >= UNKNOWN_LARGE_THRESHOLD_BYTES => Self::Large,
+            TopicKind::Other(_) => Self::Small,
         }
     }
 }
