@@ -123,8 +123,8 @@ impl BlockEvents {
             tracing::warn!(
                 %url,
                 ?missing,
-                "bn.events_url does not ask for every event topic the sidecar reads; import \
-                 telemetry or column repair goes without them"
+                "bn.events_url does not ask for every event topic the sidecar reads, so import \
+                 telemetry or column repair goes without them; add them to bn.events_url"
             );
         }
         // No request timeout: this one is meant to stay open between blocks.
@@ -176,7 +176,7 @@ async fn run(
 /// node has no such endpoint, which no amount of retrying will change.
 ///
 /// Any other 4xx is retried too, but said at warn the first time each status is seen, with the
-/// body the node gave: a topic an older node does not know, or a URL with no `topics`, would
+/// start of the body the node gave: a topic an older node does not know, or a URL with no `topics`, would
 /// otherwise show only as `overlay_bn_events_connected` stuck at zero. `refusals` holds the
 /// statuses already said.
 async fn read(
@@ -203,12 +203,14 @@ async fn read(
     {
         if refusals.insert(status) {
             let body = response.text().await.unwrap_or_default();
+            let body = &body[..body.floor_char_boundary(LOGGED_BODY_BYTES)];
             tracing::warn!(
                 %url,
                 %status,
                 body,
-                "the beacon node refused its event stream; import telemetry and column repair \
-                 are off for this host until it accepts"
+                "the beacon node refused its event stream, so import telemetry and column repair \
+                 are off for this host; check bn.events_url's topics against this beacon node's \
+                 Lighthouse version (restart-required)"
             );
         }
         return Err(err);
@@ -313,6 +315,10 @@ fn missing_topics(url: &Url) -> Vec<&'static str> {
         .filter(|topic| !asked.iter().any(|asked| asked == topic))
         .collect()
 }
+
+/// How much of a refused request's body is logged. A proxy's HTML error page can run to
+/// kilobytes, and the first few hundred bytes say what went wrong.
+const LOGGED_BODY_BYTES: usize = 512;
 
 /// What Lighthouse writes as a comment when its broadcast channel lagged and this reader lost
 /// events. Everything after the prefix is the count and the word `messages`.
