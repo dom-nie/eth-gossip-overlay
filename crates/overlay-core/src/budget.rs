@@ -665,6 +665,36 @@ mod tests {
         );
     }
 
+    /// A Gloas envelope is bounded only by `MAX_PAYLOAD_SIZE` (MD-08), and the reassembler
+    /// takes splits up to that size, so at the shipped chunk size its chunk bound holds three of
+    /// them at once. Beside its chunks each one costs its chunk list, an `(index, Bytes)` pair
+    /// per data chunk in a `Vec` grown to the next power of two, and two bitmaps over every
+    /// index of the split. The row has to hold that with every other entry at its own cost.
+    #[test]
+    fn reassembler_row_covers_max_size_envelopes_in_flight() {
+        let large = &Config::default().classes.large;
+        let split = crate::rs::Params::for_len(
+            crate::wire::MAX_PAYLOAD_BYTES,
+            large.chunk_bytes,
+            large.parity_ratio,
+        )
+        .unwrap();
+        let k = usize::from(split.k);
+        let envelopes = reassemble::MAX_BYTES / (k * large.chunk_bytes);
+        let chunk_list = k.next_power_of_two() * size_of::<(u16, bytes::Bytes)>();
+        let bitmaps = 2 * (k + usize::from(split.m)).div_ceil(64) * 8;
+        let needed = reassemble::MAX_BYTES as u64
+            + (envelopes * (chunk_list + bitmaps)) as u64
+            + (reassemble::MAX_IN_FLIGHT - envelopes) as u64 * REASSEMBLY_ENTRY_BYTES;
+
+        let row = row(&budget(), "reassembler");
+
+        assert!(
+            row >= needed,
+            "{envelopes} envelopes of {k} data chunks need {needed} bytes, the row is {row}"
+        );
+    }
+
     /// The rows are what T-076's table grows from, so the sum has to be the rows and the total
     /// has to be the sum plus exactly the headroom OPS-N4 asks for.
     #[test]
