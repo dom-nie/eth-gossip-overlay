@@ -205,8 +205,8 @@ pub struct Bn {
     pub node_key_file: PathBuf,
     /// `listen_addr`: where the sidecar listens for the beacon node's dial. Lighthouse caps
     /// inbound connections before it knows the peer, so a sidecar that only dialled would wait
-    /// for churn on a busy node (MD-01). Restart-required; a v8.2 beacon node needs one too: the
-    /// address is on its command line.
+    /// for churn on a busy node (MD-01). Restart-required, sidecar only: the beacon node dials the
+    /// ENR the sidecar posts through `add_peer`.
     pub listen_addr: String,
     /// `publish_rate_limit`: ceilings on what the sidecar injects into the beacon node.
     pub publish_rate_limit: PublishRateLimit,
