@@ -566,6 +566,10 @@ impl Link {
         {
             tracing::warn!(%err, "connect probe failed");
         }
+        // ponytail: the spec is fetched once per connect, so until a probe succeeds, and after a
+        // failed one until the next reconnect, the watch holds MAINNET and custody treats Gloas
+        // as unscheduled: a Gloas slot's repair deadline starts at the block. Retry the spec
+        // fetch on failure if that window matters.
         if let Ok(snapshot) = spec {
             self.spec.send_replace(snapshot);
         }
