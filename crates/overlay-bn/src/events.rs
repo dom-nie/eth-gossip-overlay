@@ -25,6 +25,7 @@
 //! decodes without being authentic, and the state column repair acts on has to come from the
 //! node that validated it.
 
+use std::collections::HashSet;
 use std::ops::ControlFlow;
 use std::str::from_utf8;
 use std::sync::Arc;
@@ -146,8 +147,18 @@ async fn run(
     clock: Arc<dyn Clock>,
     stats: Arc<dyn BlockEventStats>,
 ) {
+    let mut refusals = HashSet::new();
     loop {
-        let outcome = read(&http, &url, &arrivals, &custody, &clock, &stats).await;
+        let outcome = read(
+            &http,
+            &url,
+            &arrivals,
+            &custody,
+            &clock,
+            &stats,
+            &mut refusals,
+        )
+        .await;
         stats.set_connected(false);
         match outcome {
             // The beacon node closed a stream it had been serving, so the next one is worth
@@ -163,6 +174,11 @@ async fn run(
 
 /// One connection, until the beacon node closes it or the read fails. It breaks when the beacon
 /// node has no such endpoint, which no amount of retrying will change.
+///
+/// Any other 4xx is retried too, but said at warn the first time each status is seen, with the
+/// body the node gave: a topic an older node does not know, or a URL with no `topics`, would
+/// otherwise show only as `overlay_bn_events_connected` stuck at zero. `refusals` holds the
+/// statuses already said.
 async fn read(
     http: &reqwest::Client,
     url: &Url,
@@ -170,6 +186,7 @@ async fn read(
     custody: &SharedCustody,
     clock: &Arc<dyn Clock>,
     stats: &Arc<dyn BlockEventStats>,
+    refusals: &mut HashSet<StatusCode>,
 ) -> Result<ControlFlow<()>, reqwest::Error> {
     let response = http.get(url.clone()).send().await?;
     if response.status() == StatusCode::NOT_FOUND {
@@ -179,6 +196,22 @@ async fn read(
              for this host"
         );
         return Ok(ControlFlow::Break(()));
+    }
+    let status = response.status();
+    if status.is_client_error()
+        && let Err(err) = response.error_for_status_ref()
+    {
+        if refusals.insert(status) {
+            let body = response.text().await.unwrap_or_default();
+            tracing::warn!(
+                %url,
+                %status,
+                body,
+                "the beacon node refused its event stream; import telemetry and column repair \
+                 are off for this host until it accepts"
+            );
+        }
+        return Err(err);
     }
     // Any other refusal is worth waiting out: a beacon node that is still starting answers 503.
     let mut response = response.error_for_status()?;
