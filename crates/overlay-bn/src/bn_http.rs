@@ -251,7 +251,8 @@ impl BnClient {
                 tracing::warn!(
                     key,
                     url = %self.spec,
-                    "the beacon node's spec lacks a key the sidecar reads; using the sidecar's default"
+                    "the beacon node's spec lacks a key the sidecar reads; using the sidecar's \
+                     default"
                 );
             }
         }

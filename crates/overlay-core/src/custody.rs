@@ -364,9 +364,9 @@ impl Block {
 /// `await`, the same rule [`SharedRecentLarge`](crate::recent::SharedRecentLarge) keeps.
 ///
 /// The write side is [`on_block`](Self::on_block), [`on_envelope`](Self::on_envelope) and
-/// [`on_column`](Self::on_column), and `overlay_bn::events` is the only caller of any. Reading the beacon node's subscriptions
-/// here rather than at the call site is what keeps that true: the writer needs nothing but the
-/// two numbers the event carried.
+/// [`on_column`](Self::on_column), and `overlay_bn::events` is the only caller of any. Reading
+/// the beacon node's subscriptions here rather than at the call site is what keeps that true:
+/// the writer needs nothing but the numbers the event carried.
 #[derive(Clone)]
 pub struct SharedCustody(Arc<Shared>);
 
@@ -893,9 +893,11 @@ mod tests {
         );
     }
 
-    /// A withheld payload, or the node's own envelope, which fires no gossip event: no columns
-    /// exist to repair, so the slot asks for nothing however long it is tracked, columns
-    /// arriving or not.
+    /// A withheld payload: no envelope, so no columns exist to repair, and the slot asks for
+    /// nothing however long it is tracked, columns arriving or not. The node's own envelope does
+    /// fire `execution_payload_gossip`, but its own block fired no `block_gossip`, so the
+    /// tracker has no entry for it and the envelope starts nothing
+    /// (`an_envelope_for_an_unseen_block_starts_nothing`).
     #[test]
     fn a_gloas_slot_with_no_envelope_asks_for_nothing() {
         let clock = FakeClock::new();
