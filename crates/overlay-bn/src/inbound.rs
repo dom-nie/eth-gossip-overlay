@@ -714,17 +714,22 @@ mod tests {
         assert_eq!(h.stats.total(), 3);
     }
 
-    /// The whole first hop: the fake publishes on a topic the sidecar subscribed to through
-    /// the link, and what comes out of the fanout lanes carries the beacon node's own id.
-    #[tokio::test(flavor = "multi_thread")]
-    async fn attestation_published_by_fake_bn_arrives_as_outbound() {
-        let mut bn = FakeBn::start().await;
+    /// The link and the inbound task wired to `bn` the way the binary wires them, with the link
+    /// connected and the sidecar subscribed to `topics` through it.
+    struct FirstHop {
+        /// Kept so the link runs until the test ends.
+        _link: BnLink,
+        seen: SharedSeenCache,
+        out: ClassLanes<Outbound>,
+    }
+
+    async fn first_hop(bn: &mut FakeBn, stats: Arc<dyn InboundStats>, topics: &[&str]) -> FirstHop {
         let (commands, commands_rx) = mpsc::channel(64);
         let (spec, _) = spec_watch();
         let (_sets, sets) = watch::channel(SubscriptionSets::default());
         let lanes = ClassLanes::new(Arc::new(()));
         let mut link = BnLink::spawn(
-            link_config(&bn),
+            link_config(bn),
             &node_key(&tempfile::tempdir().unwrap()),
             BnClient::new(bn.http_addr(), Duration::from_secs(2)),
             &mut Registry::default(),
@@ -741,7 +746,7 @@ mod tests {
             1024,
             Arc::new(clock.clone()),
         ));
-        let mut out = ClassLanes::new(Arc::new(()));
+        let out = ClassLanes::new(Arc::new(()));
         Inbound::spawn(
             lanes,
             commands.clone(),
@@ -750,7 +755,7 @@ mod tests {
             out.pusher(),
             Arc::new(node()),
             Arc::new(clock.clone()),
-            Arc::new(()),
+            stats,
             Arc::new(Arrivals::new(Arc::new(clock), spec_watch().1)),
         );
         tokio::time::timeout(WAIT, async {
@@ -764,18 +769,31 @@ mod tests {
         })
         .await
         .expect("the link never connected");
-        commands
-            .send(BnCommand::Subscribe(ATTESTATION_3.to_owned()))
-            .await
-            .unwrap();
-        bn.wait_for(
-            |e| matches!(e, FakeBnEvent::Subscribed { topic, .. } if topic == ATTESTATION_3),
-        )
-        .await;
+        for topic in topics {
+            commands
+                .send(BnCommand::Subscribe((*topic).to_owned()))
+                .await
+                .unwrap();
+            bn.wait_for(|e| matches!(e, FakeBnEvent::Subscribed { topic: t, .. } if t == topic))
+                .await;
+        }
+        FirstHop {
+            _link: link,
+            seen,
+            out,
+        }
+    }
+
+    /// The whole first hop: the fake publishes on a topic the sidecar subscribed to through
+    /// the link, and what comes out of the fanout lanes carries the beacon node's own id.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn attestation_published_by_fake_bn_arrives_as_outbound() {
+        let mut bn = FakeBn::start().await;
+        let mut hop = first_hop(&mut bn, Arc::new(()), &[ATTESTATION_3]).await;
 
         let bn_id = bn.publish(ATTESTATION_3, b"an attestation").await.unwrap();
 
-        let outbound = tokio::time::timeout(WAIT, out.recv_from(Class::Small))
+        let outbound = tokio::time::timeout(WAIT, hop.out.recv_from(Class::Small))
             .await
             .expect("no outbound arrived in time");
         let compressed = snap::raw::Encoder::new()
@@ -789,6 +807,6 @@ mod tests {
             msgid::compute(ATTESTATION_3, &compressed, wire::MAX_PAYLOAD_SIZE as usize).id
         );
         assert_eq!(outbound.id.0[..], bn_id.0[..]);
-        assert!(seen.contains(&outbound.id));
+        assert!(hop.seen.contains(&outbound.id));
     }
 }
