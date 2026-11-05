@@ -475,9 +475,11 @@ fn lighthouse_doc_drop_in_matches_the_shipped_file() {
 }
 
 /// Check 7 (R5.9). The `check-config` sample in both READMEs carries the lines the binary
-/// prints for the three-host roster the sample shows, so the budget line cannot go stale the
-/// way the old one had: no roster size could produce it. The ceiling is the built-in default,
-/// which is what any shell without a cgroup limit of its own reads.
+/// prints for the three-host roster the sample shows, so the budget lines cannot go stale the
+/// way the old one had: no roster size could produce it. That covers the INFO line's fields
+/// and rows as well as the summary, because a sample whose two lines disagree is stale too.
+/// The ceiling is the built-in default, which is what any shell without a cgroup limit of its
+/// own reads.
 #[test]
 fn readme_check_config_sample_matches_a_regenerated_line() {
     let budget = MemoryBudget::compute(
@@ -497,11 +499,23 @@ fn readme_check_config_sample_matches_a_regenerated_line() {
         mib(budget.bounded_bytes),
         budget::HEADROOM_PERCENT
     );
+    let info = format!(
+        "memory budget bounded_bytes={} total_bytes={} headroom_percent={} memory_max={} \
+         roster={} receive_window={} rows={:?}",
+        budget.bounded_bytes,
+        budget.total_bytes,
+        budget::HEADROOM_PERCENT,
+        budget.limit,
+        budget.roster_len,
+        budget.receive_window,
+        budget.rows
+    );
 
     for readme in ["README.md", "deploy/README.md"] {
         let text = read(readme);
         assert!(text.contains(&ceiling), "{readme} has no line {ceiling:?}");
         assert!(text.contains(&total), "{readme} has no line {total:?}");
+        assert!(text.contains(&info), "{readme} has no INFO line {info:?}");
     }
 }
 
