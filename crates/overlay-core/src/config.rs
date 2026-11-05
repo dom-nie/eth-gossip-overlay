@@ -402,7 +402,7 @@ impl Default for Bn {
         Self {
             identity_url: url("http://127.0.0.1:5052/eth/v1/node/identity"),
             events_url: url(
-                "http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar",
+                "http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip",
             ),
             libp2p_addr: "/ip4/127.0.0.1/tcp/9000".to_owned(),
             node_key_file: PathBuf::from("/var/lib/eth-gossip-overlay/node.key"),
@@ -708,7 +708,7 @@ overlay:
     steering: off               # auto: ntuple flow rule if the NIC supports it, else RFS
 bn:
   identity_url: http://127.0.0.1:5052/eth/v1/node/identity
-  events_url: http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar
+  events_url: http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip
   libp2p_addr: /ip4/127.0.0.1/tcp/9000
   node_key_file: /var/lib/eth-gossip-overlay/node.key   # per-host libp2p identity, created on first start
   listen_addr: /ip4/127.0.0.1/tcp/7787            # where the beacon node dials the sidecar (MD-01); restart-required

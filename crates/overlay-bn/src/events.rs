@@ -388,7 +388,7 @@ mod tests {
     }
 
     /// The whole stream the sidecar asks for, so a test connects the way a sidecar does.
-    const TOPICS: &str = "?topics=block,block_gossip,data_column_sidecar";
+    const TOPICS: &str = "?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip";
 
     /// A tracker for a test that is not about the tracker.
     fn untracked() -> SharedCustody {

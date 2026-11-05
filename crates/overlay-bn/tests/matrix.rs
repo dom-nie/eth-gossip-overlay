@@ -535,7 +535,7 @@ async fn matrix_event_stream_reports_accepted_blocks_and_verified_columns() {
 
     let events = BlockEvents::spawn(
         format!(
-            "{}/eth/v1/events?topics=block,block_gossip,data_column_sidecar",
+            "{}/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip",
             env.http
         )
         .parse()
