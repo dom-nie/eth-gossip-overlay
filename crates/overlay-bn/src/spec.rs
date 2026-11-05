@@ -8,13 +8,14 @@
 use serde::Deserialize;
 use tokio::sync::watch;
 
-pub use overlay_core::spec::SpecSnapshot;
+pub use overlay_core::spec::{FAR_FUTURE_EPOCH, SpecSnapshot};
 
 /// Mainnet as the pinned Lighthouse v8.3.2 ships it. `DATA_COLUMN_SIDECAR_SUBNET_COUNT`,
 /// `NUMBER_OF_CUSTODY_GROUPS`, `MAX_PAYLOAD_SIZE` and `SECONDS_PER_SLOT` come from
 /// `common/eth2_network_config/built_in_network_configs/mainnet/config.yaml`,
 /// `NUMBER_OF_COLUMNS` from `consensus/types/presets/mainnet/fulu.yaml` and
-/// `SLOTS_PER_EPOCH` from `consensus/types/presets/mainnet/phase0.yaml`.
+/// `SLOTS_PER_EPOCH` from `consensus/types/presets/mainnet/phase0.yaml`. Mainnet has not
+/// scheduled Gloas.
 pub const MAINNET: SpecSnapshot = SpecSnapshot {
     data_column_sidecar_subnet_count: 128,
     number_of_columns: 128,
@@ -22,16 +23,18 @@ pub const MAINNET: SpecSnapshot = SpecSnapshot {
     max_payload_size: 10_485_760,
     seconds_per_slot: 12,
     slots_per_epoch: 32,
+    gloas_fork_epoch: FAR_FUTURE_EPOCH,
 };
 
 /// The keys [`SpecWire`] reads, in its field order, by the name the beacon node sends.
-pub const SPEC_KEYS: [&str; 6] = [
+pub const SPEC_KEYS: [&str; 7] = [
     "DATA_COLUMN_SIDECAR_SUBNET_COUNT",
     "NUMBER_OF_COLUMNS",
     "NUMBER_OF_CUSTODY_GROUPS",
     "MAX_PAYLOAD_SIZE",
     "SECONDS_PER_SLOT",
     "SLOTS_PER_EPOCH",
+    "GLOAS_FORK_EPOCH",
 ];
 
 /// The snapshot as the beacon node sends it. Lighthouse serialises every number as a quoted
@@ -52,10 +55,13 @@ pub struct SpecWire {
     seconds_per_slot: Option<u64>,
     #[serde(deserialize_with = "quoted")]
     slots_per_epoch: Option<u64>,
+    #[serde(deserialize_with = "quoted")]
+    gloas_fork_epoch: Option<u64>,
 }
 
 impl SpecWire {
-    /// The keys this answer did not carry, each of which takes [`MAINNET`]'s value.
+    /// The keys this answer did not carry. Each takes [`MAINNET`]'s value, except
+    /// `GLOAS_FORK_EPOCH`, which is not scheduled when it is missing whatever mainnet does.
     pub fn missing(&self) -> impl Iterator<Item = &'static str> {
         let values = [
             self.data_column_sidecar_subnet_count,
@@ -64,6 +70,7 @@ impl SpecWire {
             self.max_payload_size,
             self.seconds_per_slot,
             self.slots_per_epoch,
+            self.gloas_fork_epoch,
         ];
         SPEC_KEYS
             .into_iter()
@@ -85,6 +92,7 @@ impl From<SpecWire> for SpecSnapshot {
             max_payload_size: wire.max_payload_size.unwrap_or(MAINNET.max_payload_size),
             seconds_per_slot: wire.seconds_per_slot.unwrap_or(MAINNET.seconds_per_slot),
             slots_per_epoch: wire.slots_per_epoch.unwrap_or(MAINNET.slots_per_epoch),
+            gloas_fork_epoch: wire.gloas_fork_epoch.unwrap_or(FAR_FUTURE_EPOCH),
         }
     }
 }
@@ -167,7 +175,7 @@ mod drift {
     /// `/eth/v1/config/spec` serialises for mainnet at the pinned tag, read back through
     /// `SpecWire` so that a value format the sidecar cannot parse, or a compiled-in default that
     /// is not mainnet's, fails too. The first assertion is what makes the list the struct's:
-    /// six keys each set to 1 leave no field at its default.
+    /// every key set to 1 leaves no field at its default.
     #[test]
     fn spec_keys_the_sidecar_reads_are_in_lighthouse_config() {
         let ones: serde_json::Map<_, _> = SPEC_KEYS
@@ -184,6 +192,7 @@ mod drift {
                 max_payload_size: 1,
                 seconds_per_slot: 1,
                 slots_per_epoch: 1,
+                gloas_fork_epoch: 1,
             }
         );
 

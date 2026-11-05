@@ -534,6 +534,7 @@ mod tests {
             "MAX_PAYLOAD_SIZE": "1048576",
             "SECONDS_PER_SLOT": "6",
             "SLOTS_PER_EPOCH": "8",
+            "GLOAS_FORK_EPOCH": "412672",
             "BLOB_SCHEDULE": [{"EPOCH": "412608", "MAX_BLOBS_PER_BLOCK": "15"}]
         });
         for n in 0..100 {
@@ -549,6 +550,7 @@ mod tests {
         max_payload_size: 1_048_576,
         seconds_per_slot: 6,
         slots_per_epoch: 8,
+        gloas_fork_epoch: 412_672,
     };
 
     #[tokio::test]

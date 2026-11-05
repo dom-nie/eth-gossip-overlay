@@ -451,6 +451,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+    use crate::spec::FAR_FUTURE_EPOCH;
     use crate::testlog::LOG;
     use crate::time::{Clock, FakeClock};
     use crate::topic::Topic;
@@ -470,6 +471,7 @@ mod tests {
             max_payload_size: 10_485_760,
             seconds_per_slot: 12,
             slots_per_epoch: 32,
+            gloas_fork_epoch: FAR_FUTURE_EPOCH,
         }
     }
 

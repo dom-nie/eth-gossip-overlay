@@ -176,7 +176,8 @@ impl Default for Responses {
                 "NUMBER_OF_CUSTODY_GROUPS": "128",
                 "MAX_PAYLOAD_SIZE": "10485760",
                 "SECONDS_PER_SLOT": "12",
-                "SLOTS_PER_EPOCH": "32"
+                "SLOTS_PER_EPOCH": "32",
+                "GLOAS_FORK_EPOCH": "18446744073709551615"
             }})),
             peers: ok_json(json!([])),
         }

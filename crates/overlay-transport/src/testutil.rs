@@ -61,7 +61,7 @@ use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRece
 use overlay_core::repair::{self, Form as RepairForm, Outcome as RepairOutcome};
 use overlay_core::roster::{HostEntry, Hostname, Region, Roster, SelfIdentity};
 use overlay_core::seen::{SeenCache, SharedSeenCache};
-use overlay_core::spec::SpecSnapshot;
+use overlay_core::spec::{FAR_FUTURE_EPOCH, SpecSnapshot};
 use overlay_core::subs::{Bitmap, PeerState};
 use overlay_core::time::{Clock, SystemClock};
 use overlay_core::topic::Topic;
@@ -99,6 +99,7 @@ pub fn mainnet_spec() -> SpecSnapshot {
         max_payload_size: 10_485_760,
         seconds_per_slot: 12,
         slots_per_epoch: 32,
+        gloas_fork_epoch: FAR_FUTURE_EPOCH,
     }
 }
 

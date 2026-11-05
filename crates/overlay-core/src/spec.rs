@@ -6,7 +6,7 @@
 //! on the wire, and what mainnet's values are when it has not answered yet, both stay in
 //! `overlay_bn::spec`, which is the crate that talks to it.
 
-/// The seven `/eth/v1/config/spec` values the sidecar reads.
+/// The `/eth/v1/config/spec` values the sidecar reads.
 ///
 /// [`Default`] is zeros and means nothing: a consumer takes its values from the `watch`
 /// `overlay_bn::spec::spec_watch` opens, which starts at `overlay_bn::spec::MAINNET`.
@@ -28,4 +28,19 @@ pub struct SpecSnapshot {
     pub seconds_per_slot: u64,
     /// `SLOTS_PER_EPOCH`: for turning epoch-denominated spec values into time.
     pub slots_per_epoch: u64,
+    /// `GLOAS_FORK_EPOCH`: where column repair starts anchoring on the payload envelope instead
+    /// of the block (MD-09). [`FAR_FUTURE_EPOCH`] when the network has not scheduled it.
+    pub gloas_fork_epoch: u64,
+}
+
+/// What Lighthouse sends for a fork epoch it has not scheduled (`chain_spec.rs`,
+/// `serialize_fork_epoch`).
+pub const FAR_FUTURE_EPOCH: u64 = u64::MAX;
+
+impl SpecSnapshot {
+    /// The first slot of the Gloas fork, or `None` while it is not scheduled. An epoch whose
+    /// first slot does not fit a `u64`, [`FAR_FUTURE_EPOCH`] among them, is one no chain reaches.
+    pub fn first_gloas_slot(&self) -> Option<u64> {
+        self.gloas_fork_epoch.checked_mul(self.slots_per_epoch)
+    }
 }
