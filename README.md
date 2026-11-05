@@ -99,7 +99,7 @@ site: ams1
 peer id: 12D3KooWJ6JBbaSGzLK7jZj7qtey7W9wc36Wq8qhkid7Rgpy854b
 roster: 3 hosts
 memory ceiling: 1024 MiB (built-in default)
-memory budget: 743 MiB (594 MiB in bounded structures plus 25% headroom)
+memory budget: 743 MiB (595 MiB in bounded structures plus 25% headroom)
 ```
 
 The second `--version` line is the compatibility one: the major travels in the overlay's ALPN and the minor and feature bits in `HELLO`, so a pair runs at the lower minor and the intersection of the bits. Two sidecars on the same major always pair.

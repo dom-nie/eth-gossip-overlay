@@ -151,7 +151,7 @@ site: ams1
 peer id: 12D3KooWJ6JBbaSGzLK7jZj7qtey7W9wc36Wq8qhkid7Rgpy854b
 roster: 3 hosts
 memory ceiling: 1024 MiB (built-in default)
-memory budget: 743 MiB (594 MiB in bounded structures plus 25% headroom)
+memory budget: 743 MiB (595 MiB in bounded structures plus 25% headroom)
 ```
 
 The two memory lines are the ceiling `check-config` found and the budget derived against it. The

@@ -27,19 +27,19 @@ At the shipped defaults, a roster of 200 hosts and the unit's `MemoryMax=1G`, wh
 | `seen_cache` | 12800000 | 12.2 |
 | `recent_store` | 27238400 | 26.0 |
 | `publish_queue` | 35651584 | 34.0 |
-| `reassembler` | 35651584 | 34.0 |
+| `reassembler` | 36962304 | 35.2 |
 | `peer_send_lanes` | 128241664 | 122.3 |
 | `peer_topic_tables` | 130416640 | 124.4 |
 | `gossipsub` | 34132480 | 32.6 |
 | `by_root_cache` | 0 | 0.0 |
-| `quic_receive_windows` | 452586695 | 431.6 |
-| **Sum of the bounds** | 856719047 | 817.0 |
-| **Plus 25% headroom** | 1070898808 | 1021.3 |
+| `quic_receive_windows` | 451282449 | 430.4 |
+| **Sum of the bounds** | 856725521 | 817.0 |
+| **Plus 25% headroom** | 1070906901 | 1021.3 |
 | `MemoryMax` | 1073741824 | 1024.0 |
 
 <!-- end generated -->
 
-The sum sits on the usable line until the floor binds: at these defaults 322 hosts is the
+The sum sits on the usable line until the floor binds: at these defaults 321 hosts is the
 largest roster that fits, and one more goes over and the sidecar warns. Any other row that grows
 brings that forward.
 

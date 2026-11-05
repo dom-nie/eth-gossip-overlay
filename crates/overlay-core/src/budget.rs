@@ -17,6 +17,8 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use bytes::Bytes;
+
 use crate::config::Config;
 use crate::pubqueue::{PUBLISH_LARGE_LANE_BYTES, PUBLISH_SMALL_LANE_ENTRIES};
 use crate::ratelimit::TokenBucket;
@@ -150,10 +152,16 @@ pub const SEEN_ENTRY_BYTES: u64 = 64;
 /// anything is measured against.
 pub const SMALL_MESSAGE_BYTES: u64 = 512;
 
-/// What one message in flight costs beside its chunks: a `(index, Bytes)` pair per chunk, which
-/// is a hundred and ten of them for a 200 KB block at the shipped chunk size, plus the two
-/// index bitmaps, the peers that sent a chunk, and the map and deque entries holding it all.
+/// What one message in flight costs beside its chunks and their [`REASSEMBLY_CHUNK_BYTES`]: the
+/// two index bitmaps, 1408 bytes for a `MAX_PAYLOAD_SIZE` envelope at the shipped chunk size,
+/// the peers that sent a chunk, and the map and deque entries holding it all.
 pub const REASSEMBLY_ENTRY_BYTES: u64 = 4096;
+
+/// What one held chunk costs beside its bytes: the `(index, Bytes)` pair its message's entry
+/// keeps it as, twice over for the room a growing `Vec` leaves. Priced per chunk rather than per
+/// message because a Gloas envelope can be five thousand chunks where a block is a hundred, and
+/// the chunks one host holds are bounded whatever messages they belong to.
+pub const REASSEMBLY_CHUNK_BYTES: u64 = 2 * size_of::<(u16, Bytes)>() as u64;
 
 /// What one entry of a peer's topic table costs at the longest topic string the wire allows:
 /// the string, the `Topic` and id around it and the hash-table slack, held twice, once under
@@ -239,6 +247,8 @@ impl MemoryBudget {
             (
                 "reassembler",
                 reassemble::MAX_BYTES as u64
+                    + (reassemble::MAX_BYTES / cfg.classes.large.chunk_bytes.max(1)) as u64
+                        * REASSEMBLY_CHUNK_BYTES
                     + reassemble::MAX_IN_FLIGHT as u64 * REASSEMBLY_ENTRY_BYTES,
             ),
             (
@@ -567,12 +577,12 @@ mod tests {
         ("seen_cache", 12_800_000),
         ("recent_store", 27_238_400),
         ("publish_queue", 35_651_584),
-        ("reassembler", 35_651_584),
+        ("reassembler", 36_962_304),
         ("peer_send_lanes", 128_241_664),
         ("peer_topic_tables", 130_416_640),
         ("gossipsub", 34_132_480),
         ("by_root_cache", 0),
-        ("quic_receive_windows", 452_586_695),
+        ("quic_receive_windows", 451_282_449),
     ];
 
     /// OPS-N4's whole point: every bounded structure at its worst case, summed, fits under the
