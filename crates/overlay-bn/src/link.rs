@@ -2337,6 +2337,16 @@ mod tests {
         );
     }
 
+    /// A bid carrying many commitments can pass the 16 KiB the size rule draws the line at,
+    /// and the name `execution_payload_bid` starts with `execution_payload`, the Large kind.
+    #[test]
+    fn a_large_bid_still_takes_the_small_lane() {
+        assert_eq!(
+            lane_for("/eth2/6a95a1a9/execution_payload_bid/ssz_snappy", 20 * 1024),
+            Class::Small
+        );
+    }
+
     #[test]
     fn link_config_from_bn_parses_the_address_and_uses_the_5_3_backoff() {
         let cfg = LinkConfig::from_config(&Bn::default()).unwrap();
