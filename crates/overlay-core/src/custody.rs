@@ -707,6 +707,142 @@ mod tests {
         assert_eq!(stats.mismatches(), 1);
     }
 
+    /// A snapshot that moves something other than the column count, the Gloas fork epoch
+    /// arriving after the mainnet default for one, leaves every tracked set the right shape, so
+    /// nothing tracked is dropped.
+    #[test]
+    fn a_spec_change_that_keeps_the_column_count_keeps_what_is_tracked() {
+        let clock = FakeClock::new();
+        let mut tracker = tracking(&clock, &[0, 3, 7]);
+
+        tracker.on_spec(&SpecSnapshot {
+            gloas_fork_epoch: 353_024,
+            ..mainnet()
+        });
+        clock.advance(DEADLINE);
+
+        assert_eq!(gaps(&tracker, &clock).len(), 1);
+    }
+
+    /// `holds` is what column repair serves by: the beacon node's word for one column of one
+    /// block, and for nothing next to it.
+    #[test]
+    fn holds_names_only_the_column_and_root_the_node_reported() {
+        let clock = FakeClock::new();
+        let mut tracker = tracking(&clock, &[0, 3, 7]);
+
+        tracker.on_column(1, 3, ROOT);
+
+        assert!(tracker.holds(ROOT, 3));
+        assert!(!tracker.holds(ROOT, 0), "another column of the same block");
+        assert!(
+            !tracker.holds([8; 32], 3),
+            "the same column of another block"
+        );
+    }
+
+    /// The mismatch series reads zero on a network where a column subnet is a column, at start
+    /// and after a snapshot that changes something else.
+    #[test]
+    fn a_conforming_snapshot_counts_no_mismatch() {
+        let stats = Arc::new(CountingColumns::default());
+        let spec = watch::Sender::new(mainnet());
+
+        let custody = SharedCustody::new(
+            spec.subscribe(),
+            watch::Sender::new(subscribed(&[0])).subscribe(),
+            stats.clone(),
+        );
+        spec.send_replace(SpecSnapshot {
+            gloas_fork_epoch: 353_024,
+            ..mainnet()
+        });
+
+        assert_eq!(custody.threshold(), 64);
+        assert_eq!(stats.mismatches(), 0);
+    }
+
+    /// The shared tracker end to end, the way the event stream writes it and the repair task
+    /// reads it: the block records the expected set, the envelope starts the Gloas deadline,
+    /// a column the node verified is held and no longer missing, and the columns in flight
+    /// come first.
+    #[test]
+    fn the_shared_tracker_answers_what_its_writers_reported() {
+        let clock = FakeClock::new();
+        let custody = SharedCustody::new(
+            watch::Sender::new(SpecSnapshot {
+                gloas_fork_epoch: 10,
+                ..mainnet()
+            })
+            .subscribe(),
+            watch::Sender::new(subscribed(&[0, 3, 7])).subscribe(),
+            Arc::new(()),
+        );
+
+        custody.on_block(FIRST_GLOAS_SLOT, ROOT, clock.now());
+        custody.on_envelope(FIRST_GLOAS_SLOT, ROOT, clock.now());
+        custody.on_column(FIRST_GLOAS_SLOT, 3, ROOT);
+        clock.advance(DEADLINE);
+        let in_flight = custody.column_set([7]);
+
+        assert_eq!(
+            custody.gaps(DEADLINE, clock.now(), &in_flight),
+            vec![ColumnGap {
+                block_root: ROOT,
+                missing: vec![7, 0],
+                have_count: 1,
+            }]
+        );
+        assert!(custody.holds(ROOT, 3));
+        assert!(!custody.holds(ROOT, 0));
+        assert_eq!(custody.threshold(), 64);
+    }
+
+    /// A stream that lost events leaves nothing tracked until the next block (T-087).
+    #[test]
+    fn forget_drops_everything_tracked() {
+        let clock = FakeClock::new();
+        let custody = SharedCustody::new(
+            watch::Sender::new(mainnet()).subscribe(),
+            watch::Sender::new(subscribed(&[0, 3, 7])).subscribe(),
+            Arc::new(()),
+        );
+        custody.on_block(1, ROOT, clock.now());
+        custody.on_column(1, 3, ROOT);
+
+        custody.forget();
+        clock.advance(DEADLINE);
+
+        let none = custody.column_set([]);
+        assert_eq!(custody.gaps(DEADLINE, clock.now(), &none), Vec::new());
+        assert!(!custody.holds(ROOT, 3));
+    }
+
+    /// The bound: the [`TRACKED_BLOCKS`] most recently opened blocks are kept and the oldest
+    /// goes.
+    #[test]
+    fn only_the_newest_tracked_blocks_are_kept() {
+        let clock = FakeClock::new();
+        let mut tracker = CustodyTracker::new(&mainnet());
+        let expected = tracker.expected_columns(&subscribed(&[0]));
+        for slot in 0..=TRACKED_BLOCKS as u64 {
+            tracker.on_block(slot, [slot as u8; 32], expected.clone(), clock.now());
+        }
+        clock.advance(DEADLINE);
+
+        let kept: Vec<[u8; 32]> = gaps(&tracker, &clock)
+            .into_iter()
+            .map(|gap| gap.block_root)
+            .collect();
+
+        assert_eq!(
+            kept,
+            (1..=TRACKED_BLOCKS as u8)
+                .map(|byte| [byte; 32])
+                .collect::<Vec<_>>()
+        );
+    }
+
     /// The first Gloas slot in the tests below: epoch 10 of mainnet's 32 slots.
     const FIRST_GLOAS_SLOT: u64 = 320;
 
