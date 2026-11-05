@@ -571,8 +571,41 @@ mod tests {
             )),
             Vec::<&str>::new()
         );
-        assert_eq!(missing_topics(&at("?topics=head")), TOPICS_READ);
-        assert_eq!(missing_topics(&at("")), TOPICS_READ);
+        let every = [
+            "block",
+            "block_gossip",
+            "data_column_sidecar",
+            "execution_payload_gossip",
+        ];
+        assert_eq!(missing_topics(&at("?topics=head")), every);
+        assert_eq!(missing_topics(&at("")), every);
+    }
+
+    /// Every name the URL check asks for is one the parser reads, so the list and the parser
+    /// cannot drift apart: a name dropped from the list would go unchecked in a hand-set URL,
+    /// and one the parser skipped would be asked for and thrown away.
+    #[test]
+    fn every_topic_asked_for_is_one_the_parser_reads() {
+        for name in TOPICS_READ {
+            let data = match name {
+                BLOCK | BLOCK_GOSSIP => format!("{{\"slot\":\"1\",\"block\":\"{}\"}}", root(0x01)),
+                DATA_COLUMN_SIDECAR => format!(
+                    "{{\"block_root\":\"{}\",\"index\":\"1\",\"slot\":\"1\"}}",
+                    root(0x01)
+                ),
+                EXECUTION_PAYLOAD_GOSSIP => format!(
+                    "{{\"slot\":\"1\",\"builder_index\":\"9\",\"block_hash\":\"{}\",\"block_root\":\"{}\"}}",
+                    root(0x02),
+                    root(0x01)
+                ),
+                other => panic!("{other}: no event body here; add one"),
+            };
+
+            assert!(
+                event(&format!("event: {name}\ndata: {data}\n")).is_some(),
+                "{name}"
+            );
+        }
     }
 
     /// The two events the tracker is built on. `block_gossip` opens the entry and fixes what the
