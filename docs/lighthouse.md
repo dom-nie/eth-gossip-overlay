@@ -66,8 +66,11 @@ From v8.3.0 Lighthouse still accepts `--libp2p-addresses`, with the deprecation 
 carried since v8.2.2, and never dials it; registration alone admits the sidecar, and the nightly
 compatibility matrix checks that on every supported release. The env file keeps the flag while
 the supported range includes a v8.2 release, and loses it after. `bn.listen_addr` is the
-address in it, `/ip4/127.0.0.1/tcp/7787` by default, and changing it needs a sidecar restart and
-a beacon node restart, because it is on the beacon node's command line.
+address in it, `/ip4/127.0.0.1/tcp/7787` by default. On every supported release, changing it
+needs only a sidecar restart: the beacon node dials the address in the ENR the sidecar posts
+through `add_peer`, and redials it every heartbeat. The node keeps the old ENR among its trusted
+peers until its own next restart and keeps dialling it, which is harmless because the dial is
+pinned to the sidecar's peer id.
 
 ## IDONTWANT before a big publish
 
@@ -87,8 +90,6 @@ Those still travel: a message on such a topic goes the large-message way from 16
 small-message way below it. Some of these names are expected, and the fork-topic table in
 `crates/overlay-core/src/topic/forks.rs` lists them, so they are relayed without a word:
 
-- `execution_payload`, `execution_payload_bid`, `payload_attestation_message` and
-  `proposer_preferences`, the Gloas topics, until a release names them.
 - `light_client_finality_update` and `light_client_optimistic_update`, whenever the beacon node
   serves light clients, which Lighthouse does unless it runs with `--disable-light-client-server`.
 - `execution_proof`, only on a node started with `--proof-engine-endpoint`, and `inclusion_list`,

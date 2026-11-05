@@ -475,9 +475,11 @@ fn lighthouse_doc_drop_in_matches_the_shipped_file() {
 }
 
 /// Check 7 (R5.9). The `check-config` sample in both READMEs carries the lines the binary
-/// prints for the three-host roster the sample shows, so the budget line cannot go stale the
-/// way the old one had: no roster size could produce it. The ceiling is the built-in default,
-/// which is what any shell without a cgroup limit of its own reads.
+/// prints for the three-host roster the sample shows, so the budget lines cannot go stale the
+/// way the old one had: no roster size could produce it. That covers the INFO line's fields
+/// and rows as well as the summary, because a sample whose two lines disagree is stale too.
+/// The ceiling is the built-in default, which is what any shell without a cgroup limit of its
+/// own reads.
 #[test]
 fn readme_check_config_sample_matches_a_regenerated_line() {
     let budget = MemoryBudget::compute(
@@ -497,11 +499,23 @@ fn readme_check_config_sample_matches_a_regenerated_line() {
         mib(budget.bounded_bytes),
         budget::HEADROOM_PERCENT
     );
+    let info = format!(
+        "memory budget bounded_bytes={} total_bytes={} headroom_percent={} memory_max={} \
+         roster={} receive_window={} rows={:?}",
+        budget.bounded_bytes,
+        budget.total_bytes,
+        budget::HEADROOM_PERCENT,
+        budget.limit,
+        budget.roster_len,
+        budget.receive_window,
+        budget.rows
+    );
 
     for readme in ["README.md", "deploy/README.md"] {
         let text = read(readme);
         assert!(text.contains(&ceiling), "{readme} has no line {ceiling:?}");
         assert!(text.contains(&total), "{readme} has no line {total:?}");
+        assert!(text.contains(&info), "{readme} has no INFO line {info:?}");
     }
 }
 
@@ -534,9 +548,11 @@ fn the_quickstart_makes_the_state_directory_before_the_rehearsal() {
 
 /// R4.5: the prose under the table names the largest roster the defaults fit. The rows move
 /// that number (T-103's topic tables took it from 477 to well under that), so it is held to
-/// the same arithmetic as the table rather than written once. The sentence also says the floor
-/// binds at that roster and one more goes over, which is where the sidecar starts warning;
-/// both halves are checked, because a retuned row can pull them apart.
+/// the same arithmetic as the table rather than written once. The sentence also says the sum
+/// fits until the floor binds and one more goes over, which is where the sidecar starts
+/// warning; both halves are checked, because a retuned row can pull them apart. The floor can
+/// bind at the largest roster that still fits or at the first that does not, depending on how
+/// the rows round, and either way the sentence holds.
 #[test]
 fn performance_doc_names_the_largest_roster_that_fits_at_the_defaults() {
     let at = |hosts: usize| {
@@ -563,8 +579,8 @@ fn performance_doc_names_the_largest_roster_that_fits_at_the_defaults() {
         );
     }
 
-    assert_eq!(
-        floor_binds_at, largest,
+    assert!(
+        floor_binds_at == largest || floor_binds_at == largest + 1,
         "the floor binds at {floor_binds_at}, and {largest} is the largest roster that fits"
     );
     let sentence = format!("{largest} hosts is the largest roster that fits");
@@ -576,6 +592,66 @@ fn performance_doc_names_the_largest_roster_that_fits_at_the_defaults() {
         prose.contains(&sentence),
         "{PERFORMANCE} does not say {sentence:?}"
     );
+}
+
+/// The by-root cache paragraph of `docs/performance.md` gives what turning the cache on costs
+/// at the fleet the table is stated at, so it is held to the same arithmetic as the table: the
+/// window with the cache off and at the shipped slots, the most slots that still fit with the
+/// first one past it at the floor and over the limit, and the row the 64 slots §5.8 sketched
+/// would take, which does not fit.
+#[test]
+fn performance_doc_states_what_the_by_root_cache_costs_at_the_defaults() {
+    let with_cache = |slots: Option<u32>| {
+        let mut cfg = Config::default();
+        if let Some(slots) = slots {
+            cfg.bn.by_root_cache.enabled = true;
+            cfg.bn.by_root_cache.slots = slots;
+        }
+        MemoryBudget::compute(&cfg, BUDGET_ROSTER, budget::MEMORY_MAX_DEFAULT, SEND_LANES)
+    };
+    let fits = |budget: &MemoryBudget| budget.total_bytes <= budget.limit;
+    let mib = |bytes: u64| format!("{:.2}", bytes as f64 / (1024.0 * 1024.0));
+    let shipped = Config::default().bn.by_root_cache.slots;
+    let largest = (1..10_000)
+        .take_while(|&slots| fits(&with_cache(Some(slots))))
+        .last()
+        .unwrap();
+    let past = with_cache(Some(largest + 1));
+    let sketched = with_cache(Some(64));
+    let sketched_row = sketched
+        .rows
+        .iter()
+        .find(|(name, _)| *name == "by_root_cache")
+        .map(|(_, bytes)| *bytes)
+        .unwrap();
+    assert_eq!(past.receive_window, budget::STREAM_RECEIVE_WINDOW);
+    assert!(!fits(&past));
+    assert!(!fits(&sketched));
+
+    let prose = read(PERFORMANCE)
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ");
+    for sentence in [
+        format!(
+            "goes from {} MiB with the cache off to {} MiB at the shipped {shipped} slots",
+            mib(with_cache(None).receive_window),
+            mib(with_cache(Some(shipped)).receive_window),
+        ),
+        format!(
+            "{largest} slots is the most that fits; from {} the window is at the 1 MiB floor",
+            largest + 1
+        ),
+        format!(
+            "the 64 slots §5.8 sketched would be a {} MB row and do not fit",
+            sketched_row / 1_000_000
+        ),
+    ] {
+        assert!(
+            prose.contains(&sentence),
+            "{PERFORMANCE} does not say {sentence:?}"
+        );
+    }
 }
 
 /// Split rather than grow. A runbook nobody finishes reading is a runbook that does not work at

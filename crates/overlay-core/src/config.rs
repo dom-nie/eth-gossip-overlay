@@ -203,10 +203,10 @@ pub struct Bn {
     pub libp2p_addr: String,
     /// `node_key_file`: the sidecar's own libp2p identity, per host, created on first start.
     pub node_key_file: PathBuf,
-    /// `listen_addr`: where the sidecar listens for the beacon node's own dial. Lighthouse
-    /// caps inbound connections before it knows who is connecting, so a sidecar that only
-    /// dialled would wait for peer churn on a busy node (MD-01). Restart-required: the
-    /// beacon node is given this address in its command line.
+    /// `listen_addr`: where the sidecar listens for the beacon node's dial. Lighthouse caps
+    /// inbound connections before it knows the peer, so a sidecar that only dialled would wait
+    /// for churn on a busy node (MD-01). Restart-required, sidecar only: the beacon node dials the
+    /// ENR the sidecar posts through `add_peer`.
     pub listen_addr: String,
     /// `publish_rate_limit`: ceilings on what the sidecar injects into the beacon node.
     pub publish_rate_limit: PublishRateLimit,

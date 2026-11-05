@@ -772,8 +772,9 @@ mod drift {
 
     /// The Lighthouse section of `COMPATIBILITY.md` is what the generator renders, and the
     /// matrix workflow's version list spans `SUPPORTED`: its ends are the range's ends and it
-    /// climbs one release at a time, compared as versions rather than strings. The releases in
-    /// between cannot be derived from the range, so the workflow is the one list. With `UPDATE_COMPATIBILITY_MD` set the
+    /// strictly ascends, compared as versions rather than strings. Only the ends and the order
+    /// are checked, not that no release in between is missing: those releases cannot be derived
+    /// from the range, so the workflow is the one list. With `UPDATE_COMPATIBILITY_MD` set the
     /// test rewrites the section between the markers first, which is how it is regenerated.
     #[test]
     fn compatibility_md_matches_the_constant() {

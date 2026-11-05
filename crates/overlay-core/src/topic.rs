@@ -56,6 +56,14 @@ pub enum TopicKind {
     DataColumnSidecar(u8),
     /// `blob_sidecar_{i}`.
     BlobSidecar(u8),
+    /// `execution_payload`: Gloas's `SignedExecutionPayloadEnvelope`.
+    ExecutionPayload,
+    /// `execution_payload_bid`: Gloas's `SignedExecutionPayloadBid`.
+    ExecutionPayloadBid,
+    /// `payload_attestation_message`.
+    PayloadAttestation,
+    /// `proposer_preferences`.
+    ProposerPreferences,
     /// A name the sidecar does not know, kept verbatim. Such a topic is still relayed; only the
     /// transport class has to be guessed from the payload size.
     Other(String),
@@ -85,11 +93,15 @@ pub enum Class {
 }
 
 impl Class {
-    /// The class of a message on `kind`, following Appendix B: "Small class topics:
-    /// `beacon_attestation_{0..63}`, `beacon_aggregate_and_proof`, `sync_committee_{0..3}`,
-    /// `sync_committee_contribution_and_proof`, `voluntary_exit`, `proposer_slashing`,
-    /// `attester_slashing`, `bls_to_execution_change`. Large class topics: `beacon_block`,
-    /// `data_column_sidecar_{0..127}`, `blob_sidecar_*`." Known kinds ignore `payload_len`.
+    /// The class of a message on `kind`, following Appendix B (MD-08 for the Gloas kinds).
+    /// Attestations, aggregates, sync committee messages and contributions, exits, slashings,
+    /// BLS-to-execution changes, execution payload bids, payload attestations and proposer
+    /// preferences are Small. Beacon blocks, data column sidecars, blob sidecars and execution
+    /// payload envelopes are Large. Known kinds ignore `payload_len`.
+    ///
+    /// A Gloas envelope is bounded only by `MAX_PAYLOAD_SIZE`, so it is Large even when it is
+    /// small; a bid can reach 196932 bytes but is normally a few hundred, and a Small payload
+    /// too big for a datagram already goes alone on a stream (MD-08).
     ///
     /// A name the sidecar does not know is Large when `payload_len` is at least
     /// [`UNKNOWN_LARGE_THRESHOLD_BYTES`] and Small below it. A small payload on the large path
@@ -99,7 +111,8 @@ impl Class {
         match kind {
             TopicKind::BeaconBlock
             | TopicKind::DataColumnSidecar(_)
-            | TopicKind::BlobSidecar(_) => Self::Large,
+            | TopicKind::BlobSidecar(_)
+            | TopicKind::ExecutionPayload => Self::Large,
             TopicKind::BeaconAggregateAndProof
             | TopicKind::Attestation(_)
             | TopicKind::SyncCommittee(_)
@@ -107,7 +120,10 @@ impl Class {
             | TopicKind::VoluntaryExit
             | TopicKind::ProposerSlashing
             | TopicKind::AttesterSlashing
-            | TopicKind::BlsToExecutionChange => Self::Small,
+            | TopicKind::BlsToExecutionChange
+            | TopicKind::ExecutionPayloadBid
+            | TopicKind::PayloadAttestation
+            | TopicKind::ProposerPreferences => Self::Small,
             TopicKind::Other(_) if payload_len >= UNKNOWN_LARGE_THRESHOLD_BYTES => Self::Large,
             TopicKind::Other(_) => Self::Small,
         }
@@ -255,6 +271,10 @@ impl TopicKind {
             "proposer_slashing" => Self::ProposerSlashing,
             "attester_slashing" => Self::AttesterSlashing,
             "bls_to_execution_change" => Self::BlsToExecutionChange,
+            "execution_payload" => Self::ExecutionPayload,
+            "execution_payload_bid" => Self::ExecutionPayloadBid,
+            "payload_attestation_message" => Self::PayloadAttestation,
+            "proposer_preferences" => Self::ProposerPreferences,
             _ => {
                 if let Some(i) = name.strip_prefix("beacon_attestation_") {
                     Self::Attestation(index(i)?)
@@ -286,6 +306,10 @@ impl fmt::Display for TopicKind {
             Self::BlsToExecutionChange => f.write_str("bls_to_execution_change"),
             Self::DataColumnSidecar(i) => write!(f, "data_column_sidecar_{i}"),
             Self::BlobSidecar(i) => write!(f, "blob_sidecar_{i}"),
+            Self::ExecutionPayload => f.write_str("execution_payload"),
+            Self::ExecutionPayloadBid => f.write_str("execution_payload_bid"),
+            Self::PayloadAttestation => f.write_str("payload_attestation_message"),
+            Self::ProposerPreferences => f.write_str("proposer_preferences"),
             Self::Other(name) => f.write_str(name),
         }
     }
@@ -344,6 +368,32 @@ mod tests {
     }
 
     #[test]
+    fn execution_payload_parses_as_its_own_kind() {
+        assert_eq!(kind("execution_payload"), TopicKind::ExecutionPayload);
+    }
+
+    #[test]
+    fn execution_payload_bid_parses_as_its_own_kind() {
+        assert_eq!(
+            kind("execution_payload_bid"),
+            TopicKind::ExecutionPayloadBid
+        );
+    }
+
+    #[test]
+    fn payload_attestation_message_parses_as_its_own_kind() {
+        assert_eq!(
+            kind("payload_attestation_message"),
+            TopicKind::PayloadAttestation
+        );
+    }
+
+    #[test]
+    fn proposer_preferences_parses_as_its_own_kind() {
+        assert_eq!(kind("proposer_preferences"), TopicKind::ProposerPreferences);
+    }
+
+    #[test]
     fn parses_all_64_attestation_subnets() {
         for i in 0..64 {
             assert_eq!(
@@ -397,6 +447,10 @@ mod tests {
             (TopicKind::BlsToExecutionChange, Class::Small),
             (TopicKind::DataColumnSidecar(0), Class::Large),
             (TopicKind::BlobSidecar(0), Class::Large),
+            (TopicKind::ExecutionPayload, Class::Large),
+            (TopicKind::ExecutionPayloadBid, Class::Small),
+            (TopicKind::PayloadAttestation, Class::Small),
+            (TopicKind::ProposerPreferences, Class::Small),
         ] {
             for payload_len in [0, 1 << 20] {
                 assert_eq!(
@@ -406,6 +460,35 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn execution_payload_is_large_at_any_size() {
+        assert_eq!(Class::of(&TopicKind::ExecutionPayload, 100), Class::Large);
+    }
+
+    #[test]
+    fn execution_payload_bid_is_small_at_any_size() {
+        assert_eq!(
+            Class::of(&TopicKind::ExecutionPayloadBid, 64 * 1024),
+            Class::Small
+        );
+    }
+
+    #[test]
+    fn payload_attestation_is_small_at_any_size() {
+        assert_eq!(
+            Class::of(&TopicKind::PayloadAttestation, 64 * 1024),
+            Class::Small
+        );
+    }
+
+    #[test]
+    fn proposer_preferences_is_small_at_any_size() {
+        assert_eq!(
+            Class::of(&TopicKind::ProposerPreferences, 64 * 1024),
+            Class::Small
+        );
     }
 
     #[test]
@@ -497,6 +580,10 @@ mod tests {
             Just(TopicKind::BlsToExecutionChange),
             any::<u8>().prop_map(TopicKind::DataColumnSidecar),
             any::<u8>().prop_map(TopicKind::BlobSidecar),
+            Just(TopicKind::ExecutionPayload),
+            Just(TopicKind::ExecutionPayloadBid),
+            Just(TopicKind::PayloadAttestation),
+            Just(TopicKind::ProposerPreferences),
             "light_client_[a-z_]{1,24}".prop_map(TopicKind::Other),
         ]
     }

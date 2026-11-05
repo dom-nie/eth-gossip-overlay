@@ -529,6 +529,10 @@ impl State {
     }
 }
 
+/// One held chunk: the index its header carried and its bytes. The memory budget prices a held
+/// chunk by this type's size, so the entry's storage and the budget cannot drift apart.
+pub(crate) type HeldChunk = (u16, Bytes);
+
 /// One message being collected.
 struct Entry {
     topic_id: u16,
@@ -540,7 +544,7 @@ struct Entry {
     /// The chunks held, paired with the index their header carried, which is the shape
     /// [`rs::decode`] takes. Held in arrival order rather than by index, so a forged header
     /// cannot make this host reserve a slot per index of a split nothing will ever fill.
-    chunks: Vec<(u16, Bytes)>,
+    chunks: Vec<HeldChunk>,
     bytes: usize,
     received: Bits,
     forwarded: Bits,

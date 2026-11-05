@@ -110,11 +110,30 @@ pub const FORK_TOPICS: &[ForkTopic] = &[
         TopicKind::DataColumnSidecar,
         Class::Large,
     ),
-    // MD-08 names these four; until T-119 does, they are Other.
-    other("gloas", "execution_payload"),
-    other("gloas", "execution_payload_bid"),
-    other("gloas", "payload_attestation_message"),
-    other("gloas", "proposer_preferences"),
+    named(
+        "gloas",
+        "execution_payload",
+        |_| TopicKind::ExecutionPayload,
+        Class::Large,
+    ),
+    named(
+        "gloas",
+        "execution_payload_bid",
+        |_| TopicKind::ExecutionPayloadBid,
+        Class::Small,
+    ),
+    named(
+        "gloas",
+        "payload_attestation_message",
+        |_| TopicKind::PayloadAttestation,
+        Class::Small,
+    ),
+    named(
+        "gloas",
+        "proposer_preferences",
+        |_| TopicKind::ProposerPreferences,
+        Class::Small,
+    ),
     // Other by decision (MD-08): subscribed only when the node runs with `--proof-engine-endpoint`.
     other("gloas", "execution_proof"),
     // Other by decision (MD-08): Heze is scheduled on no network.
@@ -186,7 +205,7 @@ mod tests {
     use super::*;
 
     /// One of every kind the sidecar names.
-    const NAMED_KINDS: [TopicKind; 11] = [
+    const NAMED_KINDS: [TopicKind; 15] = [
         TopicKind::BeaconBlock,
         TopicKind::BeaconAggregateAndProof,
         TopicKind::Attestation(0),
@@ -198,6 +217,10 @@ mod tests {
         TopicKind::BlsToExecutionChange,
         TopicKind::DataColumnSidecar(0),
         TopicKind::BlobSidecar(0),
+        TopicKind::ExecutionPayload,
+        TopicKind::ExecutionPayloadBid,
+        TopicKind::PayloadAttestation,
+        TopicKind::ProposerPreferences,
     ];
 
     #[test]
