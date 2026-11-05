@@ -74,8 +74,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use types::{
     BeaconBlock, BeaconBlockFulu, BeaconBlockHeader, ChainSpec, DataColumnSidecar,
-    DataColumnSidecarFulu, DataColumnsByRootIdentifier, EmptyBlock, EthSpec, ForkContext, ForkName,
-    Hash256, MainnetEthSpec, SignedBeaconBlock, Slot,
+    DataColumnSidecarFulu, DataColumnSidecarGloas, DataColumnsByRootIdentifier, EmptyBlock,
+    EthSpec, ForkContext, ForkName, Hash256, MainnetEthSpec, SignedBeaconBlock, Slot,
 };
 use url::Url;
 use wiremock::matchers::{method, path};
@@ -956,22 +956,47 @@ fn lighthouse_swarm(metrics: Option<&mut Registry>) -> Swarm<FakeBnBehaviour> {
         .build()
 }
 
-/// Mainnet at the first slot of Fulu, the fork a data column belongs to.
+/// Mainnet with Gloas scheduled after Fulu, standing at the first slot of Gloas.
 ///
 /// The current fork decides which protocols the fake offers on its own inbound side, which the
 /// sidecar never uses because it asks for nothing, and the response sizes its outbound codec
-/// accepts, which a by-root answer is measured against. A beacon node asking for a data column
-/// is running Fulu by definition, so that is where the fake stands.
+/// accepts, which a by-root answer is measured against. A node past Gloas accepts a column of
+/// either fork (`rpc_data_column_limits`), so the fake stands there, and both digests are ones
+/// its codec can read an answer under.
 fn fork_context() -> Arc<ForkContext> {
-    let spec = ChainSpec::mainnet();
-    let fulu = spec
-        .fork_epoch(ForkName::Fulu)
-        .expect("mainnet schedules Fulu");
+    let spec = fake_spec();
+    let gloas = spec
+        .fork_epoch(ForkName::Gloas)
+        .expect("the fake schedules Gloas");
     Arc::new(ForkContext::new::<MainnetEthSpec>(
-        fulu.start_slot(MainnetEthSpec::slots_per_epoch()),
+        gloas.start_slot(MainnetEthSpec::slots_per_epoch()),
         Hash256::ZERO,
         &spec,
     ))
+}
+
+/// How many epochs after Fulu the fake schedules Gloas: past mainnet's blob-parameter forks, so
+/// none of them is a Gloas digest.
+const GLOAS_AFTER_FULU: u64 = 100_000;
+
+/// Mainnet with Gloas at [`GLOAS_AFTER_FULU`] epochs after Fulu.
+fn fake_spec() -> ChainSpec {
+    let mut spec = ChainSpec::mainnet();
+    let fulu = spec
+        .fork_epoch(ForkName::Fulu)
+        .expect("mainnet schedules Fulu");
+    spec.gloas_fork_epoch = Some(fulu + GLOAS_AFTER_FULU);
+    spec
+}
+
+/// The fork digest the fake's `ForkContext` computes for `fork`.
+fn fork_digest(fork: ForkName) -> [u8; 4] {
+    let context = fork_context();
+    let epoch = context
+        .spec
+        .fork_epoch(fork)
+        .expect("the fake schedules every fork up to Gloas");
+    context.context_bytes(epoch)
 }
 
 /// The by-root cache a link that is not under test for §5.8 is handed: a store nothing fills,
@@ -993,10 +1018,16 @@ pub fn by_root_off() -> ByRootCache {
 /// The fork digest the fake's own `ForkContext` computes for Fulu.
 ///
 /// A by-root response carries context bytes, and the sidecar takes them from the fork digest in
-/// the gossip topic the payload arrived on, so a test's topic has to name the fork the fake
-/// stands in or its outbound codec cannot place the answer.
+/// the gossip topic the payload arrived on, so a test's topic has to name the fork the payload
+/// belongs to or the fake's outbound codec cannot place the answer.
 pub fn fulu_fork_digest() -> [u8; 4] {
-    fork_context().current_fork_digest()
+    fork_digest(ForkName::Fulu)
+}
+
+/// The same for Gloas, for a topic whose payload a by-root answer has to carry as a Gloas
+/// object.
+pub fn gloas_fork_digest() -> [u8; 4] {
+    fork_digest(ForkName::Gloas)
 }
 
 /// One gossip payload with the identity the sidecar files it under.
@@ -1081,6 +1112,31 @@ pub fn column_sidecar(slot: u64, index: u64) -> Fixture {
     DataColumnSidecarFulu::<MainnetEthSpec>::from_ssz_bytes(&ssz)
         .expect("the hand-built wire form is one types reads back");
     Fixture::new(header.canonical_root(), ssz)
+}
+
+/// Column `index` of a Gloas block at `slot` whose root is `block_root`, with the same cell and
+/// proof as [`column_sidecar`]. A Gloas sidecar names its block root as a field, so the root is
+/// the caller's to choose.
+pub fn gloas_column_sidecar(slot: u64, index: u64, block_root: Hash256) -> Fixture {
+    let fulu =
+        DataColumnSidecarFulu::<MainnetEthSpec>::from_ssz_bytes(&column_sidecar(slot, index).ssz)
+            .expect("column_sidecar is one types reads back");
+    let sidecar = DataColumnSidecarGloas::<MainnetEthSpec> {
+        index,
+        column: fulu
+            .column
+            .to_vec()
+            .try_into()
+            .expect("one cell is inside the list bound"),
+        kzg_proofs: fulu
+            .kzg_proofs
+            .to_vec()
+            .try_into()
+            .expect("one proof is inside the list bound"),
+        slot: Slot::new(slot),
+        beacon_block_root: block_root,
+    };
+    Fixture::new(block_root, sidecar.as_ssz_bytes())
 }
 
 /// The behaviour as `service/mod.rs:341-350` constructs it, minus the whitelist filter (every
