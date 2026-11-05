@@ -594,6 +594,66 @@ fn performance_doc_names_the_largest_roster_that_fits_at_the_defaults() {
     );
 }
 
+/// The by-root cache paragraph of `docs/performance.md` gives what turning the cache on costs
+/// at the fleet the table is stated at, so it is held to the same arithmetic as the table: the
+/// window with the cache off and at the shipped slots, the most slots that still fit with the
+/// first one past it at the floor and over the limit, and the row the 64 slots §5.8 sketched
+/// would take, which does not fit.
+#[test]
+fn performance_doc_states_what_the_by_root_cache_costs_at_the_defaults() {
+    let with_cache = |slots: Option<u32>| {
+        let mut cfg = Config::default();
+        if let Some(slots) = slots {
+            cfg.bn.by_root_cache.enabled = true;
+            cfg.bn.by_root_cache.slots = slots;
+        }
+        MemoryBudget::compute(&cfg, BUDGET_ROSTER, budget::MEMORY_MAX_DEFAULT, SEND_LANES)
+    };
+    let fits = |budget: &MemoryBudget| budget.total_bytes <= budget.limit;
+    let mib = |bytes: u64| format!("{:.2}", bytes as f64 / (1024.0 * 1024.0));
+    let shipped = Config::default().bn.by_root_cache.slots;
+    let largest = (1..10_000)
+        .take_while(|&slots| fits(&with_cache(Some(slots))))
+        .last()
+        .unwrap();
+    let past = with_cache(Some(largest + 1));
+    let sketched = with_cache(Some(64));
+    let sketched_row = sketched
+        .rows
+        .iter()
+        .find(|(name, _)| *name == "by_root_cache")
+        .map(|(_, bytes)| *bytes)
+        .unwrap();
+    assert_eq!(past.receive_window, budget::STREAM_RECEIVE_WINDOW);
+    assert!(!fits(&past));
+    assert!(!fits(&sketched));
+
+    let prose = read(PERFORMANCE)
+        .split_whitespace()
+        .collect::<Vec<&str>>()
+        .join(" ");
+    for sentence in [
+        format!(
+            "goes from {} MiB with the cache off to {} MiB at the shipped {shipped} slots",
+            mib(with_cache(None).receive_window),
+            mib(with_cache(Some(shipped)).receive_window),
+        ),
+        format!(
+            "{largest} slots is the most that fits; from {} the window is at the 1 MiB floor",
+            largest + 1
+        ),
+        format!(
+            "the 64 slots §5.8 sketched would be a {} MB row and do not fit",
+            sketched_row / 1_000_000
+        ),
+    ] {
+        assert!(
+            prose.contains(&sentence),
+            "{PERFORMANCE} does not say {sentence:?}"
+        );
+    }
+}
+
 /// Split rather than grow. A runbook nobody finishes reading is a runbook that does not work at
 /// three in the morning.
 #[test]
