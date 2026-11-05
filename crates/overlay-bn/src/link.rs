@@ -1726,7 +1726,7 @@ mod tests {
         assert_eq!(harness.stats.large.load(Ordering::Relaxed), 0);
     }
 
-    /// Every T-005 kind under one fork digest, plus a name the sidecar does not know.
+    /// Every kind the sidecar names under one fork digest, plus a name no fork uses.
     fn any_topic() -> impl Strategy<Value = String> {
         prop_oneof![
             Just(TopicKind::BeaconBlock),
@@ -1740,7 +1740,11 @@ mod tests {
             Just(TopicKind::BlsToExecutionChange),
             (0..128u8).prop_map(TopicKind::DataColumnSidecar),
             (0..9u8).prop_map(TopicKind::BlobSidecar),
-            Just(TopicKind::Other("execution_payload".to_owned())),
+            Just(TopicKind::ExecutionPayload),
+            Just(TopicKind::ExecutionPayloadBid),
+            Just(TopicKind::PayloadAttestation),
+            Just(TopicKind::ProposerPreferences),
+            Just(TopicKind::Other("new_thing_topic".to_owned())),
         ]
         .prop_map(|kind| format!("/eth2/6a95a1a9/{kind}/ssz_snappy"))
     }
