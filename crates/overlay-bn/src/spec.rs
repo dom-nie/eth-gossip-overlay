@@ -39,7 +39,8 @@ pub const SPEC_KEYS: [&str; 7] = [
 
 /// The snapshot as the beacon node sends it. Lighthouse serialises every number as a quoted
 /// decimal string, so each field parses one. A key it does not send stays `None`, so the
-/// client can say which before [`MAINNET`]'s value stands in for it.
+/// client can say which before the sidecar's default stands in for it: [`MAINNET`]'s value for
+/// every key but `GLOAS_FORK_EPOCH`, which is [`FAR_FUTURE_EPOCH`] (not scheduled).
 #[derive(Default, Deserialize)]
 #[serde(default, rename_all = "UPPERCASE")]
 pub struct SpecWire {
@@ -60,8 +61,7 @@ pub struct SpecWire {
 }
 
 impl SpecWire {
-    /// The keys this answer did not carry, each of which takes the sidecar's default
-    /// ([`SpecWire::snapshot`]).
+    /// The keys this answer did not carry, each of which takes the sidecar's default.
     pub fn missing(&self) -> impl Iterator<Item = &'static str> {
         let values = [
             self.data_column_sidecar_subnet_count,
@@ -77,13 +77,11 @@ impl SpecWire {
             .zip(values)
             .filter_map(|(key, value)| value.is_none().then_some(key))
     }
-}
 
-impl SpecWire {
     /// The snapshot this answer gives, each missing key taking its value from `defaults`, except
     /// `GLOAS_FORK_EPOCH`, which is [`FAR_FUTURE_EPOCH`] when missing whatever `defaults` says:
     /// a node that names no Gloas epoch has not scheduled one.
-    pub fn snapshot(self, defaults: &SpecSnapshot) -> SpecSnapshot {
+    fn snapshot(self, defaults: &SpecSnapshot) -> SpecSnapshot {
         SpecSnapshot {
             data_column_sidecar_subnet_count: self
                 .data_column_sidecar_subnet_count
