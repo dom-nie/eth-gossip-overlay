@@ -177,7 +177,7 @@ impl Default for Responses {
                 "MAX_PAYLOAD_SIZE": "10485760",
                 "SECONDS_PER_SLOT": "12",
                 "SLOTS_PER_EPOCH": "32",
-                "GLOAS_FORK_EPOCH": "18446744073709551615"
+                "GLOAS_FORK_EPOCH": gloas_fork_epoch().to_string()
             }})),
             peers: ok_json(json!([])),
         }
@@ -987,6 +987,14 @@ fn fake_spec() -> ChainSpec {
         .expect("mainnet schedules Fulu");
     spec.gloas_fork_epoch = Some(fulu + GLOAS_AFTER_FULU);
     spec
+}
+
+/// The Gloas fork epoch the fake schedules, which its spec answer reports too.
+fn gloas_fork_epoch() -> u64 {
+    fake_spec()
+        .fork_epoch(ForkName::Gloas)
+        .expect("the fake schedules Gloas")
+        .as_u64()
 }
 
 /// The fork digest the fake's `ForkContext` computes for `fork`.
