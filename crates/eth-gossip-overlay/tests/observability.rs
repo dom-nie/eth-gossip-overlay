@@ -398,9 +398,11 @@ fn every_alert_holds_for_a_window_and_carries_a_summary_and_a_runbook() {
 
 /// MD-10: the alert on topic kinds the sidecar does not know fires for a host whose counter
 /// rose inside the window and stays quiet for one whose counter sat still, however high. The
-/// rising counter stops at 10m, so the alert holds at 20m, with the rise inside the 15-minute
-/// window, and is gone at 30m, which pins the window. The expected annotations are the rule's
-/// own, filled in for the host, because promtool compares them whole.
+/// rising counter's last step is from 9m to 10m. Prometheus 3 ranges are left-open, so at 23m
+/// the window still holds the 9m sample and the alert fires, and at 24m it does not and the
+/// alert is gone: a window of 14m or less is quiet at 23m and one of 16m or more fires at 24m,
+/// which pins it at 15m. 20m and 30m stay as the plain cases. The expected annotations are the
+/// rule's own, filled in for the host, because promtool compares them whole.
 #[test]
 fn overlay_unknown_topic_kind_fires_on_an_increase_and_not_on_a_flat_counter() {
     let rule = alert_rules()
@@ -411,15 +413,30 @@ fn overlay_unknown_topic_kind_fires_on_an_increase_and_not_on_a_flat_counter() {
         .annotations
         .summary
         .replace("{{ $labels.instance }}", "rising");
+    let fires_at = |minute: u32| {
+        format!(
+            "      - eval_time: {minute}m\n        alertname: OverlayUnknownTopicKind\n        \
+             exp_alerts:\n          - exp_labels:\n              instance: rising\n              \
+             severity: warning\n            exp_annotations:\n              summary: \"{summary}\"\n              \
+             runbook: {}\n",
+            rule.annotations.runbook
+        )
+    };
+    let quiet_at = |minute: u32| {
+        format!(
+            "      - eval_time: {minute}m\n        alertname: OverlayUnknownTopicKind\n        \
+             exp_alerts: []\n"
+        )
+    };
     let test = format!(
         "rule_files:\n  - {ALERTS_FILE}\nevaluation_interval: 1m\ntests:\n  - interval: 1m\n    \
          input_series:\n      - series: 'overlay_unknown_topic_kind_total{{instance=\"rising\",class=\"small\"}}'\n        \
          values: '0+1x10 10x30'\n      - series: 'overlay_unknown_topic_kind_total{{instance=\"flat\",class=\"large\"}}'\n        \
-         values: '7x30'\n    alert_rule_test:\n      - eval_time: 20m\n        alertname: OverlayUnknownTopicKind\n        \
-         exp_alerts:\n          - exp_labels:\n              instance: rising\n              severity: warning\n            \
-         exp_annotations:\n              summary: \"{summary}\"\n              runbook: {}\n      \
-         - eval_time: 30m\n        alertname: OverlayUnknownTopicKind\n        exp_alerts: []\n",
-        rule.annotations.runbook
+         values: '7x30'\n    alert_rule_test:\n{}{}{}{}",
+        fires_at(20),
+        fires_at(23),
+        quiet_at(24),
+        quiet_at(30),
     );
 
     let dir = scratch();
