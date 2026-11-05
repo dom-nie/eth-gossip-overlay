@@ -474,14 +474,38 @@ mod tests {
             .flat_map(|(_, value)| value.split(',').map(str::to_owned).collect::<Vec<String>>())
             .collect();
 
-        for read in [
-            BLOCK,
-            BLOCK_GOSSIP,
-            DATA_COLUMN_SIDECAR,
-            EXECUTION_PAYLOAD_GOSSIP,
-        ] {
+        for read in TOPICS_READ {
             assert!(topics.iter().any(|topic| topic == read), "{read}: {url}");
         }
+    }
+
+    /// A hand-set `bn.events_url` that leaves a topic out turns off what that topic feeds, so
+    /// the topics it lacks are named. Lighthouse takes a comma list, a repeated `topics` key or
+    /// both, and a URL with no `topics` at all lacks every one.
+    #[test]
+    fn an_events_url_names_the_topics_it_lacks() {
+        let at = |query: &str| -> Url {
+            format!("http://127.0.0.1:5052/eth/v1/events{query}")
+                .parse()
+                .unwrap()
+        };
+
+        assert_eq!(
+            missing_topics(&overlay_core::config::Config::default().bn.events_url),
+            Vec::<&str>::new()
+        );
+        assert_eq!(
+            missing_topics(&at("?topics=block,block_gossip,data_column_sidecar")),
+            [EXECUTION_PAYLOAD_GOSSIP]
+        );
+        assert_eq!(
+            missing_topics(&at(
+                "?topics=block&topics=block_gossip,execution_payload_gossip&topics=data_column_sidecar"
+            )),
+            Vec::<&str>::new()
+        );
+        assert_eq!(missing_topics(&at("?topics=head")), TOPICS_READ);
+        assert_eq!(missing_topics(&at("")), TOPICS_READ);
     }
 
     /// The two events the tracker is built on. `block_gossip` opens the entry and fixes what the
