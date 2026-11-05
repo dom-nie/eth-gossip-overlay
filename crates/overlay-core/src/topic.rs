@@ -344,6 +344,32 @@ mod tests {
     }
 
     #[test]
+    fn execution_payload_parses_as_its_own_kind() {
+        assert_eq!(kind("execution_payload"), TopicKind::ExecutionPayload);
+    }
+
+    #[test]
+    fn execution_payload_bid_parses_as_its_own_kind() {
+        assert_eq!(
+            kind("execution_payload_bid"),
+            TopicKind::ExecutionPayloadBid
+        );
+    }
+
+    #[test]
+    fn payload_attestation_message_parses_as_its_own_kind() {
+        assert_eq!(
+            kind("payload_attestation_message"),
+            TopicKind::PayloadAttestation
+        );
+    }
+
+    #[test]
+    fn proposer_preferences_parses_as_its_own_kind() {
+        assert_eq!(kind("proposer_preferences"), TopicKind::ProposerPreferences);
+    }
+
+    #[test]
     fn parses_all_64_attestation_subnets() {
         for i in 0..64 {
             assert_eq!(
@@ -497,6 +523,10 @@ mod tests {
             Just(TopicKind::BlsToExecutionChange),
             any::<u8>().prop_map(TopicKind::DataColumnSidecar),
             any::<u8>().prop_map(TopicKind::BlobSidecar),
+            Just(TopicKind::ExecutionPayload),
+            Just(TopicKind::ExecutionPayloadBid),
+            Just(TopicKind::PayloadAttestation),
+            Just(TopicKind::ProposerPreferences),
             "light_client_[a-z_]{1,24}".prop_map(TopicKind::Other),
         ]
     }
