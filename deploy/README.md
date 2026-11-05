@@ -144,7 +144,7 @@ overlay_bn_trusted 1
 
 ```console
 $ sudo eth-gossip-overlay check-config
-2026-09-16T12:56:22.065239Z  INFO overlay_core::budget: memory budget bounded_bytes=622494412 total_bytes=778118015 headroom_percent=25 memory_max=1073741824 roster=3 receive_window=236499046 rows=[("seen_cache", 12800000), ("recent_store", 27238400), ("publish_queue", 35651584), ("reassembler", 35651584), ("peer_send_lanes", 2711552), ("peer_topic_tables", 1310720), ("gossipsub", 34132480), ("by_root_cache", 0), ("quic_receive_windows", 472998092)]
+2026-09-16T12:56:22.065239Z  INFO overlay_core::budget: memory budget bounded_bytes=622931318 total_bytes=778664147 headroom_percent=25 memory_max=1073741824 roster=3 receive_window=236062139 rows=[("seen_cache", 12800000), ("recent_store", 27238400), ("publish_queue", 35651584), ("reassembler", 36962304), ("peer_send_lanes", 2711552), ("peer_topic_tables", 1310720), ("gossipsub", 34132480), ("by_root_cache", 0), ("quic_receive_windows", 472124278)]
 hostname: bn-ams1-07
 region: eu
 site: ams1
