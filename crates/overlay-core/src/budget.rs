@@ -157,8 +157,13 @@ pub const REASSEMBLY_ENTRY_BYTES: u64 = 4096;
 
 /// What one held chunk costs beside its bytes: the `(index, Bytes)` pair its message's entry
 /// keeps it as, twice over for the room a growing `Vec` leaves. Priced per chunk rather than per
-/// message because a Gloas envelope can be five thousand chunks where a block is a hundred, and
-/// the chunks one host holds are bounded whatever messages they belong to.
+/// message because a Gloas envelope can be five thousand chunks where a block is a hundred.
+///
+/// The row counts chunks at this host's `classes.large.chunk_bytes`, which bounds how many it
+/// holds only while every roster host cuts chunks that size. The reassembler takes each chunk's
+/// length off the wire, and neither HELLO nor the header check holds it to the config: a peer
+/// cutting 2-byte chunks could make this host hold up to `MAX_BYTES / 2` of them, far past the
+/// row.
 pub const REASSEMBLY_CHUNK_BYTES: u64 = 2 * size_of::<reassemble::HeldChunk>() as u64;
 
 /// What one entry of a peer's topic table costs at the longest topic string the wire allows:
