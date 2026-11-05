@@ -348,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn column_header_decodes_slot_index_and_root() {
+    fn a_fulu_column_sidecar_decodes_to_its_root_and_index() {
         let (sidecar, wire) = column_sidecar(9_001, 200);
 
         let (slot, index, block_root) = column_header(&snappy(&wire)).unwrap();
@@ -436,14 +436,47 @@ mod tests {
             .expect("a topic in the only shape the parser takes")
     }
 
-    /// The refusal the exact first offset is for. A Gloas column sidecar's fixed part is 56
-    /// bytes and a Fulu one's is 356, so reading a Gloas payload as a Fulu one would take a slot
-    /// out of the middle of a root; a first offset anywhere else is a payload nobody built.
+    /// A Gloas sidecar carries the slot and the block root as fields of its own, so the root is
+    /// read rather than hashed. The sidecar is the one `types` encodes, with the same 2 KB cell
+    /// the Fulu fixture carries.
     #[test]
-    fn column_header_refuses_a_first_offset_that_is_not_the_fixed_part() {
+    fn a_gloas_column_sidecar_decodes_to_its_root_and_index() {
+        let (sidecar, wire) = gloas_column_sidecar(9_001, 77, Hash256::repeat_byte(0x5a));
+
+        let (slot, index, block_root) = column_header(&snappy(&wire)).unwrap();
+
+        assert_eq!(slot, sidecar.slot.as_u64());
+        assert_eq!(u64::from(index), sidecar.index);
+        assert_eq!(block_root, bytes32(sidecar.beacon_block_root));
+    }
+
+    /// A Gloas column sidecar for `slot` carrying `index` and naming `block_root`, as `types`
+    /// encodes it, with the Fulu fixture's cell and proof behind the fixed part.
+    fn gloas_column_sidecar(
+        slot: u64,
+        index: u64,
+        block_root: Hash256,
+    ) -> (DataColumnSidecarGloas<MainnetEthSpec>, Vec<u8>) {
+        let (fulu, _) = column_sidecar(slot, index);
+        let sidecar = DataColumnSidecarGloas::<MainnetEthSpec> {
+            index,
+            column: fulu.column.to_vec().try_into().unwrap(),
+            kzg_proofs: fulu.kzg_proofs.to_vec().try_into().unwrap(),
+            slot: Slot::new(slot),
+            beacon_block_root: block_root,
+        };
+        let wire = sidecar.as_ssz_bytes();
+        (sidecar, wire)
+    }
+
+    /// The refusal the exact first offset is for: a first offset that is neither layout's fixed
+    /// part is a payload nobody built, and reading it as either would take a slot out of the
+    /// middle of a root.
+    #[test]
+    fn a_made_up_first_offset_is_refused() {
         let (_, wire) = column_sidecar(1, 0);
 
-        for offset in [56u32, 300, 400] {
+        for offset in [0u32, 55, 57, 300, 355, 357, 400] {
             let mut other = wire.clone();
             other[8..12].copy_from_slice(&offset.to_le_bytes());
             assert_eq!(
