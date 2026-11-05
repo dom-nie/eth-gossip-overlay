@@ -93,13 +93,11 @@ pub enum Class {
 }
 
 impl Class {
-    /// The class of a message on `kind`, following Appendix B: "Small class topics:
-    /// `beacon_attestation_{0..63}`, `beacon_aggregate_and_proof`, `sync_committee_{0..3}`,
-    /// `sync_committee_contribution_and_proof`, `voluntary_exit`, `proposer_slashing`,
-    /// `attester_slashing`, `bls_to_execution_change`, `execution_payload_bid`,
-    /// `payload_attestation_message`, `proposer_preferences`. Large class topics:
-    /// `beacon_block`, `data_column_sidecar_{0..127}`, `blob_sidecar_*`, `execution_payload`."
-    /// Known kinds ignore `payload_len`.
+    /// The class of a message on `kind`, following Appendix B (MD-08 for the Gloas kinds).
+    /// Attestations, aggregates, sync committee messages and contributions, exits, slashings,
+    /// BLS-to-execution changes, execution payload bids, payload attestations and proposer
+    /// preferences are Small. Beacon blocks, data column sidecars, blob sidecars and execution
+    /// payload envelopes are Large. Known kinds ignore `payload_len`.
     ///
     /// A Gloas envelope is bounded only by `MAX_PAYLOAD_SIZE`, so it is Large even when it is
     /// small; a bid can reach 196932 bytes but is normally a few hundred, and a Small payload
