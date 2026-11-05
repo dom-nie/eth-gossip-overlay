@@ -17,8 +17,6 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use bytes::Bytes;
-
 use crate::config::Config;
 use crate::pubqueue::{PUBLISH_LARGE_LANE_BYTES, PUBLISH_SMALL_LANE_ENTRIES};
 use crate::ratelimit::TokenBucket;
@@ -161,7 +159,7 @@ pub const REASSEMBLY_ENTRY_BYTES: u64 = 4096;
 /// keeps it as, twice over for the room a growing `Vec` leaves. Priced per chunk rather than per
 /// message because a Gloas envelope can be five thousand chunks where a block is a hundred, and
 /// the chunks one host holds are bounded whatever messages they belong to.
-pub const REASSEMBLY_CHUNK_BYTES: u64 = 2 * size_of::<(u16, Bytes)>() as u64;
+pub const REASSEMBLY_CHUNK_BYTES: u64 = 2 * size_of::<reassemble::HeldChunk>() as u64;
 
 /// What one entry of a peer's topic table costs at the longest topic string the wire allows:
 /// the string, the `Topic` and id around it and the hash-table slack, held twice, once under
@@ -691,7 +689,7 @@ mod tests {
         .unwrap();
         let k = usize::from(split.k);
         let envelopes = reassemble::MAX_BYTES / (k * large.chunk_bytes);
-        let chunk_list = k.next_power_of_two() * size_of::<(u16, bytes::Bytes)>();
+        let chunk_list = k.next_power_of_two() * size_of::<reassemble::HeldChunk>();
         let bitmaps = 2 * (k + usize::from(split.m)).div_ceil(64) * 8;
         let needed = reassemble::MAX_BYTES as u64
             + (envelopes * (chunk_list + bitmaps)) as u64
