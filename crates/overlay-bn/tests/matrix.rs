@@ -571,10 +571,15 @@ async fn matrix_event_stream_reports_accepted_blocks_and_verified_columns() {
     let (_sets_tx, sets) = watch::channel(every_column_topic(columns));
     let custody = SharedCustody::new(spec, sets, Arc::new(()));
 
+    let shipped = Config::default().bn.events_url;
     let events = BlockEvents::spawn(
         format!(
-            "{}/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip",
-            env.http
+            "{}{}?{}",
+            env.http,
+            shipped.path(),
+            shipped
+                .query()
+                .expect("the shipped events_url names its topics")
         )
         .parse()
         .unwrap(),
