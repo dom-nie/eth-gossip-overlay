@@ -127,7 +127,32 @@ mod tests {
     #[test]
     fn mainnet_is_the_pinned_lighthouse_column_count() {
         assert_eq!(MAINNET.number_of_columns, 128);
-        assert_eq!(SpecSnapshot::from(SpecWire::default()), MAINNET);
+        assert_eq!(
+            SpecSnapshot::from(SpecWire::default()),
+            SpecSnapshot {
+                gloas_fork_epoch: FAR_FUTURE_EPOCH,
+                ..MAINNET
+            }
+        );
+    }
+
+    /// An answer without `GLOAS_FORK_EPOCH` is a network that has not scheduled Gloas, whatever
+    /// the compiled defaults say. Mainnet scheduling it must not make a silent node a Gloas one,
+    /// so the defaults here schedule it and the missing key still comes out unscheduled.
+    #[test]
+    fn a_missing_gloas_fork_epoch_means_not_scheduled_whatever_mainnet_says() {
+        let scheduled = SpecSnapshot {
+            gloas_fork_epoch: 5,
+            ..MAINNET
+        };
+
+        assert_eq!(
+            SpecWire::default().snapshot(&scheduled),
+            SpecSnapshot {
+                gloas_fork_epoch: FAR_FUTURE_EPOCH,
+                ..scheduled
+            }
+        );
     }
 
     /// MD-09: column repair anchors on the envelope from the first slot of the Gloas fork
