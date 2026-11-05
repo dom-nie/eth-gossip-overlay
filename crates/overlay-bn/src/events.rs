@@ -101,6 +101,9 @@ pub struct BlockEvents {
 impl BlockEvents {
     /// Starts reading `url`. The beacon node ends the stream on its own restart and on any
     /// hiccup between the two processes, so every end is a reconnect under `backoff` (T-013).
+    ///
+    /// A `url` whose `topics` leaves out one this module reads is warned about once and used as
+    /// given, since a proxy in front of the node may expect exactly that URL.
     #[expect(
         clippy::expect_used,
         reason = "with no TLS backend compiled in, a client can only fail to build on proxy \
@@ -114,6 +117,15 @@ impl BlockEvents {
         clock: Arc<dyn Clock>,
         stats: Arc<dyn BlockEventStats>,
     ) -> Self {
+        let missing = missing_topics(&url);
+        if !missing.is_empty() {
+            tracing::warn!(
+                %url,
+                ?missing,
+                "bn.events_url does not ask for every event topic the sidecar reads; import \
+                 telemetry or column repair goes without them"
+            );
+        }
         // No request timeout: this one is meant to stay open between blocks.
         let http = reqwest::Client::builder()
             .build()
@@ -246,6 +258,28 @@ const BLOCK: &str = "block";
 const BLOCK_GOSSIP: &str = "block_gossip";
 const DATA_COLUMN_SIDECAR: &str = "data_column_sidecar";
 const EXECUTION_PAYLOAD_GOSSIP: &str = "execution_payload_gossip";
+
+/// Every event topic the sidecar reads, which `bn.events_url` has to ask for.
+pub const TOPICS_READ: [&str; 4] = [
+    BLOCK,
+    BLOCK_GOSSIP,
+    DATA_COLUMN_SIDECAR,
+    EXECUTION_PAYLOAD_GOSSIP,
+];
+
+/// The topics in [`TOPICS_READ`] that `url` does not ask for. Lighthouse reads every `topics`
+/// key, each a comma list.
+fn missing_topics(url: &Url) -> Vec<&'static str> {
+    let asked: Vec<String> = url
+        .query_pairs()
+        .filter(|(key, _)| key == "topics")
+        .flat_map(|(_, value)| value.split(',').map(str::to_owned).collect::<Vec<String>>())
+        .collect();
+    TOPICS_READ
+        .into_iter()
+        .filter(|topic| !asked.iter().any(|asked| asked == topic))
+        .collect()
+}
 
 /// What Lighthouse writes as a comment when its broadcast channel lagged and this reader lost
 /// events. Everything after the prefix is the count and the word `messages`.
