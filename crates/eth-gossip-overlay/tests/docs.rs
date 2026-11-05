@@ -660,6 +660,7 @@ fn performance_doc_states_what_the_by_root_cache_costs_at_the_defaults() {
         .find(|(name, _)| *name == "by_root_cache")
         .map(|(_, bytes)| *bytes)
         .unwrap();
+    assert!(with_cache(Some(largest)).receive_window > budget::STREAM_RECEIVE_WINDOW);
     assert_eq!(past.receive_window, budget::STREAM_RECEIVE_WINDOW);
     assert!(!fits(&past));
     assert!(!fits(&sketched));
@@ -675,8 +676,9 @@ fn performance_doc_states_what_the_by_root_cache_costs_at_the_defaults() {
             mib(with_cache(Some(shipped)).receive_window),
         ),
         format!(
-            "{largest} slots is the most that fits; from {} the window is at the 1 MiB floor",
-            largest + 1
+            "{largest} slots is the most that fits; from {} the window is at the {} MiB floor",
+            largest + 1,
+            budget::STREAM_RECEIVE_WINDOW / (1024 * 1024)
         ),
         format!(
             "the 64 slots §5.8 sketched would be a {} MB row and do not fit",
