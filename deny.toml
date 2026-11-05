@@ -87,7 +87,8 @@ allow-git = [
   "https://github.com/sigp/lighthouse",
   "https://github.com/sigp/rust-libp2p",
   # The EIP-7688 forks Lighthouse's [patch.crates-io] table points at, which the root Cargo.toml
-  # copies. Its warp entry is left out: nothing here depends on warp, so the lock never has it.
+  # copies. Its warp entry is left out: nothing here depends on warp, so no locked package comes
+  # from it (the lock lists it only under [[patch.unused]]).
   "https://github.com/sigp/ssz_types",
   "https://github.com/sigp/milhouse",
   "https://github.com/sigp/ethereum_ssz",
