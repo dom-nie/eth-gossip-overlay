@@ -552,6 +552,34 @@ mod tests {
         }
     }
 
+    /// A real Sepolia Gloas block: slot 11511776 (epoch 359743), finalized, as
+    /// `GET /eth/v2/beacon/blocks/11511776` with `Accept: application/octet-stream` returned it
+    /// from https://lodestar-sepolia.chainsafe.io on 2026-11-05, with `Eth-Consensus-Version:
+    /// gloas`. It carries one attestation, one payload attestation and a bid with blob
+    /// commitments, so its progressive lists are not empty.
+    const SEPOLIA_GLOAS_BLOCK: &[u8] = include_bytes!("decode/fixtures/sepolia-gloas-11511776.ssz");
+
+    /// Its root, from `GET /eth/v1/beacon/blocks/11511776/root` on the same node and on
+    /// https://ethereum-sepolia-beacon-api.publicnode.com, which agreed.
+    const SEPOLIA_GLOAS_ROOT: &str =
+        "0xbb240e1fd2fba75129bfbae48ea2a59100f29821f16c7f9a1653c15c2a8d8883";
+
+    /// Gloas operation lists are progressive (EIP-7688) and hash differently from the lists
+    /// before them, so a Gloas block root is only right with the `types` that knows that. This
+    /// holds the root the sidecar files a Gloas block under against the one a beacon node
+    /// reports for it.
+    #[test]
+    fn gloas_block_root_matches_the_beacon_node() {
+        let block =
+            SignedBeaconBlock::<MainnetEthSpec>::any_from_ssz_bytes(SEPOLIA_GLOAS_BLOCK).unwrap();
+        assert_eq!(block.fork_name_unchecked(), ForkName::Gloas);
+
+        let (slot, root) = block_header(&snappy(SEPOLIA_GLOAS_BLOCK)).unwrap();
+
+        assert_eq!(slot, 11_511_776);
+        assert_eq!(root, bytes32(SEPOLIA_GLOAS_ROOT.parse().unwrap()));
+    }
+
     /// What `cargo test -p overlay-bn drift` runs from this module: the byte offsets this
     /// module reads, held against every fork `types` knows (MD-10).
     mod drift {
