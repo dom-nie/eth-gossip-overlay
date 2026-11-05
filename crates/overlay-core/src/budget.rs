@@ -152,7 +152,8 @@ pub const SMALL_MESSAGE_BYTES: u64 = 512;
 
 /// What one message in flight costs beside its chunks and their [`REASSEMBLY_CHUNK_BYTES`]: the
 /// two index bitmaps, 1408 bytes for a `MAX_PAYLOAD_SIZE` envelope at the shipped chunk size,
-/// the peers that sent a chunk, and the map and deque entries holding it all.
+/// and the map and deque entries holding it all. The list of peers that sent a chunk is not
+/// covered: striped over a region of a hundred hosts it outgrows this on its own.
 pub const REASSEMBLY_ENTRY_BYTES: u64 = 4096;
 
 /// What one held chunk costs beside its bytes: the `(index, Bytes)` pair its message's entry
