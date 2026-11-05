@@ -105,6 +105,8 @@ fn quoted<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<u6
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     #[test]
@@ -118,6 +120,38 @@ mod tests {
     fn mainnet_is_the_pinned_lighthouse_column_count() {
         assert_eq!(MAINNET.number_of_columns, 128);
         assert_eq!(SpecSnapshot::from(SpecWire::default()), MAINNET);
+    }
+
+    /// MD-09: column repair anchors on the envelope from the first slot of the Gloas fork
+    /// epoch, so the epoch is read from the beacon node like every other spec value. Sepolia's.
+    #[test]
+    fn gloas_fork_epoch_is_read_from_the_spec() {
+        let wire: SpecWire = serde_json::from_value(json!({
+            "GLOAS_FORK_EPOCH": "353024",
+            "SLOTS_PER_EPOCH": "32",
+        }))
+        .unwrap();
+
+        let spec = SpecSnapshot::from(wire);
+
+        assert_eq!(spec.gloas_fork_epoch, 353_024);
+        assert_eq!(spec.first_gloas_slot(), Some(11_296_768));
+    }
+
+    /// Lighthouse sends `FAR_FUTURE_EPOCH` for a fork it has not scheduled, and a node that
+    /// sends no `GLOAS_FORK_EPOCH` at all has not scheduled it either: no slot is a Gloas slot.
+    #[test]
+    fn an_unscheduled_gloas_fork_epoch_means_no_gloas_slot() {
+        let wire: SpecWire = serde_json::from_value(json!({
+            "GLOAS_FORK_EPOCH": "18446744073709551615",
+            "SLOTS_PER_EPOCH": "32",
+        }))
+        .unwrap();
+        let silent: SpecWire = serde_json::from_value(json!({"SLOTS_PER_EPOCH": "32"})).unwrap();
+
+        assert_eq!(SpecSnapshot::from(wire).first_gloas_slot(), None);
+        assert_eq!(SpecSnapshot::from(silent).first_gloas_slot(), None);
+        assert_eq!(MAINNET.first_gloas_slot(), None);
     }
 }
 
