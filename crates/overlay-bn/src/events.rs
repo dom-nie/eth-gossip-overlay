@@ -2,7 +2,7 @@
 //! thing that writes the custody tracker (§6.4, MD-06).
 //!
 //! `GET /eth/v1/events?topics=...` is Server-Sent Events: a frame per event, fields one to a
-//! line, a blank line closing the frame. Three topics are read.
+//! line, a blank line closing the frame. Four topics are read.
 //!
 //! `block` fires when the node has imported the block, which is the moment §2 says arrival is
 //! not, so this is where the 200 to 500 ms of `newPayload` and column verification becomes a
@@ -16,6 +16,10 @@
 //! echoes a message back to whoever published it, so a column the sidecar handed the node
 //! returns on no wire the sidecar watches, and a tracker fed from the receive path would go
 //! blinder the better the overlay worked (MD-06).
+//!
+//! `execution_payload_gossip` fires inside gossip verification of a Gloas payload envelope, once
+//! per envelope, and only for a block the node has in fork choice. From the Gloas fork the
+//! columns are built from that payload, so it is what starts a slot's repair deadline (MD-09).
 //!
 //! What a peer sends cannot reach any of this. That is the whole point: a payload off the wire
 //! decodes without being authentic, and the state column repair acts on has to come from the
@@ -49,6 +53,13 @@ pub enum Event {
         /// The slot the block was proposed for.
         slot: u64,
         /// Its root, which its columns name.
+        block_root: [u8; 32],
+    },
+    /// `execution_payload_gossip`: gossip verification accepted this block's payload envelope.
+    Envelope {
+        /// The slot of the block the envelope reveals the payload for.
+        slot: u64,
+        /// That block's root.
         block_root: [u8; 32],
     },
     /// `data_column_sidecar`: the beacon node has verified this column.
@@ -170,7 +181,8 @@ async fn read(
 }
 
 /// Where one event goes. This is the whole write side of the custody tracker; grep the workspace
-/// for `on_block` and `on_column` and the only callers outside tests are here (MD-06).
+/// for `on_block`, `on_envelope` and `on_column` and the only callers outside tests are here
+/// (MD-06).
 fn apply(
     event: &Event,
     arrivals: &Arrivals,
@@ -183,6 +195,9 @@ fn apply(
             stats.imported(arrivals.imported(slot, block_root));
         }
         Event::Accepted { slot, block_root } => custody.on_block(slot, block_root, clock.now()),
+        Event::Envelope { slot, block_root } => {
+            custody.on_envelope(slot, block_root, clock.now());
+        }
         Event::Column {
             slot,
             index,
@@ -217,11 +232,20 @@ struct ColumnData {
     block_root: String,
 }
 
+/// The `data` of an `execution_payload_gossip` event. `builder_index` and `block_hash` ride
+/// along and are not read.
+#[derive(Deserialize)]
+struct EnvelopeData {
+    slot: String,
+    block_root: String,
+}
+
 /// The event names the sidecar reads. Every other topic on the stream is skipped, and so is
 /// every comment but the one the beacon node writes when it has thrown events away.
 const BLOCK: &str = "block";
 const BLOCK_GOSSIP: &str = "block_gossip";
 const DATA_COLUMN_SIDECAR: &str = "data_column_sidecar";
+const EXECUTION_PAYLOAD_GOSSIP: &str = "execution_payload_gossip";
 
 /// What Lighthouse writes as a comment when its broadcast channel lagged and this reader lost
 /// events. Everything after the prefix is the count and the word `messages`.
@@ -280,6 +304,13 @@ fn event(frame: &str) -> Option<Event> {
             Some(Event::Accepted {
                 slot: data.slot.parse().ok()?,
                 block_root: root(&data.block)?,
+            })
+        }
+        Some(EXECUTION_PAYLOAD_GOSSIP) => {
+            let data: EnvelopeData = serde_json::from_str(data?).ok()?;
+            Some(Event::Envelope {
+                slot: data.slot.parse().ok()?,
+                block_root: root(&data.block_root)?,
             })
         }
         Some(DATA_COLUMN_SIDECAR) => {
