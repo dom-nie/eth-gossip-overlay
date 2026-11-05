@@ -2,13 +2,17 @@
 //! to ask a peer for first once the deadline has passed (§5.6, §6.4, D23, MD-06).
 //!
 //! Every fact in here comes from the beacon node's own event stream and from nowhere else:
-//! `block_gossip` for a block the node accepted, `data_column_sidecar` for a column it holds.
+//! `block_gossip` for a block the node accepted, `execution_payload_gossip` for a Gloas payload
+//! envelope it accepted, `data_column_sidecar` for a column it holds.
 //! `overlay_bn::events` is the only writer, which is what MD-06 asks for. A payload a peer sent
 //! decodes without being authentic, so a tracker fed from the receive path is a tracker a roster
 //! peer writes, and column repair's inputs would be exactly the bytes an attacker controls.
 //!
 //! Expected columns are the beacon node's own column subnets (T-014, D06), which only names a
 //! set of columns while one subnet is one column.
+//!
+//! The deadline runs from the block before the Gloas fork and from the envelope after it,
+//! because a Gloas block's columns are built from the payload the builder reveals later (MD-09).
 //!
 //! Nothing here is a socket or a channel: one call answers what is missing and in what order,
 //! and T-082's scheduler turns that into requests.
@@ -115,14 +119,18 @@ pub struct CustodyTracker {
     columns: usize,
     threshold: usize,
     conforming: bool,
+    first_gloas_slot: Option<u64>,
     blocks: HashMap<BlockKey, Block>,
     /// The keys of `blocks` in the order they were opened, so the bound takes the oldest.
     order: VecDeque<BlockKey>,
 }
 
 struct Block {
-    expected: BitSet,
+    /// The columns owed, set when the beacon node accepts the block. `None` is an entry a column
+    /// opened before its block, which nothing may start a deadline on.
+    expected: Option<BitSet>,
     have: BitSet,
+    /// What the deadline is measured from: the block before the Gloas fork, the envelope after.
     seen_at: Option<Instant>,
 }
 
@@ -133,6 +141,7 @@ impl CustodyTracker {
             columns: 0,
             threshold: 0,
             conforming: false,
+            first_gloas_slot: None,
             blocks: HashMap::new(),
             order: VecDeque::new(),
         };
@@ -164,6 +173,7 @@ impl CustodyTracker {
         }
         self.columns = columns;
         self.threshold = columns / 2;
+        self.first_gloas_slot = spec.first_gloas_slot();
     }
 
     /// Whether the last snapshot named one column per subnet, which is what makes the beacon
@@ -209,12 +219,27 @@ impl CustodyTracker {
     }
 
     /// Records that the beacon node accepted a block for `slot` at `now` and that `expected`
-    /// columns are owed for it. The deadline every gap is measured from starts here.
+    /// columns are owed for it. Before the Gloas fork the deadline every gap is measured from
+    /// starts here; from it on, it waits for [`on_envelope`](Self::on_envelope).
     pub fn on_block(&mut self, slot: u64, root: [u8; 32], expected: BitSet, now: Instant) {
+        let before_gloas = self.first_gloas_slot.is_none_or(|first| slot < first);
         let block = self.open((slot, root));
-        block.expected = expected;
-        block.seen_at = Some(now);
+        block.expected = Some(expected);
+        if before_gloas {
+            block.seen_at = Some(now);
+        }
         self.trim();
+    }
+
+    /// Records that the beacon node accepted the payload envelope of the block `root` for `slot`
+    /// at `now`, which starts that block's deadline (MD-09). An envelope for a block the beacon
+    /// node has not reported accepting starts nothing: there is no expected set to measure.
+    pub fn on_envelope(&mut self, slot: u64, root: [u8; 32], now: Instant) {
+        if let Some(block) = self.blocks.get_mut(&(slot, root))
+            && block.expected.is_some()
+        {
+            block.seen_at = Some(now);
+        }
     }
 
     /// Records that the beacon node holds column `index` of `block_root` for `slot`.
@@ -296,18 +321,18 @@ impl Block {
         in_flight: &BitSet,
     ) -> Option<ColumnGap> {
         let seen_at = self.seen_at?;
+        let expected = self.expected.as_ref()?;
         if now.saturating_duration_since(seen_at) < deadline {
             return None;
         }
         let wanted = |index: &u16| !self.have.contains(*index);
-        let mut missing: Vec<u16> = self
-            .expected
+        let mut missing: Vec<u16> = expected
             .iter()
             .filter(wanted)
             .filter(|index| in_flight.contains(*index))
             .collect();
         missing.extend(
-            self.expected
+            expected
                 .iter()
                 .filter(wanted)
                 .filter(|index| !in_flight.contains(*index)),
@@ -318,14 +343,14 @@ impl Block {
             have_count: self
                 .have
                 .iter()
-                .filter(|index| self.expected.contains(*index))
+                .filter(|index| expected.contains(*index))
                 .count(),
         })
     }
 
     fn new(columns: usize) -> Self {
         Self {
-            expected: BitSet::new(columns),
+            expected: None,
             have: BitSet::new(columns),
             seen_at: None,
         }
@@ -338,8 +363,8 @@ impl Block {
 /// Every method takes the lock for one call and gives it back, so nothing here is held across an
 /// `await`, the same rule [`SharedRecentLarge`](crate::recent::SharedRecentLarge) keeps.
 ///
-/// The write side is [`on_block`](Self::on_block) and [`on_column`](Self::on_column), and
-/// `overlay_bn::events` is the only caller of either. Reading the beacon node's subscriptions
+/// The write side is [`on_block`](Self::on_block), [`on_envelope`](Self::on_envelope) and
+/// [`on_column`](Self::on_column), and `overlay_bn::events` is the only caller of any. Reading the beacon node's subscriptions
 /// here rather than at the call site is what keeps that true: the writer needs nothing but the
 /// two numbers the event carried.
 #[derive(Clone)]
@@ -389,6 +414,12 @@ impl SharedCustody {
         let mut state = self.lock();
         let expected = state.tracker.expected_columns(&sets);
         state.tracker.on_block(slot, root, expected, now);
+    }
+
+    /// One `execution_payload_gossip` event: the beacon node's gossip verification accepted the
+    /// payload envelope of this block.
+    pub fn on_envelope(&self, slot: u64, root: [u8; 32], now: Instant) {
+        self.lock().tracker.on_envelope(slot, root, now);
     }
 
     /// One `data_column_sidecar` event: the beacon node has verified this column.
