@@ -87,8 +87,6 @@ Those still travel: a message on such a topic goes the large-message way from 16
 small-message way below it. Some of these names are expected, and the fork-topic table in
 `crates/overlay-core/src/topic/forks.rs` lists them, so they are relayed without a word:
 
-- `execution_payload`, `execution_payload_bid`, `payload_attestation_message` and
-  `proposer_preferences`, the Gloas topics, until a release names them.
 - `light_client_finality_update` and `light_client_optimistic_update`, whenever the beacon node
   serves light clients, which Lighthouse does unless it runs with `--disable-light-client-server`.
 - `execution_proof`, only on a node started with `--proof-engine-endpoint`, and `inclusion_list`,
