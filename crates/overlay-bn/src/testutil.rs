@@ -1104,8 +1104,8 @@ fn lighthouse_behaviour(metrics: Option<&mut Registry>) -> LighthouseGossip {
     }
 }
 
-/// `gossipsub_config` from `beacon_node/lighthouse_network/src/config.rs:450-523` at v8.2.2,
-/// which is private, at the default load profile 3 (`NetworkLoad`, `config.rs:395-440`) on
+/// `gossipsub_config` from `beacon_node/lighthouse_network/src/config.rs:459-532` at v8.3.2,
+/// which is private, at the default load profile 3 (`NetworkLoad`, `config.rs:400-456`) on
 /// mainnet: two epochs of duplicate cache, the 1 s heartbeat and the mesh, gossip and RPC
 /// limits the beacon node runs with.
 fn lighthouse_gossipsub_config(spec: &ChainSpec) -> gossipsub::Config {

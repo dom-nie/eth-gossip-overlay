@@ -10,7 +10,7 @@ use tokio::sync::watch;
 
 pub use overlay_core::spec::SpecSnapshot;
 
-/// Mainnet as the pinned Lighthouse v8.2.2 ships it. `DATA_COLUMN_SIDECAR_SUBNET_COUNT`,
+/// Mainnet as the pinned Lighthouse v8.3.2 ships it. `DATA_COLUMN_SIDECAR_SUBNET_COUNT`,
 /// `NUMBER_OF_CUSTODY_GROUPS`, `MAX_PAYLOAD_SIZE` and `SECONDS_PER_SLOT` come from
 /// `common/eth2_network_config/built_in_network_configs/mainnet/config.yaml`,
 /// `NUMBER_OF_COLUMNS` from `consensus/types/presets/mainnet/fulu.yaml` and
