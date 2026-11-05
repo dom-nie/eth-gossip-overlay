@@ -1161,9 +1161,8 @@ mod tests {
 
     /// On v8.2 `--libp2p-addresses` is read once when the beacon node starts, and from v8.3.0
     /// not at all, so a sidecar that restarts afterwards is only dialled again if it says so
-    /// itself. The link posts its ENR
-    /// before every dial, and the beacon node's peer manager dials that ENR at once and again
-    /// on every heartbeat while it is disconnected.
+    /// itself. The link posts its ENR before every dial, and the beacon node's peer manager
+    /// dials that ENR at once and again on every heartbeat while it is disconnected.
     #[tokio::test(flavor = "multi_thread")]
     async fn link_registers_with_add_peer_before_each_dial() {
         let bn = FakeBn::start().await;
