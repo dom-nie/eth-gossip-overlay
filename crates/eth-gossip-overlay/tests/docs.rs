@@ -13,12 +13,15 @@ use std::collections::BTreeMap;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use eth_gossip_overlay::app::SEND_LANES;
 use eth_gossip_overlay::reload::RELOADABLE;
 use overlay_core::budget::{self, MemoryBudget};
 use overlay_core::config::Config;
 use serde_yaml_bw as yaml;
+use tracing_subscriber::fmt::MakeWriter;
+use tracing_subscriber::util::SubscriberInitExt;
 
 const CONFIGURATION: &str = "docs/configuration.md";
 const PERFORMANCE: &str = "docs/performance.md";
@@ -478,8 +481,10 @@ fn lighthouse_doc_drop_in_matches_the_shipped_file() {
 /// prints for the three-host roster the sample shows, so the budget lines cannot go stale the
 /// way the old one had: no roster size could produce it. That covers the INFO line's fields
 /// and rows as well as the summary, because a sample whose two lines disagree is stale too.
-/// The ceiling is the built-in default, which is what any shell without a cgroup limit of its
-/// own reads.
+/// The INFO line is the one `budget::check` really logs, captured through a text formatter
+/// without the timestamp, so a field added to or reordered in the log call moves it too. The
+/// ceiling is the built-in default, which is what any shell without a cgroup limit of its own
+/// reads.
 #[test]
 fn readme_check_config_sample_matches_a_regenerated_line() {
     let budget = MemoryBudget::compute(
@@ -499,23 +504,54 @@ fn readme_check_config_sample_matches_a_regenerated_line() {
         mib(budget.bounded_bytes),
         budget::HEADROOM_PERCENT
     );
-    let info = format!(
-        "memory budget bounded_bytes={} total_bytes={} headroom_percent={} memory_max={} \
-         roster={} receive_window={} rows={:?}",
-        budget.bounded_bytes,
-        budget.total_bytes,
-        budget::HEADROOM_PERCENT,
-        budget.limit,
-        budget.roster_len,
-        budget.receive_window,
-        budget.rows
-    );
+    let logged = Captured::default();
+    {
+        let _default = tracing_subscriber::fmt()
+            .with_writer(logged.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish()
+            .set_default();
+        budget::check(&budget);
+    }
+    let logged = String::from_utf8(logged.0.lock().unwrap().clone()).unwrap();
+    let info = logged
+        .lines()
+        .find(|line| line.contains("memory budget bounded_bytes="))
+        .unwrap_or_else(|| panic!("budget::check logged no INFO line: {logged:?}"))
+        .trim();
 
     for readme in ["README.md", "deploy/README.md"] {
         let text = read(readme);
         assert!(text.contains(&ceiling), "{readme} has no line {ceiling:?}");
         assert!(text.contains(&total), "{readme} has no line {total:?}");
-        assert!(text.contains(&info), "{readme} has no INFO line {info:?}");
+        assert!(text.contains(info), "{readme} has no INFO line {info:?}");
+    }
+}
+
+/// A log writer the test reads back.
+#[derive(Clone, Default)]
+struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Captured {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> MakeWriter<'a> for Captured {
+    type Writer = Captured;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
     }
 }
 
