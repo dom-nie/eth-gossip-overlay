@@ -894,10 +894,10 @@ mod tests {
     }
 
     /// A withheld payload: no envelope, so no columns exist to repair, and the slot asks for
-    /// nothing however long it is tracked, columns arriving or not. The node's own envelope does
-    /// fire `execution_payload_gossip`, but its own block fired no `block_gossip`, so the
-    /// tracker has no entry for it and the envelope starts nothing
-    /// (`an_envelope_for_an_unseen_block_starts_nothing`).
+    /// nothing however long it is tracked, columns arriving or not. (The node's own proposal
+    /// does fire `block_gossip`, since Lighthouse gossip-verifies an HTTP-published block, so
+    /// the tracker opens an entry for it, and its own envelope then starts the deadline like
+    /// any other.)
     #[test]
     fn a_gloas_slot_with_no_envelope_asks_for_nothing() {
         let clock = FakeClock::new();
