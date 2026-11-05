@@ -2330,6 +2330,14 @@ mod tests {
     }
 
     #[test]
+    fn execution_payload_bid_takes_the_small_lane() {
+        assert_eq!(
+            lane_for("/eth2/6a95a1a9/execution_payload_bid/ssz_snappy", 200),
+            Class::Small
+        );
+    }
+
+    #[test]
     fn link_config_from_bn_parses_the_address_and_uses_the_5_3_backoff() {
         let cfg = LinkConfig::from_config(&Bn::default()).unwrap();
 
