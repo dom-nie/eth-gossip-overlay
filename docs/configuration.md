@@ -41,14 +41,13 @@ hosts:
 ```
 
 Every host carries the same roster, and `region` is the fan-out's failure and latency domain.
-Have your discovery tool write `roster.yaml`: the sidecar checks the file for changes
-every 10 seconds and reloads what changed, so membership needs no interface beyond the file.
-Write to a temporary file in the same directory and rename it into place: a poll landing halfway
-through a direct write reads a file that does not parse, keeps the roster it has, and picks up
-the finished one next poll.
+Have your discovery tool write `roster.yaml`: the sidecar polls it every 10 seconds and reloads
+what changed, so membership needs no interface beyond the file.
+Write a temporary file in the same directory and rename it into place: a poll landing mid-write
+reads a file that does not parse and keeps the roster it has.
 
 An automatic reload is refused if it would drop more than half the sidecar's hosts, since a
-truncated file is likelier than half a fleet leaving at once. The refusal counts
+truncated file is likelier than half a fleet leaving. The refusal counts
 `roster_reload_rejected_total`, which is alerted on; `eth-gossip-overlayctl roster reload`
 applies the file anyway, which is how a genuine shrink is done.
 
@@ -115,7 +114,7 @@ Every key below ships in 0.1.0, the first release.
 | `classes.small.stale_after_ms` | `1000` | reload | a batch older than this is dropped rather than delivered late. |
 | `classes.large.chunk_bytes` | `2048` | restart | the fixed chunk size. The Reed-Solomon shards need an even length; a multiple of 64 is the stricter rule the sidecar holds them to, so a chunk lands on a cache line and the SIMD paths run at their widest stride. |
 | `classes.large.parity_ratio` | `0.1` | restart | parity chunks as a fraction of data chunks. |
-| `classes.large.repair_deadline_ms` | `250` | reload | how long after the first chunk a receiver waits before asking peers for the missing ones. |
+| `classes.large.repair_deadline_ms` | `250` | reload | how long after the first chunk a receiver waits before asking peers for the missing ones. For custody columns it runs from the block, or from the payload envelope from the Gloas fork on. |
 | `classes.large.column_repair` | `true` | reload | ask in-region peers for the custody columns the beacon node is still short of past the same deadline. Off, the node fetches them itself as it always has. |
 | `inject` | `true` | reload | whether the sidecar publishes what it receives into the beacon node. `false` is the kill switch: the sidecar keeps observing and reporting but changes nothing. |
 | `admin_socket` | `/run/eth-gossip-overlay/admin.sock` | restart | the Unix socket `eth-gossip-overlayctl` connects to. |

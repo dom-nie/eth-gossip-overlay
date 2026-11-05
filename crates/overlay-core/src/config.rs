@@ -277,7 +277,8 @@ pub struct LargeClass {
     /// `parity_ratio`: parity chunks as a fraction of data chunks.
     pub parity_ratio: f64,
     /// `repair_deadline_ms`: how long after the first chunk a receiver waits before asking peers
-    /// for the missing ones.
+    /// for the missing ones. For custody columns it runs from the block, or from the payload
+    /// envelope from the Gloas fork on.
     #[serde(rename = "repair_deadline_ms", deserialize_with = "millis")]
     pub repair_deadline: Duration,
     /// `column_repair`: ask in-region peers for the custody columns the beacon node is still
