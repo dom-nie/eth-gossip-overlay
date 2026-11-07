@@ -7,9 +7,13 @@
 //! A peer that keeps it up for more than [`SUSTAINED_VIOLATION`] loses the connection and comes
 //! back through the ordinary reconnect backoff.
 //!
-//! Nothing in v1 charges the bucket, because nothing in v1 fans out what it receives (§3
-//! principle 1). It is built, tested and wired into the receiver here so that T-063 and T-073
-//! have one budget to charge rather than one each.
+//! A peer has two allowances. The Gloas execution payload envelope gets one of its own, sized for
+//! one maximum envelope per slot, and only chunks on an `execution_payload` topic draw on it (MD-14
+//! amended). That topic exists only from the Gloas fork on, so before the fork nothing spends it
+//! and an honest peer's budget is what it was. The sidecar has no slot clock, so the topic is how
+//! it knows. Each allowance keeps its own violation window: an envelope charge that fits never
+//! clears a violation on the other allowance, or a peer could stay connected over one by spending a
+//! little of the other.
 //!
 //! `now` is a parameter everywhere, so the bucket holds no clock and a test drives it with plain
 //! `Instant` arithmetic.
@@ -23,7 +27,7 @@ use crate::ratelimit::TokenBucket;
 use crate::reassemble;
 use crate::recent::{self, RECENT_MAX_BYTES};
 use crate::seen::{SEEN_CAPACITY, SEEN_TTL};
-use crate::wire::{MAX_TOPIC_BYTES, MAX_TOPIC_SNAPSHOT_ENTRIES};
+use crate::wire::{MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, MAX_TOPIC_SNAPSHOT_ENTRIES};
 
 /// How long a peer may stay over its budget before the connection is closed with
 /// `RateExceeded` (DX-N3).
@@ -34,6 +38,13 @@ pub const SUSTAINED_VIOLATION: Duration = Duration::from_secs(10);
 /// measured against.
 pub const LARGE_BYTES_PER_SLOT_ESTIMATE: usize = 6 * 1024 * 1024;
 
+/// What one Gloas slot's execution payload envelope is taken to be: one at `MAX_PAYLOAD_SIZE`,
+/// the only bound the spec puts on it (MD-08), with the shipped tenth of parity on top, the
+/// way [`LARGE_BYTES_PER_SLOT_ESTIMATE`] carries the columns' parity. An estimate, like that
+/// one; a measured envelope size can tighten it (MD-14).
+pub const GLOAS_ENVELOPE_BYTES_PER_SLOT_ESTIMATE: usize =
+    MAX_PAYLOAD_BYTES + MAX_PAYLOAD_BYTES / 10;
+
 /// Which second hop the bytes were for, the `kind` label of `fanout_suppressed_total`.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FanoutKind {
@@ -41,6 +52,10 @@ pub enum FanoutKind {
     Relay,
     /// A chunk to forward to the rest of this host's region (T-073).
     Chunk,
+    /// A chunk of an `execution_payload` message to forward to the rest of this host's region.
+    /// The envelope has an allowance of its own (MD-14 amended), so it is told apart from
+    /// [`Chunk`](Self::Chunk) in the count as well.
+    Envelope,
 }
 
 impl FanoutKind {
@@ -49,6 +64,7 @@ impl FanoutKind {
         match self {
             Self::Relay => "relay",
             Self::Chunk => "chunk",
+            Self::Envelope => "envelope",
         }
     }
 }
@@ -66,12 +82,41 @@ pub enum Charge {
     CloseRateExceeded,
 }
 
-/// One peer's fan-out budget: a token bucket over the bytes that trigger a second hop, and how
-/// long the peer has been over it.
+/// One peer's fan-out budget: an allowance for the bytes that trigger a second hop, another for
+/// the Gloas envelope's, and how long the peer has been over each.
 #[derive(Clone, Debug)]
 pub struct FanoutBudget {
+    general: Allowance,
+    envelope: Allowance,
+}
+
+/// One token bucket and how long the peer has been over it.
+#[derive(Clone, Debug)]
+struct Allowance {
     bucket: TokenBucket,
     violation_since: Option<Instant>,
+}
+
+impl Allowance {
+    fn new(per_second: u64, capacity: u64, now: Instant) -> Self {
+        Self {
+            bucket: TokenBucket::new(per_second, capacity, now),
+            violation_since: None,
+        }
+    }
+
+    fn charge(&mut self, bytes: usize, now: Instant) -> Charge {
+        if self.bucket.try_take(bytes as u64, now) {
+            self.violation_since = None;
+            return Charge::Allowed;
+        }
+        let since = *self.violation_since.get_or_insert(now);
+        if now.saturating_duration_since(since) > SUSTAINED_VIOLATION {
+            Charge::CloseRateExceeded
+        } else {
+            Charge::Suppressed
+        }
+    }
 }
 
 impl FanoutBudget {
@@ -81,11 +126,15 @@ impl FanoutBudget {
     /// out: four times the share of a slot's large-class traffic that falls to one host, rounded
     /// up to whole chunks because a chunk is the unit anything arrives in. Refill is that
     /// capacity per slot, so a peer at the expected rate never runs dry and one at four times it
-    /// is over budget inside a slot.
+    /// is over budget inside a slot. The envelope allowance is the same arithmetic over the
+    /// envelope's estimate.
     ///
     /// ```text
-    /// capacity = ceil(4 * LARGE_BYTES_PER_SLOT_ESTIMATE / roster_size / chunk_bytes) * chunk_bytes
+    /// capacity = ceil(4 * estimate / roster_size / chunk_bytes) * chunk_bytes
     /// refill   = capacity / slot_secs bytes per second, rounded down
+    ///
+    /// estimate = LARGE_BYTES_PER_SLOT_ESTIMATE           relays and chunks
+    ///            GLOAS_ENVELOPE_BYTES_PER_SLOT_ESTIMATE  execution_payload chunks
     /// ```
     ///
     /// A roster of one, a chunk size of zero or a slot of zero seconds are not configurations
@@ -97,36 +146,37 @@ impl FanoutBudget {
         now: Instant,
     ) -> Self {
         let chunk_bytes = chunk_bytes.max(1) as u64;
-        let share = (4 * LARGE_BYTES_PER_SLOT_ESTIMATE / roster_size.max(1)) as u64;
-        let capacity = share.div_ceil(chunk_bytes) * chunk_bytes;
-        Self::new(capacity / slot_secs.max(1), capacity, now)
+        let allowance = |estimate: usize| {
+            let share = (4 * estimate / roster_size.max(1)) as u64;
+            let capacity = share.div_ceil(chunk_bytes) * chunk_bytes;
+            Allowance::new(capacity / slot_secs.max(1), capacity, now)
+        };
+        Self {
+            general: allowance(LARGE_BYTES_PER_SLOT_ESTIMATE),
+            envelope: allowance(GLOAS_ENVELOPE_BYTES_PER_SLOT_ESTIMATE),
+        }
     }
 
-    /// A budget of `capacity` bytes refilling at `per_second`, for a caller that has the two
-    /// numbers already. [`default_for`](Self::default_for) is what the sidecar wires; a test
-    /// reaches the bound with a bucket it can empty in one batch instead of a slot's traffic.
+    /// A budget whose two allowances are each `capacity` bytes refilling at `per_second`, for a
+    /// caller that has the two numbers already. [`default_for`](Self::default_for) is what the
+    /// sidecar wires; a test reaches the bound with a bucket it can empty in one batch instead of
+    /// a slot's traffic.
     pub fn new(per_second: u64, capacity: u64, now: Instant) -> Self {
         Self {
-            bucket: TokenBucket::new(per_second, capacity, now),
-            violation_since: None,
+            general: Allowance::new(per_second, capacity, now),
+            envelope: Allowance::new(per_second, capacity, now),
         }
     }
 
-    /// Takes `bytes` out of the bucket, refilled up to `now`.
+    /// Takes `bytes` out of the allowance `kind` draws on, refilled up to `now`.
     ///
-    /// `kind` is the `fanout_suppressed_total{peer, kind}` label the caller counts a refusal
-    /// under. One bucket covers every kind: the budget is what one peer may make this host fan
-    /// out, however it asked.
-    pub fn charge(&mut self, _kind: FanoutKind, bytes: usize, now: Instant) -> Charge {
-        if self.bucket.try_take(bytes as u64, now) {
-            self.violation_since = None;
-            return Charge::Allowed;
-        }
-        let since = *self.violation_since.get_or_insert(now);
-        if now.saturating_duration_since(since) > SUSTAINED_VIOLATION {
-            Charge::CloseRateExceeded
-        } else {
-            Charge::Suppressed
+    /// `kind` is also the `fanout_suppressed_total{peer, kind}` label the caller counts a refusal
+    /// under. `Envelope` draws on the envelope allowance; `Relay` and `Chunk` share the other,
+    /// because that one is what a peer may make this host fan out however it asked.
+    pub fn charge(&mut self, kind: FanoutKind, bytes: usize, now: Instant) -> Charge {
+        match kind {
+            FanoutKind::Envelope => self.envelope.charge(bytes, now),
+            FanoutKind::Relay | FanoutKind::Chunk => self.general.charge(bytes, now),
         }
     }
 }
@@ -732,6 +782,7 @@ mod tests {
     fn fanout_kinds_are_the_metric_labels_they_are_counted_under() {
         assert_eq!(FanoutKind::Relay.as_str(), "relay");
         assert_eq!(FanoutKind::Chunk.as_str(), "chunk");
+        assert_eq!(FanoutKind::Envelope.as_str(), "envelope");
     }
 
     /// The connection goes only once a peer has been over budget for longer than the bound, so
@@ -765,6 +816,37 @@ mod tests {
         );
     }
 
+    /// MD-14 amended: each allowance keeps its own violation window. A peer flooding chunks
+    /// that slips in envelope charges small enough to fit must still be closed, or the second
+    /// allowance would be a way to stay connected over the first one forever.
+    #[test]
+    fn an_envelope_charge_that_fits_does_not_clear_a_chunk_violation() {
+        let went_over = Instant::now();
+        let mut budget = FanoutBudget::default_for(200, 2048, 12, went_over);
+        let over_budget = 4 * 1024 * 1024;
+
+        assert_eq!(
+            budget.charge(FanoutKind::Chunk, over_budget, went_over),
+            Charge::Suppressed
+        );
+        assert_eq!(
+            budget.charge(FanoutKind::Envelope, 1, went_over),
+            Charge::Allowed
+        );
+        assert_eq!(
+            budget.charge(FanoutKind::Envelope, 1, went_over + SUSTAINED_VIOLATION),
+            Charge::Allowed
+        );
+        assert_eq!(
+            budget.charge(
+                FanoutKind::Chunk,
+                over_budget,
+                went_over + SUSTAINED_VIOLATION + Duration::from_nanos(1)
+            ),
+            Charge::CloseRateExceeded
+        );
+    }
+
     /// A peer that comes back inside its budget starts a fresh window, so drifting in and out of
     /// it over a slot never adds up to a close.
     #[test]
@@ -787,6 +869,43 @@ mod tests {
                 over_budget,
                 went_over + SUSTAINED_VIOLATION + Duration::from_secs(1)
             ),
+            Charge::Suppressed
+        );
+    }
+
+    /// MD-14 amended: a Gloas slot carries the envelope on top of the block and its columns. The
+    /// origin of a maximum-size envelope stripes its 5,632 chunks over a region of 100 hosts, so
+    /// one region host forwards about 57 of them, and that comes on top of a whole slot's
+    /// allowance for everything else. One shared bucket would refuse the envelope.
+    #[test]
+    fn a_max_size_envelope_on_a_gloas_slot_is_not_suppressed() {
+        let slot_start = Instant::now();
+        let mut budget = FanoutBudget::default_for(200, 2048, 12, slot_start);
+
+        assert_eq!(
+            budget.charge(FanoutKind::Chunk, 62 * 2048, slot_start),
+            Charge::Allowed
+        );
+        assert_eq!(
+            budget.charge(FanoutKind::Envelope, 57 * 2048, slot_start),
+            Charge::Allowed
+        );
+    }
+
+    /// The envelope allowance is sized like the other one, over the envelope's estimate instead
+    /// of the block's: 4 x 11,534,336 bytes over 200 hosts is 230,686 bytes, which is 113 whole
+    /// 2 KiB chunks. It is a bound of its own, not a door into the other allowance.
+    #[test]
+    fn the_envelope_allowance_is_its_own_bound() {
+        let slot_start = Instant::now();
+        let mut budget = FanoutBudget::default_for(200, 2048, 12, slot_start);
+
+        assert_eq!(
+            budget.charge(FanoutKind::Envelope, 113 * 2048, slot_start),
+            Charge::Allowed
+        );
+        assert_eq!(
+            budget.charge(FanoutKind::Envelope, 1, slot_start),
             Charge::Suppressed
         );
     }

@@ -66,13 +66,20 @@ whole fleet at once is worth reading as a change on the public network, not on y
 
 A peer sent more second-hop work than the roster size and the message sizes can account for, and
 this host refused to re-fan it. The budget exists so one misbehaving sibling cannot make every
-other host do its fan-out, and on a healthy fleet it is never reached.
+other host do its fan-out, and on a healthy fleet it is rarely reached (see `kind` below).
 
-The `peer` label names the sender and `kind` says which second hop was charged. Look at that peer:
-a sidecar restarted into a loop, a host relaying for a region it should not be, or a roster the
-two hosts disagree about. Sustained violation closes the connection with
-`RateExceeded` and the peer reconnects with backoff, so a flapping peer in the live view alongside
-this alert is the same story told twice.
+The `peer` label names the sender and `kind` says which second hop was charged: `relay` for a
+small-message batch it asked this host to re-fan, `chunk` for a piece of a block or column to pass
+on to the region, and `envelope` for a piece of a Gloas execution payload envelope. The envelope has
+an allowance of its own, sized for one maximum-size envelope per slot, so `kind="envelope"` usually
+means the peer sent more envelope than a slot can hold. Before the Gloas fork it means the peer is
+labelling other traffic as envelopes. Both allowances are shared out over the roster, not the
+region, so where a region holds fewer than about a quarter of the roster's hosts an honest block and
+its columns, or a maximum-size envelope, can reach them. Otherwise, look at that peer: a sidecar
+restarted into a loop, a host relaying for a region it should not be, or a roster the two hosts
+disagree about. Sustained violation closes the connection with `RateExceeded` and the peer
+reconnects with backoff, so a flapping peer in the live view alongside this alert is the same story
+told twice.
 
 ## OverlayRosterReloadRejected
 

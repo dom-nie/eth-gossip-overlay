@@ -296,7 +296,8 @@ impl PeerReceiver {
 
     /// Charges this peer's fan-out budget for `bytes` of second-hop work, counting a refusal
     /// and closing the connection when the peer has been over budget for too long (DX-N3). The
-    /// datagram loop charges `kind = Relay` for every `RELAY` batch; T-073 charges `Chunk`.
+    /// datagram loop charges `kind = Relay` for every `RELAY` batch; a forwarded chunk charges
+    /// `Chunk`, or `Envelope` on an `execution_payload` topic (MD-14 amended).
     pub fn charge(&self, kind: FanoutKind, bytes: usize, now: Instant) -> Charge {
         let charge = self.ctx.charge(kind, bytes, now);
         if charge == Charge::CloseRateExceeded {
@@ -658,15 +659,19 @@ impl Ctx {
             flags.contains(ChunkFlags::FORWARDED),
             now,
         );
+        let kind = match topic.kind() {
+            TopicKind::ExecutionPayload => FanoutKind::Envelope,
+            _ => FanoutKind::Chunk,
+        };
         let after = match outcome.forward() {
             false => After::Carry,
-            true => match self.charge(FanoutKind::Chunk, chunk.data.len(), now) {
+            true => match self.charge(kind, chunk.data.len(), now) {
                 Charge::Allowed => {
                     self.forward(&topic, &chunk);
                     After::Carry
                 }
                 Charge::Suppressed => After::Carry,
-                Charge::CloseRateExceeded => After::Close(FanoutKind::Chunk),
+                Charge::CloseRateExceeded => After::Close(kind),
             },
         };
         Arrival {
@@ -2791,16 +2796,25 @@ mod tests {
         hosts: usize,
         with: impl FnOnce(Builder) -> Builder,
     ) -> (TestCluster, PeerInfo, Topic) {
-        let block = topic("beacon_block");
+        striping_region_on("beacon_block", hosts, with).await
+    }
+
+    /// The same region striping a topic other than blocks, announced under the same id.
+    async fn striping_region_on(
+        name: &str,
+        hosts: usize,
+        with: impl FnOnce(Builder) -> Builder,
+    ) -> (TestCluster, PeerInfo, Topic) {
+        let striped = topic(name);
         let kinds: Vec<NodeKind> = std::iter::once(NodeKind::Bare)
             .chain(std::iter::repeat_n(NodeKind::Manager, hosts))
             .collect();
         let mut cluster = with(Builder::new(&kinds)).start().await;
         for node in 1..=hosts {
-            cluster.start_sidecar(node, subscriptions(&[&block], &[]));
+            cluster.start_sidecar(node, subscriptions(&[&striped], &[]));
         }
         eventually("the region to pair and subscribe", || {
-            (1..=hosts).all(|node| cluster.live(node).subscribers(&block).len() == hosts - 1)
+            (1..=hosts).all(|node| cluster.live(node).subscribers(&striped).len() == hosts - 1)
         })
         .await;
         let peer = cluster
@@ -2808,10 +2822,10 @@ mod tests {
                 0,
                 1,
                 &cluster.self_hello(0),
-                vec![(TopicId::new(3), block.to_string())],
+                vec![(TopicId::new(3), striped.to_string())],
             )
             .await;
-        (cluster, peer, block)
+        (cluster, peer, striped)
     }
 
     /// One chunk of a striped message, as the host it was assigned to would be sent it.
@@ -3118,6 +3132,45 @@ mod tests {
             cluster.reassembler(1).in_flight(),
             1,
             "the chunk was refused rather than taken in"
+        );
+    }
+
+    /// MD-14 amended: a chunk of an `execution_payload` message draws on the envelope
+    /// allowance, so a refusal of one is counted under `kind="envelope"` and not `chunk`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_envelope_chunk_over_budget_is_counted_as_envelope() {
+        let (cluster, peer, _) = striping_region_on("execution_payload", 2, |builder| {
+            builder.budget(FanoutBudget::new(1, 1, Instant::now()))
+        })
+        .await;
+        let sender = cluster.hostname(0);
+
+        send(
+            &peer,
+            &[chunk_frame(MessageId([13; 20]), 0, ChunkFlags::NONE)],
+        )
+        .await;
+
+        eventually("the envelope chunk to be refused a second hop", || {
+            cluster
+                .stats(1)
+                .fanout_suppressed(&sender, FanoutKind::Envelope)
+                == 1
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert_eq!(
+            cluster
+                .stats(1)
+                .fanout_suppressed(&sender, FanoutKind::Chunk),
+            0
+        );
+        assert!(
+            cluster
+                .stats(2)
+                .chunks_received(&cluster.hostname(1))
+                .is_empty(),
+            "it was forwarded anyway"
         );
     }
 
