@@ -25,9 +25,12 @@
 //! A chunk is charged its length plus [`CHUNK_OVERHEAD_BYTES`], a new sender its name plus a
 //! fixed overhead, and the two index bitmaps their size for the whole split when the entry
 //! opens. A chunk is copied out of the frame it arrived in, so it keeps nothing else alive. The
-//! cap therefore bounds what the entries really hold, whatever chunk length or index a peer
-//! sends (MD-11). Only what grows with the number of entries, each entry's own fields and its
-//! map slots, is outside it, and the memory budget prices that per entry.
+//! cap therefore bounds what the entries hold, whatever chunk length or index a peer sends
+//! (MD-11), up to the allocator's rounding: a copy past glibc's mmap threshold can be rounded
+//! to a page, at most about 3 % of the cap and only until glibc raises the threshold, and the
+//! rounding of each sender's name, which the sender overhead does not price, is small. Only
+//! what grows with the number of entries, each entry's own fields and its map slots, is outside
+//! it, and the memory budget prices that per entry.
 //!
 //! `now` is a parameter rather than a clock of its own, so a test drives arrival and expiry with
 //! plain `Instant` arithmetic and the receive path passes the clock it already holds.
@@ -71,12 +74,14 @@ pub const INCOMPLETE_TTL: Duration = Duration::from_secs(4);
 
 /// What one stored chunk costs [`ReassembleConfig::max_bytes`] beside its payload: its
 /// `(index, Bytes)` slot in the entry's chunk list, twice over for the room a growing `Vec`
-/// leaves, and up to 32 bytes the allocator rounds the chunk's own copy up by. 112 bytes on a
-/// 64-bit host.
+/// leaves, and 32 bytes for glibc's heap rounding of the chunk's own copy, which is at most
+/// that below its mmap threshold. 112 bytes on a 64-bit host.
 ///
 /// Without it a peer cutting 2-byte chunks would be charged 2 bytes for every hundred or so it
 /// costs (MD-11). The copy is a `Bytes` whose length is its capacity, so it carries no
-/// `bytes::Shared` header to price.
+/// `bytes::Shared` header to price. A copy at or past glibc's 128 KiB mmap threshold is rounded
+/// to a page instead, which can leave up to about 3 % of the cap uncharged, and only until the
+/// first free makes glibc raise its threshold past that size.
 pub const CHUNK_OVERHEAD_BYTES: usize = 2 * size_of::<HeldChunk>() + 32;
 
 /// What one entry on a message's sender list costs beside the name's own bytes, twice over for
