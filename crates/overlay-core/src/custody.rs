@@ -1103,6 +1103,30 @@ mod tests {
         assert_eq!(gap_roots(&custody, &clock), Vec::<[u8; 32]>::new());
     }
 
+    /// Under Gloas the commitments are in the builder's bid, which the block carries, so an
+    /// empty bid is known before the envelope. The envelope still arrives, and still asks for
+    /// nothing, because no column of the block exists (T-127, MD-09).
+    #[test]
+    fn a_gloas_block_with_an_empty_bid_asks_for_nothing_at_its_envelope() {
+        let clock = FakeClock::new();
+        let arrivals = arrivals(&clock);
+        let custody = shared(
+            SpecSnapshot {
+                gloas_fork_epoch: 10,
+                ..mainnet()
+            },
+            &arrivals,
+        );
+
+        custody.on_block(FIRST_GLOAS_SLOT, ROOT, clock.now());
+        file_block(&arrivals, ROOT, 0);
+        clock.advance(Duration::from_secs(1));
+        custody.on_envelope(FIRST_GLOAS_SLOT, ROOT, clock.now());
+        clock.advance(DEADLINE);
+
+        assert_eq!(gap_roots(&custody, &clock), Vec::<[u8; 32]>::new());
+    }
+
     /// Counts the two series column repair adds, which are zero on an honest fleet (§12).
     #[derive(Default)]
     struct CountingColumns(AtomicU64);
