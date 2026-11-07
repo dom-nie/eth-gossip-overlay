@@ -23,7 +23,7 @@ use crate::ratelimit::TokenBucket;
 use crate::reassemble;
 use crate::recent::{self, RECENT_MAX_BYTES};
 use crate::seen::{SEEN_CAPACITY, SEEN_TTL};
-use crate::wire::{MAX_TOPIC_BYTES, MAX_TOPIC_SNAPSHOT_ENTRIES};
+use crate::wire::{MAX_PAYLOAD_BYTES, MAX_TOPIC_BYTES, MAX_TOPIC_SNAPSHOT_ENTRIES};
 
 /// How long a peer may stay over its budget before the connection is closed with
 /// `RateExceeded` (DX-N3).
@@ -33,6 +33,13 @@ pub const SUSTAINED_VIOLATION: Duration = Duration::from_secs(10);
 /// parity, at T-071's sizes. An estimate the budget is derived from, not a limit anything is
 /// measured against.
 pub const LARGE_BYTES_PER_SLOT_ESTIMATE: usize = 6 * 1024 * 1024;
+
+/// What one Gloas slot's execution payload envelope is taken to be: one at `MAX_PAYLOAD_SIZE`,
+/// the only bound the spec puts on it (MD-08), with the shipped tenth of parity on top, the
+/// way [`LARGE_BYTES_PER_SLOT_ESTIMATE`] carries the columns' parity. An estimate, like that
+/// one; a measured envelope size can tighten it (MD-14).
+pub const GLOAS_ENVELOPE_BYTES_PER_SLOT_ESTIMATE: usize =
+    MAX_PAYLOAD_BYTES + MAX_PAYLOAD_BYTES / 10;
 
 /// Which second hop the bytes were for, the `kind` label of `fanout_suppressed_total`.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -103,9 +110,16 @@ impl FanoutBudget {
         now: Instant,
     ) -> Self {
         let chunk_bytes = chunk_bytes.max(1) as u64;
-        let share = (4 * LARGE_BYTES_PER_SLOT_ESTIMATE / roster_size.max(1)) as u64;
-        let capacity = share.div_ceil(chunk_bytes) * chunk_bytes;
-        Self::new(capacity / slot_secs.max(1), capacity, now)
+        let allowance = |estimate: usize| {
+            let share = (4 * estimate / roster_size.max(1)) as u64;
+            let capacity = share.div_ceil(chunk_bytes) * chunk_bytes;
+            TokenBucket::new(capacity / slot_secs.max(1), capacity, now)
+        };
+        Self {
+            bucket: allowance(LARGE_BYTES_PER_SLOT_ESTIMATE),
+            envelope: allowance(GLOAS_ENVELOPE_BYTES_PER_SLOT_ESTIMATE),
+            violation_since: None,
+        }
     }
 
     /// A budget of `capacity` bytes refilling at `per_second`, for a caller that has the two
