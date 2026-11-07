@@ -371,7 +371,6 @@ fn every_alert_holds_for_a_window_and_carries_a_summary_and_a_runbook() {
         [
             "OverlayPeersLow",
             "OverlayBnDisconnected",
-            "OverlayNotTrustedByBn",
             "OverlayHandshakeFailures",
             "OverlayWinRateFalling",
             "OverlayFanoutSuppressed",

@@ -50,7 +50,7 @@ injected.
 
 Leave it here for a day. The whole point of the phase is that a mistake in it costs nothing.
 
-**Day one, in this order.** Both of these are drop-in or seed problems rather than network ones,
+**Day one, in this order.** Both of these are problems on the host rather than on the network,
 and both are worth fixing before any number below is believed.
 
 Every host's beacon node lists its sidecar as trusted:
@@ -59,10 +59,9 @@ Every host's beacon node lists its sidecar as trusted:
 count(overlay_bn_trusted == 0)
 ```
 
-Zero, or the alert `OverlayNotTrustedByBn` will tell you the same thing in two minutes. A host at 0
-has a beacon node that never got `$ETH_GOSSIP_OVERLAY_TRUSTED_PEER_ARGS` onto its `ExecStart=`, or was
-not restarted after it did. A host with no series at all has a beacon node whose HTTP API did not
-answer the probe.
+Zero. A host at 0 has a beacon node that refused the sidecar's registration, which the sidecar
+logs as "the beacon node did not take the sidecar's ENR". A host with no series at all has a
+beacon node whose HTTP API did not answer the probe.
 
 Nobody is failing handshakes:
 

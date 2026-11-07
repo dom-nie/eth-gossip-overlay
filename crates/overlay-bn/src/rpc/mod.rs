@@ -17,8 +17,7 @@
 //! peers it asks. So the sidecar is a candidate for exactly the requests it refuses. What
 //! keeps that from ending in a ban is trust: `--trusted-peers` exempts it from the score
 //! change, and it must be in place before the first sync request. That is what the
-//! `overlay_bn_trusted` gauge T-018 feeds, and the `OverlayNotTrustedByBn` alert on it
-//! (Architecture.md §12), are for.
+//! `overlay_bn_trusted` gauge T-018 feeds is for (Architecture.md §12).
 
 use std::collections::BTreeSet;
 use std::fmt;

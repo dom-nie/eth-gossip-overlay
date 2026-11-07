@@ -33,13 +33,9 @@ x-beacon-node: &beacon-node
   command:
     - |
       peer_id=$$(cat /shared/$$SIDECAR.peerid)
-      # The two flags OPS-N1's drop-in puts on a real beacon node's ExecStart=. TRUST_SIDECAR=0
-      # leaves them off, which is the mistake OverlayNotTrustedByBn exists to catch and what
-      # scripts/alert-checks.sh makes on purpose.
-      if [ "$${TRUST_SIDECAR:-1}" = 1 ]; then
-        set -- --trusted-peers "$$peer_id" \
-          --libp2p-addresses "/ip4/127.0.0.1/tcp/7787/p2p/$$peer_id"
-      fi
+      # The two flags OPS-N1's drop-in puts on a real beacon node's ExecStart=.
+      set -- --trusted-peers "$$peer_id" \
+        --libp2p-addresses "/ip4/127.0.0.1/tcp/7787/p2p/$$peer_id"
       exec lighthouse beacon_node \
         --network "$$NETWORK" \
         --datadir /data \
@@ -61,7 +57,6 @@ x-beacon-node-env: &beacon-node-env
   # takes one inline, so the demo carries no file for a secret nothing ever reads. Replace the
   # whole value to hand the nodes a real client.
   LIGHTHOUSE_EXTRA_ARGS: ${LIGHTHOUSE_EXTRA_ARGS---execution-endpoint http://127.0.0.1:1 --execution-jwt-secret-key 0000000000000000000000000000000000000000000000000000000000000000}
-  TRUST_SIDECAR: ${TRUST_SIDECAR:-1}
 
 services:
   # The fleet seed once, and each sidecar's peer id before any beacon node needs it. This is the

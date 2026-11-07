@@ -37,20 +37,6 @@ than the configured address. A beacon node whose datadir was rebuilt has a new l
 takes one backoff cycle longer, which
 [symptoms.md](symptoms.md#the-beacon-node-came-back-with-a-new-identity) explains.
 
-## OverlayNotTrustedByBn
-
-The beacon node is up and answering, and it does not list the sidecar as a trusted peer. An
-untrusted sidecar is scored and pruned like any other peer, so under peer pressure the overlay
-quietly stops delivering.
-
-This is a drop-in problem, not a network one. The sidecar writes
-`/run/eth-gossip-overlay/lighthouse.env` at startup and the beacon node reads it through the drop-in;
-the two flags only take effect if `$ETH_GOSSIP_OVERLAY_TRUSTED_PEER_ARGS` is on the beacon node's own
-`ExecStart=` line, unquoted, and the beacon node has been restarted since. Check that file exists,
-that its peer id matches `eth-gossip-overlay peer-id`, and that the running beacon node's command line
-carries both flags. A sidecar that lost its node key has a new peer id and the beacon node is
-still trusting the old one, which looks the same from here.
-
 ## OverlayHandshakeFailures
 
 Overlay handshakes have been failing at a steady rate for fifteen minutes. One or two failures

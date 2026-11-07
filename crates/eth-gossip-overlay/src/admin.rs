@@ -773,8 +773,7 @@ mod tests {
     }
 
     /// `trusted` has three answers and an operator has to be able to tell them apart: the
-    /// beacon node says yes, says no, or has not said, which is `null` on the wire and what the
-    /// `OverlayNotTrustedByBn` alert waits out (D09).
+    /// beacon node says yes, says no, or has not said, which is `null` on the wire (D09).
     #[tokio::test]
     async fn status_reports_bn_version_and_trust() {
         let h = Fixture::start(LiveView::default()).await;

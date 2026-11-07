@@ -101,7 +101,7 @@ impl CompatStats for () {
 
 /// What the last connect probe said about the beacon node, for the readers that need the
 /// values rather than the gauges: `eth-gossip-overlayctl status` shows the version an operator is
-/// rolling out and the `trusted` flag the `OverlayNotTrustedByBn` alert watches (D09, T-042).
+/// rolling out and whether it lists the sidecar as trusted (D09, T-042).
 ///
 /// Every field is `None` until the beacon node has said, which is what `status` renders as
 /// `null`: an unknown trust flag and a beacon node that answered `false` are different answers

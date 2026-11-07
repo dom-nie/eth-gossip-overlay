@@ -132,6 +132,3 @@ The first is the sidecar's own account, the second is the same thing as a number
 re-checks on every connect, and the third is the beacon node's opinion, which is the one that
 settles an argument. `overlay_bn_trusted` is absent rather than 0 on a beacon node whose
 `/lighthouse/peers` endpoint is missing, and the sidecar logs that once.
-
-`overlay_bn_trusted` at 0 for two minutes raises `OverlayNotTrustedByBn`;
-[troubleshooting.md](troubleshooting.md#overlaynottrustedbybn) is what to do about it.
