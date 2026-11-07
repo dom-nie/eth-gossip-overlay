@@ -33,8 +33,10 @@
 //! buffer is allocated, every read is bounds-checked, and a shape that is not the object the
 //! topic names is an error rather than a panic. None of that makes what comes out true: a payload
 //! that decodes is a payload a peer could build, and nothing here checks a signature, a proposer
-//! or that any beacon node accepted the block. MD-06 is what that costs, and the only two things
-//! allowed to read this module's answer are the recent store's index and T-044's arrival line.
+//! or that any beacon node accepted the block. MD-06 is what that costs, and the only things
+//! allowed to read this module's answer are the recent store's index, T-044's arrival line and
+//! `Arrivals`, which custody asks for a block's blob count only by a root the beacon node itself
+//! named (T-127).
 
 use types::{BeaconBlockHeader, Hash256, MainnetEthSpec, SignedBeaconBlock, Slot};
 

@@ -8,6 +8,11 @@
 //! decodes without being authentic, so a tracker fed from the receive path is a tracker a roster
 //! peer writes, and column repair's inputs would be exactly the bytes an attacker controls.
 //!
+//! One number comes from the receive paths: how many blobs a block commits to, read from
+//! [`Arrivals`] for the root the node's own event named. A block with none has no columns and is
+//! not tracked (T-127). That root hashes the commitment list, so a peer can deliver the true
+//! count or keep it unknown, and an unknown count is tracked as if counts did not exist.
+//!
 //! Expected columns are the beacon node's own column subnets (T-014, D06), which only names a
 //! set of columns while one subnet is one column.
 //!
