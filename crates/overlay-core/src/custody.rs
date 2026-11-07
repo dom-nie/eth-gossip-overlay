@@ -482,6 +482,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+    use crate::events::Source;
+    use crate::header::Header;
     use crate::spec::FAR_FUTURE_EPOCH;
     use crate::testlog::LOG;
     use crate::time::{Clock, FakeClock};
@@ -534,6 +536,52 @@ mod tests {
     fn gaps(tracker: &CustodyTracker, clock: &FakeClock) -> Vec<ColumnGap> {
         let none = tracker.column_set([]);
         tracker.missing_past_deadline(DEADLINE, clock.now(), &none)
+    }
+
+    /// Blocks no receive path has filed, for a test about something other than blob counts.
+    fn no_arrivals() -> Arc<Arrivals> {
+        arrivals(&FakeClock::new())
+    }
+
+    /// What the receive paths file blocks into, on `clock`, which is where custody reads a
+    /// block's blob count from.
+    fn arrivals(clock: &FakeClock) -> Arc<Arrivals> {
+        Arc::new(Arrivals::new(
+            Arc::new(clock.clone()),
+            watch::Sender::new(mainnet()).subscribe(),
+        ))
+    }
+
+    /// A shared tracker at `spec` over columns 0, 3 and 7, reading blob counts from `arrivals`.
+    fn shared(spec: SpecSnapshot, arrivals: &Arc<Arrivals>) -> SharedCustody {
+        SharedCustody::new(
+            watch::Sender::new(spec).subscribe(),
+            watch::Sender::new(subscribed(&[0, 3, 7])).subscribe(),
+            arrivals.clone(),
+            Arc::new(()),
+        )
+    }
+
+    /// The bytes of block `root` going past this host, committing to `blobs` blobs.
+    fn file_block(arrivals: &Arrivals, root: [u8; 32], blobs: usize) {
+        arrivals.saw(
+            Some(Header::Block {
+                slot: 1,
+                root,
+                blobs,
+            }),
+            &Source::Bn,
+        );
+    }
+
+    /// The roots `custody` reports gaps for at `clock`'s now.
+    fn gap_roots(custody: &SharedCustody, clock: &FakeClock) -> Vec<[u8; 32]> {
+        let none = custody.column_set([]);
+        custody
+            .gaps(DEADLINE, clock.now(), &none)
+            .into_iter()
+            .map(|gap| gap.block_root)
+            .collect()
     }
 
     /// Expected columns are the beacon node's own column subnets and nothing else (T-014, D06):
@@ -690,6 +738,7 @@ mod tests {
             })
             .subscribe(),
             watch::Sender::new(subscribed(&[0, 3, 7])).subscribe(),
+            no_arrivals(),
             stats.clone(),
         );
         custody.on_block(1, ROOT, clock.now());
@@ -751,6 +800,7 @@ mod tests {
         let custody = SharedCustody::new(
             spec.subscribe(),
             watch::Sender::new(subscribed(&[0])).subscribe(),
+            no_arrivals(),
             stats.clone(),
         );
         spec.send_replace(SpecSnapshot {
@@ -776,6 +826,7 @@ mod tests {
             })
             .subscribe(),
             watch::Sender::new(subscribed(&[0, 3, 7])).subscribe(),
+            no_arrivals(),
             Arc::new(()),
         );
 
@@ -805,6 +856,7 @@ mod tests {
         let custody = SharedCustody::new(
             watch::Sender::new(mainnet()).subscribe(),
             watch::Sender::new(subscribed(&[0, 3, 7])).subscribe(),
+            no_arrivals(),
             Arc::new(()),
         );
         custody.on_block(1, ROOT, clock.now());
@@ -938,6 +990,26 @@ mod tests {
         clock.advance(Duration::from_secs(12));
 
         assert_eq!(gaps(&tracker, &clock), Vec::new());
+    }
+
+    /// A block that commits to no blobs has no columns, so none of its columns can be owed;
+    /// tracking it would ask peers for every expected column and hear not found from each
+    /// (T-127). Nor does it take one of the [`TRACKED_BLOCKS`] places from a block that has some.
+    #[test]
+    fn a_block_with_no_blobs_opens_no_entry() {
+        let clock = FakeClock::new();
+        let arrivals = arrivals(&clock);
+        let custody = shared(mainnet(), &arrivals);
+        let with_blobs: Vec<[u8; 32]> = (1..=TRACKED_BLOCKS as u8).map(|byte| [byte; 32]).collect();
+        for (slot, root) in (1..).zip(&with_blobs) {
+            custody.on_block(slot, *root, clock.now());
+        }
+
+        file_block(&arrivals, ROOT, 0);
+        custody.on_block(9, ROOT, clock.now());
+        clock.advance(DEADLINE);
+
+        assert_eq!(gap_roots(&custody, &clock), with_blobs);
     }
 
     /// Counts the two series column repair adds, which are zero on an honest fleet (§12).
