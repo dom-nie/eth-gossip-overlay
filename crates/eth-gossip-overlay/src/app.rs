@@ -705,8 +705,8 @@ impl App {
 }
 
 /// The `lighthouse.env` file, before anything binds. A failure is a warning: a container has no
-/// `/run/eth-gossip-overlay` and a beacon node without the file simply starts without a trusted peer,
-/// which `OverlayNotTrustedByBn` reports (OPS-N1).
+/// `/run/eth-gossip-overlay` and a beacon node without the file simply starts without a trusted peer
+/// until the sidecar's `add_peer` registration gives it one (OPS-N1, MD-01).
 fn write_trusted_peer_env(line: &str) {
     let dir = TrustedPeerEnv::directory();
     match TrustedPeerEnv::write(&dir, line) {
