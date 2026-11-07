@@ -714,7 +714,7 @@ fn write_trusted_peer_env(line: &str) {
         Err(err) => tracing::warn!(
             %err,
             dir = %dir.display(),
-            "no lighthouse env file; the beacon node will not trust or dial this sidecar"
+            "no lighthouse env file; the beacon node will trust and dial this sidecar only once its add_peer registration lands"
         ),
     }
 }
