@@ -791,6 +791,37 @@ mod tests {
         );
     }
 
+    /// MD-14 amended: each allowance keeps its own violation window. A peer flooding chunks
+    /// that slips in envelope charges small enough to fit must still be closed, or the second
+    /// allowance would be a way to stay connected over the first one forever.
+    #[test]
+    fn an_envelope_charge_that_fits_does_not_clear_a_chunk_violation() {
+        let went_over = Instant::now();
+        let mut budget = FanoutBudget::default_for(200, 2048, 12, went_over);
+        let over_budget = 4 * 1024 * 1024;
+
+        assert_eq!(
+            budget.charge(FanoutKind::Chunk, over_budget, went_over),
+            Charge::Suppressed
+        );
+        assert_eq!(
+            budget.charge(FanoutKind::Envelope, 1, went_over),
+            Charge::Allowed
+        );
+        assert_eq!(
+            budget.charge(FanoutKind::Envelope, 1, went_over + SUSTAINED_VIOLATION),
+            Charge::Allowed
+        );
+        assert_eq!(
+            budget.charge(
+                FanoutKind::Chunk,
+                over_budget,
+                went_over + SUSTAINED_VIOLATION + Duration::from_nanos(1)
+            ),
+            Charge::CloseRateExceeded
+        );
+    }
+
     /// A peer that comes back inside its budget starts a fresh window, so drifting in and out of
     /// it over a slot never adds up to a close.
     #[test]
