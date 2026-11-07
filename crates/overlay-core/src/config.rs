@@ -271,9 +271,10 @@ pub struct SmallClass {
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct LargeClass {
-    /// `chunk_bytes`: the fixed chunk size. The Reed-Solomon shards need an even length; a
-    /// multiple of 64 is the stricter rule the sidecar holds them to, so a chunk lands on a
-    /// cache line and the SIMD paths run at their widest stride.
+    /// `chunk_bytes`: the fixed chunk size, a multiple of 64. Reed-Solomon needs an even length;
+    /// 64 aligns a chunk to a cache line and the widest SIMD stride.
+    /// Chunks cost their length plus 104 bytes of the reassembler's 32 MiB cap; below 1600 bytes,
+    /// two maximum-size envelopes fit, not three.
     pub chunk_bytes: usize,
     /// `parity_ratio`: parity chunks as a fraction of data chunks.
     pub parity_ratio: f64,

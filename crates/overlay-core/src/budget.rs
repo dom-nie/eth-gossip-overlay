@@ -150,22 +150,13 @@ pub const SEEN_ENTRY_BYTES: u64 = 64;
 /// anything is measured against.
 pub const SMALL_MESSAGE_BYTES: u64 = 512;
 
-/// What one message in flight costs beside its chunks and their [`REASSEMBLY_CHUNK_BYTES`]: the
-/// two index bitmaps, 1408 bytes for a `MAX_PAYLOAD_SIZE` envelope at the shipped chunk size,
-/// and the map and deque entries holding it all. The list of peers that sent a chunk is not
-/// covered: striped over a region of a hundred hosts it outgrows this on its own.
+/// What one message in flight costs beside what the reassembler charges to
+/// [`reassemble::MAX_BYTES`]: the two index bitmaps, 1408 bytes for a `MAX_PAYLOAD_SIZE` envelope
+/// at the shipped chunk size, and the map and deque entries holding it all. Each chunk's slot and
+/// the list of peers that sent one are charged inside the cap (MD-11). The bitmaps are still
+/// priced here, which is honest only for an honest split: one chunk at index 65534 makes them
+/// 16 KiB, until T-131 charges them when the entry opens.
 pub const REASSEMBLY_ENTRY_BYTES: u64 = 4096;
-
-/// What one held chunk costs beside its bytes: the `(index, Bytes)` pair its message's entry
-/// keeps it as, twice over for the room a growing `Vec` leaves. Priced per chunk rather than per
-/// message because a Gloas envelope can be five thousand chunks where a block is a hundred.
-///
-/// The row counts chunks at this host's `classes.large.chunk_bytes`, which bounds how many it
-/// holds only while every roster host cuts chunks that size. The reassembler takes each chunk's
-/// length off the wire, and neither HELLO nor the header check holds it to the config: a peer
-/// cutting 2-byte chunks could make this host hold up to `MAX_BYTES / 2` of them, far past the
-/// row.
-pub const REASSEMBLY_CHUNK_BYTES: u64 = 2 * size_of::<reassemble::HeldChunk>() as u64;
 
 /// What one entry of a peer's topic table costs at the longest topic string the wire allows:
 /// the string, the `Topic` and id around it and the hash-table slack, held twice, once under
@@ -251,8 +242,6 @@ impl MemoryBudget {
             (
                 "reassembler",
                 reassemble::MAX_BYTES as u64
-                    + (reassemble::MAX_BYTES / cfg.classes.large.chunk_bytes.max(1)) as u64
-                        * REASSEMBLY_CHUNK_BYTES
                     + reassemble::MAX_IN_FLIGHT as u64 * REASSEMBLY_ENTRY_BYTES,
             ),
             (
@@ -581,12 +570,12 @@ mod tests {
         ("seen_cache", 12_800_000),
         ("recent_store", 27_238_400),
         ("publish_queue", 35_651_584),
-        ("reassembler", 36_962_304),
+        ("reassembler", 35_651_584),
         ("peer_send_lanes", 128_241_664),
         ("peer_topic_tables", 130_416_640),
         ("gossipsub", 34_132_480),
         ("by_root_cache", 0),
-        ("quic_receive_windows", 451_282_449),
+        ("quic_receive_windows", 452_586_695),
     ];
 
     /// OPS-N4's whole point: every bounded structure at its worst case, summed, fits under the
@@ -679,34 +668,19 @@ mod tests {
         );
     }
 
-    /// A Gloas envelope is bounded only by `MAX_PAYLOAD_SIZE` (MD-08), and the reassembler
-    /// takes splits up to that size, so at the shipped chunk size its chunk bound holds three of
-    /// them at once. Beside its chunks each one costs its chunk list, an `(index, Bytes)` pair
-    /// per data chunk in a `Vec` grown to the next power of two, and two bitmaps over every
-    /// index of the split. The row has to hold that with every other entry at its own cost.
+    /// The reassembler charges each chunk's slot and each sender inside `MAX_BYTES` (MD-11), so
+    /// the row is the cap and the per-entry slots and nothing else. It does not move with this
+    /// host's chunk size, because nothing holds a peer to it.
     #[test]
-    fn reassembler_row_covers_max_size_envelopes_in_flight() {
-        let large = &Config::default().classes.large;
-        let split = crate::rs::Params::for_len(
-            crate::wire::MAX_PAYLOAD_BYTES,
-            large.chunk_bytes,
-            large.parity_ratio,
-        )
-        .unwrap();
-        let k = usize::from(split.k);
-        let envelopes = reassemble::MAX_BYTES / (k * large.chunk_bytes);
-        let chunk_list = k.next_power_of_two() * size_of::<reassemble::HeldChunk>();
-        let bitmaps = 2 * (k + usize::from(split.m)).div_ceil(64) * 8;
-        let needed = reassemble::MAX_BYTES as u64
-            + (envelopes * (chunk_list + bitmaps)) as u64
-            + (reassemble::MAX_IN_FLIGHT - envelopes) as u64 * REASSEMBLY_ENTRY_BYTES;
+    fn reassembler_row_is_max_bytes_and_the_entry_slots() {
+        let wanted = reassemble::MAX_BYTES as u64
+            + reassemble::MAX_IN_FLIGHT as u64 * REASSEMBLY_ENTRY_BYTES;
+        let mut tiny = Config::default();
+        tiny.classes.large.chunk_bytes = 2;
+        let tiny = MemoryBudget::compute(&tiny, 200, MEMORY_MAX_DEFAULT, LANES);
 
-        let row = row(&budget(), "reassembler");
-
-        assert!(
-            row >= needed,
-            "{envelopes} envelopes of {k} data chunks need {needed} bytes, the row is {row}"
-        );
+        assert_eq!(row(&budget(), "reassembler"), wanted);
+        assert_eq!(row(&tiny, "reassembler"), wanted, "at 2-byte chunks");
     }
 
     /// The rows are what T-076's table grows from, so the sum has to be the rows and the total

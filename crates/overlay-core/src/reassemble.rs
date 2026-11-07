@@ -17,10 +17,16 @@
 //!
 //! A host takes every block and all 128 data columns of a slot, so a few hundred messages can be
 //! in flight at once. Three bounds keep that from growing without end: [`MAX_IN_FLIGHT`] on the
-//! count, [`MAX_BYTES`] on the chunk bytes held, and [`INCOMPLETE_TTL`] on how long a message
-//! that never completed keeps its place. Each of them takes the oldest entry first and counts
-//! what it took, and the forwarded bitmap and the sender list go with the entry, so nothing in
-//! this module is sized or expired on its own.
+//! count, [`MAX_BYTES`] on what the held chunks and their senders are charged, and
+//! [`INCOMPLETE_TTL`] on how long a message that never completed keeps its place. Each of them
+//! takes the oldest entry first and counts what it took, and the forwarded bitmap and the sender
+//! list go with the entry, so nothing in this module is sized or expired on its own.
+//!
+//! A chunk is charged its length plus [`CHUNK_OVERHEAD_BYTES`] and a new sender its name plus a
+//! fixed overhead, so the cap holds whatever chunk length a peer cuts (MD-11). It does not yet
+//! see two things: a held chunk is a view that keeps the whole frame it arrived in alive, and the
+//! index bitmaps grow with the highest index seen. T-131 copies on store and charges the
+//! bitmaps.
 //!
 //! `now` is a parameter rather than a clock of its own, so a test drives arrival and expiry with
 //! plain `Instant` arithmetic and the receive path passes the clock it already holds.
@@ -46,19 +52,35 @@ use crate::wire::{Chunk, MAX_PAYLOAD_BYTES};
 /// from here and from [`MAX_BYTES`].
 pub const MAX_IN_FLIGHT: usize = 512;
 
-/// Chunk bytes one host holds for messages it has not finished with.
+/// What one host's held chunks, with their bookkeeping and their senders, are charged for
+/// messages it has not finished with.
 ///
 /// One slot is a 200 KB block and 128 data columns of about 40 KB, which is 5.2 MiB of payload,
 /// and a message is buffered as its chunks, so the parity chunks put roughly a tenth on top:
 /// about 5.7 MiB for a slot. Four slots of that, which is the same margin [`MAX_IN_FLIGHT`]
 /// carries over the 129 messages a slot brings, is 23 MiB, rounded up here to the 32 MiB
 /// T-017's large publish lane is bounded by, so the two large-class buffers are the same size
-/// (§10).
+/// (§10). At the shipped 2 KiB chunks the per-chunk overhead adds about 5 %.
 pub const MAX_BYTES: usize = 32 * 1024 * 1024;
 
 /// How long a message that never completed keeps its entry. Longer than the repair deadline plus
 /// the 1.5 s a repair is given after it (D24), so T-082 still finds the senders it would ask.
 pub const INCOMPLETE_TTL: Duration = Duration::from_secs(4);
+
+/// What one stored chunk costs [`ReassembleConfig::max_bytes`] beside its payload: its
+/// `(index, Bytes)` slot in the entry's chunk list, twice over for the room a growing `Vec`
+/// leaves, and the `bytes::Shared` header the frame buffer is promoted to when the codec cuts a
+/// view out of it. 104 bytes on a 64-bit host.
+///
+/// Without it a peer cutting 2-byte chunks would be charged 2 bytes for every hundred or so it
+/// costs (MD-11). The chunk is still a view into the frame it arrived in, so the rest of that
+/// frame stays alive and is not counted here: T-131 copies on store and closes that.
+pub const CHUNK_OVERHEAD_BYTES: usize = 2 * size_of::<HeldChunk>() + 3 * size_of::<usize>();
+
+/// What one entry on a message's sender list costs beside the name's own bytes, twice over for
+/// the `Vec`'s growth. Charged rather than capped, because repair asks every sender in turn
+/// (D23).
+const SENDER_OVERHEAD_BYTES: usize = 2 * size_of::<(Hostname, bool)>();
 
 /// What one host's reassembly is held to. The sidecar passes [`ReassembleConfig::default`],
 /// which is the three constants above; a test passes less so the bounds are reachable without a
@@ -67,7 +89,7 @@ pub const INCOMPLETE_TTL: Duration = Duration::from_secs(4);
 pub struct ReassembleConfig {
     /// Messages in flight at once, oldest evicted past it.
     pub max_in_flight: usize,
-    /// Chunk bytes held for them, oldest message evicted past it.
+    /// What their held chunks and senders are charged, oldest message evicted past it.
     pub max_bytes: usize,
     /// How long a message that never completed keeps its entry.
     pub incomplete_ttl: Duration,
@@ -172,7 +194,7 @@ pub enum Reason {
 pub enum Evicted {
     /// [`ReassembleConfig::max_in_flight`] was reached by a new message.
     MaxInFlight,
-    /// [`ReassembleConfig::max_bytes`] was passed by a stored chunk.
+    /// [`ReassembleConfig::max_bytes`] was passed by a stored chunk or a new sender.
     MaxBytes,
     /// The message waited [`ReassembleConfig::incomplete_ttl`] without completing.
     Expired,
@@ -372,7 +394,8 @@ fn usable(params: Params) -> bool {
 /// Everything one host holds about messages it has not finished with.
 struct State {
     cfg: ReassembleConfig,
-    /// The chunk bytes of every entry, which is what [`ReassembleConfig::max_bytes`] bounds.
+    /// What every entry's chunks and senders are charged, which is what
+    /// [`ReassembleConfig::max_bytes`] bounds.
     bytes: usize,
     in_flight: HashMap<MessageId, Entry>,
     /// The ids of `in_flight` in arrival order, so the oldest is what a bound takes.
@@ -412,13 +435,19 @@ impl State {
         // A forwarded chunk is the second hop and there is no third (D11), so its index is left
         // clear: the copy that arrives clear afterwards is the one this host owes its region.
         let forward = !forwarded && entry.forwarded.set(chunk.index);
-        entry.saw(from, forwarded);
+        if entry.saw(from, forwarded) {
+            let cost = SENDER_OVERHEAD_BYTES + from.0.len();
+            entry.bytes += cost;
+            self.bytes += cost;
+        }
         if !entry.received.set(chunk.index) {
+            self.trim_bytes();
             return Outcome::Duplicate { forward };
         }
         entry.chunks.push((chunk.index, chunk.data.clone()));
-        entry.bytes += chunk.data.len();
-        self.bytes += chunk.data.len();
+        let cost = chunk.data.len() + CHUNK_OVERHEAD_BYTES;
+        entry.bytes += cost;
+        self.bytes += cost;
 
         match self.finished(&chunk.msg_id, topic, forward) {
             Some(outcome) => outcome,
@@ -481,9 +510,11 @@ impl State {
         }
     }
 
-    /// Drops the oldest entries until the chunk bytes held are back inside the bound. A single
-    /// message can never pass it on its own: [`MAX_BYTES`] is more than three times what the
-    /// longest message the overlay carries takes.
+    /// Drops the oldest entries until what is charged is back inside the bound. [`MAX_BYTES`] is
+    /// about three times what the longest message is charged when it was cut at the shipped
+    /// chunk size. A hostile split, 65535 chunks of 512 bytes for one, can pass the cap on its
+    /// own, and then it goes with everything older than it, which is the right answer for a
+    /// message no honest sender cut.
     fn trim_bytes(&mut self) {
         while self.bytes > self.cfg.max_bytes {
             if !self.drop_oldest(Evicted::MaxBytes) {
@@ -529,9 +560,10 @@ impl State {
     }
 }
 
-/// One held chunk: the index its header carried and its bytes. The memory budget prices a held
-/// chunk by this type's size, so the entry's storage and the budget cannot drift apart.
-pub(crate) type HeldChunk = (u16, Bytes);
+/// One held chunk: the index its header carried and its bytes. [`CHUNK_OVERHEAD_BYTES`] is
+/// priced from this type's size, so the entry's storage and what the cap charges for it cannot
+/// drift apart.
+type HeldChunk = (u16, Bytes);
 
 /// One message being collected.
 struct Entry {
@@ -571,15 +603,17 @@ impl Entry {
 
     /// Records that `from` has a chunk of this message, which is what repair reads (D23). A peer
     /// that sends a second chunk under the same flag is already on the list, so the list is as
-    /// long as the peers that have written, not as the chunks they wrote.
-    fn saw(&mut self, from: &Hostname, forwarded: bool) {
-        if !self
+    /// long as the peers that have written, not as the chunks they wrote. Answers whether it
+    /// added one, which is what the caller charges.
+    fn saw(&mut self, from: &Hostname, forwarded: bool) -> bool {
+        let new = !self
             .senders
             .iter()
-            .any(|(peer, flag)| peer == from && *flag == forwarded)
-        {
+            .any(|(peer, flag)| peer == from && *flag == forwarded);
+        if new {
             self.senders.push((from.clone(), forwarded));
         }
+        new
     }
 
     /// The peer this message is counted against: the first to send a clear chunk, which is the
@@ -632,6 +666,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::config::Config;
     use crate::rs::{self, Params};
     use crate::topic::Topic;
 
@@ -1085,12 +1120,13 @@ mod tests {
 
     /// The byte bound, for a host holding more chunks than it has room for. A slot brings one
     /// block and 128 columns, so the count bound alone would let a burst of large messages take
-    /// far more memory than the sum of the bounds allows (§10).
+    /// far more memory than the sum of the bounds allows (§10). The cap is exactly what two
+    /// one-chunk entries are charged, so the third is the one that passes it.
     #[test]
     fn max_bytes_evicts_when_buffered_bytes_exceed_the_bound() {
         let evictions = Arc::new(Evictions::default());
         let reassembler = Reassembler::new(ReassembleConfig {
-            max_bytes: 16,
+            max_bytes: 2 * one_chunk_entry(),
             ..ReassembleConfig::default()
         })
         .with_stats(evictions.clone());
@@ -1109,6 +1145,173 @@ mod tests {
             Outcome::Stored { forward: true },
             "the oldest entry should have gone"
         );
+    }
+
+    /// What `store` charges for one sender on an entry's list.
+    fn sender_cost(peer: &Hostname) -> usize {
+        SENDER_OVERHEAD_BYTES + peer.0.len()
+    }
+
+    /// What an entry holding one [`chunk`] from [`host`] is charged.
+    fn one_chunk_entry() -> usize {
+        8 + CHUNK_OVERHEAD_BYTES + sender_cost(&host())
+    }
+
+    /// MD-11: a roster peer cutting 2-byte chunks pays each one's bookkeeping, so the default
+    /// 32 MiB cap holds about 316 thousand of them rather than 16.8 million.
+    ///
+    /// What this bounds is the count and the reassembler's own sum. For chunks that arrive one
+    /// per `CHUNK` frame, a stored 2-byte chunk costs at most 144 bytes of heap: the 80 of its
+    /// slot with the `Vec`'s doubling, the 24 of the frame's `bytes::Shared`, and the 40-byte
+    /// frame its zero-copy view keeps alive, which is about 1.4 times the cap. For chunks cut
+    /// from a shared frame, a `REPAIR_RESP` carrying many, it bounds nothing: one held chunk
+    /// keeps the whole frame, up to 10 MiB, until T-131 copies on store.
+    #[test]
+    fn a_flood_of_two_byte_chunks_is_charged_its_bookkeeping() {
+        let max_bytes = 1024 * 1024;
+        let reassembler = Reassembler::new(ReassembleConfig {
+            max_bytes,
+            ..ReassembleConfig::default()
+        });
+        let now = Instant::now();
+        let k = u16::MAX;
+        let most = max_bytes / (2 + CHUNK_OVERHEAD_BYTES);
+
+        // Each message stops one index short so none completes and everything sent is held.
+        // Counting payload alone, eight of them fit under the cap and the ninth passes it.
+        for msg_id in 0..9 {
+            for index in 0..k - 1 {
+                let flood = Chunk {
+                    msg_id: MessageId([msg_id; 20]),
+                    topic_id: 1,
+                    k,
+                    m: 0,
+                    index,
+                    total_len: u32::from(k) * 2,
+                    data: Bytes::from_static(b"ab"),
+                };
+                on(&reassembler, &flood, false, now);
+
+                let state = reassembler.state();
+                let held: usize = state.in_flight.values().map(|e| e.chunks.len()).sum();
+                // Every chunk is 2 bytes, so the sum over held chunks is a product. Walking the
+                // chunks after each one would make this test quadratic.
+                let senders: usize = state
+                    .in_flight
+                    .values()
+                    .flat_map(|entry| &entry.senders)
+                    .map(|(peer, _)| sender_cost(peer))
+                    .sum();
+                let charged = held * (2 + CHUNK_OVERHEAD_BYTES) + senders;
+                assert!(
+                    state.bytes <= max_bytes,
+                    "{} bytes charged past the {max_bytes} cap",
+                    state.bytes
+                );
+                assert_eq!(state.bytes, charged, "message {msg_id}, index {index}");
+                assert!(
+                    held <= most,
+                    "{held} chunks held, the cap allows {most} (message {msg_id}, index {index})"
+                );
+            }
+        }
+    }
+
+    /// A sender is charged once per flag it writes under, which is how often it goes on the
+    /// list, so a peer sending a hundred chunks of one message pays for its name once (D23).
+    #[test]
+    fn a_new_sender_is_charged_and_a_repeat_is_not() {
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        let origin = host();
+        let sibling = Hostname("bn-sibling".to_owned());
+        let bytes = || reassembler.state().bytes;
+        let chunk_cost = 8 + CHUNK_OVERHEAD_BYTES;
+
+        reassembler.on_chunk(&chunk(1, 0, 8, 1), &block(), &origin, false, now);
+        assert_eq!(bytes(), chunk_cost + sender_cost(&origin), "a first sender");
+
+        let before = bytes();
+        reassembler.on_chunk(&chunk(1, 1, 8, 1), &block(), &origin, false, now);
+        assert_eq!(
+            bytes() - before,
+            chunk_cost,
+            "the same sender and flag again"
+        );
+
+        let before = bytes();
+        reassembler.on_chunk(&chunk(1, 2, 8, 1), &block(), &origin, true, now);
+        assert_eq!(
+            bytes() - before,
+            chunk_cost + sender_cost(&origin),
+            "the same sender under the other flag is a second entry"
+        );
+
+        let before = bytes();
+        reassembler.on_chunk(&chunk(1, 3, 8, 1), &block(), &sibling, false, now);
+        assert_eq!(
+            bytes() - before,
+            chunk_cost + sender_cost(&sibling),
+            "a new sender"
+        );
+    }
+
+    /// A duplicate from a peer not yet on the list stores no bytes but grows the list, so that
+    /// path is held to the cap as well. The cap fits two one-chunk entries exactly, and the
+    /// newer one's duplicate from a second peer is what takes the older one away.
+    #[test]
+    fn a_duplicate_from_a_new_sender_is_trimmed() {
+        let evictions = Arc::new(Evictions::default());
+        let reassembler = Reassembler::new(ReassembleConfig {
+            max_bytes: 2 * one_chunk_entry(),
+            ..ReassembleConfig::default()
+        })
+        .with_stats(evictions.clone());
+        let now = Instant::now();
+        for msg_id in 1..=2 {
+            on(&reassembler, &chunk(msg_id, 0, 4, 1), false, now);
+        }
+        let sibling = Hostname("bn-02".to_owned());
+
+        let outcome = reassembler.on_chunk(&chunk(2, 0, 4, 1), &block(), &sibling, false, now);
+
+        assert_eq!(outcome, Outcome::Duplicate { forward: false });
+        assert_eq!(evictions.seen(), [Evicted::MaxBytes]);
+        assert_eq!(reassembler.in_flight(), 1);
+        assert_eq!(
+            reassembler.state().bytes,
+            one_chunk_entry() + sender_cost(&sibling)
+        );
+    }
+
+    /// A Gloas envelope is bounded only by `MAX_PAYLOAD_SIZE` (MD-08), and at the shipped split
+    /// it is 5120 data chunks of 2048 bytes. Held incomplete, it is fewer chunks than that, so
+    /// pricing all 5120 with their overhead, and a hundred senders with 32-byte names once each,
+    /// is the most it is charged striped over a region of a hundred hosts. The cap holds three
+    /// of them, with 470,912 bytes to spare on a 64-bit host.
+    #[test]
+    fn three_max_size_envelopes_fit_under_max_bytes() {
+        let large = &Config::default().classes.large;
+        let split = Params::for_len(MAX_PAYLOAD_BYTES, large.chunk_bytes, large.parity_ratio)
+            .expect("the shipped split");
+        let senders = 100 * (SENDER_OVERHEAD_BYTES + 32);
+        let envelope = usize::from(split.k) * (split.chunk_bytes + CHUNK_OVERHEAD_BYTES) + senders;
+
+        assert!(
+            3 * envelope <= MAX_BYTES,
+            "three envelopes are charged {} bytes, the cap is {MAX_BYTES}",
+            3 * envelope
+        );
+        assert_eq!(MAX_BYTES - 3 * envelope, 470_912);
+    }
+
+    /// The overheads MD-11 was decided on, for a 64-bit host: 104 bytes a chunk, which puts
+    /// 316,551 two-byte chunks under the default cap, and 64 bytes a sender beside its name.
+    #[test]
+    fn the_overheads_are_md11s_64_bit_numbers() {
+        assert_eq!(CHUNK_OVERHEAD_BYTES, 104);
+        assert_eq!(SENDER_OVERHEAD_BYTES, 64);
+        assert_eq!(MAX_BYTES / (2 + CHUNK_OVERHEAD_BYTES), 316_551);
     }
 
     /// What T-082 asks for when a message has not finished in time (D23, D24): the indices no

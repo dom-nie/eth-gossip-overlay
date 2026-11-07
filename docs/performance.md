@@ -27,19 +27,19 @@ At the shipped defaults, a roster of 200 hosts and the unit's `MemoryMax=1G`, wh
 | `seen_cache` | 12800000 | 12.2 |
 | `recent_store` | 27238400 | 26.0 |
 | `publish_queue` | 35651584 | 34.0 |
-| `reassembler` | 36962304 | 35.2 |
+| `reassembler` | 35651584 | 34.0 |
 | `peer_send_lanes` | 128241664 | 122.3 |
 | `peer_topic_tables` | 130416640 | 124.4 |
 | `gossipsub` | 34132480 | 32.6 |
 | `by_root_cache` | 0 | 0.0 |
-| `quic_receive_windows` | 451282449 | 430.4 |
-| **Sum of the bounds** | 856725521 | 817.0 |
-| **Plus 25% headroom** | 1070906901 | 1021.3 |
+| `quic_receive_windows` | 452586695 | 431.6 |
+| **Sum of the bounds** | 856719047 | 817.0 |
+| **Plus 25% headroom** | 1070898808 | 1021.3 |
 | `MemoryMax` | 1073741824 | 1024.0 |
 
 <!-- end generated -->
 
-The sum sits on the usable line until the floor binds: at these defaults 321 hosts is the
+The sum sits on the usable line until the floor binds: at these defaults 322 hosts is the
 largest roster that fits, and one more goes over and the sidecar warns. Any other row that grows
 brings that forward.
 
@@ -57,8 +57,8 @@ and column lookups out of it. One slot above is a 200 KB block and 128 columns o
 An ignored test in `crates/overlay-core/src/recent.rs` fills a sixteen-slot store with that
 traffic and lands on the bound to the byte; the maps indexing it add about 300 bytes an entry.
 
-At 200 hosts the window goes from 2.16 MiB with the cache off to 1.88 MiB at the shipped 16
-slots. 49 slots is the most that fits; from 50 the window is at the 1 MiB floor. Lighthouse walks
+At 200 hosts the window goes from 2.17 MiB with the cache off to 1.88 MiB at the shipped 16
+slots. 50 slots is the most that fits; from 51 the window is at the 1 MiB floor. Lighthouse walks
 only a few slots back for a missing parent, and the 64 slots §5.8 sketched would be a 321 MB row
 and do not fit.
 
