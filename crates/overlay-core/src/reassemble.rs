@@ -1111,6 +1111,71 @@ mod tests {
         );
     }
 
+    /// What `store` charges for one sender on an entry's list.
+    fn sender_cost(peer: &Hostname) -> usize {
+        SENDER_OVERHEAD_BYTES + peer.0.len()
+    }
+
+    /// MD-11: a roster peer cutting 2-byte chunks pays each one's bookkeeping, so the default
+    /// 32 MiB cap holds about 316 thousand of them rather than 16.8 million.
+    ///
+    /// What this bounds is the count and the reassembler's own sum. For chunks that arrive one
+    /// per `CHUNK` frame, a stored 2-byte chunk costs at most 144 bytes of heap: the 80 of its
+    /// slot with the `Vec`'s doubling, the 24 of the frame's `bytes::Shared`, and the 40-byte
+    /// frame its zero-copy view keeps alive, which is about 1.4 times the cap. For chunks cut
+    /// from a shared frame, a `REPAIR_RESP` carrying many, it bounds nothing: one held chunk
+    /// keeps the whole frame, up to 10 MiB, until T-131 copies on store.
+    #[test]
+    fn a_flood_of_two_byte_chunks_is_charged_its_bookkeeping() {
+        let max_bytes = 1024 * 1024;
+        let reassembler = Reassembler::new(ReassembleConfig {
+            max_bytes,
+            ..ReassembleConfig::default()
+        });
+        let now = Instant::now();
+        let k = u16::MAX;
+        let most = max_bytes / (2 + CHUNK_OVERHEAD_BYTES);
+
+        // Each message stops one index short so none completes and everything sent is held.
+        // Counting payload alone, eight of them fit under the cap and the ninth passes it.
+        for msg_id in 0..9 {
+            for index in 0..k - 1 {
+                let flood = Chunk {
+                    msg_id: MessageId([msg_id; 20]),
+                    topic_id: 1,
+                    k,
+                    m: 0,
+                    index,
+                    total_len: u32::from(k) * 2,
+                    data: Bytes::from_static(b"ab"),
+                };
+                on(&reassembler, &flood, false, now);
+
+                let state = reassembler.state();
+                let held: usize = state.in_flight.values().map(|e| e.chunks.len()).sum();
+                // Every chunk is 2 bytes, so the sum over held chunks is a product. Walking the
+                // chunks after each one would make this test quadratic.
+                let senders: usize = state
+                    .in_flight
+                    .values()
+                    .flat_map(|entry| &entry.senders)
+                    .map(|(peer, _)| sender_cost(peer))
+                    .sum();
+                let charged = held * (2 + CHUNK_OVERHEAD_BYTES) + senders;
+                assert!(
+                    state.bytes <= max_bytes,
+                    "{} bytes charged past the {max_bytes} cap",
+                    state.bytes
+                );
+                assert_eq!(state.bytes, charged, "message {msg_id}, index {index}");
+                assert!(
+                    held <= most,
+                    "{held} chunks held, the cap allows {most} (message {msg_id}, index {index})"
+                );
+            }
+        }
+    }
+
     /// What T-082 asks for when a message has not finished in time (D23, D24): the indices no
     /// chunk arrived for, ascending so the data ones come first, every peer that sent one with
     /// the flag its chunk carried in arrival order, and the split and count a request works out
