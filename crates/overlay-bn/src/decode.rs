@@ -273,7 +273,7 @@ mod tests {
     use ssz::{Decode, Encode};
     use types::{
         BeaconBlock, BeaconBlockFulu, ChainSpec, DataColumnSidecar, DataColumnSidecarFulu,
-        DataColumnSidecarGloas, EmptyBlock, ForkName,
+        DataColumnSidecarGloas, EmptyBlock, ForkName, KzgCommitment,
     };
 
     use super::*;
@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn block_header_decodes_slot_and_root_from_compressed_payload() {
         for (block, wire) in [base_block(4_242), fulu_block(4_242)] {
-            let (slot, root) = block_header(&snappy(&wire)).unwrap();
+            let (slot, root, _) = block_header(&snappy(&wire)).unwrap();
 
             assert_eq!(slot, 4_242);
             assert_eq!(root, bytes32(block.canonical_root()));
@@ -556,10 +556,41 @@ mod tests {
             SignedBeaconBlock::<MainnetEthSpec>::any_from_ssz_bytes(SEPOLIA_GLOAS_BLOCK).unwrap();
         assert_eq!(block.fork_name_unchecked(), ForkName::Gloas);
 
-        let (slot, root) = block_header(&snappy(SEPOLIA_GLOAS_BLOCK)).unwrap();
+        let (slot, root, _) = block_header(&snappy(SEPOLIA_GLOAS_BLOCK)).unwrap();
 
         assert_eq!(slot, 11_511_776);
         assert_eq!(root, bytes32(SEPOLIA_GLOAS_ROOT.parse().unwrap()));
+    }
+
+    /// A block's blob count is what tells custody that no column of it will ever exist. Before
+    /// Gloas the commitments are in the body; from Gloas on the body has none and they are in
+    /// the builder's bid, which the block carries, so the count is known at the block either way.
+    #[test]
+    fn block_header_reads_the_blob_commitment_count() {
+        let spec = ChainSpec::mainnet();
+        let mut fulu = BeaconBlockFulu::<MainnetEthSpec>::empty(&spec);
+        for _ in 0..2 {
+            fulu.body
+                .blob_kzg_commitments
+                .push(KzgCommitment::empty_for_testing())
+                .unwrap();
+        }
+        let (_, wire) = signed_block(BeaconBlock::Fulu(fulu), 4_242);
+
+        assert_eq!(block_header(&snappy(&wire)).unwrap().2, 2);
+
+        let gloas =
+            SignedBeaconBlock::<MainnetEthSpec>::any_from_ssz_bytes(SEPOLIA_GLOAS_BLOCK).unwrap();
+        let in_bid = gloas
+            .message()
+            .body()
+            .signed_execution_payload_bid_gloas()
+            .unwrap()
+            .message
+            .blob_kzg_commitments
+            .len();
+        assert_ne!(in_bid, 0, "the fixture's bid carries commitments");
+        assert_eq!(block_header(&snappy(SEPOLIA_GLOAS_BLOCK)).unwrap().2, in_bid);
     }
 
     /// What `cargo test -p overlay-bn drift` runs from this module: the byte offsets this
