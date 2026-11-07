@@ -69,13 +69,13 @@ pub const INCOMPLETE_TTL: Duration = Duration::from_secs(4);
 
 /// What one stored chunk costs [`ReassembleConfig::max_bytes`] beside its payload: its
 /// `(index, Bytes)` slot in the entry's chunk list, twice over for the room a growing `Vec`
-/// leaves, and the `bytes::Shared` header the frame buffer is promoted to when the codec cuts a
-/// view out of it. 104 bytes on a 64-bit host.
+/// leaves, and up to 32 bytes the allocator rounds the chunk's own copy up by. 112 bytes on a
+/// 64-bit host.
 ///
 /// Without it a peer cutting 2-byte chunks would be charged 2 bytes for every hundred or so it
-/// costs (MD-11). The chunk is still a view into the frame it arrived in, so the rest of that
-/// frame stays alive and is not counted here: T-131 copies on store and closes that.
-pub const CHUNK_OVERHEAD_BYTES: usize = 2 * size_of::<HeldChunk>() + 3 * size_of::<usize>();
+/// costs (MD-11). The copy is a `Bytes` whose length is its capacity, so it carries no
+/// `bytes::Shared` header to price.
+pub const CHUNK_OVERHEAD_BYTES: usize = 2 * size_of::<HeldChunk>() + 32;
 
 /// What one entry on a message's sender list costs beside the name's own bytes, twice over for
 /// the `Vec`'s growth. Charged rather than capped, because repair asks every sender in turn
