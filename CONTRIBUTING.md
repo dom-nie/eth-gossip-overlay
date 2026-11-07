@@ -75,7 +75,7 @@ git push origin main v0.2.0           # the tag is what builds the release
 
 `release.sh` refuses a version that is already tagged, a working tree that is not clean, and an `Unreleased` section whose `Protocol:` line is missing or claims a major the build does not speak. It bumps the workspace version and the image label, moves `Unreleased` under the new version with today's date, leaves an empty `Unreleased` behind, commits and tags. Nothing is pushed for you.
 
-Pushing the tag runs `.github/workflows/release.yml`: both Linux targets on a Debian oldstable builder, a tarball per target with the two binaries, the licence and `deploy/`, `SHA256SUMS`, a provenance attestation, the container image on `ghcr.io` and a GitHub release whose notes are the changelog section. Running that workflow by hand instead is a dry run: it builds and checksums, and publishes nothing.
+Pushing the tag runs `.github/workflows/release.yml`: both Linux targets on a Debian 11 (bullseye) builder, a tarball per target with the two binaries, the licence and `deploy/`, `SHA256SUMS`, a provenance attestation, the container image on `ghcr.io` and a GitHub release whose notes are the changelog section. Running that workflow by hand instead is a dry run: it builds and checksums, and publishes nothing.
 
 ## Developer Certificate of Origin
 
