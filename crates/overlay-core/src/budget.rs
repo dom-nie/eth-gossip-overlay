@@ -158,8 +158,9 @@ impl FanoutBudget {
     }
 
     /// A budget whose two allowances are each `capacity` bytes refilling at `per_second`, for a
-    /// caller that has the two numbers already. [`default_for`](Self::default_for) is what the sidecar wires; a test
-    /// reaches the bound with a bucket it can empty in one batch instead of a slot's traffic.
+    /// caller that has the two numbers already. [`default_for`](Self::default_for) is what the
+    /// sidecar wires; a test reaches the bound with a bucket it can empty in one batch instead of
+    /// a slot's traffic.
     pub fn new(per_second: u64, capacity: u64, now: Instant) -> Self {
         Self {
             general: Allowance::new(per_second, capacity, now),
