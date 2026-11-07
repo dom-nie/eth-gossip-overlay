@@ -239,7 +239,8 @@ impl Arrivals {
         self.file(block_root, source, None);
     }
 
-    /// [`arrived`](Self::arrived), with the blob count the block's bytes carried.
+    /// [`arrived`](Self::arrived), with the blob count the block's bytes carried. A record
+    /// filed without a count takes one from the first arrival that has it.
     fn file(&self, block_root: [u8; 32], source: &Source<'_>, blobs: Option<usize>) {
         let arrival = Arrival {
             at: self.clock.wall(),
@@ -253,7 +254,8 @@ impl Arrivals {
         };
         let mut seen = self.seen();
         self.prune(&mut seen, arrival.seen);
-        seen.entry(block_root).or_insert(arrival);
+        let record = seen.entry(block_root).or_insert(arrival);
+        record.blobs = record.blobs.or(blobs);
     }
 
     /// Files what a receive path just took in, if it was a block.
