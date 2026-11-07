@@ -444,7 +444,9 @@ impl State {
             self.trim_bytes();
             return Outcome::Duplicate { forward };
         }
-        entry.chunks.push((chunk.index, chunk.data.clone()));
+        entry
+            .chunks
+            .push((chunk.index, Bytes::copy_from_slice(&chunk.data)));
         let cost = chunk.data.len() + CHUNK_OVERHEAD_BYTES;
         entry.bytes += cost;
         self.bytes += cost;
