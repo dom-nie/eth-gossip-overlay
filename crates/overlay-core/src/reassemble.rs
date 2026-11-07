@@ -377,6 +377,11 @@ fn indices(params: Params) -> usize {
     usize::from(params.k) + usize::from(params.m)
 }
 
+/// How many 64-bit words each of an entry's index bitmaps takes for the split.
+fn bitmap_words(params: Params) -> usize {
+    indices(params).div_ceil(64)
+}
+
 /// Whether a split rebuilt from a header is one a message could have been cut into and the codec
 /// can put back together. The encoder's own limits live in someone else's crate and it panics
 /// rather than refusing, so a header off the wire is checked against them before it is stored.
@@ -394,7 +399,7 @@ fn usable(params: Params) -> bool {
 /// Everything one host holds about messages it has not finished with.
 struct State {
     cfg: ReassembleConfig,
-    /// What every entry's chunks and senders are charged, which is what
+    /// What every entry's chunks, senders and bitmaps are charged, which is what
     /// [`ReassembleConfig::max_bytes`] bounds.
     bytes: usize,
     in_flight: HashMap<MessageId, Entry>,
@@ -407,7 +412,8 @@ struct State {
 
 impl State {
     /// Opens an entry for `msg_id`, which may take the oldest one away: that is the bound on how
-    /// many messages a peer can make this host hold.
+    /// many messages a peer can make this host hold. Its two bitmaps are sized for the split
+    /// here and never grow, so they are charged here too.
     fn open(
         &mut self,
         msg_id: MessageId,
@@ -421,9 +427,11 @@ impl State {
                 break;
             }
         }
+        let mut entry = Entry::new(topic_id, kind, params, now);
+        entry.bytes = 2 * size_of::<u64>() * bitmap_words(params);
+        self.bytes += entry.bytes;
         self.order.push_back(msg_id);
-        self.in_flight
-            .insert(msg_id, Entry::new(topic_id, kind, params, now));
+        self.in_flight.insert(msg_id, entry);
     }
 
     /// Records one chunk against an entry that is already open, and answers what its arrival
@@ -597,8 +605,8 @@ impl Entry {
             first_chunk_at,
             chunks: Vec::new(),
             bytes: 0,
-            received: Bits::default(),
-            forwarded: Bits::default(),
+            received: Bits(vec![0; bitmap_words(params)]),
+            forwarded: Bits(vec![0; bitmap_words(params)]),
             senders: Vec::new(),
         }
     }
@@ -637,21 +645,20 @@ impl Entry {
     }
 }
 
-/// A set of one message's indices, one bit each.
-#[derive(Default)]
+/// A set of one message's indices, one bit each, as long as the split from the start.
 struct Bits(Vec<u64>);
 
 impl Bits {
     /// Sets the bit for `index` and reports whether it was this call that set it. The caller has
-    /// already refused an index the message has no chunk for, which is what keeps this from
-    /// growing past the split it belongs to.
+    /// already refused any index outside the split, which is what this was sized for, so the
+    /// word is always there and this never grows.
     fn set(&mut self, index: u16) -> bool {
-        let (word, bit) = (usize::from(index) / 64, usize::from(index) % 64);
-        if self.0.len() <= word {
-            self.0.resize(word + 1, 0);
-        }
-        let claimed = self.0[word] & (1 << bit) == 0;
-        self.0[word] |= 1 << bit;
+        let Some(word) = self.0.get_mut(usize::from(index) / 64) else {
+            return false;
+        };
+        let bit = 1 << (index % 64);
+        let claimed = *word & bit == 0;
+        *word |= bit;
         claimed
     }
 
@@ -1157,12 +1164,6 @@ mod tests {
         let reassembler = Reassembler::new(ReassembleConfig::default());
         let now = Instant::now();
         let first = chunk(1, 0, 150, 50);
-        let split = Params {
-            k: first.k,
-            m: first.m,
-            chunk_bytes: first.data.len(),
-            total_len: first.total_len,
-        };
 
         on(&reassembler, &first, false, now);
 
@@ -1170,7 +1171,7 @@ mod tests {
             let state = reassembler.state();
             assert_eq!(
                 state.bytes,
-                8 + CHUNK_OVERHEAD_BYTES + sender_cost(&host()) + bitmaps(split)
+                8 + CHUNK_OVERHEAD_BYTES + sender_cost(&host()) + bitmaps(split(&first))
             );
             let entry = &state.in_flight[&first.msg_id];
             assert_eq!(entry.received.0.len(), 4);
@@ -1227,9 +1228,19 @@ mod tests {
         2 * 8 * (usize::from(params.k) + usize::from(params.m)).div_ceil(64)
     }
 
-    /// What an entry holding one [`chunk`] from [`host`] is charged.
+    /// The split a chunk's header describes, as the entry it opens records it.
+    fn split(chunk: &Chunk) -> Params {
+        Params {
+            k: chunk.k,
+            m: chunk.m,
+            chunk_bytes: chunk.data.len(),
+            total_len: chunk.total_len,
+        }
+    }
+
+    /// What an entry holding one [`chunk`] of a 4 + 1 split from [`host`] is charged.
     fn one_chunk_entry() -> usize {
-        8 + CHUNK_OVERHEAD_BYTES + sender_cost(&host())
+        8 + CHUNK_OVERHEAD_BYTES + sender_cost(&host()) + bitmaps(split(&chunk(1, 0, 4, 1)))
     }
 
     /// MD-11: a roster peer cutting 2-byte chunks pays each one's bookkeeping, so the default
@@ -1308,8 +1319,13 @@ mod tests {
         let bytes = || reassembler.state().bytes;
         let chunk_cost = 8 + CHUNK_OVERHEAD_BYTES;
 
-        reassembler.on_chunk(&chunk(1, 0, 8, 1), &block(), &origin, false, now);
-        assert_eq!(bytes(), chunk_cost + sender_cost(&origin), "a first sender");
+        let first = chunk(1, 0, 8, 1);
+        reassembler.on_chunk(&first, &block(), &origin, false, now);
+        assert_eq!(
+            bytes(),
+            bitmaps(split(&first)) + chunk_cost + sender_cost(&origin),
+            "a first sender"
+        );
 
         let before = bytes();
         reassembler.on_chunk(&chunk(1, 1, 8, 1), &block(), &origin, false, now);
