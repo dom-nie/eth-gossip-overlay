@@ -76,6 +76,7 @@ pub enum Charge {
 #[derive(Clone, Debug)]
 pub struct FanoutBudget {
     bucket: TokenBucket,
+    envelope: TokenBucket,
     violation_since: Option<Instant>,
 }
 
@@ -113,6 +114,7 @@ impl FanoutBudget {
     pub fn new(per_second: u64, capacity: u64, now: Instant) -> Self {
         Self {
             bucket: TokenBucket::new(per_second, capacity, now),
+            envelope: TokenBucket::new(per_second, capacity, now),
             violation_since: None,
         }
     }
@@ -122,8 +124,12 @@ impl FanoutBudget {
     /// `kind` is the `fanout_suppressed_total{peer, kind}` label the caller counts a refusal
     /// under. One bucket covers every kind: the budget is what one peer may make this host fan
     /// out, however it asked.
-    pub fn charge(&mut self, _kind: FanoutKind, bytes: usize, now: Instant) -> Charge {
-        if self.bucket.try_take(bytes as u64, now) {
+    pub fn charge(&mut self, kind: FanoutKind, bytes: usize, now: Instant) -> Charge {
+        let bucket = match kind {
+            FanoutKind::Envelope => &mut self.envelope,
+            FanoutKind::Relay | FanoutKind::Chunk => &mut self.bucket,
+        };
+        if bucket.try_take(bytes as u64, now) {
             self.violation_since = None;
             return Charge::Allowed;
         }
