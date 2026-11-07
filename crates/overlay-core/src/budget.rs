@@ -822,6 +822,24 @@ mod tests {
         );
     }
 
+    /// The envelope allowance is sized like the other one, over the envelope's estimate instead
+    /// of the block's: 4 x 11,534,336 bytes over 200 hosts is 230,686 bytes, which is 113 whole
+    /// 2 KiB chunks. It is a bound of its own, not a door into the other allowance.
+    #[test]
+    fn the_envelope_allowance_is_its_own_bound() {
+        let slot_start = Instant::now();
+        let mut budget = FanoutBudget::default_for(200, 2048, 12, slot_start);
+
+        assert_eq!(
+            budget.charge(FanoutKind::Envelope, 113 * 2048, slot_start),
+            Charge::Allowed
+        );
+        assert_eq!(
+            budget.charge(FanoutKind::Envelope, 1, slot_start),
+            Charge::Suppressed
+        );
+    }
+
     /// A slot's traffic in one burst goes through, and the byte after it does not until the
     /// bucket has refilled. The numbers are the arithmetic in [`FanoutBudget::default_for`] for
     /// a 200-host fleet at T-071's chunk size and mainnet's slot: 4 x 6 MiB over 200 hosts is
