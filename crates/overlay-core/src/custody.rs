@@ -1036,6 +1036,35 @@ mod tests {
         assert_eq!(gap_roots(&custody, &clock), with_blobs);
     }
 
+    /// One blob is enough for every column to exist, because a column is one cell of every
+    /// blob, so a block with any blobs is owed its whole expected set as before.
+    #[test]
+    fn a_block_with_one_blob_still_opens_an_entry() {
+        let clock = FakeClock::new();
+        let arrivals = arrivals(&clock);
+        let custody = shared(mainnet(), &arrivals);
+
+        file_block(&arrivals, ROOT, 1);
+        custody.on_block(1, ROOT, clock.now());
+        clock.advance(DEADLINE);
+
+        assert_eq!(gap_roots(&custody, &clock), [ROOT]);
+    }
+
+    /// A block whose bytes never went past this host has no known count, which is how every
+    /// block was tracked before counts existed, and it is tracked the same way.
+    #[test]
+    fn a_block_whose_blob_count_is_unknown_is_tracked_as_before() {
+        let clock = FakeClock::new();
+        let arrivals = arrivals(&clock);
+        let custody = shared(mainnet(), &arrivals);
+
+        custody.on_block(1, ROOT, clock.now());
+        clock.advance(DEADLINE);
+
+        assert_eq!(gap_roots(&custody, &clock), [ROOT]);
+    }
+
     /// Counts the two series column repair adds, which are zero on an honest fleet (§12).
     #[derive(Default)]
     struct CountingColumns(AtomicU64);
