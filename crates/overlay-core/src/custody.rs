@@ -306,6 +306,15 @@ impl CustodyTracker {
         gaps.into_iter().map(|(_, gap)| gap).collect()
     }
 
+    /// Drops every block `blobless` says commits to no blobs, for a count learned after the
+    /// block's event opened its entry (T-127). Such a block has no columns, so whatever its
+    /// entry says, nothing in it can be owed or held.
+    fn drop_blobless(&mut self, blobless: impl Fn([u8; 32]) -> bool) {
+        self.blocks.retain(|(_, root), _| !blobless(*root));
+        let blocks = &self.blocks;
+        self.order.retain(|key| blocks.contains_key(key));
+    }
+
     /// The entry for `key`, opening one if this host has none.
     fn open(&mut self, key: BlockKey) -> &mut Block {
         let columns = self.columns;
@@ -458,9 +467,18 @@ impl SharedCustody {
         self.lock().tracker.forget();
     }
 
-    /// [`CustodyTracker::missing_past_deadline`] under the lock.
+    /// [`CustodyTracker::missing_past_deadline`] under the lock, after dropping every block
+    /// whose count the receive paths have since learned is zero: the node usually sends
+    /// `block_gossip` before it forwards the block, so [`on_block`](Self::on_block) seldom knows
+    /// it, and this runs on every repair tick, well before the deadline matters.
     pub fn gaps(&self, deadline: Duration, now: Instant, in_flight: &BitSet) -> Vec<ColumnGap> {
-        self.lock()
+        let mut state = self.lock();
+        // The arrivals lock is taken under this one and never the other way round: `on_block`
+        // reads its count before locking, and `Arrivals` never calls back in here.
+        state
+            .tracker
+            .drop_blobless(|root| self.0.arrivals.blobs(root) == Some(0));
+        state
             .tracker
             .missing_past_deadline(deadline, now, in_flight)
     }
