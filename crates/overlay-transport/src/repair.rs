@@ -86,7 +86,9 @@ async fn run(deps: Deps, deadline: watch::Receiver<Duration>, columns: watch::Re
         );
         // The columns the beacon node is short of, on the same tick and against the same live
         // view. What the tracker holds came from the node's own event stream, so this is the one
-        // read in the loop that no peer can influence (§6.4, MD-06).
+        // read in the loop that no peer can influence (§6.4, MD-06). The one number it also reads
+        // from the receive paths, a block's blob count, is bound to the node's root; the argument
+        // is on `Arrivals::blobs`.
         let wanted = match *columns.borrow() {
             false => Vec::new(),
             true => {
