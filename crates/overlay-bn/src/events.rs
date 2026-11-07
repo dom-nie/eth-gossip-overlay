@@ -426,6 +426,7 @@ mod tests {
     use std::time::Duration;
 
     use overlay_core::backoff::Backoff;
+    use overlay_core::custody::TRACKED_BLOCKS;
     use overlay_core::events::Source;
     use overlay_core::header::Header;
     use overlay_core::time::{Clock, FakeClock};
@@ -627,8 +628,10 @@ mod tests {
     }
 
     /// A block whose bytes went past the sidecar before its `block_gossip` event, as an overlay
-    /// delivery does, carries its blob count into the tracker: one with no blobs opens nothing,
-    /// and one beside it with blobs is tracked as before (T-127).
+    /// delivery does, carries its blob count into the tracker at the event: one with no blobs
+    /// opens nothing, so it takes none of the [`TRACKED_BLOCKS`] places from the blocks with
+    /// blobs before it (T-127). Reading the gaps would drop it either way; the place it would
+    /// have taken is what shows whether the event saw the count.
     #[test]
     fn a_blobless_block_gossip_event_opens_no_entry() {
         let clock = FakeClock::new();
@@ -640,22 +643,24 @@ mod tests {
             arrivals.clone(),
             Arc::new(()),
         );
-        for (byte, blobs) in [(0xaa, 0), (0xbb, 2)] {
+        let with_blobs: Vec<(u64, u8)> = (1..).zip(0xb1..).take(TRACKED_BLOCKS).collect();
+        let mut stream = String::new();
+        for (slot, byte, blobs) in with_blobs
+            .iter()
+            .map(|&(slot, byte)| (slot, byte, 2))
+            .chain([(9, 0xaa, 0)])
+        {
             arrivals.saw(
                 Some(Header::Block {
-                    slot: 9,
+                    slot,
                     root: [byte; 32],
                     blobs,
                 }),
                 &Source::Bn,
             );
+            stream.push_str(&gossip_frame(slot, &root(byte)));
         }
         let stats: Arc<dyn BlockEventStats> = Arc::new(());
-        let stream = format!(
-            "{}{}",
-            gossip_frame(9, &root(0xaa)),
-            gossip_frame(9, &root(0xbb))
-        );
 
         for event in Frames::default().feed(stream.as_bytes()) {
             apply(&event, &arrivals, &custody, &clock, &stats);
@@ -665,7 +670,10 @@ mod tests {
         let gaps = custody.gaps(Duration::ZERO, clock.now(), &none);
         assert_eq!(
             gaps.iter().map(|gap| gap.block_root).collect::<Vec<_>>(),
-            [[0xbb; 32]],
+            with_blobs
+                .iter()
+                .map(|&(_, byte)| [byte; 32])
+                .collect::<Vec<_>>(),
             "{gaps:?}"
         );
     }
