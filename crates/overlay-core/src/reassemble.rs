@@ -666,6 +666,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::config::Config;
     use crate::rs::{self, Params};
     use crate::topic::Topic;
 
@@ -1290,7 +1291,9 @@ mod tests {
     /// of them, with 470,912 bytes to spare on a 64-bit host.
     #[test]
     fn three_max_size_envelopes_fit_under_max_bytes() {
-        let split = Params::for_len(MAX_PAYLOAD_BYTES, 2048, 0.10).expect("the shipped split");
+        let large = &Config::default().classes.large;
+        let split = Params::for_len(MAX_PAYLOAD_BYTES, large.chunk_bytes, large.parity_ratio)
+            .expect("the shipped split");
         let senders = 100 * (SENDER_OVERHEAD_BYTES + 32);
         let envelope = usize::from(split.k) * (split.chunk_bytes + CHUNK_OVERHEAD_BYTES) + senders;
 
