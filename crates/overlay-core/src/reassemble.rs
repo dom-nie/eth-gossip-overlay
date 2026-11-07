@@ -1154,6 +1154,12 @@ mod tests {
         SENDER_OVERHEAD_BYTES + peer.0.len()
     }
 
+    /// What an entry's two index bitmaps are charged for `params`' split: a bit per index each,
+    /// in whole 64-bit words.
+    fn bitmaps(params: Params) -> usize {
+        2 * 8 * (usize::from(params.k) + usize::from(params.m)).div_ceil(64)
+    }
+
     /// What an entry holding one [`chunk`] from [`host`] is charged.
     fn one_chunk_entry() -> usize {
         8 + CHUNK_OVERHEAD_BYTES + sender_cost(&host())
@@ -1287,33 +1293,37 @@ mod tests {
     }
 
     /// A Gloas envelope is bounded only by `MAX_PAYLOAD_SIZE` (MD-08), and at the shipped split
-    /// it is 5120 data chunks of 2048 bytes. Held incomplete, it is fewer chunks than that, so
-    /// pricing all 5120 with their overhead, and a hundred senders with 32-byte names once each,
-    /// is the most it is charged striped over a region of a hundred hosts. The cap holds three
-    /// of them, with 470,912 bytes to spare on a 64-bit host.
+    /// it is 5120 data chunks of 2048 bytes and 512 parity. Held incomplete, it is fewer chunks
+    /// than that, so pricing all 5120 with their overhead, the two bitmaps over all 5632
+    /// indices, and a hundred senders with 32-byte names once each, is the most it is charged
+    /// striped over a region of a hundred hosts. The cap holds three of them, with 343,808 bytes
+    /// to spare on a 64-bit host.
     #[test]
     fn three_max_size_envelopes_fit_under_max_bytes() {
         let large = &Config::default().classes.large;
         let split = Params::for_len(MAX_PAYLOAD_BYTES, large.chunk_bytes, large.parity_ratio)
             .expect("the shipped split");
         let senders = 100 * (SENDER_OVERHEAD_BYTES + 32);
-        let envelope = usize::from(split.k) * (split.chunk_bytes + CHUNK_OVERHEAD_BYTES) + senders;
+        let envelope = usize::from(split.k) * (split.chunk_bytes + CHUNK_OVERHEAD_BYTES)
+            + bitmaps(split)
+            + senders;
 
         assert!(
             3 * envelope <= MAX_BYTES,
             "three envelopes are charged {} bytes, the cap is {MAX_BYTES}",
             3 * envelope
         );
-        assert_eq!(MAX_BYTES - 3 * envelope, 470_912);
+        assert_eq!(MAX_BYTES - 3 * envelope, 343_808);
     }
 
-    /// The overheads MD-11 was decided on, for a 64-bit host: 104 bytes a chunk, which puts
-    /// 316,551 two-byte chunks under the default cap, and 64 bytes a sender beside its name.
+    /// The overheads MD-11 was decided on, as T-131 left them, for a 64-bit host: 112 bytes a
+    /// chunk, which puts 294,337 two-byte chunks under the default cap, and 64 bytes a sender
+    /// beside its name.
     #[test]
     fn the_overheads_are_md11s_64_bit_numbers() {
-        assert_eq!(CHUNK_OVERHEAD_BYTES, 104);
+        assert_eq!(CHUNK_OVERHEAD_BYTES, 112);
         assert_eq!(SENDER_OVERHEAD_BYTES, 64);
-        assert_eq!(MAX_BYTES / (2 + CHUNK_OVERHEAD_BYTES), 316_551);
+        assert_eq!(MAX_BYTES / (2 + CHUNK_OVERHEAD_BYTES), 294_337);
     }
 
     /// What T-082 asks for when a message has not finished in time (D23, D24): the indices no
