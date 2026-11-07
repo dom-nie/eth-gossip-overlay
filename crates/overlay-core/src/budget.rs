@@ -679,6 +679,21 @@ mod tests {
         );
     }
 
+    /// The reassembler charges each chunk's slot and each sender inside `MAX_BYTES` (MD-11), so
+    /// the row is the cap and the per-entry slots and nothing else. It does not move with this
+    /// host's chunk size, because nothing holds a peer to it.
+    #[test]
+    fn reassembler_row_is_max_bytes_and_the_entry_slots() {
+        let wanted = reassemble::MAX_BYTES as u64
+            + reassemble::MAX_IN_FLIGHT as u64 * REASSEMBLY_ENTRY_BYTES;
+        let mut tiny = Config::default();
+        tiny.classes.large.chunk_bytes = 2;
+        let tiny = MemoryBudget::compute(&tiny, 200, MEMORY_MAX_DEFAULT, LANES);
+
+        assert_eq!(row(&budget(), "reassembler"), wanted);
+        assert_eq!(row(&tiny, "reassembler"), wanted, "at 2-byte chunks");
+    }
+
     /// The rows are what T-076's table grows from, so the sum has to be the rows and the total
     /// has to be the sum plus exactly the headroom OPS-N4 asks for.
     #[test]
