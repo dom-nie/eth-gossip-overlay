@@ -1284,9 +1284,10 @@ mod tests {
     }
 
     /// A Gloas envelope is bounded only by `MAX_PAYLOAD_SIZE` (MD-08), and at the shipped split
-    /// it is 5120 data chunks of 2048 bytes. Held one short of complete, striped over a region of
-    /// a hundred hosts with 32-byte names, it is charged each chunk with its overhead and each
-    /// sender once, and the cap still holds three of them.
+    /// it is 5120 data chunks of 2048 bytes. Held incomplete, it is fewer chunks than that, so
+    /// pricing all 5120 with their overhead, and a hundred senders with 32-byte names once each,
+    /// is the most it is charged striped over a region of a hundred hosts. The cap holds three
+    /// of them, with 470,912 bytes to spare on a 64-bit host.
     #[test]
     fn three_max_size_envelopes_fit_under_max_bytes() {
         let split = Params::for_len(MAX_PAYLOAD_BYTES, 2048, 0.10).expect("the shipped split");
@@ -1298,6 +1299,14 @@ mod tests {
             "three envelopes are charged {} bytes, the cap is {MAX_BYTES}",
             3 * envelope
         );
+        assert_eq!(MAX_BYTES - 3 * envelope, 470_912);
+    }
+
+    /// MD-11's numbers on a 64-bit host: a 2-byte chunk is charged 106 bytes, so the default cap
+    /// holds 316,551 of them where it held 16.8 million when only payload counted.
+    #[test]
+    fn the_default_cap_holds_about_316_thousand_two_byte_chunks() {
+        assert_eq!(MAX_BYTES / (2 + CHUNK_OVERHEAD_BYTES), 316_551);
     }
 
     /// What T-082 asks for when a message has not finished in time (D23, D24): the indices no
