@@ -4,9 +4,10 @@
 //! Every fact here but one comes from the beacon node's own event stream and from nowhere else:
 //! `block_gossip` for a block the node accepted, `execution_payload_gossip` for a Gloas payload
 //! envelope it accepted, `data_column_sidecar` for a column it holds.
-//! `overlay_bn::events` is the only writer, which is what MD-06 asks for. A payload a peer sent
-//! decodes without being authentic, so a tracker fed from the receive path is a tracker a roster
-//! peer writes, and column repair's inputs would be exactly the bytes an attacker controls.
+//! `overlay_bn::events` is the only writer that opens or fills an entry, which is what MD-06 asks
+//! for. A payload a peer sent decodes without being authentic, so a tracker fed from the receive
+//! path is a tracker a roster peer writes, and column repair's inputs would be exactly the bytes
+//! an attacker controls.
 //!
 //! One number comes from the receive paths: how many blobs a block commits to, read from
 //! [`Arrivals`] for the root the node's own event named. A block with none has no columns and is
