@@ -433,6 +433,7 @@ impl State {
             self.bytes += cost;
         }
         if !entry.received.set(chunk.index) {
+            self.trim_bytes();
             return Outcome::Duplicate { forward };
         }
         entry.chunks.push((chunk.index, chunk.data.clone()));
