@@ -111,7 +111,7 @@ Every key below ships in 0.1.0, the first release.
 | `bn.by_root_cache.slots` | `16` | restart | slots of blocks and columns held while the cache is on. |
 | `classes.small.batch_window_ms` | `10` | reload | how long a batch collects entries before it is flushed. |
 | `classes.small.stale_after_ms` | `1000` | reload | a batch older than this is dropped rather than delivered late. |
-| `classes.large.chunk_bytes` | `2048` | restart | the fixed chunk size, a multiple of 64. Reed-Solomon needs an even length; 64 aligns a chunk to a cache line and the widest SIMD stride. Chunks cost their length plus 104 bytes of the reassembler's 32 MiB cap; below 1600 bytes, two maximum-size envelopes fit, not three. |
+| `classes.large.chunk_bytes` | `2048` | restart | the fixed chunk size, a multiple of 64. Reed-Solomon needs an even length; 64 aligns a chunk to a cache line and the widest SIMD stride. Chunks cost their length plus 112 bytes of the reassembler's 32 MiB cap; below 1728 bytes, two maximum-size envelopes fit, not three. |
 | `classes.large.parity_ratio` | `0.1` | restart | parity chunks as a fraction of data chunks. |
 | `classes.large.repair_deadline_ms` | `250` | reload | how long after the first chunk a receiver waits before asking peers for the missing ones. For custody columns it runs from the block, or from the payload envelope from the Gloas fork on. |
 | `classes.large.column_repair` | `true` | reload | ask in-region peers for the custody columns the beacon node is still short of past the same deadline. Off, the node fetches them itself as it always has. |
