@@ -629,6 +629,42 @@ mod tests {
         assert!(!arrivals.imported(8, [0x88; 32]));
     }
 
+    /// Custody asks for a block's blob count by the root the beacon node named, and the count
+    /// is the one the block's own bytes carried (T-127).
+    #[test]
+    fn arrivals_remember_a_blocks_blob_count() {
+        let spec = slots_of(12);
+        let arrivals = Arrivals::new(Arc::new(FakeClock::new()), spec.subscribe());
+
+        for (byte, blobs) in [(0x11, 0), (0x12, 3)] {
+            arrivals.saw(
+                Some(Header::Block {
+                    slot: 7,
+                    root: [byte; 32],
+                    blobs,
+                }),
+                &Source::Bn,
+            );
+        }
+
+        assert_eq!(arrivals.blobs([0x11; 32]), Some(0));
+        assert_eq!(arrivals.blobs([0x12; 32]), Some(3));
+    }
+
+    /// A root whose bytes never went past this host has no count, and neither has one filed
+    /// without its bytes: custody tracks such a block exactly as it did before it had counts.
+    #[test]
+    fn an_unseen_root_has_no_blob_count() {
+        let spec = slots_of(12);
+        let arrivals = Arrivals::new(Arc::new(FakeClock::new()), spec.subscribe());
+        arrivals.arrived([0x21; 32], &Source::Bn);
+        arrivals.imported(7, [0x22; 32]);
+
+        assert_eq!(arrivals.blobs([0x20; 32]), None);
+        assert_eq!(arrivals.blobs([0x21; 32]), None);
+        assert_eq!(arrivals.blobs([0x22; 32]), None);
+    }
+
     #[test]
     fn arrival_records_older_than_eight_slots_are_dropped() {
         let clock = FakeClock::new();
