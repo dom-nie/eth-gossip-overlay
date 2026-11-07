@@ -11,6 +11,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::Instant;
 
 use bytes::Bytes;
+use overlay_core::budget::REASSEMBLY_ENTRY_BYTES;
 use overlay_core::msgid::MessageId;
 use overlay_core::reassemble::{Outcome, ReassembleConfig, Reassembler};
 use overlay_core::roster::Hostname;
@@ -80,6 +81,15 @@ fn host() -> Hostname {
     Hostname("bn-01".to_owned())
 }
 
+/// A frame body of `frame_len` bytes read the way `wire::read_frame` reads one, into one `Vec`
+/// handed to `Bytes`, and the `data_len` bytes at its end cut out with `split_to` as the codec
+/// cuts a chunk's data.
+fn view_into_frame(frame_len: usize, data_len: usize) -> Bytes {
+    let mut frame = Bytes::from(vec![0xa5; frame_len]);
+    drop(frame.split_to(frame_len - data_len));
+    frame.split_to(data_len)
+}
+
 /// A repair answer carries many chunks in one frame of up to 10 MiB, so a chunk kept as a view
 /// into it would keep all of it. The entry has to own its bytes.
 #[test]
@@ -109,4 +119,51 @@ fn a_chunk_cut_from_a_large_frame_does_not_keep_the_frame() {
         grown < HARNESS_BYTES,
         "{grown} bytes still live for one 2048-byte chunk"
     );
+}
+
+/// A roster peer cutting 2-byte chunks, each in a `CHUNK` frame of its own, makes this host hold
+/// tens of thousands of them. Whatever that costs on the heap, the slot, the copy, the bitmaps
+/// and the senders, stays inside `max_bytes`; only what grows with the entry count is outside
+/// it, and the budget prices that as `REASSEMBLY_ENTRY_BYTES` an entry.
+#[test]
+fn a_two_byte_chunk_flood_keeps_the_heap_under_max_bytes() {
+    let _serial = serial();
+    let max_bytes = 4 * 1024 * 1024;
+    let reassembler = Reassembler::new(ReassembleConfig {
+        max_bytes,
+        ..ReassembleConfig::default()
+    });
+    let (topic, from) = (block(), host());
+    let now = Instant::now();
+    let k = u16::MAX;
+    // Each message stops one index short so none completes and everything sent is held.
+    let per_message = u32::from(k) - 1;
+    let before = live();
+    let mut worst = 0;
+
+    for sent in 0..400_000u32 {
+        let mut msg_id = [0; 20];
+        msg_id[..4].copy_from_slice(&(sent / per_message).to_le_bytes());
+        let chunk = Chunk {
+            msg_id: MessageId(msg_id),
+            topic_id: 1,
+            k,
+            m: 0,
+            index: (sent % per_message) as u16,
+            total_len: u32::from(k) * 2,
+            data: view_into_frame(40, 2),
+        };
+        reassembler.on_chunk(&chunk, &topic, &from, false, now);
+        drop(chunk);
+
+        let grown = live().saturating_sub(before);
+        let allowed =
+            max_bytes + reassembler.in_flight() * REASSEMBLY_ENTRY_BYTES as usize + HARNESS_BYTES;
+        worst = worst.max(grown);
+        assert!(
+            grown <= allowed,
+            "{grown} bytes live after {sent} chunks, {allowed} allowed"
+        );
+    }
+    println!("worst live heap growth over the flood: {worst} bytes, cap {max_bytes}");
 }
