@@ -1065,6 +1065,26 @@ mod tests {
         assert_eq!(gap_roots(&custody, &clock), [ROOT]);
     }
 
+    /// The usual order on a public block: the node sends `block_gossip` before it forwards the
+    /// block's bytes, so the count is unknown when the entry opens and known well before the
+    /// deadline. Reading the gaps drops the entry, and it stays gone after the arrival record
+    /// that said zero is pruned, eight slots on.
+    #[test]
+    fn a_blobless_block_learned_after_its_event_asks_for_nothing() {
+        let clock = FakeClock::new();
+        let arrivals = arrivals(&clock);
+        let custody = shared(mainnet(), &arrivals);
+
+        custody.on_block(1, ROOT, clock.now());
+        file_block(&arrivals, ROOT, 0);
+        clock.advance(DEADLINE);
+        assert_eq!(gap_roots(&custody, &clock), Vec::<[u8; 32]>::new());
+
+        clock.advance(Duration::from_secs(97));
+        assert_eq!(arrivals.blobs(ROOT), None, "the record is pruned");
+        assert_eq!(gap_roots(&custody, &clock), Vec::<[u8; 32]>::new());
+    }
+
     /// Counts the two series column repair adds, which are zero on an honest fleet (§12).
     #[derive(Default)]
     struct CountingColumns(AtomicU64);
