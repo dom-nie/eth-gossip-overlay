@@ -7,13 +7,13 @@
 //! A peer that keeps it up for more than [`SUSTAINED_VIOLATION`] loses the connection and comes
 //! back through the ordinary reconnect backoff.
 //!
-//! A peer has two allowances. The Gloas execution payload envelope gets one of its own, sized
-//! for one maximum envelope per slot, and only chunks on an `execution_payload` topic draw on it
-//! (MD-14 amended). That topic exists only from the Gloas fork on, so before the fork nothing
-//! spends it and a peer's budget is what it was. The sidecar has no slot clock, so the topic is
-//! how it knows. Each allowance keeps its own violation window: an envelope charge that fits
-//! never clears a violation on the other allowance, or a peer could stay connected over one by
-//! spending a little of the other.
+//! A peer has two allowances. The Gloas execution payload envelope gets one of its own, sized for
+//! one maximum envelope per slot, and only chunks on an `execution_payload` topic draw on it (MD-14
+//! amended). That topic exists only from the Gloas fork on, so before the fork nothing spends it
+//! and an honest peer's budget is what it was. The sidecar has no slot clock, so the topic is how
+//! it knows. Each allowance keeps its own violation window: an envelope charge that fits never
+//! clears a violation on the other allowance, or a peer could stay connected over one by spending a
+//! little of the other.
 //!
 //! `now` is a parameter everywhere, so the bucket holds no clock and a test drives it with plain
 //! `Instant` arithmetic.
