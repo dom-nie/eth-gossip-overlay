@@ -60,6 +60,21 @@ pub const MAX_BYTES: usize = 32 * 1024 * 1024;
 /// the 1.5 s a repair is given after it (D24), so T-082 still finds the senders it would ask.
 pub const INCOMPLETE_TTL: Duration = Duration::from_secs(4);
 
+/// What one stored chunk costs [`ReassembleConfig::max_bytes`] beside its payload: its
+/// `(index, Bytes)` slot in the entry's chunk list, twice over for the room a growing `Vec`
+/// leaves, and the `bytes::Shared` header the frame buffer is promoted to when the codec cuts a
+/// view out of it. 104 bytes on a 64-bit host.
+///
+/// Without it a peer cutting 2-byte chunks would be charged 2 bytes for every hundred or so it
+/// costs (MD-11). The chunk is still a view into the frame it arrived in, so the rest of that
+/// frame stays alive and is not counted here: T-131 copies on store and closes that.
+pub const CHUNK_OVERHEAD_BYTES: usize = 2 * size_of::<HeldChunk>() + 3 * size_of::<usize>();
+
+/// What one entry on a message's sender list costs beside the name's own bytes, twice over for
+/// the `Vec`'s growth. Charged rather than capped, because repair asks every sender in turn
+/// (D23).
+const SENDER_OVERHEAD_BYTES: usize = 2 * size_of::<(Hostname, bool)>();
+
 /// What one host's reassembly is held to. The sidecar passes [`ReassembleConfig::default`],
 /// which is the three constants above; a test passes less so the bounds are reachable without a
 /// slot's traffic.
@@ -412,13 +427,18 @@ impl State {
         // A forwarded chunk is the second hop and there is no third (D11), so its index is left
         // clear: the copy that arrives clear afterwards is the one this host owes its region.
         let forward = !forwarded && entry.forwarded.set(chunk.index);
-        entry.saw(from, forwarded);
+        if entry.saw(from, forwarded) {
+            let cost = SENDER_OVERHEAD_BYTES + from.0.len();
+            entry.bytes += cost;
+            self.bytes += cost;
+        }
         if !entry.received.set(chunk.index) {
             return Outcome::Duplicate { forward };
         }
         entry.chunks.push((chunk.index, chunk.data.clone()));
-        entry.bytes += chunk.data.len();
-        self.bytes += chunk.data.len();
+        let cost = chunk.data.len() + CHUNK_OVERHEAD_BYTES;
+        entry.bytes += cost;
+        self.bytes += cost;
 
         match self.finished(&chunk.msg_id, topic, forward) {
             Some(outcome) => outcome,
@@ -571,15 +591,17 @@ impl Entry {
 
     /// Records that `from` has a chunk of this message, which is what repair reads (D23). A peer
     /// that sends a second chunk under the same flag is already on the list, so the list is as
-    /// long as the peers that have written, not as the chunks they wrote.
-    fn saw(&mut self, from: &Hostname, forwarded: bool) {
-        if !self
+    /// long as the peers that have written, not as the chunks they wrote. Answers whether it
+    /// added one, which is what the caller charges.
+    fn saw(&mut self, from: &Hostname, forwarded: bool) -> bool {
+        let new = !self
             .senders
             .iter()
-            .any(|(peer, flag)| peer == from && *flag == forwarded)
-        {
+            .any(|(peer, flag)| peer == from && *flag == forwarded);
+        if new {
             self.senders.push((from.clone(), forwarded));
         }
+        new
     }
 
     /// The peer this message is counted against: the first to send a clear chunk, which is the
@@ -1085,12 +1107,13 @@ mod tests {
 
     /// The byte bound, for a host holding more chunks than it has room for. A slot brings one
     /// block and 128 columns, so the count bound alone would let a burst of large messages take
-    /// far more memory than the sum of the bounds allows (§10).
+    /// far more memory than the sum of the bounds allows (§10). The cap is exactly what two
+    /// one-chunk entries are charged, so the third is the one that passes it.
     #[test]
     fn max_bytes_evicts_when_buffered_bytes_exceed_the_bound() {
         let evictions = Arc::new(Evictions::default());
         let reassembler = Reassembler::new(ReassembleConfig {
-            max_bytes: 16,
+            max_bytes: 2 * one_chunk_entry(),
             ..ReassembleConfig::default()
         })
         .with_stats(evictions.clone());
@@ -1114,6 +1137,11 @@ mod tests {
     /// What `store` charges for one sender on an entry's list.
     fn sender_cost(peer: &Hostname) -> usize {
         SENDER_OVERHEAD_BYTES + peer.0.len()
+    }
+
+    /// What an entry holding one [`chunk`] from [`host`] is charged.
+    fn one_chunk_entry() -> usize {
+        8 + CHUNK_OVERHEAD_BYTES + sender_cost(&host())
     }
 
     /// MD-11: a roster peer cutting 2-byte chunks pays each one's bookkeeping, so the default
