@@ -427,6 +427,7 @@ mod tests {
 
     use overlay_core::backoff::Backoff;
     use overlay_core::events::Source;
+    use overlay_core::header::Header;
     use overlay_core::time::{Clock, FakeClock};
     use overlay_core::topic::{SubscriptionSets, Topic};
     use tokio::sync::{mpsc, watch};
@@ -621,6 +622,50 @@ mod tests {
         assert_eq!(
             gaps.first().map(|gap| gap.missing.clone()),
             Some(vec![0]),
+            "{gaps:?}"
+        );
+    }
+
+    /// A block whose bytes went past the sidecar before its `block_gossip` event, as an overlay
+    /// delivery does, carries its blob count into the tracker: one with no blobs opens nothing,
+    /// and one beside it with blobs is tracked as before (T-127).
+    #[test]
+    fn a_blobless_block_gossip_event_opens_no_entry() {
+        let clock = FakeClock::new();
+        let (_spec, spec) = spec_watch();
+        let arrivals = Arc::new(Arrivals::new(Arc::new(clock.clone()), spec.clone()));
+        let custody = SharedCustody::new(
+            spec,
+            watch::Sender::new(subscribed(&[0, 1])).subscribe(),
+            arrivals.clone(),
+            Arc::new(()),
+        );
+        for (byte, blobs) in [(0xaa, 0), (0xbb, 2)] {
+            arrivals.saw(
+                Some(Header::Block {
+                    slot: 9,
+                    root: [byte; 32],
+                    blobs,
+                }),
+                &Source::Bn,
+            );
+        }
+        let stats: Arc<dyn BlockEventStats> = Arc::new(());
+        let stream = format!(
+            "{}{}",
+            gossip_frame(9, &root(0xaa)),
+            gossip_frame(9, &root(0xbb))
+        );
+
+        for event in Frames::default().feed(stream.as_bytes()) {
+            apply(&event, &arrivals, &custody, &clock, &stats);
+        }
+
+        let none = custody.column_set([]);
+        let gaps = custody.gaps(Duration::ZERO, clock.now(), &none);
+        assert_eq!(
+            gaps.iter().map(|gap| gap.block_root).collect::<Vec<_>>(),
+            [[0xbb; 32]],
             "{gaps:?}"
         );
     }
