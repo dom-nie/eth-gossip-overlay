@@ -205,6 +205,8 @@ struct Arrival {
     origin: Option<Hostname>,
     /// Whether the beacon node has reported importing the block (T-101).
     imported: bool,
+    /// How many blobs the block commits to, when its bytes went past this host (T-127).
+    blobs: Option<usize>,
 }
 
 /// Which blocks reached this host lately, so an import event can be turned into a lag, and
@@ -234,6 +236,11 @@ impl Arrivals {
     /// Files the arrival of `block_root`. A block that arrives again keeps the record it already
     /// has, which is the one a lag is worth measuring from.
     pub fn arrived(&self, block_root: [u8; 32], source: &Source<'_>) {
+        self.file(block_root, source, None);
+    }
+
+    /// [`arrived`](Self::arrived), with the blob count the block's bytes carried.
+    fn file(&self, block_root: [u8; 32], source: &Source<'_>, blobs: Option<usize>) {
         let arrival = Arrival {
             at: self.clock.wall(),
             seen: self.clock.now(),
@@ -242,6 +249,7 @@ impl Arrivals {
                 Source::Overlay { origin } => Some((*origin).clone()),
             },
             imported: false,
+            blobs,
         };
         let mut seen = self.seen();
         self.prune(&mut seen, arrival.seen);
@@ -255,8 +263,8 @@ impl Arrivals {
     /// only ever saw columns did not carry the block, and measuring the block's lag from one
     /// would credit the overlay with a block the beacon node fetched itself.
     pub fn saw(&self, header: Option<Header>, source: &Source<'_>) {
-        if let Some(Header::Block { root, .. }) = header {
-            self.arrived(root, source);
+        if let Some(Header::Block { root, blobs, .. }) = header {
+            self.file(root, source, Some(blobs));
         }
     }
 
@@ -290,6 +298,7 @@ impl Arrivals {
                 seen: now,
                 origin: None,
                 imported: false,
+                blobs: None,
             })
             .imported = true;
         matched
@@ -307,6 +316,20 @@ impl Arrivals {
         self.prune(&mut seen, self.clock.now());
         seen.get(&block_root)
             .is_some_and(|arrival| arrival.imported)
+    }
+
+    /// How many blobs `block_root` commits to, if its bytes went past this host inside the
+    /// retention window. `None` is a block whose count nobody here knows.
+    ///
+    /// Custody reads this for a root the beacon node's own event named (T-127, MD-06). The bytes
+    /// may be a peer's, but the root is the hash tree root of the block message, and that hashes
+    /// the commitment list (under Gloas, the bid that holds it), so no peer can file a different
+    /// count under a real root. A peer that keeps the block from arriving here leaves the count
+    /// unknown, which custody treats as it treated every block before counts existed.
+    pub fn blobs(&self, block_root: [u8; 32]) -> Option<usize> {
+        let mut seen = self.seen();
+        self.prune(&mut seen, self.clock.now());
+        seen.get(&block_root).and_then(|arrival| arrival.blobs)
     }
 
     /// Drops the records the retention window no longer covers. Both entry points call it, so a
