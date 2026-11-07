@@ -4,8 +4,7 @@ One `config.yaml`, the same on every host, at `/etc/eth-gossip-overlay/config.ya
 `--config` says otherwise. Every key has a default, so a file naming only what you change is
 valid, and [`deploy/examples/config.yaml`](../deploy/examples/config.yaml) is that file with
 every default written out. An unknown or misspelled key stops the start; configuration
-management that runs `eth-gossip-overlay check-config` after a push finds out before systemd
-does.
+management running `eth-gossip-overlay check-config` after a push catches it before systemd.
 
 ## Reload or restart
 
@@ -59,9 +58,9 @@ systemd sets it, as the shipped unit's `LoadCredential=` does. Set
 [security.md](security.md) is the procedure.
 
 `bn.node_key_file` holds this host's libp2p identity, created on first start with mode 0600: the
-peer id the beacon node trusts, not derived from the seed. Deleting it means a new identity, so
-`lighthouse.env` changes and the beacon node must restart to read it; keep the file, and on a
-container the volume under it.
+peer id the beacon node trusts, not derived from the seed. Deleting it means a new identity on
+the next start, so `lighthouse.env` changes and the beacon node must restart to read it; keep the
+file, and on a container the volume under it.
 
 The `log` section sets the level and format of the one output stream, events included.
 [events.md](events.md) has the fields, the queries, and why `tracing-journald` is an option
@@ -75,7 +74,7 @@ counts hits, misses and refusals. Each slot costs 5.2 MiB of receive window
 
 ## Every key
 
-Every key below ships in 0.1.0.
+Every key below ships in 0.1.0, the first release.
 
 <!-- generated from crates/overlay-core/src/config.rs, do not edit by hand -->
 
@@ -112,7 +111,7 @@ Every key below ships in 0.1.0.
 | `bn.by_root_cache.slots` | `16` | restart | slots of blocks and columns held while the cache is on. |
 | `classes.small.batch_window_ms` | `10` | reload | how long a batch collects entries before it is flushed. |
 | `classes.small.stale_after_ms` | `1000` | reload | a batch older than this is dropped rather than delivered late. |
-| `classes.large.chunk_bytes` | `2048` | restart | the fixed chunk size, a multiple of 64. Reed-Solomon needs only an even length; 64 puts a chunk on a cache line and the SIMD paths at their widest stride. Chunks cost their length plus 104 bytes of the reassembler's 32 MiB cap; below 1600 bytes, two maximum-size envelopes fit, not three. |
+| `classes.large.chunk_bytes` | `2048` | restart | the fixed chunk size, a multiple of 64. Reed-Solomon needs an even length; 64 aligns a chunk to a cache line and the widest SIMD stride. Chunks cost their length plus 104 bytes of the reassembler's 32 MiB cap; below 1600 bytes, two maximum-size envelopes fit, not three. |
 | `classes.large.parity_ratio` | `0.1` | restart | parity chunks as a fraction of data chunks. |
 | `classes.large.repair_deadline_ms` | `250` | reload | how long after the first chunk a receiver waits before asking peers for the missing ones. For custody columns it runs from the block, or from the payload envelope from the Gloas fork on. |
 | `classes.large.column_repair` | `true` | reload | ask in-region peers for the custody columns the beacon node is still short of past the same deadline. Off, the node fetches them itself as it always has. |
