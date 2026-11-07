@@ -41,6 +41,10 @@ pub enum FanoutKind {
     Relay,
     /// A chunk to forward to the rest of this host's region (T-073).
     Chunk,
+    /// A chunk of an `execution_payload` message to forward to the rest of this host's region.
+    /// The envelope has an allowance of its own (MD-14 amended), so it is told apart from
+    /// [`Chunk`](Self::Chunk) in the count as well.
+    Envelope,
 }
 
 impl FanoutKind {
@@ -49,6 +53,7 @@ impl FanoutKind {
         match self {
             Self::Relay => "relay",
             Self::Chunk => "chunk",
+            Self::Envelope => "envelope",
         }
     }
 }
