@@ -1,5 +1,5 @@
-# Alert rules for the sidecar: Architecture.md §12's list, the five the design panel added and
-# the one MD-10 added.
+# Alert rules for the sidecar: Architecture.md §12's list, the four the design panel added, D39's
+# column conflict and the one MD-10 added.
 # Load them into your own Prometheus:
 #
 #   rule_files:
