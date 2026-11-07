@@ -688,6 +688,27 @@ mod tests {
         assert_eq!(arrivals.blobs([0x22; 32]), None);
     }
 
+    /// A record filed before the block's bytes went past, by an import event that beat the
+    /// gossip copy here, still learns the count when the bytes come. A root hashes the
+    /// commitment list, so whichever copy brings the count brings the right one.
+    #[test]
+    fn a_blob_count_learned_after_the_import_is_kept() {
+        let spec = slots_of(12);
+        let arrivals = Arrivals::new(Arc::new(FakeClock::new()), spec.subscribe());
+        arrivals.imported(7, [0x31; 32]);
+
+        arrivals.saw(
+            Some(Header::Block {
+                slot: 7,
+                root: [0x31; 32],
+                blobs: 0,
+            }),
+            &Source::Bn,
+        );
+
+        assert_eq!(arrivals.blobs([0x31; 32]), Some(0));
+    }
+
     #[test]
     fn arrival_records_older_than_eight_slots_are_dropped() {
         let clock = FakeClock::new();
