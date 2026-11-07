@@ -517,11 +517,12 @@ mod tests {
         }
     }
 
-    /// A tracker over `indices`, with the two watches a real one reads.
+    /// A tracker over `indices`, with the two watches a real one reads and blocks nobody filed.
     fn tracking(indices: &[u8]) -> SharedCustody {
         SharedCustody::new(
             spec_watch().1,
             watch::Sender::new(subscribed(indices)).subscribe(),
+            Arc::new(Arrivals::new(Arc::new(FakeClock::new()), spec_watch().1)),
             Arc::new(()),
         )
     }
@@ -659,6 +660,7 @@ mod tests {
         let custody = SharedCustody::new(
             watch::Sender::new(gloas).subscribe(),
             watch::Sender::new(subscribed(&[0, 1])).subscribe(),
+            Arc::new(Arrivals::new(Arc::new(clock.clone()), spec_watch().1)),
             Arc::new(()),
         );
         let none = custody.column_set([]);

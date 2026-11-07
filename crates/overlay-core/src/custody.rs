@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
+use crate::events::Arrivals;
 use crate::spec::SpecSnapshot;
 use crate::topic::{SubscriptionSets, TopicKind};
 
@@ -221,7 +222,20 @@ impl CustodyTracker {
     /// Records that the beacon node accepted a block for `slot` at `now` and that `expected`
     /// columns are owed for it. Before the Gloas fork the deadline every gap is measured from
     /// starts here; from it on, it waits for [`on_envelope`](Self::on_envelope).
-    pub fn on_block(&mut self, slot: u64, root: [u8; 32], expected: BitSet, now: Instant) {
+    ///
+    /// `blobs` is how many blobs the block commits to, if anyone here knows. A block with none
+    /// has no columns, so it opens nothing; an unknown count is tracked like any block (T-127).
+    pub fn on_block(
+        &mut self,
+        slot: u64,
+        root: [u8; 32],
+        expected: BitSet,
+        blobs: Option<usize>,
+        now: Instant,
+    ) {
+        if blobs == Some(0) {
+            return;
+        }
         let before_gloas = self.first_gloas_slot.is_none_or(|first| slot < first);
         let block = self.open((slot, root));
         block.expected = Some(expected);
@@ -373,6 +387,7 @@ pub struct SharedCustody(Arc<Shared>);
 struct Shared {
     spec: watch::Receiver<SpecSnapshot>,
     sets: watch::Receiver<SubscriptionSets>,
+    arrivals: Arc<Arrivals>,
     stats: Arc<dyn ColumnStats>,
     state: Mutex<State>,
 }
@@ -386,10 +401,12 @@ struct State {
 
 impl SharedCustody {
     /// A tracker sized by whatever `spec` holds now, expecting whatever `sets` says the beacon
-    /// node is subscribed to when a block arrives.
+    /// node is subscribed to when a block arrives, and reading from `arrivals` how many blobs a
+    /// block commits to.
     pub fn new(
         spec: watch::Receiver<SpecSnapshot>,
         sets: watch::Receiver<SubscriptionSets>,
+        arrivals: Arc<Arrivals>,
         stats: Arc<dyn ColumnStats>,
     ) -> Self {
         let snapshot = *spec.borrow();
@@ -403,17 +420,24 @@ impl SharedCustody {
         Self(Arc::new(Shared {
             spec,
             sets,
+            arrivals,
             stats,
             state: Mutex::new(state),
         }))
     }
 
     /// One `block_gossip` event: the beacon node's gossip verification accepted this block.
+    ///
+    /// The blob count is read for `root`, the root the node's own event named, so MD-06 holds:
+    /// see [`Arrivals::blobs`] for why no peer can attach a false count to it. The node usually
+    /// sends this event before it forwards the block's bytes, so the count is often unknown
+    /// here, and [`gaps`](Self::gaps) checks again.
     pub fn on_block(&self, slot: u64, root: [u8; 32], now: Instant) {
         let sets = self.0.sets.borrow().clone();
+        let blobs = self.0.arrivals.blobs(root);
         let mut state = self.lock();
         let expected = state.tracker.expected_columns(&sets);
-        state.tracker.on_block(slot, root, expected, now);
+        state.tracker.on_block(slot, root, expected, blobs, now);
     }
 
     /// One `execution_payload_gossip` event: the beacon node's gossip verification accepted the
@@ -529,7 +553,7 @@ mod tests {
     fn tracking(clock: &FakeClock, indices: &[u16]) -> CustodyTracker {
         let mut tracker = CustodyTracker::new(&mainnet());
         let expected = tracker.expected_columns(&subscribed(indices));
-        tracker.on_block(1, ROOT, expected, clock.now());
+        tracker.on_block(1, ROOT, expected, None, clock.now());
         tracker
     }
 
@@ -712,7 +736,7 @@ mod tests {
         assert_eq!(tracker.threshold(), 128);
         let expected = tracker.expected_columns(&subscribed(&[200]));
         assert!(expected.contains(200));
-        tracker.on_block(1, ROOT, expected, clock.now());
+        tracker.on_block(1, ROOT, expected, None, clock.now());
         tracker.on_column(1, 200, ROOT);
         clock.advance(DEADLINE);
         assert_eq!(gaps(&tracker, &clock), Vec::new());
@@ -878,7 +902,7 @@ mod tests {
         let mut tracker = CustodyTracker::new(&mainnet());
         let expected = tracker.expected_columns(&subscribed(&[0]));
         for slot in 0..=TRACKED_BLOCKS as u64 {
-            tracker.on_block(slot, [slot as u8; 32], expected.clone(), clock.now());
+            tracker.on_block(slot, [slot as u8; 32], expected.clone(), None, clock.now());
         }
         clock.advance(DEADLINE);
 
@@ -906,7 +930,7 @@ mod tests {
             ..mainnet()
         });
         let expected = tracker.expected_columns(&subscribed(&[0, 3, 7]));
-        tracker.on_block(slot, ROOT, expected, clock.now());
+        tracker.on_block(slot, ROOT, expected, None, clock.now());
         tracker
     }
 
@@ -986,7 +1010,7 @@ mod tests {
         tracker.on_column(other, 3, [9; 32]);
         tracker.on_envelope(other, [9; 32], clock.now());
         let expected = tracker.expected_columns(&subscribed(&[0, 3, 7]));
-        tracker.on_block(other, [9; 32], expected, clock.now());
+        tracker.on_block(other, [9; 32], expected, None, clock.now());
         clock.advance(Duration::from_secs(12));
 
         assert_eq!(gaps(&tracker, &clock), Vec::new());
