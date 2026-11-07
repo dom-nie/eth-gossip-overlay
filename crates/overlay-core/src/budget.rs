@@ -82,9 +82,37 @@ pub enum Charge {
 /// long the peer has been over it.
 #[derive(Clone, Debug)]
 pub struct FanoutBudget {
+    general: Allowance,
+    envelope: Allowance,
+}
+
+/// One token bucket and how long the peer has been over it.
+#[derive(Clone, Debug)]
+struct Allowance {
     bucket: TokenBucket,
-    envelope: TokenBucket,
     violation_since: Option<Instant>,
+}
+
+impl Allowance {
+    fn new(per_second: u64, capacity: u64, now: Instant) -> Self {
+        Self {
+            bucket: TokenBucket::new(per_second, capacity, now),
+            violation_since: None,
+        }
+    }
+
+    fn charge(&mut self, bytes: usize, now: Instant) -> Charge {
+        if self.bucket.try_take(bytes as u64, now) {
+            self.violation_since = None;
+            return Charge::Allowed;
+        }
+        let since = *self.violation_since.get_or_insert(now);
+        if now.saturating_duration_since(since) > SUSTAINED_VIOLATION {
+            Charge::CloseRateExceeded
+        } else {
+            Charge::Suppressed
+        }
+    }
 }
 
 impl FanoutBudget {
@@ -113,12 +141,11 @@ impl FanoutBudget {
         let allowance = |estimate: usize| {
             let share = (4 * estimate / roster_size.max(1)) as u64;
             let capacity = share.div_ceil(chunk_bytes) * chunk_bytes;
-            TokenBucket::new(capacity / slot_secs.max(1), capacity, now)
+            Allowance::new(capacity / slot_secs.max(1), capacity, now)
         };
         Self {
-            bucket: allowance(LARGE_BYTES_PER_SLOT_ESTIMATE),
+            general: allowance(LARGE_BYTES_PER_SLOT_ESTIMATE),
             envelope: allowance(GLOAS_ENVELOPE_BYTES_PER_SLOT_ESTIMATE),
-            violation_since: None,
         }
     }
 
@@ -127,9 +154,8 @@ impl FanoutBudget {
     /// reaches the bound with a bucket it can empty in one batch instead of a slot's traffic.
     pub fn new(per_second: u64, capacity: u64, now: Instant) -> Self {
         Self {
-            bucket: TokenBucket::new(per_second, capacity, now),
-            envelope: TokenBucket::new(per_second, capacity, now),
-            violation_since: None,
+            general: Allowance::new(per_second, capacity, now),
+            envelope: Allowance::new(per_second, capacity, now),
         }
     }
 
@@ -139,19 +165,9 @@ impl FanoutBudget {
     /// under. One bucket covers every kind: the budget is what one peer may make this host fan
     /// out, however it asked.
     pub fn charge(&mut self, kind: FanoutKind, bytes: usize, now: Instant) -> Charge {
-        let bucket = match kind {
-            FanoutKind::Envelope => &mut self.envelope,
-            FanoutKind::Relay | FanoutKind::Chunk => &mut self.bucket,
-        };
-        if bucket.try_take(bytes as u64, now) {
-            self.violation_since = None;
-            return Charge::Allowed;
-        }
-        let since = *self.violation_since.get_or_insert(now);
-        if now.saturating_duration_since(since) > SUSTAINED_VIOLATION {
-            Charge::CloseRateExceeded
-        } else {
-            Charge::Suppressed
+        match kind {
+            FanoutKind::Envelope => self.envelope.charge(bytes, now),
+            FanoutKind::Relay | FanoutKind::Chunk => self.general.charge(bytes, now),
         }
     }
 }
