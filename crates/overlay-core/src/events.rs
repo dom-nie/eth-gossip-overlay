@@ -564,6 +564,7 @@ mod tests {
             header: Some(Header::Block {
                 slot: 9_876,
                 root: [0xab; 32],
+                blobs: 1,
             }),
         });
 
@@ -608,6 +609,7 @@ mod tests {
             Some(Header::Block {
                 slot: 7,
                 root: [0x77; 32],
+                blobs: 1,
             }),
             &Source::Bn,
         );

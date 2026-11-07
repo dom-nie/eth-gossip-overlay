@@ -131,6 +131,7 @@ const RECEIVE_WINDOW: u64 = STREAM_RECEIVE_WINDOW;
 pub const DECODED_BLOCK: Header = Header::Block {
     slot: 8_675_309,
     root: [0x9c; 32],
+    blobs: 1,
 };
 
 /// The block a column payload names, which is the same one, so a block and its columns file

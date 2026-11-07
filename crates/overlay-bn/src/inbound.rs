@@ -263,6 +263,7 @@ mod tests {
     const DECODED: Header = Header::Block {
         slot: 8_675_309,
         root: [0x9c; 32],
+        blobs: 1,
     };
 
     /// Stands in for T-083's decoder, which needs a real SSZ block. What is under test is the
