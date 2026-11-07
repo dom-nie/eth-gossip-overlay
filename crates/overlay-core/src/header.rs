@@ -26,6 +26,9 @@ pub enum Header {
         slot: u64,
         /// Its block root, which is what its columns name.
         root: [u8; 32],
+        /// How many blob KZG commitments it carries. Zero means no column of it exists, so
+        /// custody has nothing to wait for (T-127).
+        blobs: usize,
     },
     /// A `data_column_sidecar_{index}`.
     Column {

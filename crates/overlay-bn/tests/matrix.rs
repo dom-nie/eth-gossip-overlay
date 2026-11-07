@@ -569,7 +569,8 @@ async fn matrix_event_stream_reports_accepted_blocks_and_verified_columns() {
     let (_spec_tx, spec) = spec_watch();
     let columns = spec.borrow().number_of_columns;
     let (_sets_tx, sets) = watch::channel(every_column_topic(columns));
-    let custody = SharedCustody::new(spec, sets, Arc::new(()));
+    let arrivals = Arc::new(Arrivals::new(Arc::new(SystemClock), spec_watch().1));
+    let custody = SharedCustody::new(spec, sets, arrivals.clone(), Arc::new(()));
 
     let shipped = Config::default().bn.events_url;
     let events = BlockEvents::spawn(
@@ -584,7 +585,7 @@ async fn matrix_event_stream_reports_accepted_blocks_and_verified_columns() {
         .parse()
         .unwrap(),
         Backoff::new(BACKOFF_MIN, BACKOFF_MAX),
-        Arc::new(Arrivals::new(Arc::new(SystemClock), spec_watch().1)),
+        arrivals,
         custody.clone(),
         Arc::new(SystemClock),
         Arc::new(()),

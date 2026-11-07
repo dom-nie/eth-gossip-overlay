@@ -426,7 +426,9 @@ mod tests {
     use std::time::Duration;
 
     use overlay_core::backoff::Backoff;
+    use overlay_core::custody::TRACKED_BLOCKS;
     use overlay_core::events::Source;
+    use overlay_core::header::Header;
     use overlay_core::time::{Clock, FakeClock};
     use overlay_core::topic::{SubscriptionSets, Topic};
     use tokio::sync::{mpsc, watch};
@@ -517,11 +519,12 @@ mod tests {
         }
     }
 
-    /// A tracker over `indices`, with the two watches a real one reads.
+    /// A tracker over `indices`, with the two watches a real one reads and blocks nobody filed.
     fn tracking(indices: &[u8]) -> SharedCustody {
         SharedCustody::new(
             spec_watch().1,
             watch::Sender::new(subscribed(indices)).subscribe(),
+            Arc::new(Arrivals::new(Arc::new(FakeClock::new()), spec_watch().1)),
             Arc::new(()),
         )
     }
@@ -624,6 +627,57 @@ mod tests {
         );
     }
 
+    /// A block whose bytes went past the sidecar before its `block_gossip` event, as an overlay
+    /// delivery does, carries its blob count into the tracker at the event: one with no blobs
+    /// opens nothing, so it takes none of the [`TRACKED_BLOCKS`] places from the blocks with
+    /// blobs before it (T-127). Reading the gaps would drop it either way; the place it would
+    /// have taken is what shows whether the event saw the count.
+    #[test]
+    fn a_blobless_block_gossip_event_opens_no_entry() {
+        let clock = FakeClock::new();
+        let (_spec, spec) = spec_watch();
+        let arrivals = Arc::new(Arrivals::new(Arc::new(clock.clone()), spec.clone()));
+        let custody = SharedCustody::new(
+            spec,
+            watch::Sender::new(subscribed(&[0, 1])).subscribe(),
+            arrivals.clone(),
+            Arc::new(()),
+        );
+        let with_blobs: Vec<(u64, u8)> = (1..).zip(0xb1..).take(TRACKED_BLOCKS).collect();
+        let mut stream = String::new();
+        for (slot, byte, blobs) in with_blobs
+            .iter()
+            .map(|&(slot, byte)| (slot, byte, 2))
+            .chain([(9, 0xaa, 0)])
+        {
+            arrivals.saw(
+                Some(Header::Block {
+                    slot,
+                    root: [byte; 32],
+                    blobs,
+                }),
+                &Source::Bn,
+            );
+            stream.push_str(&gossip_frame(slot, &root(byte)));
+        }
+        let stats: Arc<dyn BlockEventStats> = Arc::new(());
+
+        for event in Frames::default().feed(stream.as_bytes()) {
+            apply(&event, &arrivals, &custody, &clock, &stats);
+        }
+
+        let none = custody.column_set([]);
+        let gaps = custody.gaps(Duration::ZERO, clock.now(), &none);
+        assert_eq!(
+            gaps.iter().map(|gap| gap.block_root).collect::<Vec<_>>(),
+            with_blobs
+                .iter()
+                .map(|&(_, byte)| [byte; 32])
+                .collect::<Vec<_>>(),
+            "{gaps:?}"
+        );
+    }
+
     /// The frame Lighthouse v8.3.2 writes when gossip verification accepts a payload envelope,
     /// `SseExecutionPayloadGossip` field for field (`common/eth2/src/types.rs:1221`).
     fn envelope_frame(slot: u64, root: &str) -> String {
@@ -659,6 +713,7 @@ mod tests {
         let custody = SharedCustody::new(
             watch::Sender::new(gloas).subscribe(),
             watch::Sender::new(subscribed(&[0, 1])).subscribe(),
+            Arc::new(Arrivals::new(Arc::new(clock.clone()), spec_watch().1)),
             Arc::new(()),
         );
         let none = custody.column_set([]);

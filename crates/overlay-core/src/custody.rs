@@ -1,12 +1,18 @@
 //! Which data columns this host's beacon node wants for a slot, which have arrived, and which
 //! to ask a peer for first once the deadline has passed (§5.6, §6.4, D23, MD-06).
 //!
-//! Every fact in here comes from the beacon node's own event stream and from nowhere else:
+//! Every fact here but one comes from the beacon node's own event stream and from nowhere else:
 //! `block_gossip` for a block the node accepted, `execution_payload_gossip` for a Gloas payload
 //! envelope it accepted, `data_column_sidecar` for a column it holds.
-//! `overlay_bn::events` is the only writer, which is what MD-06 asks for. A payload a peer sent
-//! decodes without being authentic, so a tracker fed from the receive path is a tracker a roster
-//! peer writes, and column repair's inputs would be exactly the bytes an attacker controls.
+//! `overlay_bn::events` is the only writer that opens or fills an entry, which is what MD-06 asks
+//! for. A payload a peer sent decodes without being authentic, so a tracker fed from the receive
+//! path is a tracker a roster peer writes, and column repair's inputs would be exactly the bytes
+//! an attacker controls.
+//!
+//! One number comes from the receive paths: how many blobs a block commits to, read from
+//! [`Arrivals`] for the root the node's own event named. A block with none has no columns and is
+//! not tracked (T-127). That root hashes the commitment list, so a peer can deliver the true
+//! count or keep it unknown, and an unknown count is tracked as if counts did not exist.
 //!
 //! Expected columns are the beacon node's own column subnets (T-014, D06), which only names a
 //! set of columns while one subnet is one column.
@@ -23,6 +29,7 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::watch;
 
+use crate::events::Arrivals;
 use crate::spec::SpecSnapshot;
 use crate::topic::{SubscriptionSets, TopicKind};
 
@@ -221,7 +228,20 @@ impl CustodyTracker {
     /// Records that the beacon node accepted a block for `slot` at `now` and that `expected`
     /// columns are owed for it. Before the Gloas fork the deadline every gap is measured from
     /// starts here; from it on, it waits for [`on_envelope`](Self::on_envelope).
-    pub fn on_block(&mut self, slot: u64, root: [u8; 32], expected: BitSet, now: Instant) {
+    ///
+    /// `blobs` is how many blobs the block commits to, if anyone here knows. A block with none
+    /// has no columns, so it opens nothing; an unknown count is tracked like any block (T-127).
+    pub fn on_block(
+        &mut self,
+        slot: u64,
+        root: [u8; 32],
+        expected: BitSet,
+        blobs: Option<usize>,
+        now: Instant,
+    ) {
+        if blobs == Some(0) {
+            return;
+        }
         let before_gloas = self.first_gloas_slot.is_none_or(|first| slot < first);
         let block = self.open((slot, root));
         block.expected = Some(expected);
@@ -290,6 +310,15 @@ impl CustodyTracker {
             .collect();
         gaps.sort_by_key(|(key, _)| *key);
         gaps.into_iter().map(|(_, gap)| gap).collect()
+    }
+
+    /// Drops every block `blobless` says commits to no blobs, for a count learned after the
+    /// block's event opened its entry (T-127). Such a block has no columns, so whatever its
+    /// entry says, nothing in it can be owed or held.
+    fn drop_blobless(&mut self, blobless: impl Fn([u8; 32]) -> bool) {
+        self.blocks.retain(|(_, root), _| !blobless(*root));
+        let blocks = &self.blocks;
+        self.order.retain(|key| blocks.contains_key(key));
     }
 
     /// The entry for `key`, opening one if this host has none.
@@ -366,13 +395,15 @@ impl Block {
 /// The write side is [`on_block`](Self::on_block), [`on_envelope`](Self::on_envelope) and
 /// [`on_column`](Self::on_column), and `overlay_bn::events` is the only caller of any. Reading
 /// the beacon node's subscriptions here rather than at the call site is what keeps that true:
-/// the writer needs nothing but the numbers the event carried.
+/// the writer needs nothing but the numbers the event carried. [`gaps`](Self::gaps) also drops
+/// entries whose blob count is now known to be zero, but it only removes, never opens.
 #[derive(Clone)]
 pub struct SharedCustody(Arc<Shared>);
 
 struct Shared {
     spec: watch::Receiver<SpecSnapshot>,
     sets: watch::Receiver<SubscriptionSets>,
+    arrivals: Arc<Arrivals>,
     stats: Arc<dyn ColumnStats>,
     state: Mutex<State>,
 }
@@ -386,10 +417,12 @@ struct State {
 
 impl SharedCustody {
     /// A tracker sized by whatever `spec` holds now, expecting whatever `sets` says the beacon
-    /// node is subscribed to when a block arrives.
+    /// node is subscribed to when a block arrives, and reading from `arrivals` how many blobs a
+    /// block commits to.
     pub fn new(
         spec: watch::Receiver<SpecSnapshot>,
         sets: watch::Receiver<SubscriptionSets>,
+        arrivals: Arc<Arrivals>,
         stats: Arc<dyn ColumnStats>,
     ) -> Self {
         let snapshot = *spec.borrow();
@@ -403,17 +436,24 @@ impl SharedCustody {
         Self(Arc::new(Shared {
             spec,
             sets,
+            arrivals,
             stats,
             state: Mutex::new(state),
         }))
     }
 
     /// One `block_gossip` event: the beacon node's gossip verification accepted this block.
+    ///
+    /// The blob count is read for `root`, the root the node's own event named, so MD-06 holds:
+    /// see [`Arrivals::blobs`] for why no peer can attach a false count to it. The node usually
+    /// sends this event before it forwards the block's bytes, so the count is often unknown
+    /// here, and [`gaps`](Self::gaps) checks again.
     pub fn on_block(&self, slot: u64, root: [u8; 32], now: Instant) {
         let sets = self.0.sets.borrow().clone();
+        let blobs = self.0.arrivals.blobs(root);
         let mut state = self.lock();
         let expected = state.tracker.expected_columns(&sets);
-        state.tracker.on_block(slot, root, expected, now);
+        state.tracker.on_block(slot, root, expected, blobs, now);
     }
 
     /// One `execution_payload_gossip` event: the beacon node's gossip verification accepted the
@@ -434,9 +474,18 @@ impl SharedCustody {
         self.lock().tracker.forget();
     }
 
-    /// [`CustodyTracker::missing_past_deadline`] under the lock.
+    /// [`CustodyTracker::missing_past_deadline`] under the lock, after dropping every block
+    /// whose count the receive paths have since learned is zero: the node usually sends
+    /// `block_gossip` before it forwards the block, so [`on_block`](Self::on_block) seldom knows
+    /// it, and this runs on every repair tick, well before the deadline matters.
     pub fn gaps(&self, deadline: Duration, now: Instant, in_flight: &BitSet) -> Vec<ColumnGap> {
-        self.lock()
+        let mut state = self.lock();
+        // The arrivals lock is taken under this one and never the other way round: `on_block`
+        // reads its count before locking, and `Arrivals` never calls back in here.
+        state
+            .tracker
+            .drop_blobless(|root| self.0.arrivals.blobs(root) == Some(0));
+        state
             .tracker
             .missing_past_deadline(deadline, now, in_flight)
     }
@@ -482,6 +531,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::*;
+    use crate::events::Source;
+    use crate::header::Header;
     use crate::spec::FAR_FUTURE_EPOCH;
     use crate::testlog::LOG;
     use crate::time::{Clock, FakeClock};
@@ -527,13 +578,59 @@ mod tests {
     fn tracking(clock: &FakeClock, indices: &[u16]) -> CustodyTracker {
         let mut tracker = CustodyTracker::new(&mainnet());
         let expected = tracker.expected_columns(&subscribed(indices));
-        tracker.on_block(1, ROOT, expected, clock.now());
+        tracker.on_block(1, ROOT, expected, None, clock.now());
         tracker
     }
 
     fn gaps(tracker: &CustodyTracker, clock: &FakeClock) -> Vec<ColumnGap> {
         let none = tracker.column_set([]);
         tracker.missing_past_deadline(DEADLINE, clock.now(), &none)
+    }
+
+    /// Blocks no receive path has filed, for a test about something other than blob counts.
+    fn no_arrivals() -> Arc<Arrivals> {
+        arrivals(&FakeClock::new())
+    }
+
+    /// What the receive paths file blocks into, on `clock`, which is where custody reads a
+    /// block's blob count from.
+    fn arrivals(clock: &FakeClock) -> Arc<Arrivals> {
+        Arc::new(Arrivals::new(
+            Arc::new(clock.clone()),
+            watch::Sender::new(mainnet()).subscribe(),
+        ))
+    }
+
+    /// A shared tracker at `spec` over columns 0, 3 and 7, reading blob counts from `arrivals`.
+    fn shared(spec: SpecSnapshot, arrivals: &Arc<Arrivals>) -> SharedCustody {
+        SharedCustody::new(
+            watch::Sender::new(spec).subscribe(),
+            watch::Sender::new(subscribed(&[0, 3, 7])).subscribe(),
+            arrivals.clone(),
+            Arc::new(()),
+        )
+    }
+
+    /// The bytes of block `root` going past this host, committing to `blobs` blobs.
+    fn file_block(arrivals: &Arrivals, root: [u8; 32], blobs: usize) {
+        arrivals.saw(
+            Some(Header::Block {
+                slot: 1,
+                root,
+                blobs,
+            }),
+            &Source::Bn,
+        );
+    }
+
+    /// The roots `custody` reports gaps for at `clock`'s now.
+    fn gap_roots(custody: &SharedCustody, clock: &FakeClock) -> Vec<[u8; 32]> {
+        let none = custody.column_set([]);
+        custody
+            .gaps(DEADLINE, clock.now(), &none)
+            .into_iter()
+            .map(|gap| gap.block_root)
+            .collect()
     }
 
     /// Expected columns are the beacon node's own column subnets and nothing else (T-014, D06):
@@ -664,7 +761,7 @@ mod tests {
         assert_eq!(tracker.threshold(), 128);
         let expected = tracker.expected_columns(&subscribed(&[200]));
         assert!(expected.contains(200));
-        tracker.on_block(1, ROOT, expected, clock.now());
+        tracker.on_block(1, ROOT, expected, None, clock.now());
         tracker.on_column(1, 200, ROOT);
         clock.advance(DEADLINE);
         assert_eq!(gaps(&tracker, &clock), Vec::new());
@@ -690,6 +787,7 @@ mod tests {
             })
             .subscribe(),
             watch::Sender::new(subscribed(&[0, 3, 7])).subscribe(),
+            no_arrivals(),
             stats.clone(),
         );
         custody.on_block(1, ROOT, clock.now());
@@ -751,6 +849,7 @@ mod tests {
         let custody = SharedCustody::new(
             spec.subscribe(),
             watch::Sender::new(subscribed(&[0])).subscribe(),
+            no_arrivals(),
             stats.clone(),
         );
         spec.send_replace(SpecSnapshot {
@@ -776,6 +875,7 @@ mod tests {
             })
             .subscribe(),
             watch::Sender::new(subscribed(&[0, 3, 7])).subscribe(),
+            no_arrivals(),
             Arc::new(()),
         );
 
@@ -805,6 +905,7 @@ mod tests {
         let custody = SharedCustody::new(
             watch::Sender::new(mainnet()).subscribe(),
             watch::Sender::new(subscribed(&[0, 3, 7])).subscribe(),
+            no_arrivals(),
             Arc::new(()),
         );
         custody.on_block(1, ROOT, clock.now());
@@ -826,7 +927,7 @@ mod tests {
         let mut tracker = CustodyTracker::new(&mainnet());
         let expected = tracker.expected_columns(&subscribed(&[0]));
         for slot in 0..=TRACKED_BLOCKS as u64 {
-            tracker.on_block(slot, [slot as u8; 32], expected.clone(), clock.now());
+            tracker.on_block(slot, [slot as u8; 32], expected.clone(), None, clock.now());
         }
         clock.advance(DEADLINE);
 
@@ -854,7 +955,7 @@ mod tests {
             ..mainnet()
         });
         let expected = tracker.expected_columns(&subscribed(&[0, 3, 7]));
-        tracker.on_block(slot, ROOT, expected, clock.now());
+        tracker.on_block(slot, ROOT, expected, None, clock.now());
         tracker
     }
 
@@ -934,10 +1035,103 @@ mod tests {
         tracker.on_column(other, 3, [9; 32]);
         tracker.on_envelope(other, [9; 32], clock.now());
         let expected = tracker.expected_columns(&subscribed(&[0, 3, 7]));
-        tracker.on_block(other, [9; 32], expected, clock.now());
+        tracker.on_block(other, [9; 32], expected, None, clock.now());
         clock.advance(Duration::from_secs(12));
 
         assert_eq!(gaps(&tracker, &clock), Vec::new());
+    }
+
+    /// A block that commits to no blobs has no columns, so none of its columns can be owed;
+    /// tracking it would ask peers for every expected column and hear not found from each
+    /// (T-127). Nor does it take one of the [`TRACKED_BLOCKS`] places from a block that has some.
+    #[test]
+    fn a_block_with_no_blobs_opens_no_entry() {
+        let clock = FakeClock::new();
+        let arrivals = arrivals(&clock);
+        let custody = shared(mainnet(), &arrivals);
+        let with_blobs: Vec<[u8; 32]> = (1..=TRACKED_BLOCKS as u8).map(|byte| [byte; 32]).collect();
+        for (slot, root) in (1..).zip(&with_blobs) {
+            custody.on_block(slot, *root, clock.now());
+        }
+
+        file_block(&arrivals, ROOT, 0);
+        custody.on_block(9, ROOT, clock.now());
+        clock.advance(DEADLINE);
+
+        assert_eq!(gap_roots(&custody, &clock), with_blobs);
+    }
+
+    /// One blob is enough for every column to exist, because a column is one cell of every
+    /// blob, so a block with any blobs is owed its whole expected set as before.
+    #[test]
+    fn a_block_with_one_blob_still_opens_an_entry() {
+        let clock = FakeClock::new();
+        let arrivals = arrivals(&clock);
+        let custody = shared(mainnet(), &arrivals);
+
+        file_block(&arrivals, ROOT, 1);
+        custody.on_block(1, ROOT, clock.now());
+        clock.advance(DEADLINE);
+
+        assert_eq!(gap_roots(&custody, &clock), [ROOT]);
+    }
+
+    /// A block whose bytes never went past this host has no known count, which is how every
+    /// block was tracked before counts existed, and it is tracked the same way.
+    #[test]
+    fn a_block_whose_blob_count_is_unknown_is_tracked_as_before() {
+        let clock = FakeClock::new();
+        let arrivals = arrivals(&clock);
+        let custody = shared(mainnet(), &arrivals);
+
+        custody.on_block(1, ROOT, clock.now());
+        clock.advance(DEADLINE);
+
+        assert_eq!(gap_roots(&custody, &clock), [ROOT]);
+    }
+
+    /// The usual order on a public block: the node sends `block_gossip` before it forwards the
+    /// block's bytes, so the count is unknown when the entry opens and known well before the
+    /// deadline. Reading the gaps drops the entry, and it stays gone after the arrival record
+    /// that said zero is pruned, eight slots on.
+    #[test]
+    fn a_blobless_block_learned_after_its_event_asks_for_nothing() {
+        let clock = FakeClock::new();
+        let arrivals = arrivals(&clock);
+        let custody = shared(mainnet(), &arrivals);
+
+        custody.on_block(1, ROOT, clock.now());
+        file_block(&arrivals, ROOT, 0);
+        clock.advance(DEADLINE);
+        assert_eq!(gap_roots(&custody, &clock), Vec::<[u8; 32]>::new());
+
+        clock.advance(Duration::from_secs(97));
+        assert_eq!(arrivals.blobs(ROOT), None, "the record is pruned");
+        assert_eq!(gap_roots(&custody, &clock), Vec::<[u8; 32]>::new());
+    }
+
+    /// Under Gloas the commitments are in the builder's bid, which the block carries, so an
+    /// empty bid is known before the envelope. The envelope still arrives, and still asks for
+    /// nothing, because no column of the block exists (T-127, MD-09).
+    #[test]
+    fn a_gloas_block_with_an_empty_bid_asks_for_nothing_at_its_envelope() {
+        let clock = FakeClock::new();
+        let arrivals = arrivals(&clock);
+        let custody = shared(
+            SpecSnapshot {
+                gloas_fork_epoch: 10,
+                ..mainnet()
+            },
+            &arrivals,
+        );
+
+        custody.on_block(FIRST_GLOAS_SLOT, ROOT, clock.now());
+        file_block(&arrivals, ROOT, 0);
+        clock.advance(Duration::from_secs(1));
+        custody.on_envelope(FIRST_GLOAS_SLOT, ROOT, clock.now());
+        clock.advance(DEADLINE);
+
+        assert_eq!(gap_roots(&custody, &clock), Vec::<[u8; 32]>::new());
     }
 
     /// Counts the two series column repair adds, which are zero on an honest fleet (§12).

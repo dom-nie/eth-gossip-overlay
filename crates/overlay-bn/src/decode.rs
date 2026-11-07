@@ -33,8 +33,10 @@
 //! buffer is allocated, every read is bounds-checked, and a shape that is not the object the
 //! topic names is an error rather than a panic. None of that makes what comes out true: a payload
 //! that decodes is a payload a peer could build, and nothing here checks a signature, a proposer
-//! or that any beacon node accepted the block. MD-06 is what that costs, and the only two things
-//! allowed to read this module's answer are the recent store's index and T-044's arrival line.
+//! or that any beacon node accepted the block. MD-06 is what that costs, and the only things
+//! allowed to read this module's answer are the recent store's index, T-044's arrival line and
+//! `Arrivals`, which custody asks for a block's blob count only by a root the beacon node itself
+//! named (T-127).
 
 use types::{BeaconBlockHeader, Hash256, MainnetEthSpec, SignedBeaconBlock, Slot};
 
@@ -81,30 +83,37 @@ const COLUMN_FIXED_LEN: usize = COLUMN_HEADER_AT + BEACON_BLOCK_HEADER_LEN + 96 
 /// block root is a field of its own.
 const GLOAS_COLUMN_FIXED_LEN: usize = 8 + 2 * 4 + 8 + 32;
 
-/// The slot a block is for and its block root, from the payload the beacon node gossips.
+/// The slot a block is for, its block root and how many blobs it commits to, from the payload
+/// the beacon node gossips.
 ///
 /// This is the compressed-payload form the ticket names and the one the tests here drive; the
 /// receive path holds the payload already decompressed and goes through [`Headers`] to the inner
 /// function, so it decompresses once for the id and the header together (T-006).
 ///
+/// The blob count is the length of the block's KZG commitment list: in the body before Gloas,
+/// in the builder's bid from Gloas on, and zero before Deneb, which has neither. Custody reads
+/// it to leave a block with no blobs untracked (T-127).
+///
 /// Two things a reader should know about the numbers this produces. The fork variant is found by
 /// trying each in turn, because nothing on the wire names it and the sidecar holds no fork
-/// schedule. A block read as the wrong variant gives a root no column belongs to, and that costs
-/// a slot of column repair rather than one request: the block opens a tracker entry under that
-/// root while every real column of it files under the right one, so the entry reports its whole
-/// expected set missing and the scheduler asks for up to the threshold every slot until the
-/// entry ages out. And a tree hash depends on the preset, through the list lengths it merkleises
-/// to, so the root is mainnet's; a network on another preset would need the preset with it,
-/// which is a change to what `SpecSnapshot` carries rather than to this function.
-pub fn block_header(payload: &[u8]) -> Result<(u64, [u8; 32]), HeaderError> {
+/// schedule. A block read as the wrong variant gives a root the beacon node never names, so
+/// nothing keyed by the node's events ever finds it. And a tree hash depends on the preset,
+/// through the list lengths it merkleises to, so the root is mainnet's; a network on another
+/// preset would need the preset with it, which is a change to what `SpecSnapshot` carries rather
+/// than to this function.
+pub fn block_header(payload: &[u8]) -> Result<(u64, [u8; 32], usize), HeaderError> {
     block_header_ssz(&decompress(payload)?)
 }
 
 /// The same from bytes already decompressed, which is what the receive path holds (T-006).
-fn block_header_ssz(ssz: &[u8]) -> Result<(u64, [u8; 32]), HeaderError> {
+fn block_header_ssz(ssz: &[u8]) -> Result<(u64, [u8; 32], usize), HeaderError> {
     let block = SignedBeaconBlock::<MainnetEthSpec>::any_from_ssz_bytes(ssz)
         .map_err(|_| HeaderError::Ssz)?;
-    Ok((block.slot().as_u64(), bytes32(block.canonical_root())))
+    Ok((
+        block.slot().as_u64(),
+        bytes32(block.canonical_root()),
+        block.num_expected_blobs(),
+    ))
 }
 
 /// The slot, index and block root of a data column sidecar, from the payload the beacon node
@@ -203,7 +212,7 @@ impl HeaderDecoder for Headers {
     fn header(&self, topic: &Topic, ssz: &[u8]) -> Option<Header> {
         match topic.kind() {
             TopicKind::BeaconBlock => match block_header_ssz(ssz) {
-                Ok((slot, root)) => Some(Header::Block { slot, root }),
+                Ok((slot, root, blobs)) => Some(Header::Block { slot, root, blobs }),
                 Err(error) => {
                     tracing::debug!(%topic, %error, "a block payload carries no header");
                     None
@@ -273,7 +282,7 @@ mod tests {
     use ssz::{Decode, Encode};
     use types::{
         BeaconBlock, BeaconBlockFulu, ChainSpec, DataColumnSidecar, DataColumnSidecarFulu,
-        DataColumnSidecarGloas, EmptyBlock, ForkName,
+        DataColumnSidecarGloas, EmptyBlock, ForkName, KzgCommitment,
     };
 
     use super::*;
@@ -381,7 +390,7 @@ mod tests {
     #[test]
     fn block_header_decodes_slot_and_root_from_compressed_payload() {
         for (block, wire) in [base_block(4_242), fulu_block(4_242)] {
-            let (slot, root) = block_header(&snappy(&wire)).unwrap();
+            let (slot, root, _) = block_header(&snappy(&wire)).unwrap();
 
             assert_eq!(slot, 4_242);
             assert_eq!(root, bytes32(block.canonical_root()));
@@ -556,10 +565,44 @@ mod tests {
             SignedBeaconBlock::<MainnetEthSpec>::any_from_ssz_bytes(SEPOLIA_GLOAS_BLOCK).unwrap();
         assert_eq!(block.fork_name_unchecked(), ForkName::Gloas);
 
-        let (slot, root) = block_header(&snappy(SEPOLIA_GLOAS_BLOCK)).unwrap();
+        let (slot, root, _) = block_header(&snappy(SEPOLIA_GLOAS_BLOCK)).unwrap();
 
         assert_eq!(slot, 11_511_776);
         assert_eq!(root, bytes32(SEPOLIA_GLOAS_ROOT.parse().unwrap()));
+    }
+
+    /// A block's blob count is what tells custody that no column of it will ever exist. Before
+    /// Gloas the commitments are in the body; from Gloas on the body has none and they are in
+    /// the builder's bid, which the block carries, so the count is known at the block either way.
+    #[test]
+    fn block_header_reads_the_blob_commitment_count() {
+        let spec = ChainSpec::mainnet();
+        let mut fulu = BeaconBlockFulu::<MainnetEthSpec>::empty(&spec);
+        for _ in 0..2 {
+            fulu.body
+                .blob_kzg_commitments
+                .push(KzgCommitment::empty_for_testing())
+                .unwrap();
+        }
+        let (_, wire) = signed_block(BeaconBlock::Fulu(fulu), 4_242);
+
+        assert_eq!(block_header(&snappy(&wire)).unwrap().2, 2);
+
+        let gloas =
+            SignedBeaconBlock::<MainnetEthSpec>::any_from_ssz_bytes(SEPOLIA_GLOAS_BLOCK).unwrap();
+        let in_bid = gloas
+            .message()
+            .body()
+            .signed_execution_payload_bid_gloas()
+            .unwrap()
+            .message
+            .blob_kzg_commitments
+            .len();
+        assert_ne!(in_bid, 0, "the fixture's bid carries commitments");
+        assert_eq!(
+            block_header(&snappy(SEPOLIA_GLOAS_BLOCK)).unwrap().2,
+            in_bid
+        );
     }
 
     /// What `cargo test -p overlay-bn drift` runs from this module: the byte offsets this

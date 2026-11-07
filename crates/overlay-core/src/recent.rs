@@ -582,6 +582,7 @@ mod tests {
                 TOPIC => Some(Header::Block {
                     slot: 42,
                     root: [8; 32],
+                    blobs: 1,
                 }),
                 _ => None,
             }
@@ -612,7 +613,8 @@ mod tests {
             recent.insert(id(2), topic(), payload(2, 200), Some(&ssz), clock.now()),
             Some(Header::Block {
                 slot: 42,
-                root: [8; 32]
+                root: [8; 32],
+                blobs: 1,
             })
         );
         assert_eq!(recent.get_by_column([8; 32], 5), None);
@@ -641,7 +643,8 @@ mod tests {
             header,
             Some(Header::Block {
                 slot: 42,
-                root: [8; 32]
+                root: [8; 32],
+                blobs: 1,
             })
         );
         assert_eq!(recent.get_by_block([8; 32]), Some(id(1)));
