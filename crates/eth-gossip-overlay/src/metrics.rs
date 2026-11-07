@@ -136,7 +136,8 @@ pub const HANDSHAKE_FAILURES_TOTAL: &str = "overlay_handshake_failures_total";
 pub const ROSTER_REGION_MISMATCH_TOTAL: &str = "overlay_roster_region_mismatch_total";
 /// Peers admitted on a key derived from the outgoing fleet seed.
 pub const PEER_AUTH_VIA_PREVIOUS_SEED_TOTAL: &str = "overlay_peer_auth_via_previous_seed_total";
-/// Second-hop work refused because the peer was over its fan-out budget.
+/// Second-hop work refused because the peer was over its fan-out budget. `kind` is
+/// [`FanoutKind`]'s label: `relay`, `chunk`, or `envelope` for the Gloas envelope's own allowance.
 pub const FANOUT_SUPPRESSED_TOTAL: &str = "overlay_fanout_suppressed_total";
 /// Batches this host re-fanned as a relay.
 pub const RELAYED_BATCHES_TOTAL: &str = "overlay_relayed_batches_total";

@@ -7,9 +7,13 @@
 //! A peer that keeps it up for more than [`SUSTAINED_VIOLATION`] loses the connection and comes
 //! back through the ordinary reconnect backoff.
 //!
-//! Nothing in v1 charges the bucket, because nothing in v1 fans out what it receives (§3
-//! principle 1). It is built, tested and wired into the receiver here so that T-063 and T-073
-//! have one budget to charge rather than one each.
+//! A peer has two allowances. The Gloas execution payload envelope gets one of its own, sized
+//! for one maximum envelope per slot, and only chunks on an `execution_payload` topic draw on it
+//! (MD-14 amended). That topic exists only from the Gloas fork on, so before the fork nothing
+//! spends it and a peer's budget is what it was. The sidecar has no slot clock, so the topic is
+//! how it knows. Each allowance keeps its own violation window: an envelope charge that fits
+//! never clears a violation on the other allowance, or a peer could stay connected over one by
+//! spending a little of the other.
 //!
 //! `now` is a parameter everywhere, so the bucket holds no clock and a test drives it with plain
 //! `Instant` arithmetic.
@@ -78,8 +82,8 @@ pub enum Charge {
     CloseRateExceeded,
 }
 
-/// One peer's fan-out budget: a token bucket over the bytes that trigger a second hop, and how
-/// long the peer has been over it.
+/// One peer's fan-out budget: an allowance for the bytes that trigger a second hop, another for
+/// the Gloas envelope's, and how long the peer has been over each.
 #[derive(Clone, Debug)]
 pub struct FanoutBudget {
     general: Allowance,
@@ -122,11 +126,15 @@ impl FanoutBudget {
     /// out: four times the share of a slot's large-class traffic that falls to one host, rounded
     /// up to whole chunks because a chunk is the unit anything arrives in. Refill is that
     /// capacity per slot, so a peer at the expected rate never runs dry and one at four times it
-    /// is over budget inside a slot.
+    /// is over budget inside a slot. The envelope allowance is the same arithmetic over the
+    /// envelope's estimate.
     ///
     /// ```text
-    /// capacity = ceil(4 * LARGE_BYTES_PER_SLOT_ESTIMATE / roster_size / chunk_bytes) * chunk_bytes
+    /// capacity = ceil(4 * estimate / roster_size / chunk_bytes) * chunk_bytes
     /// refill   = capacity / slot_secs bytes per second, rounded down
+    ///
+    /// estimate = LARGE_BYTES_PER_SLOT_ESTIMATE           relays and chunks
+    ///            GLOAS_ENVELOPE_BYTES_PER_SLOT_ESTIMATE  execution_payload chunks
     /// ```
     ///
     /// A roster of one, a chunk size of zero or a slot of zero seconds are not configurations
@@ -149,8 +157,8 @@ impl FanoutBudget {
         }
     }
 
-    /// A budget of `capacity` bytes refilling at `per_second`, for a caller that has the two
-    /// numbers already. [`default_for`](Self::default_for) is what the sidecar wires; a test
+    /// A budget whose two allowances are each `capacity` bytes refilling at `per_second`, for a
+    /// caller that has the two numbers already. [`default_for`](Self::default_for) is what the sidecar wires; a test
     /// reaches the bound with a bucket it can empty in one batch instead of a slot's traffic.
     pub fn new(per_second: u64, capacity: u64, now: Instant) -> Self {
         Self {
@@ -159,11 +167,11 @@ impl FanoutBudget {
         }
     }
 
-    /// Takes `bytes` out of the bucket, refilled up to `now`.
+    /// Takes `bytes` out of the allowance `kind` draws on, refilled up to `now`.
     ///
-    /// `kind` is the `fanout_suppressed_total{peer, kind}` label the caller counts a refusal
-    /// under. One bucket covers every kind: the budget is what one peer may make this host fan
-    /// out, however it asked.
+    /// `kind` is also the `fanout_suppressed_total{peer, kind}` label the caller counts a refusal
+    /// under. `Envelope` draws on the envelope allowance; `Relay` and `Chunk` share the other,
+    /// because that one is what a peer may make this host fan out however it asked.
     pub fn charge(&mut self, kind: FanoutKind, bytes: usize, now: Instant) -> Charge {
         match kind {
             FanoutKind::Envelope => self.envelope.charge(bytes, now),
