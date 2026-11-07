@@ -420,8 +420,7 @@ struct State {
 
 impl State {
     /// Opens an entry for `msg_id`, which may take the oldest one away: that is the bound on how
-    /// many messages a peer can make this host hold. Its two bitmaps are sized for the split
-    /// here and never grow, so they are charged here too.
+    /// many messages a peer can make this host hold. The entry comes charged for its bitmaps.
     fn open(
         &mut self,
         msg_id: MessageId,
@@ -435,8 +434,7 @@ impl State {
                 break;
             }
         }
-        let mut entry = Entry::new(topic_id, kind, params, now);
-        entry.bytes = 2 * size_of::<u64>() * bitmap_words(params);
+        let entry = Entry::new(topic_id, kind, params, now);
         self.bytes += entry.bytes;
         self.order.push_back(msg_id);
         self.in_flight.insert(msg_id, entry);
@@ -602,7 +600,10 @@ struct Entry {
 }
 
 impl Entry {
+    /// An entry charged for its two bitmaps, which are sized for the split here and never grow.
     fn new(topic_id: u16, kind: &TopicKind, params: Params, first_chunk_at: Instant) -> Self {
+        let received = Bits(vec![0; bitmap_words(params)]);
+        let forwarded = Bits(vec![0; bitmap_words(params)]);
         Self {
             topic_id,
             column: match kind {
@@ -612,9 +613,9 @@ impl Entry {
             params,
             first_chunk_at,
             chunks: Vec::new(),
-            bytes: 0,
-            received: Bits(vec![0; bitmap_words(params)]),
-            forwarded: Bits(vec![0; bitmap_words(params)]),
+            bytes: size_of::<u64>() * (received.0.len() + forwarded.0.len()),
+            received,
+            forwarded,
             senders: Vec::new(),
         }
     }
