@@ -121,44 +121,60 @@ fn a_chunk_cut_from_a_large_frame_does_not_keep_the_frame() {
     );
 }
 
-/// A roster peer cutting 2-byte chunks, each in a `CHUNK` frame of its own, makes this host hold
-/// tens of thousands of them. Whatever that costs on the heap, the slot, the copy, the bitmaps
-/// and the senders, stays inside `max_bytes`; only what grows with the entry count is outside
-/// it, and the budget prices that as `REASSEMBLY_ENTRY_BYTES` an entry.
-#[test]
-fn a_two_byte_chunk_flood_keeps_the_heap_under_max_bytes() {
-    let _serial = serial();
+/// One 2-byte chunk of message `message`, a split of 65535 data chunks and no parity, viewed
+/// from a 40-byte `CHUNK` frame of its own.
+fn two_byte_chunk(message: u32, index: u16) -> Chunk {
+    let mut msg_id = [0; 20];
+    msg_id[..4].copy_from_slice(&message.to_le_bytes());
+    Chunk {
+        msg_id: MessageId(msg_id),
+        topic_id: 1,
+        k: u16::MAX,
+        m: 0,
+        index,
+        total_len: u32::from(u16::MAX) * 2,
+        data: view_into_frame(40, 2),
+    }
+}
+
+/// What the heap may have grown by while `reassembler` holds what it holds: the cap, plus what
+/// the budget prices per open entry as `REASSEMBLY_ENTRY_BYTES`, plus the harness's own room.
+fn allowed(reassembler: &Reassembler, max_bytes: usize) -> usize {
+    max_bytes + reassembler.in_flight() * REASSEMBLY_ENTRY_BYTES as usize + HARNESS_BYTES
+}
+
+fn four_mib_reassembler() -> (Reassembler, usize) {
     let max_bytes = 4 * 1024 * 1024;
     let reassembler = Reassembler::new(ReassembleConfig {
         max_bytes,
         ..ReassembleConfig::default()
     });
+    (reassembler, max_bytes)
+}
+
+/// A roster peer cutting 2-byte chunks, each in a `CHUNK` frame of its own, makes this host hold
+/// tens of thousands of them, and what they cost on the heap, their slots and their copies,
+/// stays inside `max_bytes`. The flood holds one or two entries at a time, so it says little
+/// about the bitmaps; `one_chunk_at_the_last_index_per_message_keeps_the_heap_under_max_bytes`
+/// is the test for those.
+#[test]
+fn a_two_byte_chunk_flood_keeps_the_heap_under_max_bytes() {
+    let _serial = serial();
+    let (reassembler, max_bytes) = four_mib_reassembler();
     let (topic, from) = (block(), host());
     let now = Instant::now();
-    let k = u16::MAX;
     // Each message stops one index short so none completes and everything sent is held.
-    let per_message = u32::from(k) - 1;
+    let per_message = u32::from(u16::MAX) - 1;
     let before = live();
     let mut worst = 0;
 
     for sent in 0..400_000u32 {
-        let mut msg_id = [0; 20];
-        msg_id[..4].copy_from_slice(&(sent / per_message).to_le_bytes());
-        let chunk = Chunk {
-            msg_id: MessageId(msg_id),
-            topic_id: 1,
-            k,
-            m: 0,
-            index: (sent % per_message) as u16,
-            total_len: u32::from(k) * 2,
-            data: view_into_frame(40, 2),
-        };
+        let chunk = two_byte_chunk(sent / per_message, (sent % per_message) as u16);
         reassembler.on_chunk(&chunk, &topic, &from, false, now);
         drop(chunk);
 
         let grown = live().saturating_sub(before);
-        let allowed =
-            max_bytes + reassembler.in_flight() * REASSEMBLY_ENTRY_BYTES as usize + HARNESS_BYTES;
+        let allowed = allowed(&reassembler, max_bytes);
         worst = worst.max(grown);
         assert!(
             grown <= allowed,
@@ -166,4 +182,36 @@ fn a_two_byte_chunk_flood_keeps_the_heap_under_max_bytes() {
         );
     }
     println!("worst live heap growth over the flood: {worst} bytes, cap {max_bytes}");
+}
+
+/// One chunk at the last index of a 65535-chunk split opens an entry whose two bitmaps take
+/// 16 KiB for 2 bytes of payload. Spread over as many messages as the count bound allows, that
+/// is 8 MiB nothing would count if the bitmaps were not charged when the entry opens.
+#[test]
+fn one_chunk_at_the_last_index_per_message_keeps_the_heap_under_max_bytes() {
+    let _serial = serial();
+    let (reassembler, max_bytes) = four_mib_reassembler();
+    let (topic, from) = (block(), host());
+    let now = Instant::now();
+    let before = live();
+    let mut worst = 0;
+
+    for message in 0..512 {
+        let chunk = two_byte_chunk(message, u16::MAX - 1);
+        reassembler.on_chunk(&chunk, &topic, &from, false, now);
+        drop(chunk);
+
+        let grown = live().saturating_sub(before);
+        let allowed = allowed(&reassembler, max_bytes);
+        worst = worst.max(grown);
+        assert!(
+            grown <= allowed,
+            "{grown} bytes live after {message} messages, {allowed} allowed, {} in flight",
+            reassembler.in_flight()
+        );
+    }
+    println!(
+        "worst live heap growth over 512 last-index chunks: {worst} bytes, cap {max_bytes}, {} in flight",
+        reassembler.in_flight()
+    );
 }
