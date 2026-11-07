@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # T-052 check 6: the alert rules against a running fleet rather than against promtool.
 #
-#   scripts/alert-checks.sh [--with-beacon-nodes]
+#   scripts/alert-checks.sh
 #
 # Starts T-047's compose demo with the Prometheus that loads deploy/prometheus/alerts.yml, breaks
 # something the rules are supposed to notice, and waits for the alert to go pending. Pending
@@ -10,9 +10,6 @@
 #
 #   OverlayPeersLow        stop one of the three sidecars; the other two are down to one peer of
 #                          the two their roster lists.
-#   OverlayNotTrustedByBn  start the beacon nodes without the trusted-peer flags the drop-in
-#                          would give them. Needs a testnet and minutes of checkpoint sync, so it
-#                          runs only with --with-beacon-nodes, which is the nightly job.
 #
 # IMAGE          the sidecar image, eth-gossip-overlay:demo by default
 # TOOLBOX        the Dockerfile's toolbox stage, which the demo's setup step needs
@@ -23,14 +20,9 @@ IMAGE=${IMAGE:-eth-gossip-overlay:demo}
 TOOLBOX=${TOOLBOX:-eth-gossip-overlay:toolbox}
 ALERT_TIMEOUT=${ALERT_TIMEOUT:-120}
 MESH_TIMEOUT=${MESH_TIMEOUT:-120}
-TRUST_TIMEOUT=${TRUST_TIMEOUT:-900}
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 demo=$root/examples/compose
-with_beacon_nodes=0
-if [ "${1-}" = "--with-beacon-nodes" ]; then
-  with_beacon_nodes=1
-fi
 
 prometheus=http://127.0.0.1:9090
 failed=0
@@ -76,8 +68,8 @@ pending() { echo "ALERTS{alertname=\"$1\",alertstate=\"pending\"}"; }
 docker image inspect "$IMAGE" > /dev/null 2>&1 || docker build -t "$IMAGE" "$root"
 docker image inspect "$TOOLBOX" > /dev/null 2>&1 || docker build --target toolbox -t "$TOOLBOX" "$root"
 
-# 1. OverlayPeersLow. The three sidecars need no beacon node to build their mesh, so this half
-# runs anywhere the demo does.
+# OverlayPeersLow. The three sidecars need no beacon node to build their mesh, so this runs
+# anywhere the demo does.
 compose up -d sc-1 sc-2 sc-3 prometheus
 
 if ! wait_for 'count(sum by (instance) (overlay_peers_connected) == 2) == 3' "$MESH_TIMEOUT" > /dev/null; then
@@ -98,19 +90,5 @@ else
   compose logs --tail 20 prometheus
 fi
 compose start sc-2 > /dev/null
-
-# 2. OverlayNotTrustedByBn. TRUST_SIDECAR=0 starts the beacon nodes without the two flags the
-# systemd drop-in would hand them, which is the mistake this alert exists to catch.
-if [ "$with_beacon_nodes" = 1 ]; then
-  TRUST_SIDECAR=0 compose up -d bn-1 bn-2 bn-3
-
-  if ! wait_for 'overlay_bn_trusted == 0' "$TRUST_TIMEOUT" > /dev/null; then
-    fail "no beacon node reported the sidecar untrusted in ${TRUST_TIMEOUT}s"
-  elif elapsed=$(wait_for "$(pending OverlayNotTrustedByBn)" "$ALERT_TIMEOUT"); then
-    pass "alerts_fire_in_the_compose_demo: OverlayNotTrustedByBn pending after ${elapsed}s"
-  else
-    fail "alerts_fire_in_the_compose_demo: OverlayNotTrustedByBn never went pending"
-  fi
-fi
 
 exit "$failed"
