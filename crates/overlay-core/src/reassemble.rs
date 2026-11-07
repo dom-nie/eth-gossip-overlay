@@ -1204,6 +1204,45 @@ mod tests {
         }
     }
 
+    /// A sender is charged once per flag it writes under, which is how often it goes on the
+    /// list, so a peer sending a hundred chunks of one message pays for its name once (D23).
+    #[test]
+    fn a_new_sender_is_charged_and_a_repeat_is_not() {
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        let origin = host();
+        let sibling = Hostname("bn-sibling".to_owned());
+        let bytes = || reassembler.state().bytes;
+        let chunk_cost = 8 + CHUNK_OVERHEAD_BYTES;
+
+        reassembler.on_chunk(&chunk(1, 0, 8, 1), &block(), &origin, false, now);
+        assert_eq!(bytes(), chunk_cost + sender_cost(&origin), "a first sender");
+
+        let before = bytes();
+        reassembler.on_chunk(&chunk(1, 1, 8, 1), &block(), &origin, false, now);
+        assert_eq!(
+            bytes() - before,
+            chunk_cost,
+            "the same sender and flag again"
+        );
+
+        let before = bytes();
+        reassembler.on_chunk(&chunk(1, 2, 8, 1), &block(), &origin, true, now);
+        assert_eq!(
+            bytes() - before,
+            chunk_cost + sender_cost(&origin),
+            "the same sender under the other flag is a second entry"
+        );
+
+        let before = bytes();
+        reassembler.on_chunk(&chunk(1, 3, 8, 1), &block(), &sibling, false, now);
+        assert_eq!(
+            bytes() - before,
+            chunk_cost + sender_cost(&sibling),
+            "a new sender"
+        );
+    }
+
     /// What T-082 asks for when a message has not finished in time (D23, D24): the indices no
     /// chunk arrived for, ascending so the data ones come first, every peer that sent one with
     /// the flag its chunk carried in arrival order, and the split and count a request works out
