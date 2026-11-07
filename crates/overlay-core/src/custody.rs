@@ -1,7 +1,7 @@
 //! Which data columns this host's beacon node wants for a slot, which have arrived, and which
 //! to ask a peer for first once the deadline has passed (§5.6, §6.4, D23, MD-06).
 //!
-//! Every fact in here comes from the beacon node's own event stream and from nowhere else:
+//! Every fact here but one comes from the beacon node's own event stream and from nowhere else:
 //! `block_gossip` for a block the node accepted, `execution_payload_gossip` for a Gloas payload
 //! envelope it accepted, `data_column_sidecar` for a column it holds.
 //! `overlay_bn::events` is the only writer, which is what MD-06 asks for. A payload a peer sent
@@ -394,7 +394,8 @@ impl Block {
 /// The write side is [`on_block`](Self::on_block), [`on_envelope`](Self::on_envelope) and
 /// [`on_column`](Self::on_column), and `overlay_bn::events` is the only caller of any. Reading
 /// the beacon node's subscriptions here rather than at the call site is what keeps that true:
-/// the writer needs nothing but the numbers the event carried.
+/// the writer needs nothing but the numbers the event carried. [`gaps`](Self::gaps) also drops
+/// entries whose blob count is now known to be zero, but it only removes, never opens.
 #[derive(Clone)]
 pub struct SharedCustody(Arc<Shared>);
 
