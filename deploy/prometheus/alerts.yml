@@ -42,17 +42,6 @@ groups:
           summary: "{{ $labels.instance }} has no beacon node link"
           runbook: docs/troubleshooting.md#overlaybndisconnected
 
-      # D09. The series is absent, not zero, while the beacon node has not said, so a node whose
-      # HTTP API does not answer the trusted-peer probe stays quiet here.
-      - alert: OverlayNotTrustedByBn
-        expr: overlay_bn_trusted == 0
-        for: 2m
-        labels:
-          severity: critical
-        annotations:
-          summary: "{{ $labels.instance }}'s beacon node does not list the sidecar as trusted"
-          runbook: docs/troubleshooting.md#overlaynottrustedbybn
-
       # D14: a sustained rate, not a single failure. One peer restarting fails a handshake or
       # two and stops. A rolling upgrade across a protocol major fails them for as long as the
       # rollout lasts, which is why the window is long enough to sit through one.
