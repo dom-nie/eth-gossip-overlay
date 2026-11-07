@@ -1149,6 +1149,73 @@ mod tests {
         );
     }
 
+    /// An entry's bitmaps are as long as its split from the moment it opens, so what they cost
+    /// is known then and charged then, whatever index the first chunk carries, and finishing the
+    /// message gives it back with the rest. 200 indices are four words a bitmap.
+    #[test]
+    fn bitmaps_are_charged_for_the_whole_split_at_open() {
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        let first = chunk(1, 0, 150, 50);
+        let split = Params {
+            k: first.k,
+            m: first.m,
+            chunk_bytes: first.data.len(),
+            total_len: first.total_len,
+        };
+
+        on(&reassembler, &first, false, now);
+
+        {
+            let state = reassembler.state();
+            assert_eq!(
+                state.bytes,
+                8 + CHUNK_OVERHEAD_BYTES + sender_cost(&host()) + bitmaps(split)
+            );
+            let entry = &state.in_flight[&first.msg_id];
+            assert_eq!(entry.received.0.len(), 4);
+            assert_eq!(entry.forwarded.0.len(), 4);
+        }
+        reassembler.complete(first.msg_id);
+        assert_eq!(
+            reassembler.state().bytes,
+            0,
+            "the charge went with the entry"
+        );
+    }
+
+    /// The bitmaps were sized for the split at open, so the last index the split has lands in
+    /// a word that is already there: storing it costs the chunk and nothing else.
+    #[test]
+    fn a_chunk_at_the_last_index_does_not_grow_the_bitmaps() {
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        let msg_id = MessageId([1; 20]);
+        let sizes = || {
+            let state = reassembler.state();
+            let entry = &state.in_flight[&msg_id];
+            let (received, forwarded) = (&entry.received.0, &entry.forwarded.0);
+            (
+                state.bytes,
+                [
+                    received.len(),
+                    received.capacity(),
+                    forwarded.len(),
+                    forwarded.capacity(),
+                ],
+            )
+        };
+        on(&reassembler, &chunk(1, 0, 150, 50), false, now);
+        let (before, opened) = sizes();
+
+        on(&reassembler, &chunk(1, 199, 150, 50), false, now);
+
+        let (after, grown) = sizes();
+        assert_eq!(grown, opened);
+        assert_eq!(after - before, 8 + CHUNK_OVERHEAD_BYTES);
+        assert!(reassembler.state().in_flight[&msg_id].received.has(199));
+    }
+
     /// What `store` charges for one sender on an entry's list.
     fn sender_cost(peer: &Hostname) -> usize {
         SENDER_OVERHEAD_BYTES + peer.0.len()
@@ -1166,14 +1233,11 @@ mod tests {
     }
 
     /// MD-11: a roster peer cutting 2-byte chunks pays each one's bookkeeping, so the default
-    /// 32 MiB cap holds about 316 thousand of them rather than 16.8 million.
+    /// 32 MiB cap holds about 294 thousand of them rather than 16.8 million.
     ///
-    /// What this bounds is the count and the reassembler's own sum. For chunks that arrive one
-    /// per `CHUNK` frame, a stored 2-byte chunk costs at most 144 bytes of heap: the 80 of its
-    /// slot with the `Vec`'s doubling, the 24 of the frame's `bytes::Shared`, and the 40-byte
-    /// frame its zero-copy view keeps alive, which is about 1.4 times the cap. For chunks cut
-    /// from a shared frame, a `REPAIR_RESP` carrying many, it bounds nothing: one held chunk
-    /// keeps the whole frame, up to 10 MiB, until T-131 copies on store.
+    /// What this checks is the count and the reassembler's own sum, bitmaps included. That the
+    /// sum covers what the chunks really cost on the heap is `tests/reassembly_memory.rs`'s
+    /// question, which it answers with an allocator that counts.
     #[test]
     fn a_flood_of_two_byte_chunks_is_charged_its_bookkeeping() {
         let max_bytes = 1024 * 1024;
@@ -1184,6 +1248,12 @@ mod tests {
         let now = Instant::now();
         let k = u16::MAX;
         let most = max_bytes / (2 + CHUNK_OVERHEAD_BYTES);
+        let flood_split = Params {
+            k,
+            m: 0,
+            chunk_bytes: 2,
+            total_len: u32::from(k) * 2,
+        };
 
         // Each message stops one index short so none completes and everything sent is held.
         // Counting payload alone, eight of them fit under the cap and the ninth passes it.
@@ -1210,7 +1280,9 @@ mod tests {
                     .flat_map(|entry| &entry.senders)
                     .map(|(peer, _)| sender_cost(peer))
                     .sum();
-                let charged = held * (2 + CHUNK_OVERHEAD_BYTES) + senders;
+                let charged = held * (2 + CHUNK_OVERHEAD_BYTES)
+                    + senders
+                    + state.in_flight.len() * bitmaps(flood_split);
                 assert!(
                     state.bytes <= max_bytes,
                     "{} bytes charged past the {max_bytes} cap",
