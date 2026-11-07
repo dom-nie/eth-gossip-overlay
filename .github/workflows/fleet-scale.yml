@@ -3,7 +3,8 @@ name: Fleet at scale
 # The nightly runs: too slow, or too dependent on a public network, for a pull request.
 #
 # T-051's fleet harness with thirty hosts per scenario instead of three to six, the compose demo
-# with the three real beacon nodes a newcomer starts, and the alert rules against that demo.
+# with the three real beacon nodes a newcomer starts, and the alert rules against the demo's
+# sidecars and Prometheus.
 on:
   schedule:
     - cron: "17 3 * * *"
