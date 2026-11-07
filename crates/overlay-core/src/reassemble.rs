@@ -550,9 +550,10 @@ impl State {
     }
 }
 
-/// One held chunk: the index its header carried and its bytes. The memory budget prices a held
-/// chunk by this type's size, so the entry's storage and the budget cannot drift apart.
-pub(crate) type HeldChunk = (u16, Bytes);
+/// One held chunk: the index its header carried and its bytes. [`CHUNK_OVERHEAD_BYTES`] is
+/// priced from this type's size, so the entry's storage and what the cap charges for it cannot
+/// drift apart.
+type HeldChunk = (u16, Bytes);
 
 /// One message being collected.
 struct Entry {
