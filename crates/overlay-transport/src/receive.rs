@@ -296,7 +296,8 @@ impl PeerReceiver {
 
     /// Charges this peer's fan-out budget for `bytes` of second-hop work, counting a refusal
     /// and closing the connection when the peer has been over budget for too long (DX-N3). The
-    /// datagram loop charges `kind = Relay` for every `RELAY` batch; T-073 charges `Chunk`.
+    /// datagram loop charges `kind = Relay` for every `RELAY` batch; a forwarded chunk charges
+    /// `Chunk`, or `Envelope` on an `execution_payload` topic (MD-14 amended).
     pub fn charge(&self, kind: FanoutKind, bytes: usize, now: Instant) -> Charge {
         let charge = self.ctx.charge(kind, bytes, now);
         if charge == Charge::CloseRateExceeded {
@@ -658,15 +659,19 @@ impl Ctx {
             flags.contains(ChunkFlags::FORWARDED),
             now,
         );
+        let kind = match topic.kind() {
+            TopicKind::ExecutionPayload => FanoutKind::Envelope,
+            _ => FanoutKind::Chunk,
+        };
         let after = match outcome.forward() {
             false => After::Carry,
-            true => match self.charge(FanoutKind::Chunk, chunk.data.len(), now) {
+            true => match self.charge(kind, chunk.data.len(), now) {
                 Charge::Allowed => {
                     self.forward(&topic, &chunk);
                     After::Carry
                 }
                 Charge::Suppressed => After::Carry,
-                Charge::CloseRateExceeded => After::Close(FanoutKind::Chunk),
+                Charge::CloseRateExceeded => After::Close(kind),
             },
         };
         Arrival {
