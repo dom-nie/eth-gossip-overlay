@@ -1305,10 +1305,12 @@ mod tests {
         assert_eq!(MAX_BYTES - 3 * envelope, 470_912);
     }
 
-    /// MD-11's numbers on a 64-bit host: a 2-byte chunk is charged 106 bytes, so the default cap
-    /// holds 316,551 of them where it held 16.8 million when only payload counted.
+    /// The overheads MD-11 was decided on, for a 64-bit host: 104 bytes a chunk, which puts
+    /// 316,551 two-byte chunks under the default cap, and 64 bytes a sender beside its name.
     #[test]
-    fn the_default_cap_holds_about_316_thousand_two_byte_chunks() {
+    fn the_overheads_are_md11s_64_bit_numbers() {
+        assert_eq!(CHUNK_OVERHEAD_BYTES, 104);
+        assert_eq!(SENDER_OVERHEAD_BYTES, 64);
         assert_eq!(MAX_BYTES / (2 + CHUNK_OVERHEAD_BYTES), 316_551);
     }
 
