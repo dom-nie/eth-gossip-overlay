@@ -17,16 +17,17 @@
 //!
 //! A host takes every block and all 128 data columns of a slot, so a few hundred messages can be
 //! in flight at once. Three bounds keep that from growing without end: [`MAX_IN_FLIGHT`] on the
-//! count, [`MAX_BYTES`] on what the held chunks and their senders are charged, and
-//! [`INCOMPLETE_TTL`] on how long a message that never completed keeps its place. Each of them
-//! takes the oldest entry first and counts what it took, and the forwarded bitmap and the sender
-//! list go with the entry, so nothing in this module is sized or expired on its own.
+//! count, [`MAX_BYTES`] on what the entries hold, and [`INCOMPLETE_TTL`] on how long a message
+//! that never completed keeps its place. Each of them takes the oldest entry first and counts
+//! what it took, and the forwarded bitmap and the sender list go with the entry, so nothing in
+//! this module is sized or expired on its own.
 //!
-//! A chunk is charged its length plus [`CHUNK_OVERHEAD_BYTES`] and a new sender its name plus a
-//! fixed overhead, so the cap holds whatever chunk length a peer cuts (MD-11). It does not yet
-//! see two things: a held chunk is a view that keeps the whole frame it arrived in alive, and the
-//! index bitmaps grow with the highest index seen. T-131 copies on store and charges the
-//! bitmaps.
+//! A chunk is charged its length plus [`CHUNK_OVERHEAD_BYTES`], a new sender its name plus a
+//! fixed overhead, and the two index bitmaps their size for the whole split when the entry
+//! opens. A chunk is copied out of the frame it arrived in, so it keeps nothing else alive. The
+//! cap therefore bounds what the entries really hold, whatever chunk length or index a peer
+//! sends (MD-11). Only what grows with the number of entries, each entry's own fields and its
+//! map slots, is outside it, and the memory budget prices that per entry.
 //!
 //! `now` is a parameter rather than a clock of its own, so a test drives arrival and expiry with
 //! plain `Instant` arithmetic and the receive path passes the clock it already holds.
@@ -52,8 +53,9 @@ use crate::wire::{Chunk, MAX_PAYLOAD_BYTES};
 /// from here and from [`MAX_BYTES`].
 pub const MAX_IN_FLIGHT: usize = 512;
 
-/// What one host's held chunks, with their bookkeeping and their senders, are charged for
-/// messages it has not finished with.
+/// What one host's entries for messages it has not finished with are charged: their chunks with
+/// the bookkeeping, their senders and their bitmaps, which is all the memory they hold beside
+/// the entries themselves.
 ///
 /// One slot is a 200 KB block and 128 data columns of about 40 KB, which is 5.2 MiB of payload,
 /// and a message is buffered as its chunks, so the parity chunks put roughly a tenth on top:
@@ -89,7 +91,7 @@ const SENDER_OVERHEAD_BYTES: usize = 2 * size_of::<(Hostname, bool)>();
 pub struct ReassembleConfig {
     /// Messages in flight at once, oldest evicted past it.
     pub max_in_flight: usize,
-    /// What their held chunks and senders are charged, oldest message evicted past it.
+    /// What their chunks, senders and bitmaps are charged, oldest message evicted past it.
     pub max_bytes: usize,
     /// How long a message that never completed keeps its entry.
     pub incomplete_ttl: Duration,
@@ -194,7 +196,8 @@ pub enum Reason {
 pub enum Evicted {
     /// [`ReassembleConfig::max_in_flight`] was reached by a new message.
     MaxInFlight,
-    /// [`ReassembleConfig::max_bytes`] was passed by a stored chunk or a new sender.
+    /// [`ReassembleConfig::max_bytes`] was passed by a new message's bitmaps, a stored chunk or
+    /// a new sender.
     MaxBytes,
     /// The message waited [`ReassembleConfig::incomplete_ttl`] without completing.
     Expired,

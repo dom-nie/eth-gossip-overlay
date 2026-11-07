@@ -151,11 +151,11 @@ pub const SEEN_ENTRY_BYTES: u64 = 64;
 pub const SMALL_MESSAGE_BYTES: u64 = 512;
 
 /// What one message in flight costs beside what the reassembler charges to
-/// [`reassemble::MAX_BYTES`]: the two index bitmaps, 1408 bytes for a `MAX_PAYLOAD_SIZE` envelope
-/// at the shipped chunk size, and the map and deque entries holding it all. Each chunk's slot and
-/// the list of peers that sent one are charged inside the cap (MD-11). The bitmaps are still
-/// priced here, which is honest only for an honest split: one chunk at index 65534 makes them
-/// 16 KiB, until T-131 charges them when the entry opens.
+/// [`reassemble::MAX_BYTES`]: the entry itself, its map and deque slots, and its slot in the
+/// completed set. The chunks with their copies, the peers that sent them and the two index
+/// bitmaps are all charged inside the cap (MD-11), so the reassembler row is a ceiling for any
+/// peer, not only an honest one. This overstates what is left outside, and is kept rather than
+/// lowered.
 pub const REASSEMBLY_ENTRY_BYTES: u64 = 4096;
 
 /// What one entry of a peer's topic table costs at the longest topic string the wire allows:
@@ -668,7 +668,7 @@ mod tests {
         );
     }
 
-    /// The reassembler charges each chunk's slot and each sender inside `MAX_BYTES` (MD-11), so
+    /// The reassembler charges every chunk, sender and bitmap inside `MAX_BYTES` (MD-11), so
     /// the row is the cap and the per-entry slots and nothing else. It does not move with this
     /// host's chunk size, because nothing holds a peer to it.
     #[test]
