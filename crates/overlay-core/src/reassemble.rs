@@ -1272,6 +1272,23 @@ mod tests {
         );
     }
 
+    /// A Gloas envelope is bounded only by `MAX_PAYLOAD_SIZE` (MD-08), and at the shipped split
+    /// it is 5120 data chunks of 2048 bytes. Held one short of complete, striped over a region of
+    /// a hundred hosts with 32-byte names, it is charged each chunk with its overhead and each
+    /// sender once, and the cap still holds three of them.
+    #[test]
+    fn three_max_size_envelopes_fit_under_max_bytes() {
+        let split = Params::for_len(MAX_PAYLOAD_BYTES, 2048, 0.10).expect("the shipped split");
+        let senders = 100 * (SENDER_OVERHEAD_BYTES + 32);
+        let envelope = usize::from(split.k) * (split.chunk_bytes + CHUNK_OVERHEAD_BYTES) + senders;
+
+        assert!(
+            3 * envelope <= MAX_BYTES,
+            "three envelopes are charged {} bytes, the cap is {MAX_BYTES}",
+            3 * envelope
+        );
+    }
+
     /// What T-082 asks for when a message has not finished in time (D23, D24): the indices no
     /// chunk arrived for, ascending so the data ones come first, every peer that sent one with
     /// the flag its chunk carried in arrival order, and the split and count a request works out
