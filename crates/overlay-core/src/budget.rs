@@ -732,6 +732,7 @@ mod tests {
     fn fanout_kinds_are_the_metric_labels_they_are_counted_under() {
         assert_eq!(FanoutKind::Relay.as_str(), "relay");
         assert_eq!(FanoutKind::Chunk.as_str(), "chunk");
+        assert_eq!(FanoutKind::Envelope.as_str(), "envelope");
     }
 
     /// The connection goes only once a peer has been over budget for longer than the bound, so
