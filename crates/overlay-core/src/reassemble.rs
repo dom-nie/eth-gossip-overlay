@@ -1243,6 +1243,34 @@ mod tests {
         );
     }
 
+    /// A duplicate from a peer not yet on the list stores no bytes but grows the list, so that
+    /// path is held to the cap as well. The cap fits two one-chunk entries exactly, and the
+    /// newer one's duplicate from a second peer is what takes the older one away.
+    #[test]
+    fn a_duplicate_from_a_new_sender_is_trimmed() {
+        let evictions = Arc::new(Evictions::default());
+        let reassembler = Reassembler::new(ReassembleConfig {
+            max_bytes: 2 * one_chunk_entry(),
+            ..ReassembleConfig::default()
+        })
+        .with_stats(evictions.clone());
+        let now = Instant::now();
+        for msg_id in 1..=2 {
+            on(&reassembler, &chunk(msg_id, 0, 4, 1), false, now);
+        }
+        let sibling = Hostname("bn-02".to_owned());
+
+        let outcome = reassembler.on_chunk(&chunk(2, 0, 4, 1), &block(), &sibling, false, now);
+
+        assert_eq!(outcome, Outcome::Duplicate { forward: false });
+        assert_eq!(evictions.seen(), [Evicted::MaxBytes]);
+        assert_eq!(reassembler.in_flight(), 1);
+        assert_eq!(
+            reassembler.state().bytes,
+            one_chunk_entry() + sender_cost(&sibling)
+        );
+    }
+
     /// What T-082 asks for when a message has not finished in time (D23, D24): the indices no
     /// chunk arrived for, ascending so the data ones come first, every peer that sent one with
     /// the flag its chunk carried in arrival order, and the split and count a request works out
