@@ -209,9 +209,10 @@ struct Arrival {
     blobs: Option<usize>,
 }
 
-/// Which blocks reached this host lately, so an import event can be turned into a lag, and
-/// which of them the beacon node has imported, so a block whose parent it lacks is not offered
-/// to it (T-101).
+/// Which blocks reached this host lately, so an import event can be turned into a lag, which
+/// of them the beacon node has imported, so a block whose parent it lacks is not offered to it
+/// (T-101), and how many blobs each commits to, which custody reads to leave a block with none
+/// untracked (T-127).
 ///
 /// It lives here rather than beside the event stream that reads it because both receive paths
 /// file into it, and one of them is in `overlay-transport`, which has never heard of the beacon
@@ -334,7 +335,7 @@ impl Arrivals {
         seen.get(&block_root).and_then(|arrival| arrival.blobs)
     }
 
-    /// Drops the records the retention window no longer covers. Both entry points call it, so a
+    /// Drops the records the retention window no longer covers. Every entry point calls it, so a
     /// beacon node that has stopped importing still lets the map empty out.
     fn prune(&self, seen: &mut BTreeMap<[u8; 32], Arrival>, now: Instant) {
         let window = Duration::from_secs(RETENTION_SLOTS * self.spec.borrow().seconds_per_slot);
