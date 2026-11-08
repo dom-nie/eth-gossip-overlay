@@ -46,17 +46,33 @@ jobs:
       # inside the script, so it is split into arguments, quotes and all, and nothing in it runs
       # as shell. xargs turns cargo-mutants' exit codes 2 and 3 into 123, which still fails.
       - name: Mutants in ${{ matrix.crate }}
+        id: mutants
         env:
           ARGS: ${{ inputs.args }}
         run: printf '%s' "$ARGS" | xargs cargo mutants --in-place -p ${{ matrix.crate }}
 
+      # The counts tell a run that tested nothing, or failed before it tested anything, from one
+      # that tested everything and missed nothing.
       - name: Name the missed and timed-out mutants on the run page
         if: always()
         env:
           CRATE: ${{ matrix.crate }}
+          OUTCOME: ${{ steps.mutants.outcome }}
         run: |
+          count() { grep -c . "mutants.out/$1.txt" 2>/dev/null || true; }
+          caught=$(count caught) missed=$(count missed) timeout=$(count timeout) unviable=$(count unviable)
           {
             echo "## $CRATE"
+            echo "caught ${caught:-0}, missed ${missed:-0}, timeout ${timeout:-0}, unviable ${unviable:-0}"
+            echo
+            if [ "${caught:-0}${missed:-0}${timeout:-0}${unviable:-0}" = 0000 ]; then
+              echo "No mutant was tested."
+              echo
+            fi
+            if [ "$OUTCOME" = failure ] && [ "${missed:-0}" = 0 ] && [ "${timeout:-0}" = 0 ]; then
+              echo "The run failed before naming a mutant (the baseline, or a usage error): see the log."
+              echo
+            fi
             for outcome in missed timeout; do
               echo "### $outcome"
               if [ -s "mutants.out/$outcome.txt" ]; then
