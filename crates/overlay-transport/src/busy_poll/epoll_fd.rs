@@ -81,3 +81,31 @@ fn bound_to(fd: RawFd) -> Option<SocketAddr> {
 pub(super) fn find(_listen: SocketAddr) -> Result<(RawFd, RawFd), &'static str> {
     Err("per-epoll busy polling is Linux only")
 }
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use std::os::fd::AsRawFd;
+
+    use super::*;
+
+    /// The walk against a real runtime: a tokio socket is registered on the runtime's epoll
+    /// instance, and the lookup has to come back with that instance and that socket, for both
+    /// address families the overlay listens on.
+    #[tokio::test]
+    async fn find_names_the_epoll_instance_holding_the_overlay_socket() {
+        for bind in ["127.0.0.1:0", "[::1]:0"] {
+            let socket = tokio::net::UdpSocket::bind(bind)
+                .await
+                .unwrap_or_else(|err| panic!("bind {bind}: {err}"));
+
+            let (epoll, fd) = find(socket.local_addr().unwrap()).unwrap();
+
+            assert_eq!(fd, socket.as_raw_fd(), "{bind}");
+            assert_eq!(
+                std::fs::read_link(format!("/proc/self/fd/{epoll}")).unwrap(),
+                std::path::Path::new("anon_inode:[eventpoll]"),
+                "{bind}"
+            );
+        }
+    }
+}
