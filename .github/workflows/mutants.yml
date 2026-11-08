@@ -44,12 +44,16 @@ jobs:
       #
       # The dispatch input reaches the command through env and xargs, never through `${{ }}`
       # inside the script, so it is split into arguments, quotes and all, and nothing in it runs
-      # as shell. xargs turns cargo-mutants' exit codes 2 and 3 into 123, which still fails.
+      # as shell. The first xargs only checks the quotes balance: given an unbalanced one, xargs
+      # runs the command on the words before it, which would start a partial run. xargs turns
+      # cargo-mutants' exit codes 2 and 3 into 123, which still fails.
       - name: Mutants in ${{ matrix.crate }}
         id: mutants
         env:
           ARGS: ${{ inputs.args }}
-        run: printf '%s' "$ARGS" | xargs cargo mutants --in-place -p ${{ matrix.crate }}
+        run: >-
+          printf '%s' "$ARGS" | xargs true &&
+          printf '%s' "$ARGS" | xargs cargo mutants --in-place -p ${{ matrix.crate }}
 
       # The counts tell a run that tested nothing, or failed before it tested anything, from one
       # that tested everything and missed nothing.
