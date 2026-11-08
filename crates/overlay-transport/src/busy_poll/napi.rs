@@ -107,6 +107,10 @@ pub(super) mod netlink {
     const REPLY_TIMEOUT_SECONDS: i64 = 1;
 
     /// Asks netdev to suspend `napi_id`'s IRQ for `nanos` while polling is finding packets.
+    // mutants::skip: `NETDEV_CMD_NAPI_SET` needs `CAP_NET_ADMIN`, which no unprivileged test has.
+    // What is left here is three calls, and `open`, `family_id`, `round_trip` and the request
+    // `napi_set_request` builds are each under test on their own.
+    #[cfg_attr(test, mutants::skip)]
     pub fn set_irq_suspend_timeout(napi_id: u32, nanos: u64) -> io::Result<()> {
         let socket = open()?;
         let family = family_id(&socket, NETDEV_FAMILY)?;
