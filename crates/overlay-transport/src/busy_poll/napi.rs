@@ -110,19 +110,24 @@ pub(super) mod netlink {
     pub fn set_irq_suspend_timeout(napi_id: u32, nanos: u64) -> io::Result<()> {
         let socket = open()?;
         let family = family_id(&socket)?;
+        round_trip(&socket, &napi_set_request(family, napi_id, nanos)).map(drop)
+    }
+
+    /// `NETDEV_CMD_NAPI_SET` for `napi_id` with its IRQ suspension timeout, addressed to the
+    /// number `family` the netdev family was given at boot.
+    fn napi_set_request(family: u16, napi_id: u32, nanos: u64) -> Vec<u8> {
         let mut attrs = attribute(NETDEV_A_NAPI_ID, &napi_id.to_ne_bytes());
         attrs.extend(attribute(
             NETDEV_A_NAPI_IRQ_SUSPEND_TIMEOUT,
             &nanos.to_ne_bytes(),
         ));
-        let request = message(
+        message(
             family,
             NETDEV_CMD_NAPI_SET,
             NLM_F_REQUEST | NLM_F_ACK,
             2,
             &attrs,
-        );
-        round_trip(&socket, &request).map(drop)
+        )
     }
 
     /// A generic netlink socket that will not wait forever for an answer.
