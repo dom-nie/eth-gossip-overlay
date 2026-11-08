@@ -16,6 +16,9 @@ use super::{Host, Kernel};
 /// `None` where the kernel has no id to give: nothing has arrived on the socket yet, or the
 /// device behind it has no NAPI instance at all, which is loopback and most of what a container
 /// hands a process.
+// mutants::skip: one line over `id_of_with`, which is under test with a fake kernel; the only
+// thing left to mutate is which kernel it asks, and that is the running one.
+#[cfg_attr(test, mutants::skip)]
 pub fn id_of(socket: RawFd) -> io::Result<Option<u32>> {
     id_of_with(&Host, socket)
 }

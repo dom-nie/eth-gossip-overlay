@@ -75,6 +75,9 @@ fn bound_to(fd: RawFd) -> Option<SocketAddr> {
 /// the same way it carries a kernel that is too old, so a developer reading a laptop's log is
 /// told which of the two they are looking at.
 #[cfg(not(target_os = "linux"))]
+// mutants::skip: compiled only off Linux. The Linux runner the nightly uses never builds this,
+// so a mutant here changes nothing that was built and survives whatever the suite does.
+#[cfg_attr(test, mutants::skip)]
 pub(super) fn find(_listen: SocketAddr) -> Result<(RawFd, RawFd), &'static str> {
     Err("per-epoll busy polling is Linux only")
 }

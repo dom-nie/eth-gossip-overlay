@@ -452,6 +452,9 @@ pub fn ceiling() -> Ceiling {
 /// A host that is not Linux has no cgroup to read, so the constant is the ceiling and there is
 /// nothing to warn about.
 #[cfg(not(target_os = "linux"))]
+// mutants::skip: compiled only off Linux. The Linux runner the nightly uses never builds this,
+// so a mutant here changes nothing that was built and survives whatever the suite does.
+#[cfg_attr(test, mutants::skip)]
 pub fn ceiling() -> Ceiling {
     Ceiling {
         bytes: MEMORY_MAX_DEFAULT,

@@ -266,6 +266,9 @@ impl Kernel for Host {
 /// Off Linux there is no epoll instance to set anything on, so the answer is the one every
 /// caller already handles: this kernel does not have the ioctl.
 #[cfg(not(target_os = "linux"))]
+// mutants::skip: compiled only off Linux. The Linux runner the nightly uses never builds this,
+// so a mutant here changes nothing that was built and survives whatever the suite does.
+#[cfg_attr(test, mutants::skip)]
 impl Kernel for Host {
     fn set_epoll_params(&self, _epoll: RawFd, _params: &EpollParams) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(libc::ENOTTY))
@@ -323,6 +326,9 @@ fn apply_with(kernel: &dyn Kernel, epoll: RawFd, params: &EpollParams) -> io::Re
 /// Reads and changes nothing, so it is both the startup probe that tells a kernel before 6.13
 /// from an epoll instance that could not be found, and the read-back `docs/performance.md`
 /// gives an operator for confirming that [`apply`] took.
+// mutants::skip: one line over `detect_with`, which is under test with a fake kernel; the only
+// thing left to mutate is which kernel it asks, and that is the running one.
+#[cfg_attr(test, mutants::skip)]
 pub fn detect(epoll: RawFd) -> io::Result<Option<EpollParams>> {
     detect_with(&Host, epoll)
 }

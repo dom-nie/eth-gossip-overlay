@@ -262,6 +262,10 @@ pub(crate) trait Nic {
 /// The NIC this host is running on.
 pub(crate) struct Host;
 
+// mutants::skip: `ethtool` and the `/sys` and `/proc/irq` writes need privileges and a real
+// NIC, which no unprivileged test has. `integration_apply_and_undo_on_a_privileged_runner` is
+// the real check, and every decision about what to run is above this, under test with a fake.
+#[cfg_attr(test, mutants::skip)]
 impl Nic for Host {
     fn ethtool(&self, args: &[&str]) -> io::Result<String> {
         let done = Command::new("ethtool").args(args).output()?;
@@ -416,6 +420,9 @@ pub struct Report {
 /// A refused step is one warning and one entry in the report. §11 wants the overlay's queue
 /// pinned whether or not a flow rule for one address family took, and a card that will not take
 /// a rule should not also cost an operator the interrupt affinity.
+// mutants::skip: one line over `apply_with`, which is under test with a fake NIC; the only
+// thing left to mutate is which host it touches, and that is the running one.
+#[cfg_attr(test, mutants::skip)]
 pub fn apply(plan: &[Action]) -> Report {
     apply_with(&Host, plan)
 }
@@ -537,6 +544,9 @@ fn replace(nic: &dyn Nic, path: &Path, value: &str) -> io::Result<Undo> {
 ///
 /// A step that will not go back is a warning and nothing else. The process is on its way out,
 /// and a host left with one setting of ours is better than a shutdown that hangs on it.
+// mutants::skip: one line over `undo_with`, which is under test with a fake NIC; the only
+// thing left to mutate is which host it touches, and that is the running one.
+#[cfg_attr(test, mutants::skip)]
 pub fn undo(report: &Report) {
     undo_with(&Host, report);
 }
@@ -559,6 +569,9 @@ fn undo_with(nic: &dyn Nic, report: &Report) {
 /// (D30): a host whose operator never asked for any of this is never spoken to. A card that
 /// cannot be read, or that has nothing this configuration can do to it, costs one warning and
 /// leaves the overlay running exactly as it would have.
+// mutants::skip: one line over `enable_with`, which is under test with a fake NIC; the only
+// thing left to mutate is which host it touches, and that is the running one.
+#[cfg_attr(test, mutants::skip)]
 pub fn enable(cfg: &IoThread, port: u16) -> Report {
     enable_with(&Host, cfg, port)
 }
