@@ -6,8 +6,15 @@
 # One failure is all a mutant needs, so the first one ends the run and kills the tests still in
 # flight. Nextest's own default lets them run on, and a second test waiting on a broken
 # handshake can then carry the run past cargo-mutants' 60 s floor. Needs nextest 0.9.111.
+#
+# This is workspace-wide, because nextest only takes fail-fast at profile level. That is
+# harmless outside the two pure crates: it decides only how a run that has already failed ends,
+# never whether a test passes.
 fail-fast = { max-fail = 1, terminate = "immediate" }
 
-# Flagged slow at 15 s and killed at 30 s. No test in either pure crate comes near 15 s
-# unmutated, so a test that reaches it is waiting on something that will never happen.
+# Flagged slow at 15 s and killed at 30 s, in the two crates cargo-mutants runs. No test there
+# comes near 15 s unmutated, so a test that reaches it is waiting on something that will never
+# happen. The fleet harness elsewhere waits up to 30 s by design and keeps nextest's defaults.
+[[profile.default.overrides]]
+filter = 'package(overlay-core) | package(overlay-transport)'
 slow-timeout = { period = "15s", terminate-after = 2 }
