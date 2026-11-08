@@ -1039,6 +1039,216 @@ mod tests {
         );
     }
 
+    /// `auto` on the fixture card, all the way from detection: sixteen queues and an ntuple
+    /// filter, so two rules for queue 15 and threaded NAPI. `/proc/interrupts` lists eight
+    /// queues, so the affinity step finds no interrupt for queue 15 and is the one refusal.
+    #[test]
+    fn enable_with_auto_applies_the_plan_for_the_card_it_detected() {
+        let nic = Fake::default();
+
+        let report = enable_with(&nic, &cfg(Steering::Auto), PORT);
+
+        let rule = |flow_type| Action::NtupleRule {
+            iface: "eth0".to_owned(),
+            flow_type,
+            port: PORT,
+            queue: 15,
+        };
+        assert_eq!(
+            report.applied,
+            vec![
+                rule("udp4"),
+                rule("udp6"),
+                Action::ThreadedNapi {
+                    iface: "eth0".to_owned(),
+                },
+            ]
+        );
+        let refused: Vec<&Action> = report.failed.iter().map(|(action, _)| action).collect();
+        assert_eq!(
+            refused,
+            vec![&Action::IrqAffinity {
+                iface: "eth0".to_owned(),
+                queue: 15,
+                cpu: 31,
+            }]
+        );
+    }
+
+    /// §11's coalescing is for the overlay's queue alone, and a clean shutdown hands the queue
+    /// back running what the card had before: here adaptive with 32 µs, as the card reported.
+    #[test]
+    fn per_queue_coalesce_is_turned_off_and_put_back_to_what_the_card_ran() {
+        let nic = Fake {
+            per_queue: true,
+            ..Fake::default()
+        };
+        let report = apply_with(
+            &nic,
+            &[Action::PerQueueCoalesce {
+                iface: "eth0".to_owned(),
+                queue: 7,
+                rx_usecs: 8,
+            }],
+        );
+
+        undo_with(&nic, &report);
+
+        let calls = nic.calls();
+        let at = |call: &str| {
+            calls
+                .iter()
+                .position(|made| made == call)
+                .unwrap_or_else(|| panic!("no `{call}` in {calls:?}"))
+        };
+        let set =
+            at("ethtool --per-queue eth0 queue_mask 0x80 --coalesce adaptive-rx off rx-usecs 8");
+        let put_back =
+            at("ethtool --per-queue eth0 queue_mask 0x80 --coalesce adaptive-rx on rx-usecs 32");
+        assert!(set < put_back, "{calls:?}");
+    }
+
+    /// A card with no flow filter gets the overlay's queue an equal share of the flow table
+    /// `deploy/sysctl` sizes, written where the kernel reads it.
+    #[test]
+    fn the_rfs_plan_writes_the_queues_share_of_the_flow_table() {
+        let nic = Fake::default();
+
+        apply_with(&nic, &plan(&caps(false), &cfg(Steering::Auto), PORT));
+
+        assert_eq!(
+            nic.read(Path::new("/sys/class/net/eth0/queues/rx-7/rps_flow_cnt"))
+                .ok(),
+            Some("4096".to_owned())
+        );
+    }
+
+    /// A card that keeps its receive and transmit rings apart says `Combined: 0`, which is a
+    /// count of none rather than a count, and its queues are the `RX` line.
+    #[test]
+    fn a_card_with_no_combined_channels_counts_its_rx_queues() {
+        let channels = concat!(
+            "Channel parameters for eth0:\n",
+            "Pre-set maximums:\n",
+            "RX:\t\t8\n",
+            "TX:\t\t8\n",
+            "Other:\t\t1\n",
+            "Combined:\t0\n",
+            "Current hardware settings:\n",
+            "RX:\t\t4\n",
+            "TX:\t\t4\n",
+            "Other:\t\t0\n",
+            "Combined:\t0\n",
+        );
+
+        assert_eq!(rx_queues(channels), Some(4));
+    }
+
+    /// The default route is whichever line has a zero destination, not the first line, and on a
+    /// host running containers the first line is usually a bridge.
+    #[test]
+    fn the_default_route_is_found_below_a_route_on_another_interface() {
+        let routes = concat!(
+            "Iface\tDestination\tGateway\tFlags\tRefCnt\tUse\tMetric\tMask\tMTU\tWindow\tIRTT\n",
+            "docker0\t000011AC\t00000000\t0001\t0\t0\t0\t0000FFFF\t0\t0\t0\n",
+            "eth0\t00000000\t0102A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n",
+        );
+
+        assert_eq!(default_iface(routes), Some("eth0".to_owned()));
+    }
+
+    /// The labels are the `overlay_steering_applied` values operators query, and the lines are
+    /// what `steering plan` prints. `docs/performance.md` shows both, so each is compared with
+    /// the literal and the literal with the document: a rendering that went empty would still
+    /// be contained in any document.
+    #[test]
+    fn each_action_is_labelled_and_printed_the_way_docs_performance_md_shows() {
+        let doc = include_str!("../../../docs/performance.md");
+        let iface = |name: &str| name.to_owned();
+        let labels: Vec<&str> = [
+            Action::NtupleRule {
+                iface: iface("eth0"),
+                flow_type: "udp4",
+                port: PORT,
+                queue: 7,
+            },
+            Action::RfsFlowEntries {
+                iface: iface("eth0"),
+                queue: 7,
+                entries: 4096,
+            },
+            Action::IrqAffinity {
+                iface: iface("eth0"),
+                queue: 7,
+                cpu: 31,
+            },
+            Action::ThreadedNapi {
+                iface: iface("eth0"),
+            },
+            Action::PerQueueCoalesce {
+                iface: iface("eth0"),
+                queue: 7,
+                rx_usecs: 8,
+            },
+        ]
+        .iter()
+        .map(Action::kind)
+        .collect();
+
+        assert_eq!(
+            labels,
+            ["ntuple", "rfs", "irq_affinity", "threaded_napi", "coalesce"]
+        );
+        for label in ["ntuple", "irq_affinity", "threaded_napi"] {
+            assert!(doc.contains(&format!("action=\"{label}\"")), "{label}");
+        }
+
+        let printed = [
+            (
+                Action::NtupleRule {
+                    iface: iface("enp1s0f0np0"),
+                    flow_type: "udp4",
+                    port: 7788,
+                    queue: 15,
+                },
+                "ntuple rule: enp1s0f0np0 udp4 dst-port 7788 to queue 15",
+            ),
+            (
+                Action::NtupleRule {
+                    iface: iface("enp1s0f0np0"),
+                    flow_type: "udp6",
+                    port: 7788,
+                    queue: 15,
+                },
+                "ntuple rule: enp1s0f0np0 udp6 dst-port 7788 to queue 15",
+            ),
+            (
+                Action::RfsFlowEntries {
+                    iface: iface("enp0s3"),
+                    queue: 3,
+                    entries: 8192,
+                },
+                "rfs: enp0s3 queue 3 tracks 8192 flows",
+            ),
+        ];
+        for (action, line) in printed {
+            assert_eq!(action.to_string(), line);
+            assert!(doc.contains(line), "{line}");
+        }
+    }
+
+    /// `ethtool -N` ends its reply with the rule's id, and the undo deletes by that id. A reply
+    /// whose last word is not a number names no rule, and taking it for one would leave an
+    /// undo that deletes nothing and a rule on the card.
+    #[test]
+    fn a_rule_id_is_the_last_word_only_when_it_is_a_number() {
+        assert_eq!(
+            rule_id("Added rule with ID 1023\n"),
+            Some("1023".to_owned())
+        );
+        assert_eq!(rule_id("Added rule\n"), None);
+    }
+
     /// The one test that needs a real card and the privileges to change it. Everything above is
     /// a fake host answering; this is the only place `ethtool`, `/proc/interrupts` and `/sys`
     /// meet a kernel, and the only thing that can tell whether the naming [`irq_for`] follows
