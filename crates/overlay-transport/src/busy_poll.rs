@@ -214,6 +214,11 @@ pub(crate) trait Kernel {
 pub(crate) struct Host;
 
 #[cfg(target_os = "linux")]
+// mutants::skip: each method is one syscall whose interesting answers, an old kernel, no
+// capability, no NAPI id, no host can be made to give. The decisions about those answers are
+// under test with a fake kernel, the `CapEff` parse is `cap_net_admin_in` and tested on its own,
+// and `integration_busy_poll_enabled_on_supported_kernel` is the real-kernel check.
+#[cfg_attr(test, mutants::skip)]
 impl Kernel for Host {
     fn set_epoll_params(&self, epoll: RawFd, params: &EpollParams) -> io::Result<()> {
         // The kernel copies eight bytes out of the pointer and writes nothing back, and
