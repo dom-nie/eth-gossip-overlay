@@ -363,7 +363,7 @@ fn irq_for(interrupts: &str, iface: &str, queue: u32) -> Option<u32> {
 fn rule_id(said: &str) -> Option<String> {
     said.split_whitespace()
         .next_back()
-        .filter(|id| !id.is_empty() && id.chars().all(|digit| digit.is_ascii_digit()))
+        .filter(|id| id.chars().all(|digit| digit.is_ascii_digit()))
         .map(str::to_owned)
 }
 
