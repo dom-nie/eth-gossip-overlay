@@ -624,6 +624,49 @@ pub(crate) mod tests {
         );
     }
 
+    /// The queue a packet arrived on is the queue whose IRQ is suspended, for the configured
+    /// timeout in the nanoseconds the kernel counts in, and the gauge says the path came up.
+    #[tokio::test(start_paused = true)]
+    async fn suspension_is_asked_for_the_queue_the_socket_names() {
+        let kernel = Fake {
+            napi_id: 42,
+            cap_net_admin: true,
+            ..Fake::default()
+        };
+        let reported = Reported::default();
+
+        suspend_when_the_queue_is_known(&kernel, -1, Duration::from_millis(20), reported.sink())
+            .await;
+
+        assert_eq!(reported.seen(), vec![true]);
+        assert_eq!(*kernel.suspended.lock().unwrap(), vec![(42, 20_000_000)]);
+    }
+
+    /// A socket that never names a queue, which is loopback and most containers, costs a
+    /// minute of polling and one line, and the kernel is asked for nothing.
+    #[tokio::test(start_paused = true)]
+    async fn suspension_gives_up_after_a_minute_without_a_queue() {
+        let kernel = Fake {
+            cap_net_admin: true,
+            ..Fake::default()
+        };
+        let mark = LOG.len();
+        let reported = Reported::default();
+
+        suspend_when_the_queue_is_known(&kernel, -1, Duration::from_millis(20), reported.sink())
+            .await;
+
+        assert_eq!(reported.seen(), vec![false]);
+        assert!(kernel.suspended.lock().unwrap().is_empty());
+        assert_eq!(
+            LOG.since(mark)
+                .lines()
+                .filter(|line| line.contains("the overlay socket never named a NAPI queue"))
+                .count(),
+            1
+        );
+    }
+
     /// The one test that needs the kernel this ticket is about.
     #[cfg(target_os = "linux")]
     mod kernel {
