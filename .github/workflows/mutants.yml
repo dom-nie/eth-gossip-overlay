@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: "41 4 * * *"
   workflow_dispatch:
+    inputs:
+      args:
+        description: "Extra cargo-mutants arguments, such as --file to narrow the run"
+        type: string
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,11 +38,36 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0,cargo-nextest@0.9.149
 
-      # A surviving mutant exits 2 and a timed-out one exits 3, so either fails the job. Both
-      # are named on the log line above the summary, with the file and line they change and
-      # what they change it to; mutants.out has the diff and the test output for each.
+      # A surviving or timed-out mutant fails the job. Each is named on the log line above
+      # cargo-mutants' summary and on the run page by the step below, with the file and line it
+      # changes and what it changes it to; mutants.out has the diff and the test output for each.
+      #
+      # The dispatch input reaches the command through env and xargs, never through `${{ }}`
+      # inside the script, so it is split into arguments, quotes and all, and nothing in it runs
+      # as shell. xargs turns cargo-mutants' exit codes 2 and 3 into 123, which still fails.
       - name: Mutants in ${{ matrix.crate }}
-        run: cargo mutants --in-place -p ${{ matrix.crate }}
+        env:
+          ARGS: ${{ inputs.args }}
+        run: printf '%s' "$ARGS" | xargs cargo mutants --in-place -p ${{ matrix.crate }}
+
+      - name: Name the missed and timed-out mutants on the run page
+        if: always()
+        env:
+          CRATE: ${{ matrix.crate }}
+        run: |
+          {
+            echo "## $CRATE"
+            for outcome in missed timeout; do
+              echo "### $outcome"
+              if [ -s "mutants.out/$outcome.txt" ]; then
+                echo '```'
+                cat "mutants.out/$outcome.txt"
+                echo '```'
+              else
+                echo none
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v7
         if: always()
