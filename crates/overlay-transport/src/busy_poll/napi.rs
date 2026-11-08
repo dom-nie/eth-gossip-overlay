@@ -255,6 +255,22 @@ pub(super) mod netlink {
             );
         }
 
+        /// The suspension request names the queue and the timeout in nanoseconds, and asks for
+        /// an acknowledgement: without `NLM_F_ACK` the kernel answers a success with nothing
+        /// and the reply read would wait out its timeout.
+        #[test]
+        fn a_napi_set_request_carries_the_id_and_the_timeout_in_nanoseconds() {
+            let request = napi_set_request(30, 42, 20_000_000);
+
+            assert_eq!(
+                request,
+                [
+                    40, 0, 0, 0, 30, 0, 5, 0, 2, 0, 0, 0, 0, 0, 0, 0, 14, 1, 0, 0, 8, 0, 2, 0, 42,
+                    0, 0, 0, 12, 0, 7, 0, 0x00, 0x2d, 0x31, 0x01, 0, 0, 0, 0,
+                ]
+            );
+        }
+
         /// A length the kernel wrote is not trusted past the end of the body: the walk stops at
         /// the first attribute that claims more bytes than are there.
         #[test]
