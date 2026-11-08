@@ -74,7 +74,7 @@ jobs:
               echo
             fi
             if [ "$OUTCOME" = failure ] && [ "${missed:-0}" = 0 ] && [ "${timeout:-0}" = 0 ]; then
-              echo "The run failed before naming a mutant (the baseline, or a usage error): see the log."
+              echo "The run failed without naming a missed or timed-out mutant: the baseline, a usage error, or an error partway through. See the log."
               echo
             fi
             for outcome in missed timeout; do
