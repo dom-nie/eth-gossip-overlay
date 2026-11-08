@@ -31,7 +31,7 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-mutants@27.1.0
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.149
 
       # A surviving mutant exits 2 and a timed-out one exits 3, so either fails the job. Both
       # are named on the log line above the summary, with the file and line they change and

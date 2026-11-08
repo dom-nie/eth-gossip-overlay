@@ -1,0 +1,9 @@
+# cargo-nextest, which cargo-mutants runs the suite under (T-123, MD-13). Each test is its own
+# process, so a mutant that breaks every handshake fails at the first test that notices instead
+# of holding the whole binary until cargo-mutants calls it a timeout. Fail-fast is nextest's
+# default and stays on: one failure is all a mutant needs.
+
+[profile.default]
+# Flagged slow at 15 s and killed at 30 s. No test in either pure crate comes near 15 s
+# unmutated, so a test that reaches it is waiting on something that will never happen.
+slow-timeout = { period = "15s", terminate-after = 2 }

@@ -24,20 +24,21 @@ lychee --offline --no-progress --exclude-path target '**/*.md'   # internal link
 A passing test proves the code ran. It does not prove the test would fail if the code were wrong, and two defects of that kind have already reached review here. `cargo-mutants` changes one thing in the code at a time, reruns the suite, and reports every change the suite did not notice.
 
 ```sh
-cargo install cargo-mutants --locked                # once
-cargo mutants -p overlay-core                       # about four minutes
-cargo mutants -p overlay-transport                  # about a minute and a half
+cargo install cargo-mutants@27.1.0 cargo-nextest --locked   # once
+cargo mutants -p overlay-core                       # about two hours on a GitHub runner
+cargo mutants -p overlay-transport                  # about four hours on a GitHub runner
 cargo mutants -p overlay-core --list                # what would run, without running it
 cargo mutants -p overlay-core -f seen.rs            # one file, while you work on it
 ```
 
-`.cargo/mutants.toml` holds the settings. Test code is skipped for you: anything under `#[cfg(test)]`, `#[test]` or `#[tokio::test]` is never mutated, and neither are integration test targets. A nightly workflow runs both crates and fails on a survivor; it does not run on pull requests, because the suite runs once per mutant.
+`.cargo/mutants.toml` holds the settings. The suite runs under cargo-nextest, which is why it is installed beside cargo-mutants: each test is its own process, nextest stops at the first failure, and `.config/nextest.toml` kills any one test at 30 s. A mutant that breaks every handshake then fails in seconds instead of timing out the run. Test code is skipped for you: anything under `#[cfg(test)]`, `#[test]` or `#[tokio::test]` is never mutated, and neither are integration test targets. A nightly workflow runs both crates and fails on a survivor; it does not run on pull requests, because the suite runs once per mutant.
 
-A surviving mutant is one of three things, and each has an answer.
+A surviving or timed-out mutant is one of four things, and each has an answer.
 
 - It is a missing test. Write it, named after the behaviour it checks like every other test here, never after the mutant. A test that kills a mutant while asserting nothing a reader would recognise as behaviour is worse than the survivor.
 - It is equivalent, changing nothing anyone can observe. Skip it.
 - Its only possible test would assert an implementation detail, a log line's wording, or a branch no public entry point can reach. Skip it.
+- It hangs: the code loops forever instead of failing, so no test can catch it and the run reports a timeout. Skip it, and say in the reason that it spins (see `pop_oldest` in `overlay-core/src/seen.rs`).
 
 A skip carries its reason, always. Put `#[cfg_attr(test, mutants::skip)]` on the item with a comment above saying why; the attribute comes from the `mutants` dev-dependency and compiles to nothing. When the mutant is on an expression that cannot carry an attribute, add a regex to `exclude_re` in `.cargo/mutants.toml` with the same comment. A bare skip is not a way to make the run quiet, and `overlay-bn` and `eth-gossip-overlay` are not configured yet.
 
