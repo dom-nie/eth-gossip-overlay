@@ -104,6 +104,7 @@ pub fn enable(cfg: &IoThread, listen: SocketAddr, enabled: impl Fn(bool) + Send 
         return;
     }
     tokio::spawn(suspend_when_the_queue_is_known(
+        &Host,
         socket,
         cfg.irq_suspend_timeout,
         enabled,
@@ -115,11 +116,16 @@ pub fn enable(cfg: &IoThread, listen: SocketAddr, enabled: impl Fn(bool) + Send 
 /// A device with no NAPI instance never names one, which is loopback and most of what a
 /// container gives a process. That ends in one line rather than in an attempt per interval
 /// forever.
-async fn suspend_when_the_queue_is_known(socket: RawFd, timeout: Duration, enabled: impl Fn(bool)) {
+async fn suspend_when_the_queue_is_known(
+    kernel: &(dyn Kernel + Sync),
+    socket: RawFd,
+    timeout: Duration,
+    enabled: impl Fn(bool),
+) {
     for _ in 0..NAPI_POLL_ATTEMPTS {
-        match napi::id_of(socket) {
+        match napi::id_of_with(kernel, socket) {
             Ok(Some(napi_id)) => {
-                match napi::set_irq_suspend_timeout(napi_id, timeout) {
+                match napi::set_irq_suspend_timeout_with(kernel, napi_id, timeout) {
                     Ok(asked) => enabled(asked),
                     Err(err) => {
                         tracing::info!(napi_id, %err, "overlay IRQ suspension not set");

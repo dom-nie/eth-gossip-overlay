@@ -23,7 +23,7 @@ pub fn id_of(socket: RawFd) -> io::Result<Option<u32>> {
     id_of_with(&Host, socket)
 }
 
-fn id_of_with(kernel: &dyn Kernel, socket: RawFd) -> io::Result<Option<u32>> {
+pub(super) fn id_of_with(kernel: &dyn Kernel, socket: RawFd) -> io::Result<Option<u32>> {
     match kernel.napi_id(socket)? {
         0 => Ok(None),
         id => Ok(Some(id)),
@@ -37,11 +37,7 @@ fn id_of_with(kernel: &dyn Kernel, socket: RawFd) -> io::Result<Option<u32>> {
 /// A process without it logs one line and leaves the queue on its interrupts: an operator who
 /// did not grant a capability made a decision rather than a mistake, and busy polling without
 /// the suspension is still most of the tuning.
-pub fn set_irq_suspend_timeout(napi_id: u32, timeout: Duration) -> io::Result<bool> {
-    set_irq_suspend_timeout_with(&Host, napi_id, timeout)
-}
-
-fn set_irq_suspend_timeout_with(
+pub(super) fn set_irq_suspend_timeout_with(
     kernel: &dyn Kernel,
     napi_id: u32,
     timeout: Duration,
