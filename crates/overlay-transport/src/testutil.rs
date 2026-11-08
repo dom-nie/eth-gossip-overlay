@@ -1875,6 +1875,13 @@ pub fn subscriptions(advertised: &[&Topic], extra: &[&Topic]) -> SubscriptionSet
     }
 }
 
+/// Awaits `fut`, failing the test rather than hanging when it never finishes.
+pub async fn bounded<T>(what: &str, fut: impl Future<Output = T>) -> T {
+    tokio::time::timeout(WAIT, fut)
+        .await
+        .unwrap_or_else(|_| panic!("{what} did not finish within {WAIT:?}"))
+}
+
 /// Polls until `ready` holds, failing the test rather than hanging when it never does.
 pub async fn eventually(what: &str, ready: impl FnMut() -> bool) {
     poll(WAIT, Duration::from_millis(10), what, ready).await;

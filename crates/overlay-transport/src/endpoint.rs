@@ -230,6 +230,7 @@ pub(crate) mod tests {
 
     use super::*;
     use crate::testlog::LOG;
+    use crate::testutil::bounded;
     use crate::tls::{self, PinTable};
 
     /// What a two-host loopback pair gives each other inbound. Nothing here fills a window, so
@@ -608,12 +609,15 @@ pub(crate) mod tests {
 
         let error = runtime().block_on(async {
             let dialler = endpoint(&cfg, &pins, &seeds, "bn-b");
-            let connection = connect(
-                &cfg,
-                TEST_RECEIVE_WINDOW,
-                &dialler,
-                addr,
-                dial_config(&pins, &seeds, "bn-b", "bn-a"),
+            let connection = bounded(
+                "the dial",
+                connect(
+                    &cfg,
+                    TEST_RECEIVE_WINDOW,
+                    &dialler,
+                    addr,
+                    dial_config(&pins, &seeds, "bn-b", "bn-a"),
+                ),
             )
             .await
             .unwrap();
