@@ -162,7 +162,10 @@ pub(super) mod netlink {
             .find(|(kind, _)| *kind == CTRL_ATTR_FAMILY_ID)
             .and_then(|(_, value)| value.get(..2))
             .map(|value| u16::from_ne_bytes([value[0], value[1]]))
-            .ok_or_else(|| io::Error::other("the kernel has no netdev generic netlink family"))
+            .ok_or_else(|| {
+                let name = String::from_utf8_lossy(name.strip_suffix(b"\0").unwrap_or(name));
+                io::Error::other(format!("the kernel has no {name} generic netlink family"))
+            })
     }
 
     /// Sends one message and reads the one datagram that answers it, turning a netlink error
