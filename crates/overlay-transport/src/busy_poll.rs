@@ -460,6 +460,32 @@ pub(crate) mod tests {
         assert_eq!(err.raw_os_error(), Some(libc::EPERM));
     }
 
+    /// What the configuration's `prefer_busy_poll` turns into: spin for the configured time,
+    /// keep the IRQ masked while spinning, and leave the budget to the kernel, which is the only
+    /// budget it takes from a process without `CAP_NET_ADMIN`.
+    #[test]
+    fn preferring_busy_poll_masks_the_irq_at_the_kernels_budget() {
+        let params = EpollParams::preferring_busy_poll(150);
+
+        assert_eq!(params.busy_poll_usecs, 150);
+        assert_eq!(params.busy_poll_budget, 0);
+        assert_eq!(params.prefer_busy_poll, 1);
+    }
+
+    /// The read-back's half of the same rule: only a missing ioctl is "no parameters", and
+    /// anything else the kernel says reaches the operator as the error it was.
+    #[test]
+    fn detect_passes_on_an_error_that_is_not_a_missing_ioctl() {
+        let kernel = Fake {
+            epoll_errno: Some(libc::EPERM),
+            ..Fake::default()
+        };
+
+        let err = detect_with(&kernel, EPOLL).unwrap_err();
+
+        assert_eq!(err.raw_os_error(), Some(libc::EPERM));
+    }
+
     /// `EPIOCGPARAMS` is how test 5 and `docs/performance.md` confirm the parameters took, and
     /// how the startup path tells "this kernel is too old" from "the epoll fd was not found".
     #[test]
@@ -509,6 +535,14 @@ pub(crate) mod tests {
             assert_eq!(libc::EPIOCSPARAMS, set_params);
             assert_eq!(libc::EPIOCGPARAMS, get_params);
         }
+    }
+
+    /// An ioctl reports failure as -1 and the reason in errno, and success as anything else.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_ioctl_that_returned_minus_one_is_an_error() {
+        assert!(result(0).is_ok());
+        assert!(result(-1).is_err());
     }
 
     /// An address no socket in this process is bound to, so the lookup has nothing to find on
