@@ -537,6 +537,18 @@ pub(crate) mod tests {
         }
     }
 
+    /// `CAP_NET_ADMIN` is bit 12 of the hex mask on `/proc/self/status`'s `CapEff:` line, and
+    /// a status with no such line holds no capabilities at all.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cap_net_admin_is_read_from_the_cap_eff_line() {
+        assert!(cap_net_admin_in("Name:\tx\nCapEff:\t0000000000001000\n"));
+        assert!(cap_net_admin_in("CapEff:\t000001ffffffffff"));
+        assert!(!cap_net_admin_in("CapEff:\t0000000000000000"));
+        assert!(!cap_net_admin_in("CapEff:\t0000000000002000"));
+        assert!(!cap_net_admin_in("Name:\tx\nCapPrm:\t0000000000001000\n"));
+    }
+
     /// An ioctl reports failure as -1 and the reason in errno, and success as anything else.
     #[cfg(target_os = "linux")]
     #[test]
