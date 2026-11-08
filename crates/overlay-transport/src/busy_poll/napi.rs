@@ -109,7 +109,7 @@ pub(super) mod netlink {
     /// Asks netdev to suspend `napi_id`'s IRQ for `nanos` while polling is finding packets.
     pub fn set_irq_suspend_timeout(napi_id: u32, nanos: u64) -> io::Result<()> {
         let socket = open()?;
-        let family = family_id(&socket)?;
+        let family = family_id(&socket, NETDEV_FAMILY)?;
         round_trip(&socket, &napi_set_request(family, napi_id, nanos)).map(drop)
     }
 
@@ -146,15 +146,15 @@ pub(super) mod netlink {
         Ok(netlink)
     }
 
-    /// The number the netdev family was given at boot, which is the only thing about it that is
-    /// not a constant.
-    fn family_id(socket: &OwnedFd) -> io::Result<u16> {
+    /// The number the generic netlink family `name` was given at boot, which for netdev is the
+    /// only thing about it that is not a constant. `name` carries its trailing NUL.
+    fn family_id(socket: &OwnedFd, name: &[u8]) -> io::Result<u16> {
         let request = message(
             GENL_ID_CTRL,
             CTRL_CMD_GETFAMILY,
             NLM_F_REQUEST,
             1,
-            &attribute(CTRL_ATTR_FAMILY_NAME, NETDEV_FAMILY),
+            &attribute(CTRL_ATTR_FAMILY_NAME, name),
         );
         let reply = round_trip(socket, &request)?;
         let body = reply.get(NLMSG_HEADER + GENL_HEADER..).ok_or_else(short)?;
