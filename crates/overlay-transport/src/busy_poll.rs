@@ -243,19 +243,9 @@ impl Kernel for Host {
     }
 
     fn has_cap_net_admin(&self) -> bool {
-        /// From `include/uapi/linux/capability.h`.
-        const CAP_NET_ADMIN: u32 = 12;
-
         // A process that cannot read its own status has bigger problems than an unsuspended
         // IRQ, and the caller's answer to both is the same line.
-        let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-            return false;
-        };
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix("CapEff:"))
-            .and_then(|effective| u64::from_str_radix(effective.trim(), 16).ok())
-            .is_some_and(|caps| caps & (1 << CAP_NET_ADMIN) != 0)
+        std::fs::read_to_string("/proc/self/status").is_ok_and(|status| cap_net_admin_in(&status))
     }
 
     fn set_irq_suspend_timeout(&self, napi_id: u32, nanos: u64) -> io::Result<()> {
@@ -292,6 +282,19 @@ impl Kernel for Host {
     fn set_irq_suspend_timeout(&self, _napi_id: u32, _nanos: u64) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(libc::ENOTTY))
     }
+}
+
+/// Whether a `/proc/<pid>/status` says the process holds `CAP_NET_ADMIN` in its effective set.
+#[cfg(target_os = "linux")]
+fn cap_net_admin_in(status: &str) -> bool {
+    /// From `include/uapi/linux/capability.h`.
+    const CAP_NET_ADMIN: u32 = 12;
+
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapEff:"))
+        .and_then(|effective| u64::from_str_radix(effective.trim(), 16).ok())
+        .is_some_and(|caps| caps & (1 << CAP_NET_ADMIN) != 0)
 }
 
 /// What an ioctl returned, as an error where it failed.
