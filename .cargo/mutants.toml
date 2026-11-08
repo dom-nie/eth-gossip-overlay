@@ -40,6 +40,9 @@ exclude_re = [
   # `true` that pops nothing never ends. Excluded by name rather than skipped on the function,
   # because `drop_oldest`'s other mutants are under test.
   "replace State::drop_oldest -> bool with true",
+  # NLM_F_REQUEST (1) and NLM_F_ACK (4) are disjoint bits, so `^` and `|` give the same flags
+  # for the same reason as the two nibble joins above. `| with &` on the same line is caught.
+  "replace \\| with \\^ in netlink::napi_set_request",
 ]
 
 # The one file the `#[cfg(test)]` rule above does not cover. `overlay-transport`'s `testutil` is
