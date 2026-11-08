@@ -35,7 +35,7 @@ exclude_re = [
   # Spins forever in-process. With `&&`, an expired front entry short-circuits past
   # `drop_oldest`, so the reassembler's expiry loop never advances. Only nextest's 30 s kill
   # ends it, which is a deadline and not a test of behaviour (MD-02), and each such mutant
-  # costs 30 s or more. The two `delete !` mutants on the same line stay in the run.
+  # costs up to 30 s. The two `delete !` mutants on the same line stay in the run.
   "replace \\|\\| with && in State::expire",
   # Spins forever in-process. `expire` and `trim_bytes` loop on this answer, and a constant
   # `true` that pops nothing never ends. Excluded by name rather than skipped on the function,
