@@ -286,6 +286,28 @@ pub(super) mod netlink {
 
             assert_eq!(found, vec![(1, &[16, 0][..])]);
         }
+
+        /// The real kernel, because it is the only thing that can say the request is one it
+        /// parses. `CTRL_CMD_GETFAMILY` needs no privilege, and the controller resolves its own
+        /// name to `GENL_ID_CTRL`, the one family number that is fixed.
+        #[test]
+        fn the_kernel_resolves_its_own_controller_family_to_16() {
+            let socket = open().unwrap();
+
+            assert_eq!(family_id(&socket, b"nlctrl\0").unwrap(), GENL_ID_CTRL);
+        }
+
+        /// A name no family has comes back as the errno the kernel put in its error message.
+        /// The name stays short: the kernel echoes the request in that message, and one long
+        /// enough would leave bytes where a misread errno offset finds something to read.
+        #[test]
+        fn an_unknown_family_is_enoent() {
+            let socket = open().unwrap();
+
+            let refused = family_id(&socket, b"nosuch\0").unwrap_err();
+
+            assert_eq!(refused.raw_os_error(), Some(libc::ENOENT));
+        }
     }
 }
 
