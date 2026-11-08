@@ -25,13 +25,13 @@ A passing test proves the code ran. It does not prove the test would fail if the
 
 ```sh
 cargo install cargo-mutants@27.1.0 cargo-nextest --locked   # once
-cargo mutants -p overlay-core                       # about two hours on a GitHub runner
-cargo mutants -p overlay-transport                  # about four hours on a GitHub runner
+cargo mutants -p overlay-core                       # 1117 mutants, about two hours on a GitHub runner
+cargo mutants -p overlay-transport                  # 628 mutants, about two hours on a GitHub runner
 cargo mutants -p overlay-core --list                # what would run, without running it
 cargo mutants -p overlay-core -f seen.rs            # one file, while you work on it
 ```
 
-`.cargo/mutants.toml` holds the settings. The suite runs under cargo-nextest, which is why it is installed beside cargo-mutants: each test is its own process, nextest stops at the first failure and kills the tests still running, and `.config/nextest.toml` kills any one test at 30 s. The fail-fast setting there needs cargo-nextest 0.9.111 or newer. A mutant that breaks every handshake then fails in seconds instead of timing out the run. Test code is skipped for you: anything under `#[cfg(test)]`, `#[test]` or `#[tokio::test]` is never mutated, and neither are integration test targets. A nightly workflow runs both crates and fails on a survivor; it does not run on pull requests, because the suite runs once per mutant.
+`.cargo/mutants.toml` holds the settings. The suite runs under cargo-nextest, which is why it is installed beside cargo-mutants: each test is its own process, nextest stops at the first failure and kills the tests still running, and `.config/nextest.toml` kills any one test at 30 s. The fail-fast setting there needs cargo-nextest 0.9.111 or newer. A mutant that breaks every handshake then fails in seconds instead of timing out the run, which took the transport crate from about four hours under `cargo test` to about two. Test code is skipped for you: anything under `#[cfg(test)]`, `#[test]` or `#[tokio::test]` is never mutated, and neither are integration test targets. A nightly workflow runs both crates and fails on a survivor; it does not run on pull requests, because the suite runs once per mutant.
 
 A surviving or timed-out mutant is one of four things, and each has an answer.
 
