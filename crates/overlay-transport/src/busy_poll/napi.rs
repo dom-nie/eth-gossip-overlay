@@ -228,6 +228,44 @@ pub(super) mod netlink {
     fn short() -> io::Error {
         io::Error::other("short netlink reply")
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The family lookup as the kernel reads it: `struct nlmsghdr`, `struct genlmsghdr` and
+        /// one `CTRL_ATTR_FAMILY_NAME` padded to four bytes, every field little-endian like
+        /// every Linux target the sidecar ships for.
+        #[test]
+        fn a_family_lookup_request_is_the_bytes_the_kernel_expects() {
+            let request = message(
+                GENL_ID_CTRL,
+                CTRL_CMD_GETFAMILY,
+                NLM_F_REQUEST,
+                1,
+                &attribute(CTRL_ATTR_FAMILY_NAME, b"netdev\0"),
+            );
+
+            assert_eq!(
+                request,
+                [
+                    32, 0, 0, 0, 16, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 1, 0, 0, 11, 0, 2, 0,
+                    b'n', b'e', b't', b'd', b'e', b'v', 0, 0,
+                ]
+            );
+        }
+
+        /// A length the kernel wrote is not trusted past the end of the body: the walk stops at
+        /// the first attribute that claims more bytes than are there.
+        #[test]
+        fn attributes_stop_at_one_that_does_not_fit() {
+            let body = [6, 0, 1, 0, 16, 0, 0, 0, 40, 0, 2, 0, b'x'];
+
+            let found: Vec<(u16, &[u8])> = attributes(&body).collect();
+
+            assert_eq!(found, vec![(1, &[16, 0][..])]);
+        }
+    }
 }
 
 #[cfg(test)]
