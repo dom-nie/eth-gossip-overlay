@@ -16,8 +16,10 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use overlay_core::custody::SharedCustody;
 use overlay_core::events::{self, Arrivals, FirstArrival};
 use overlay_core::fanout::Outbound;
+use overlay_core::header::Header;
 use overlay_core::lanes::{ClassLanes, LanePusher};
 use overlay_core::msgid::{self, MessageId};
 use overlay_core::recent::SharedRecentLarge;
@@ -74,6 +76,7 @@ pub struct Inbound {
     clock: Arc<dyn Clock>,
     stats: Arc<dyn InboundStats>,
     arrivals: Arc<Arrivals>,
+    custody: SharedCustody,
     /// Unknown topic names and unparsable topic strings already warned about, so a stream
     /// of messages on one costs one line. A name never contains a `/`, so the two cannot
     /// collide.
@@ -85,7 +88,8 @@ impl Inbound {
     /// becomes an [`Outbound`] on `out`, stamped with `clock`'s time, and a new large one is
     /// logged as this host's first arrival under `node`'s name (T-044), kept in `recent` for a
     /// peer that may have to repair it (§5.6), and, when it is a block, filed in `arrivals` so
-    /// the beacon node's own import of it can be timed against this moment (T-084).
+    /// the beacon node's own import of it can be timed against this moment (T-084). A column,
+    /// new or not, is recorded in `custody` as one the node holds (D43).
     #[expect(
         clippy::too_many_arguments,
         reason = "the inbound path's wiring: where messages come from, the two stores it \
@@ -102,6 +106,7 @@ impl Inbound {
         clock: Arc<dyn Clock>,
         stats: Arc<dyn InboundStats>,
         arrivals: Arc<Arrivals>,
+        custody: SharedCustody,
     ) -> JoinHandle<()> {
         let mut inbound = Self {
             lanes,
@@ -113,6 +118,7 @@ impl Inbound {
             clock,
             stats,
             arrivals,
+            custody,
             warned: BTreeSet::new(),
         };
         tokio::spawn(async move {
@@ -174,6 +180,23 @@ impl Inbound {
             tracing::error!(id = %msg.id, topic = msg.topic, "gossipsub id is not 20 bytes");
             return;
         };
+        // A column the node forwards is a column the node holds, and under Gloas this is the
+        // only place it says so for one it merged from partial messages (D43). Read before the
+        // duplicate return below: the overlay may have delivered the same column first, and
+        // what is being recorded is the node's word, not the message's novelty.
+        let column = matches!(topic.kind(), TopicKind::DataColumnSidecar(_))
+            .then(|| msgid::decompressed(&msg.data, MAX_PAYLOAD_BYTES))
+            .flatten();
+        if let Some(Header::Column {
+            slot,
+            index,
+            block_root,
+        }) = column
+            .as_deref()
+            .and_then(|ssz| self.recent.header_of(&topic, ssz))
+        {
+            self.custody.on_column(slot, index, block_root);
+        }
         // Seen-cache insert site 1 of 3 (D08). The other two are T-032's receiver, for what
         // arrives whole from the overlay, and T-074's completion, for what the reassembler puts
         // together.
@@ -203,7 +226,7 @@ impl Inbound {
         // decompression is what its own gossipsub already did.
         let header = match class {
             Class::Large => {
-                let ssz = msgid::decompressed(&payload, MAX_PAYLOAD_BYTES);
+                let ssz = column.or_else(|| msgid::decompressed(&payload, MAX_PAYLOAD_BYTES));
                 self.recent
                     .insert(id, topic.clone(), payload, ssz.as_deref(), received_at)
             }
@@ -266,13 +289,25 @@ mod tests {
         blobs: 1,
     };
 
+    const COLUMN_5: &str = "/eth2/00000000/data_column_sidecar_5/ssz_snappy";
+
+    /// The column the fake decoder reads out of anything on a column topic.
+    const DECODED_COLUMN: Header = Header::Column {
+        slot: 8_675_309,
+        index: 5,
+        block_root: [0x9c; 32],
+    };
+
     /// Stands in for T-083's decoder, which needs a real SSZ block. What is under test is the
     /// inbound path filing what a decoder said, not the decoder.
     struct OneBlock;
 
     impl HeaderDecoder for OneBlock {
-        fn header(&self, _: &Topic, _: &[u8]) -> Option<Header> {
-            Some(DECODED)
+        fn header(&self, topic: &Topic, _: &[u8]) -> Option<Header> {
+            match topic.kind() {
+                TopicKind::DataColumnSidecar(_) => Some(DECODED_COLUMN),
+                _ => Some(DECODED),
+            }
         }
     }
 
@@ -359,6 +394,7 @@ mod tests {
     /// would hold.
     struct Harness {
         arrivals: Arc<Arrivals>,
+        custody: SharedCustody,
         lanes: Option<ClassLanes<BnMessage>>,
         pusher: LanePusher<BnMessage>,
         command_tx: mpsc::Sender<BnCommand>,
@@ -386,8 +422,15 @@ mod tests {
                 1024,
                 Arc::new(clock.clone()),
             ));
+            let arrivals = Arc::new(Arrivals::new(Arc::new(clock.clone()), spec.clone()));
             Self {
-                arrivals: Arc::new(Arrivals::new(Arc::new(clock.clone()), spec)),
+                custody: SharedCustody::new(
+                    spec,
+                    watch::channel(SubscriptionSets::default()).1,
+                    arrivals.clone(),
+                    Arc::new(()),
+                ),
+                arrivals,
                 pusher: lanes.pusher(),
                 lanes: Some(lanes),
                 command_tx,
@@ -416,6 +459,7 @@ mod tests {
                 Arc::new(self.clock.clone()),
                 self.stats.clone(),
                 self.arrivals.clone(),
+                self.custody.clone(),
             );
         }
 
@@ -433,6 +477,39 @@ mod tests {
     /// The beacon node's gossip is snappy, and only bytes that decompress reach a decoder.
     fn snappy(bytes: &[u8]) -> Vec<u8> {
         snap::raw::Encoder::new().compress_vec(bytes).unwrap()
+    }
+
+    /// D43: the node forwards only what it holds, and under Gloas this is the one place it says
+    /// so for a column it merged from partial messages.
+    #[tokio::test]
+    async fn a_column_the_node_forwards_is_one_the_node_holds() {
+        let mut h = Harness::new();
+        assert!(!h.custody.holds(DECODED_COLUMN.block_root(), 5));
+        h.push(
+            Class::Large,
+            message(COLUMN_5, &snappy(b"a column from the beacon node")),
+        );
+        h.start();
+        h.out.recv().await;
+
+        assert!(h.custody.holds(DECODED_COLUMN.block_root(), 5));
+        assert!(!h.custody.holds(DECODED_COLUMN.block_root(), 6));
+    }
+
+    /// The overlay often delivers a column before the node forwards its own copy. The forward is
+    /// then a duplicate and goes nowhere, and it is still the node saying it holds the column.
+    #[tokio::test]
+    async fn a_column_the_overlay_delivered_first_counts_once_the_node_forwards_it() {
+        let mut h = Harness::new();
+        let msg = message(COLUMN_5, &snappy(b"a column the overlay had first"));
+        assert!(h.seen.insert(core_id(&msg)));
+        h.push(Class::Large, msg);
+        h.start();
+
+        h.accepted().await;
+        assert!(nothing_out(&mut h.out).await);
+        assert_eq!(h.stats.count("duplicate", Class::Large), 1);
+        assert!(h.custody.holds(DECODED_COLUMN.block_root(), 5));
     }
 
     #[tokio::test]
@@ -748,6 +825,7 @@ mod tests {
             Arc::new(clock.clone()),
         ));
         let out = ClassLanes::new(Arc::new(()));
+        let arrivals = Arc::new(Arrivals::new(Arc::new(clock.clone()), spec_watch().1));
         Inbound::spawn(
             lanes,
             commands.clone(),
@@ -757,7 +835,13 @@ mod tests {
             Arc::new(node()),
             Arc::new(clock.clone()),
             stats,
-            Arc::new(Arrivals::new(Arc::new(clock), spec_watch().1)),
+            arrivals.clone(),
+            SharedCustody::new(
+                spec_watch().1,
+                watch::channel(SubscriptionSets::default()).1,
+                arrivals,
+                Arc::new(()),
+            ),
         );
         tokio::time::timeout(WAIT, async {
             loop {

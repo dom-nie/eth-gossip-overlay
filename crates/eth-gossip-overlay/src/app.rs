@@ -373,9 +373,9 @@ impl App {
         // reads it (T-084). The retention window comes off the same snapshot the rest does.
         let arrivals = Arc::new(Arrivals::new(clock.clone(), spec_rx.clone()));
         let (sets_tx, sets_rx) = watch::channel(SubscriptionSets::default());
-        // Which columns the beacon node wants and which it has. The event stream below is the
-        // only thing that writes it, which is what makes the state something no peer can
-        // reach (§6.4, MD-06).
+        // Which columns the beacon node wants and which it has. The event stream below and the
+        // inbound path's read of what the node forwards are the only things that write it,
+        // which is what makes the state something no peer can reach (§6.4, MD-06, D43).
         let custody = SharedCustody::new(
             spec_rx.clone(),
             sets_rx.clone(),
@@ -441,6 +441,7 @@ impl App {
             clock.clone(),
             Arc::new(BnInbound(metrics.clone())),
             arrivals.clone(),
+            custody.clone(),
         );
         // Import time: what the beacon node does with a block after this host already had it,
         // which is the part of the slot the overlay cannot win back (§2, §12).

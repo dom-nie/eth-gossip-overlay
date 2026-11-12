@@ -1,13 +1,16 @@
 //! Which data columns this host's beacon node wants for a slot, which have arrived, and which
 //! to ask a peer for first once the deadline has passed (§5.6, §6.4, D23, MD-06).
 //!
-//! Every fact here but one comes from the beacon node's own event stream and from nowhere else:
-//! `block_gossip` for a block the node accepted, `execution_payload_gossip` for a Gloas payload
-//! envelope it accepted, `data_column_sidecar` for a column it holds.
-//! `overlay_bn::events` is the only writer that opens or fills an entry, which is what MD-06 asks
-//! for. A payload a peer sent decodes without being authentic, so a tracker fed from the receive
-//! path is a tracker a roster peer writes, and column repair's inputs would be exactly the bytes
-//! an attacker controls.
+//! Every fact here but one comes from the beacon node and from nowhere else. Its event stream
+//! says most of it: `block_gossip` for a block the node accepted, `execution_payload_gossip` for
+//! a Gloas payload envelope it accepted, `data_column_sidecar` for a column it holds. A column
+//! the node forwards on its own link says the same as that last event, and is the only word on
+//! a Gloas column the node merged from partial messages, for which Lighthouse v8.3.2 fires no
+//! event at all (D43). `overlay_bn::events` and `overlay_bn::inbound` are the only writers,
+//! which is what MD-06 as amended asks for: written only by the node. A payload a peer sent
+//! decodes without being authentic, so a tracker fed from the overlay receive path is a tracker
+//! a roster peer writes, and column repair's inputs would be exactly the bytes an attacker
+//! controls.
 //!
 //! One number comes from the receive paths: how many blobs a block commits to, read from
 //! [`Arrivals`] for the root the node's own event named. A block with none has no columns and is
@@ -18,7 +21,8 @@
 //! set of columns while one subnet is one column.
 //!
 //! The deadline runs from the block before the Gloas fork and from the envelope after it,
-//! because a Gloas block's columns are built from the payload the builder reveals later (MD-09).
+//! because a Gloas block's columns are built from the payload the builder reveals later (MD-09),
+//! and after it the columns are given [`GLOAS_COLUMN_GRACE`] on top (D43).
 //!
 //! Nothing here is a socket or a channel: one call answers what is missing and in what order,
 //! and T-082's scheduler turns that into requests.
@@ -45,6 +49,18 @@ use crate::topic::{SubscriptionSets, TopicKind};
 /// four most recently opened is refused by identity whatever the store still has. The store's
 /// longer window is for chunk repair and the node's own lookups, which never ask this.
 pub const TRACKED_BLOCKS: usize = 4;
+
+/// How long past the envelope a Gloas block's columns are given before the deadline starts to
+/// run (D43). Not a config key: it is a property of when a node has its columns, not a
+/// preference.
+///
+/// A Gloas node has no column until it has the payload, and builds or merges them after the
+/// envelope's event has fired, so a deadline run from the envelope alone finds a healthy node
+/// short every slot. Measured on a devnet at Lighthouse v8.3.2 over 285 blocks (T-134): the
+/// last of a block's 128 columns reached the link a median 804 ms after the envelope, 1539 ms
+/// at the 99th percentile and 1711 ms at the worst, on a laptop's Docker VM. With the shipped
+/// 250 ms deadline on top, this clears every one of them, the worst by 39 ms.
+pub const GLOAS_COLUMN_GRACE: Duration = Duration::from_millis(1500);
 
 /// The counters column repair adds, all of which read zero on an honest fleet (§12). The binary
 /// implements this on its metrics; a caller that wants no series passes `()`.
@@ -252,17 +268,19 @@ impl CustodyTracker {
     }
 
     /// Records that the beacon node accepted the payload envelope of the block `root` for `slot`
-    /// at `now`, which starts that block's deadline (MD-09). An envelope for a block the beacon
-    /// node has not reported accepting starts nothing: there is no expected set to measure.
+    /// at `now`, which starts that block's deadline [`GLOAS_COLUMN_GRACE`] later (MD-09, D43).
+    /// An envelope for a block the beacon node has not reported accepting starts nothing: there
+    /// is no expected set to measure.
     pub fn on_envelope(&mut self, slot: u64, root: [u8; 32], now: Instant) {
         if let Some(block) = self.blocks.get_mut(&(slot, root))
             && block.expected.is_some()
         {
-            block.seen_at = Some(now);
+            block.seen_at = Some(now + GLOAS_COLUMN_GRACE);
         }
     }
 
-    /// Records that the beacon node holds column `index` of `block_root` for `slot`.
+    /// Records that the beacon node holds column `index` of `block_root` for `slot`: it said so
+    /// on its event stream, or it forwarded the column on its own link (D43).
     ///
     /// A column that arrives before its block opens the entry, because the beacon node verifies
     /// a column on its own and does not wait for the block; the block is what puts a deadline on
@@ -393,7 +411,9 @@ impl Block {
 /// `await`, the same rule [`SharedRecentLarge`](crate::recent::SharedRecentLarge) keeps.
 ///
 /// The write side is [`on_block`](Self::on_block), [`on_envelope`](Self::on_envelope) and
-/// [`on_column`](Self::on_column), and `overlay_bn::events` is the only caller of any. Reading
+/// [`on_column`](Self::on_column). `overlay_bn::events` calls all three, and
+/// `overlay_bn::inbound` calls the last for a column the node forwards (D43); nothing on the
+/// overlay receive path calls any. Reading
 /// the beacon node's subscriptions here rather than at the call site is what keeps that true:
 /// the writer needs nothing but the numbers the event carried. [`gaps`](Self::gaps) also drops
 /// entries whose blob count is now known to be zero, but it only removes, never opens.
@@ -462,7 +482,8 @@ impl SharedCustody {
         self.lock().tracker.on_envelope(slot, root, now);
     }
 
-    /// One `data_column_sidecar` event: the beacon node has verified this column.
+    /// One `data_column_sidecar` event, or one column the beacon node forwarded on its link: the
+    /// node holds this column.
     pub fn on_column(&self, slot: u64, index: u8, block_root: [u8; 32]) {
         self.lock()
             .tracker
@@ -882,7 +903,7 @@ mod tests {
         custody.on_block(FIRST_GLOAS_SLOT, ROOT, clock.now());
         custody.on_envelope(FIRST_GLOAS_SLOT, ROOT, clock.now());
         custody.on_column(FIRST_GLOAS_SLOT, 3, ROOT);
-        clock.advance(DEADLINE);
+        clock.advance(GLOAS_COLUMN_GRACE + DEADLINE);
         let in_flight = custody.column_set([7]);
 
         assert_eq!(
@@ -971,16 +992,17 @@ mod tests {
         assert_eq!(gaps(&tracker, &clock), Vec::new());
     }
 
-    /// The envelope is the anchor: the deadline runs from it, the same 250 ms it runs from a
-    /// block before the fork (MD-09).
+    /// The envelope is the anchor (MD-09), and the node has no column until it has the payload,
+    /// so the same 250 ms a block gets before the fork starts 1.5 s after the envelope (D43).
+    /// The number is written out: a test that named the constant would move with it.
     #[test]
-    fn a_gloas_slot_starts_the_deadline_at_the_envelope() {
+    fn a_gloas_slot_starts_the_deadline_a_grace_after_the_envelope() {
         let clock = FakeClock::new();
         let mut tracker = tracking_gloas(&clock, FIRST_GLOAS_SLOT);
         clock.advance(Duration::from_secs(1));
 
         tracker.on_envelope(FIRST_GLOAS_SLOT, ROOT, clock.now());
-        clock.advance(DEADLINE - Duration::from_millis(1));
+        clock.advance(Duration::from_millis(1500) + DEADLINE - Duration::from_millis(1));
         assert_eq!(gaps(&tracker, &clock), Vec::new());
 
         clock.advance(Duration::from_millis(1));
