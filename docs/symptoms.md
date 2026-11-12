@@ -93,7 +93,9 @@ missing topics: a hand-set URL leaves out some of `block`, `block_gossip`,
 this host; check bn.events_url's topics against this beacon node's Lighthouse version
 (restart-required)` carries the status and the start of the node's answer, and
 `overlay_bn_events_connected` stays at 0. The usual cause is a topic this Lighthouse does not
-know, a typo, or no `topics` at all. Fix the URL and restart the sidecar.
+know, a typo, or no `topics` at all. Fix the URL and restart the sidecar. A 401 or 403 is not
+Lighthouse's answer, since the beacon API puts no authentication on this endpoint: it comes from
+a proxy or auth layer in front of the node, and that is where to look.
 
 ## Socket buffers smaller than the sidecar asked for
 
