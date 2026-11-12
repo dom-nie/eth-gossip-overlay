@@ -725,7 +725,9 @@ async fn cross_region_small_batches_cost_one_wan_copy_per_relay() {
     fleet.wait_full_mesh(fleet.wait()).await;
     let relays = 3;
     fleet.set_relays(4, relays).await;
-    let remote: Vec<String> = (2..fleet.hosts())
+    let remote: Vec<String> = fleet
+        .region("us")
+        .into_iter()
         .map(|node| fleet.node(node).hostname().0.clone())
         .collect();
     let sent = |scrape: &Scrape| -> f64 {
