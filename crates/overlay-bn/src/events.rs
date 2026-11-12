@@ -542,6 +542,10 @@ mod tests {
     /// A hand-set `bn.events_url` that leaves a topic out turns off what that topic feeds, so
     /// the topics it lacks are named; the shipped default lacks none. Lighthouse takes a comma
     /// list, a repeated `topics` key or both, and a URL with no `topics` at all lacks every one.
+    ///
+    /// The four names are written out here rather than read from `TOPICS_READ`, so this is the
+    /// test that catches a name dropped from that list: the URL with no `topics` would then
+    /// lack three names instead of four.
     #[test]
     fn an_events_url_names_the_topics_it_lacks() {
         let at = |query: &str| -> Url {
@@ -574,9 +578,10 @@ mod tests {
         assert_eq!(missing_topics(&at("")), every);
     }
 
-    /// Every name the URL check asks for is one the parser reads, so the list and the parser
-    /// cannot drift apart: a name dropped from the list would go unchecked in a hand-set URL,
-    /// and one the parser skipped would be asked for and thrown away.
+    /// Every name in `TOPICS_READ` is one the parser reads, so a name the parser skipped is
+    /// not asked for and thrown away. This walks the list, so a name dropped from the list is
+    /// not caught here; `an_events_url_names_the_topics_it_lacks` compares the list with the
+    /// four names written out and catches that.
     #[test]
     fn every_topic_asked_for_is_one_the_parser_reads() {
         for name in TOPICS_READ {
