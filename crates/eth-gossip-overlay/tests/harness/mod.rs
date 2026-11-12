@@ -9,17 +9,17 @@
 //!
 //! ```no_run
 //! # async fn example() {
-//! # use harness::{Fleet, WAIT, topic};
+//! # use harness::{Fleet, topic};
 //! let block = topic("beacon_block");
 //! let mut fleet = Fleet::builder().regions(&[("eu", 3), ("us", 2)]).start().await;
 //! for node in fleet.nodes() {
 //!     node.subscribe(&block).await;
 //! }
-//! fleet.wait_full_mesh(WAIT).await;
+//! fleet.wait_full_mesh(fleet.wait()).await;
 //!
 //! fleet.node(0).bn().publish(&block, b"a block").await;
 //! fleet
-//!     .wait_for("the block to reach node 1", WAIT, |fleet| {
+//!     .wait_for("the block to reach node 1", fleet.wait(), |fleet| {
 //!         fleet.node(1).bn().count(&block, b"a block") == 1
 //!     })
 //!     .await;
@@ -84,9 +84,16 @@ use tokio::net::{TcpStream, UnixStream};
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 
-/// Long enough for a fleet to pair and deliver on a loaded machine, short enough that a
-/// scenario which will never pass fails instead of hanging.
-pub const WAIT: Duration = Duration::from_secs(30);
+/// The wait for a fleet of up to six hosts: long enough to pair and deliver on a loaded
+/// machine, short enough that a scenario which will never pass fails instead of hanging.
+/// A scenario takes [`Fleet::wait`], which grows this with the host count.
+const WAIT: Duration = Duration::from_secs(30);
+
+/// How long a fleet of `hosts` is given: [`WAIT`] for up to six hosts and another [`WAIT`] for
+/// every six after, so the thirty-host nightly waits five times what a pull request's fleet does.
+pub fn wait_for_hosts(hosts: usize) -> Duration {
+    WAIT * hosts.div_ceil(6).max(1) as u32
+}
 
 /// How long to wait before believing nothing further is coming. The longest sleep anywhere in
 /// the harness, which is what keeps the whole suite inside its minute.
@@ -320,6 +327,11 @@ impl Fleet {
     /// How many hosts the fleet has, which the nightly variant grows (see [`HOSTS_ENV`]).
     pub fn hosts(&self) -> usize {
         self.nodes.len()
+    }
+
+    /// How long a wait on this fleet is given, from its host count (see [`wait_for_hosts`]).
+    pub fn wait(&self) -> Duration {
+        wait_for_hosts(self.hosts())
     }
 
     /// One node.
@@ -590,9 +602,11 @@ impl Fleet {
             let _ = running.task.await;
         }
         let (overlay, metrics) = (self.nodes[index].overlay, self.nodes[index].metrics);
-        self.wait_for("the stopped node to let go of its ports", WAIT, |_| {
-            UdpSocket::bind(overlay).is_ok() && TcpListener::bind(metrics).is_ok()
-        })
+        self.wait_for(
+            "the stopped node to let go of its ports",
+            self.wait(),
+            |_| UdpSocket::bind(overlay).is_ok() && TcpListener::bind(metrics).is_ok(),
+        )
         .await;
     }
 
@@ -658,7 +672,7 @@ impl Fleet {
             self.write_files(index);
         }
         self.reload_all().await;
-        self.wait_for_peers("the cut connections to close", WAIT)
+        self.wait_for_peers("the cut connections to close", self.wait())
             .await;
     }
 

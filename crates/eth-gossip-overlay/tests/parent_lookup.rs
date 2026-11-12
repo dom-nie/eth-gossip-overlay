@@ -16,7 +16,7 @@ use eth_gossip_overlay::metrics::{
     FIRST_SEEN_TOTAL, LABEL_CLASS, LABEL_REASON, LABEL_SOURCE, PUBLISH_SUPPRESSED_TOTAL,
     REASON_PARENT_UNKNOWN, SOURCE_OVERLAY,
 };
-use harness::{Fleet, WAIT, topic};
+use harness::{Fleet, topic};
 use overlay_bn::testutil::{RpcAnswer, fulu_block};
 
 mod harness;
@@ -37,7 +37,7 @@ async fn a_block_whose_parent_the_node_lacks_is_dropped_by_lighthouse_after_four
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     let parent = [0x11; 32];
     let mut child = fulu_block(4_242).ssz;
     child[PARENT_ROOT].copy_from_slice(&parent);
@@ -47,7 +47,7 @@ async fn a_block_whose_parent_the_node_lacks_is_dropped_by_lighthouse_after_four
     fleet
         .wait_for_metrics(
             "node 1 to take the block in over the overlay",
-            WAIT,
+            fleet.wait(),
             |scrapes| {
                 scrapes[1].sum(
                     FIRST_SEEN_TOTAL,

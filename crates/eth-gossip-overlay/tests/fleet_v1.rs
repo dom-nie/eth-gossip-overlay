@@ -12,7 +12,7 @@ use eth_gossip_overlay::metrics::{
     RELAYED_BATCHES_TOTAL, REPAIR_REQUESTS_TOTAL, SOURCE_OVERLAY, UNANNOUNCED_TOPIC_TOTAL,
     UNIT_BYTES, UNKNOWN_TOPIC_ID_TOTAL, UNWANTED_TOPIC_TOTAL,
 };
-use harness::{Fleet, SETTLE, Scrape, WAIT, incompressible, topic};
+use harness::{Fleet, SETTLE, Scrape, incompressible, topic};
 use overlay_bn::testutil::{RpcAnswer, gloas_column_sidecar, gloas_fork_digest, hash256};
 use overlay_core::protocol::features;
 use overlay_core::relay;
@@ -44,7 +44,7 @@ async fn block_from_one_bn_reaches_every_other_bn_exactly_once() {
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
 
     let payload = b"a block from bn 0".to_vec();
     fleet.node(0).bn().publish(&block, &payload).await;
@@ -52,7 +52,7 @@ async fn block_from_one_bn_reaches_every_other_bn_exactly_once() {
     fleet
         .wait_for(
             "every other beacon node to import the block",
-            WAIT,
+            fleet.wait(),
             |fleet| (1..5).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
         )
         .await;
@@ -82,7 +82,7 @@ async fn fleet_scenario_one_passes_with_the_io_thread_configured() {
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
 
     let payload = b"a block from a reserved core".to_vec();
     fleet.node(0).bn().publish(&block, &payload).await;
@@ -90,7 +90,7 @@ async fn fleet_scenario_one_passes_with_the_io_thread_configured() {
     fleet
         .wait_for(
             "every other beacon node to import the block",
-            WAIT,
+            fleet.wait(),
             |fleet| (1..5).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
         )
         .await;
@@ -113,7 +113,7 @@ async fn attestation_on_subnet_reaches_only_subscribed_bns() {
     for index in 0..3 {
         fleet.node(index).subscribe(&subnet).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     fleet.settle().await;
 
     let unsubscribed = fleet.node(3).hostname().0.clone();
@@ -129,9 +129,11 @@ async fn attestation_on_subnet_reaches_only_subscribed_bns() {
     fleet.node(0).bn().publish(&subnet, &payload).await;
 
     fleet
-        .wait_for("both subscribed beacon nodes to import it", WAIT, |fleet| {
-            (1..3).all(|i| fleet.node(i).bn().count(&subnet, &payload) == 1)
-        })
+        .wait_for(
+            "both subscribed beacon nodes to import it",
+            fleet.wait(),
+            |fleet| (1..3).all(|i| fleet.node(i).bn().count(&subnet, &payload) == 1),
+        )
         .await;
     fleet.settle().await;
     assert_eq!(
@@ -156,7 +158,7 @@ async fn same_message_from_two_origins_is_published_once_everywhere() {
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     fleet.partition(&[0], &[1]).await;
 
     let payload = b"one block, two origins".to_vec();
@@ -166,9 +168,11 @@ async fn same_message_from_two_origins_is_published_once_everywhere() {
     );
 
     fleet
-        .wait_for("both other beacon nodes to import it", WAIT, |fleet| {
-            (2..4).all(|i| fleet.node(i).bn().count(&block, &payload) == 1)
-        })
+        .wait_for(
+            "both other beacon nodes to import it",
+            fleet.wait(),
+            |fleet| (2..4).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
+        )
         .await;
     fleet.settle().await;
     for index in 2..4 {
@@ -188,7 +192,7 @@ async fn single_region_fleet_works() {
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
 
     let payload = b"a block in a one-region fleet".to_vec();
     fleet.node(0).bn().publish(&block, &payload).await;
@@ -196,7 +200,7 @@ async fn single_region_fleet_works() {
     fleet
         .wait_for(
             "every other beacon node to import the block",
-            WAIT,
+            fleet.wait(),
             |fleet| (1..4).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
         )
         .await;
@@ -214,7 +218,7 @@ async fn three_region_fleet_works() {
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
 
     let payload = b"a block across three regions".to_vec();
     fleet.node(0).bn().publish(&block, &payload).await;
@@ -222,7 +226,7 @@ async fn three_region_fleet_works() {
     fleet
         .wait_for(
             "every other beacon node to import the block",
-            WAIT,
+            fleet.wait(),
             |fleet| (1..6).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
         )
         .await;
@@ -242,23 +246,27 @@ async fn inject_off_node_receives_and_counts_but_publishes_nothing() {
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
 
     let payload = b"a block nobody may inject".to_vec();
     fleet.node(0).bn().publish(&block, &payload).await;
 
     fleet
-        .wait_for_metrics("node 1 to count what it may not publish", WAIT, |scrapes| {
-            let won = scrapes[1].sum(
-                FIRST_SEEN_TOTAL,
-                &[(LABEL_CLASS, "large"), (LABEL_SOURCE, SOURCE_OVERLAY)],
-            );
-            let held = scrapes[1].sum(
-                PUBLISH_SUPPRESSED_TOTAL,
-                &[(LABEL_CLASS, "large"), (LABEL_REASON, REASON_INJECT_OFF)],
-            );
-            won > 0.0 && held > 0.0
-        })
+        .wait_for_metrics(
+            "node 1 to count what it may not publish",
+            fleet.wait(),
+            |scrapes| {
+                let won = scrapes[1].sum(
+                    FIRST_SEEN_TOTAL,
+                    &[(LABEL_CLASS, "large"), (LABEL_SOURCE, SOURCE_OVERLAY)],
+                );
+                let held = scrapes[1].sum(
+                    PUBLISH_SUPPRESSED_TOTAL,
+                    &[(LABEL_CLASS, "large"), (LABEL_REASON, REASON_INJECT_OFF)],
+                );
+                won > 0.0 && held > 0.0
+            },
+        )
         .await;
     fleet.settle().await;
     assert_eq!(fleet.node(1).bn().count(&block, &payload), 0, "injected");
@@ -275,14 +283,14 @@ async fn message_takes_one_overlay_hop_only() {
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     fleet.partition(&[0], &[2]).await;
 
     let payload = b"a block that must not be relayed".to_vec();
     fleet.node(0).bn().publish(&block, &payload).await;
 
     fleet
-        .wait_for("node 1 to import the block", WAIT, |fleet| {
+        .wait_for("node 1 to import the block", fleet.wait(), |fleet| {
             fleet.node(1).bn().count(&block, &payload) == 1
         })
         .await;
@@ -300,10 +308,10 @@ async fn restarted_node_rejoins_and_receives_the_next_message() {
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
 
     fleet.restart_node(2).await;
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
 
     let payload = b"a block after the restart".to_vec();
     fleet.node(0).bn().publish(&block, &payload).await;
@@ -311,7 +319,7 @@ async fn restarted_node_rejoins_and_receives_the_next_message() {
     fleet
         .wait_for(
             "the restarted node to import the next block",
-            WAIT,
+            fleet.wait(),
             |fleet| fleet.node(2).bn().count(&block, &payload) == 1,
         )
         .await;
@@ -327,7 +335,7 @@ async fn bn_disconnect_stops_siblings_sending_to_that_node() {
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     let quiet = fleet.node(1).hostname().0.clone();
     let sent_to_quiet = |scrape: &Scrape| {
         scrape.sum(
@@ -365,7 +373,7 @@ async fn publish_and_wait(fleet: &Fleet, topic: &str, text: &str) {
     let payload = text.as_bytes().to_vec();
     fleet.node(0).bn().publish(topic, &payload).await;
     fleet
-        .wait_for("node 2 to import the block", WAIT, |fleet| {
+        .wait_for("node 2 to import the block", fleet.wait(), |fleet| {
             fleet.node(2).bn().count(topic, &payload) == 1
         })
         .await;
@@ -393,7 +401,7 @@ async fn slow_peer_at_1_mbps_keeps_sender_memory_under_bound_and_others_unaffect
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     let slow = fleet.node(3).hostname().0.clone();
     fleet.throttle_node(3, Some(ONE_MBPS));
 
@@ -431,18 +439,22 @@ async fn slow_peer_at_1_mbps_keeps_sender_memory_under_bound_and_others_unaffect
     );
 
     fleet
-        .wait_for_metrics("the sender to count the frames it threw away", WAIT, |s| {
-            [DropReason::Full, DropReason::Stale].iter().any(|reason| {
-                s[0].sum(
-                    PEER_QUEUE_DROPS_TOTAL,
-                    &[
-                        (LABEL_PEER, &slow),
-                        (LABEL_CLASS, "large"),
-                        (LABEL_REASON, reason.as_str()),
-                    ],
-                ) > 0.0
-            })
-        })
+        .wait_for_metrics(
+            "the sender to count the frames it threw away",
+            fleet.wait(),
+            |s| {
+                [DropReason::Full, DropReason::Stale].iter().any(|reason| {
+                    s[0].sum(
+                        PEER_QUEUE_DROPS_TOTAL,
+                        &[
+                            (LABEL_PEER, &slow),
+                            (LABEL_CLASS, "large"),
+                            (LABEL_REASON, reason.as_str()),
+                        ],
+                    ) > 0.0
+                })
+            },
+        )
         .await;
     let arrived = blocks
         .iter()
@@ -458,9 +470,11 @@ async fn deliver_to_fast_nodes(fleet: &Fleet, topic: &str, payload: &[u8]) -> Du
     let sent = Instant::now();
     fleet.node(0).bn().publish(topic, payload).await;
     fleet
-        .wait_for("both fast nodes to import the block", WAIT, |fleet| {
-            (1..3).all(|node| fleet.node(node).bn().count(topic, payload) == 1)
-        })
+        .wait_for(
+            "both fast nodes to import the block",
+            fleet.wait(),
+            |fleet| (1..3).all(|node| fleet.node(node).bn().count(topic, payload) == 1),
+        )
         .await;
     sent.elapsed()
 }
@@ -483,7 +497,7 @@ async fn seed_rotation_with_host_by_host_sidecar_restarts_keeps_the_full_mesh_an
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
 
     let identities: Vec<(String, Vec<u8>)> = fleet
         .nodes()
@@ -506,13 +520,13 @@ async fn seed_rotation_with_host_by_host_sidecar_restarts_keeps_the_full_mesh_an
     fleet.rotate_seed([0x22; 32]).await;
     for index in 0..fleet.hosts() {
         fleet.restart_node(index).await;
-        fleet.wait_full_mesh(WAIT).await;
+        fleet.wait_full_mesh(fleet.wait()).await;
     }
     let during = via_previous_seed(&fleet.metrics().await);
     assert!(during > before, "no pairing in the walk used the old seed");
 
     fleet.retire_previous_seed().await;
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     assert_eq!(
         via_previous_seed(&fleet.metrics().await),
         during,
@@ -522,9 +536,11 @@ async fn seed_rotation_with_host_by_host_sidecar_restarts_keeps_the_full_mesh_an
     let payload = b"a block on the new seed".to_vec();
     fleet.node(0).bn().publish(&block, &payload).await;
     fleet
-        .wait_for("the rotated fleet to still deliver", WAIT, |fleet| {
-            (1..3).all(|index| fleet.node(index).bn().count(&block, &payload) == 1)
-        })
+        .wait_for(
+            "the rotated fleet to still deliver",
+            fleet.wait(),
+            |fleet| (1..3).all(|index| fleet.node(index).bn().count(&block, &payload) == 1),
+        )
         .await;
 
     for (index, (peer_id, env)) in identities.iter().enumerate() {
@@ -558,7 +574,7 @@ async fn attestation_burst_of_1000_arrives_within_100_ms_on_loopback() {
     for node in fleet.nodes() {
         node.subscribe(&subnet).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     fleet.settle().await;
     let arrived = |fleet: &Fleet, index: usize| {
         fleet
@@ -580,7 +596,7 @@ async fn attestation_burst_of_1000_arrives_within_100_ms_on_loopback() {
     fleet
         .wait_for(
             "every other beacon node to import the burst",
-            WAIT,
+            fleet.wait(),
             |fleet| (1..hosts).all(|index| arrived(fleet, index) >= burst.len()),
         )
         .await;
@@ -622,7 +638,7 @@ async fn rolling_upgrade_adding_a_feature_bit_keeps_pairing_and_serves_older_pee
     for node in fleet.nodes() {
         node.subscribe(&subnet).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     let (upgraded, older) = (
         fleet.node(1).hostname().clone(),
         fleet.node(2).hostname().clone(),
@@ -630,7 +646,7 @@ async fn rolling_upgrade_adding_a_feature_bit_keeps_pairing_and_serves_older_pee
 
     mask(&older, Some(0));
     fleet.restart_node(2).await;
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
 
     assert_eq!(
         fleet.node(0).negotiated_features(&upgraded).await,
@@ -646,22 +662,26 @@ async fn rolling_upgrade_adding_a_feature_bit_keeps_pairing_and_serves_older_pee
     let out = b"an attestation for a fleet halfway through the upgrade".to_vec();
     fleet.node(0).bn().publish(&subnet, &out).await;
     fleet
-        .wait_for("both other beacon nodes to import it", WAIT, |fleet| {
-            (1..3).all(|index| fleet.node(index).bn().count(&subnet, &out) == 1)
-        })
+        .wait_for(
+            "both other beacon nodes to import it",
+            fleet.wait(),
+            |fleet| (1..3).all(|index| fleet.node(index).bn().count(&subnet, &out) == 1),
+        )
         .await;
 
     let back = b"an attestation from the host that has not upgraded".to_vec();
     fleet.node(2).bn().publish(&subnet, &back).await;
     fleet
-        .wait_for("the upgraded hosts to import what it sent", WAIT, |fleet| {
-            (0..2).all(|index| fleet.node(index).bn().count(&subnet, &back) == 1)
-        })
+        .wait_for(
+            "the upgraded hosts to import what it sent",
+            fleet.wait(),
+            |fleet| (0..2).all(|index| fleet.node(index).bn().count(&subnet, &back) == 1),
+        )
         .await;
 
     mask(&older, None);
     fleet.restart_node(2).await;
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     assert_eq!(
         fleet.node(0).negotiated_features(&older).await,
         features::DATAGRAM_BATCHES | features::STRIPING | features::REPAIR,
@@ -683,7 +703,7 @@ async fn cross_region_small_batches_cost_one_wan_copy_per_relay() {
     for node in fleet.nodes() {
         node.subscribe(&subnet).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     let relays = 3;
     fleet.set_relays(4, relays).await;
     let remote: Vec<String> = (2..fleet.hosts())
@@ -709,7 +729,7 @@ async fn cross_region_small_batches_cost_one_wan_copy_per_relay() {
         fleet
             .wait_for(
                 "every other host to import the attestation",
-                WAIT,
+                fleet.wait(),
                 |fleet| fleet.node(node).bn().count(&subnet, &payload) == 1,
             )
             .await;
@@ -731,7 +751,7 @@ async fn unsubscribed_relay_refans_but_does_not_publish() {
         .regions(&[("eu", 1), ("us", 3)])
         .start()
         .await;
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     fleet.set_relays(1, 1).await;
     // Which host the origin relays through is a hash of its own name over the region's hosts in
     // hostname order (D20), which is what the fleet's own numbering gives.
@@ -746,13 +766,18 @@ async fn unsubscribed_relay_refans_but_does_not_publish() {
         fleet.node(node).subscribe(&subnet).await;
     }
     fleet
-        .wait_for_metrics("everyone but the relay to want the subnet", WAIT, |now| {
-            std::iter::once(0)
-                .chain(subscribers.iter().copied())
-                .all(|node| {
-                    now[node].sum(BN_SUBSCRIPTIONS, &[]) > before[node].sum(BN_SUBSCRIPTIONS, &[])
-                })
-        })
+        .wait_for_metrics(
+            "everyone but the relay to want the subnet",
+            fleet.wait(),
+            |now| {
+                std::iter::once(0)
+                    .chain(subscribers.iter().copied())
+                    .all(|node| {
+                        now[node].sum(BN_SUBSCRIPTIONS, &[])
+                            > before[node].sum(BN_SUBSCRIPTIONS, &[])
+                    })
+            },
+        )
         .await;
     fleet.settle().await;
     // The first attestation is what makes the relay intern an id for the subnet, and it is lost
@@ -770,9 +795,11 @@ async fn unsubscribed_relay_refans_but_does_not_publish() {
 
     for node in subscribers {
         fleet
-            .wait_for("the hosts beside the relay to import it", WAIT, |fleet| {
-                fleet.node(node).bn().count(&subnet, &payload) == 1
-            })
+            .wait_for(
+                "the hosts beside the relay to import it",
+                fleet.wait(),
+                |fleet| fleet.node(node).bn().count(&subnet, &payload) == 1,
+            )
             .await;
     }
     fleet.settle().await;
@@ -806,7 +833,7 @@ async fn wedged_bn_on_one_host_does_not_delay_the_second_hop_to_its_region() {
     for node in fleet.nodes() {
         node.subscribe(&subnet).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     fleet.set_relays(1, 1).await;
     let pool: Vec<Hostname> = (1..4)
         .map(|node| fleet.node(node).hostname().clone())
@@ -820,9 +847,11 @@ async fn wedged_bn_on_one_host_does_not_delay_the_second_hop_to_its_region() {
 
     for node in (1..4).filter(|node| *node != relay) {
         fleet
-            .wait_for("the region behind the relay to import it", WAIT, |fleet| {
-                fleet.node(node).bn().count(&subnet, &payload) == 1
-            })
+            .wait_for(
+                "the region behind the relay to import it",
+                fleet.wait(),
+                |fleet| fleet.node(node).bn().count(&subnet, &payload) == 1,
+            )
             .await;
     }
     fleet.settle().await;
@@ -849,7 +878,7 @@ async fn single_and_two_host_regions_use_whole_delivery_and_the_direct_small_pat
         node.subscribe(&block).await;
         node.subscribe(&subnet).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     fleet.settle().await;
     let sent_to = |scrape: &Scrape, peer: &Hostname| {
         scrape.sum(
@@ -864,7 +893,7 @@ async fn single_and_two_host_regions_use_whole_delivery_and_the_direct_small_pat
     fleet
         .wait_for(
             "both hosts of the other region to import it",
-            WAIT,
+            fleet.wait(),
             |fleet| (1..3).all(|node| fleet.node(node).bn().count(&block, &payload) == 1),
         )
         .await;
@@ -873,7 +902,7 @@ async fn single_and_two_host_regions_use_whole_delivery_and_the_direct_small_pat
     fleet
         .wait_for(
             "both of them to import the attestation too",
-            WAIT,
+            fleet.wait(),
             |fleet| (1..3).all(|node| fleet.node(node).bn().count(&subnet, &attestation) == 1),
         )
         .await;
@@ -898,7 +927,7 @@ async fn single_and_two_host_regions_use_whole_delivery_and_the_direct_small_pat
     fleet
         .wait_for(
             "the other region and the region peer to import it",
-            WAIT,
+            fleet.wait(),
             |fleet| {
                 [0, 2]
                     .iter()
@@ -927,7 +956,7 @@ async fn wedged_bn_on_one_host_does_not_delay_the_chunk_second_hop_to_its_region
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     fleet.node(1).wedge_bn().await;
     let wedged = fleet.node(1).hostname().0.clone();
 
@@ -941,7 +970,7 @@ async fn wedged_bn_on_one_host_does_not_delay_the_chunk_second_hop_to_its_region
         fleet
             .wait_for_metrics(
                 "the region behind the wedged host to be given chunks",
-                WAIT,
+                fleet.wait(),
                 |now| {
                     now[node].sum(
                         MESSAGES_TOTAL,
@@ -969,7 +998,7 @@ async fn chunk_arriving_before_topic_add_is_counted_not_crashed_and_zero_in_stea
         .config(|settings| settings.stripe_min_recipients = 2)
         .start()
         .await;
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     // The subscribers first, so the origin's stripe has somewhere to go, and the origin last, so
     // the only announcement still in flight when it publishes is its own.
     for node in [1, 2] {
@@ -984,7 +1013,7 @@ async fn chunk_arriving_before_topic_add_is_counted_not_crashed_and_zero_in_stea
         fleet
             .wait_for_metrics(
                 "both hosts to be reading the column's chunks",
-                WAIT,
+                fleet.wait(),
                 |now| now[node].sum(MESSAGES_TOTAL, &[(LABEL_DIRECTION, "in")]) > 0.0,
             )
             .await;
@@ -996,10 +1025,14 @@ async fn chunk_arriving_before_topic_add_is_counted_not_crashed_and_zero_in_stea
     fleet.node(0).bn().publish(&column, &settled).await;
     for node in [1, 2] {
         fleet
-            .wait_for_metrics("both hosts to read the second one's chunks", WAIT, |now| {
-                now[node].sum(BYTES_TOTAL, &[(LABEL_DIRECTION, "in")])
-                    > before[node].sum(BYTES_TOTAL, &[(LABEL_DIRECTION, "in")])
-            })
+            .wait_for_metrics(
+                "both hosts to read the second one's chunks",
+                fleet.wait(),
+                |now| {
+                    now[node].sum(BYTES_TOTAL, &[(LABEL_DIRECTION, "in")])
+                        > before[node].sum(BYTES_TOTAL, &[(LABEL_DIRECTION, "in")])
+                },
+            )
             .await;
     }
     fleet.settle().await;
@@ -1029,7 +1062,7 @@ async fn striped_block_costs_the_origin_two_block_equivalents_and_each_host_one(
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     fleet.settle().await;
     let out = |scrape: &Scrape| scrape.sum(BYTES_TOTAL, &[(LABEL_DIRECTION, "out")]);
     let before = fleet.metrics().await;
@@ -1041,7 +1074,7 @@ async fn striped_block_costs_the_origin_two_block_equivalents_and_each_host_one(
         fleet
             .wait_for_metrics(
                 "every host of the origin's region to pass its chunks on",
-                WAIT,
+                fleet.wait(),
                 |now| out(&now[node]) - out(&before[node]) > 0.0,
             )
             .await;
@@ -1103,7 +1136,7 @@ async fn block_striped_across_region_is_published_once_on_every_node() {
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
 
     let payload = incompressible(21, 200 * 1024);
     fleet.node(0).bn().publish(&block, &payload).await;
@@ -1111,7 +1144,7 @@ async fn block_striped_across_region_is_published_once_on_every_node() {
     fleet
         .wait_for(
             "every other beacon node to import the block",
-            WAIT,
+            fleet.wait(),
             |fleet| (1..hosts).all(|node| fleet.node(node).bn().count(&block, &payload) == 1),
         )
         .await;
@@ -1169,7 +1202,7 @@ async fn block_still_completes_when_one_stripe_host_is_down() {
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     fleet.partition(&[hosts - 1], &[1, 2, 3]).await;
 
     let payload = incompressible(22, 100 * 1024);
@@ -1178,7 +1211,7 @@ async fn block_still_completes_when_one_stripe_host_is_down() {
     fleet
         .wait_for(
             "the rest of the region to import the block",
-            WAIT,
+            fleet.wait(),
             |fleet| (1..hosts - 1).all(|node| fleet.node(node).bn().count(&block, &payload) == 1),
         )
         .await;
@@ -1218,7 +1251,7 @@ async fn two_origins_with_divergent_live_views_publish_once_with_at_most_2k_plus
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     // One origin sees neither the other origin nor the last host, so the two assignments run
     // over different pools and neither origin is a target of the other.
     fleet.partition(&[0], &[1, hosts - 1]).await;
@@ -1231,7 +1264,7 @@ async fn two_origins_with_divergent_live_views_publish_once_with_at_most_2k_plus
     fleet
         .wait_for(
             "every host that is not an origin to import it",
-            WAIT,
+            fleet.wait(),
             |fleet| (2..hosts).all(|node| fleet.node(node).bn().count(&block, &payload) == 1),
         )
         .await;
@@ -1281,21 +1314,25 @@ async fn one_third_of_a_region_lost_mid_slot_completes_via_parity_or_repair_befo
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     fleet.partition(&[4, 5], &[1, 2, 3]).await;
 
     let payload = incompressible(24, 100 * 1024);
     fleet.node(0).bn().publish(&block, &payload).await;
 
     fleet
-        .wait_for("the two thirds still talking to import it", WAIT, |fleet| {
-            (1..4).all(|node| fleet.node(node).bn().count(&block, &payload) == 1)
-        })
+        .wait_for(
+            "the two thirds still talking to import it",
+            fleet.wait(),
+            |fleet| (1..4).all(|node| fleet.node(node).bn().count(&block, &payload) == 1),
+        )
         .await;
     fleet
-        .wait_for("the lost third to import it as well", WAIT, |fleet| {
-            (4..hosts).all(|node| fleet.node(node).bn().count(&block, &payload) == 1)
-        })
+        .wait_for(
+            "the lost third to import it as well",
+            fleet.wait(),
+            |fleet| (4..hosts).all(|node| fleet.node(node).bn().count(&block, &payload) == 1),
+        )
         .await;
     fleet.settle().await;
     let now = fleet.metrics().await;
@@ -1339,7 +1376,7 @@ async fn block_completes_via_repair_when_a_stripe_host_dies_mid_transfer() {
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     fleet.partition(&[hosts - 1], &[1, 2, 3]).await;
 
     let payload = incompressible(25, 100 * 1024);
@@ -1348,7 +1385,7 @@ async fn block_completes_via_repair_when_a_stripe_host_dies_mid_transfer() {
     fleet
         .wait_for(
             "the rest of the region to import the block",
-            WAIT,
+            fleet.wait(),
             |fleet| (1..hosts - 1).all(|node| fleet.node(node).bn().count(&block, &payload) == 1),
         )
         .await;
@@ -1380,20 +1417,22 @@ async fn a_roster_add_never_dials_against_the_old_pin_table() {
         .config(|settings| settings.fillers = 198)
         .start()
         .await;
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     let connected = |scrapes: &[Scrape]| scrapes[0].sum(PEERS_CONNECTED, &[]);
 
     fleet.drop_from_roster(0, 1).await;
     fleet
-        .wait_for_metrics("node 0 to let node 1 go", WAIT, |scrapes| {
+        .wait_for_metrics("node 0 to let node 1 go", fleet.wait(), |scrapes| {
             connected(scrapes) == 0.0
         })
         .await;
     fleet.add_to_roster(0, 1).await;
     fleet
-        .wait_for_metrics("node 0 to pair with node 1 again", WAIT, |scrapes| {
-            connected(scrapes) == 1.0
-        })
+        .wait_for_metrics(
+            "node 0 to pair with node 1 again",
+            fleet.wait(),
+            |scrapes| connected(scrapes) == 1.0,
+        )
         .await;
 
     let refused = fleet.node(0).metrics().await.sum(
@@ -1426,7 +1465,7 @@ async fn a_gloas_column_delivered_on_one_host_is_served_from_the_others_cache_by
     for node in fleet.nodes() {
         node.subscribe(&columns).await;
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     let root = [0x5a; 32];
     let column = gloas_column_sidecar(11_511_776, 5, hash256(root));
 
@@ -1434,7 +1473,7 @@ async fn a_gloas_column_delivered_on_one_host_is_served_from_the_others_cache_by
     fleet
         .wait_for(
             "node 1's beacon node to receive the column",
-            WAIT,
+            fleet.wait(),
             |fleet| fleet.node(1).bn().count(&columns, &column.ssz) == 1,
         )
         .await;

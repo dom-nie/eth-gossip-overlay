@@ -19,7 +19,7 @@
 
 use std::time::{Duration, Instant};
 
-use harness::{Fleet, WAIT, incompressible, topic};
+use harness::{Fleet, incompressible, topic};
 
 mod harness;
 
@@ -55,7 +55,7 @@ async fn fleet(initial_window_bytes: u64, topics: &[String]) -> Fleet {
             node.subscribe(name).await;
         }
     }
-    fleet.wait_full_mesh(WAIT).await;
+    fleet.wait_full_mesh(fleet.wait()).await;
     fleet.settle().await;
     fleet
 }
@@ -74,7 +74,7 @@ async fn publish_and_wait(fleet: &Fleet, sent: &[(String, Vec<u8>)]) -> Duration
     for (name, payload) in sent {
         fleet.node(0).bn().publish(name, payload).await;
     }
-    let deadline = started + WAIT;
+    let deadline = started + fleet.wait();
     loop {
         let done = (1..NODES)
             .all(|node| fleet.node(node).bn().received_count() - before[node] >= sent.len());
@@ -89,7 +89,8 @@ async fn publish_and_wait(fleet: &Fleet, sent: &[(String, Vec<u8>)]) -> Duration
         }
         assert!(
             Instant::now() < deadline,
-            "waited {WAIT:?} for {} messages to reach {} nodes",
+            "waited {:?} for {} messages to reach {} nodes",
+            fleet.wait(),
             sent.len(),
             NODES - 1
         );
