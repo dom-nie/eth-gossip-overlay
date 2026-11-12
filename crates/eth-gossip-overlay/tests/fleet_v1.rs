@@ -1237,20 +1237,22 @@ async fn block_striped_across_region_is_published_once_on_every_node() {
 #[tokio::test(flavor = "multi_thread")]
 async fn block_still_completes_when_one_stripe_host_is_down() {
     let block = topic("beacon_block");
-    let hosts = 5;
     let mut fleet = Fleet::builder()
-        .regions(&[("eu", hosts)])
+        .regions(&[("eu", 5)])
         .config(|settings| {
             settings.stripe_min_recipients = 2;
             settings.parity_ratio = 1.0;
         })
         .start()
         .await;
+    let hosts = fleet.hosts();
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
     fleet.wait_full_mesh(fleet.wait()).await;
-    fleet.partition(&[hosts - 1], &[1, 2, 3]).await;
+    fleet
+        .partition(&[hosts - 1], &(1..hosts - 1).collect::<Vec<_>>())
+        .await;
 
     let payload = incompressible(22, 100 * 1024);
     fleet.node(0).bn().publish(&block, &payload).await;
