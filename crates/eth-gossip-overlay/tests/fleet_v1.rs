@@ -279,7 +279,14 @@ async fn inject_off_node_receives_and_counts_but_publishes_nothing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn message_takes_one_overlay_hop_only() {
     let block = topic("beacon_block");
-    let mut fleet = Fleet::builder().regions(&[("eu", 3)]).at_own_size("the one-hop claim is about whole delivery; from 16 subscribers in a region the block is striped, and a stripe's second hop is the design (§5.4)").start().await;
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", 3)])
+        .at_own_size(
+            "the one-hop claim is about whole delivery; from 16 subscribers in a region the \
+             block is striped, and a stripe's second hop is the design (§5.4)",
+        )
+        .start()
+        .await;
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
@@ -397,7 +404,14 @@ async fn slow_peer_at_1_mbps_keeps_sender_memory_under_bound_and_others_unaffect
     const PAYLOAD_BYTES: usize = 64 * 1024;
 
     let block = topic("beacon_block");
-    let mut fleet = Fleet::builder().regions(&[("eu", 4)]).at_own_size("the bound is on the whole-message lane (D17); from 16 subscribers the sender stripes and sends the slow peer a chunk or two per block").start().await;
+    let mut fleet = Fleet::builder()
+        .regions(&[("eu", 4)])
+        .at_own_size(
+            "the bound is on the whole-message lane (D17); from 16 subscribers the sender \
+             stripes and sends the slow peer a chunk or two per block",
+        )
+        .start()
+        .await;
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
