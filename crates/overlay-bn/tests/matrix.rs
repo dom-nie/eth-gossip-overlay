@@ -1528,6 +1528,134 @@ async fn matrix_execution_payload_gossip_fires_once_per_envelope_from_any_source
     assert_eq!(twice, 0, "an envelope fired more than once");
 }
 
+/// D44's first step: the event the parent-payload check reads. `execution_payload` fires when
+/// the node imports a payload envelope, which is when a child built on it stops being
+/// `UnknownPayload`; `execution_payload_gossip` fires earlier, at gossip verification. Over
+/// `MATRIX_SLOTS` slots every envelope the near node gossip-verified is matched with its import
+/// event, own proposals and other nodes' apart, and the gap between the two events is printed.
+/// The far node is read as well: its envelopes come from its shipped sidecar and, when it
+/// falls behind, from the catch-up loop over the beacon API, so an import event there is one
+/// for an envelope that never arrived from a public gossip peer. An envelope fetched by root
+/// is not covered: T-121 saw the node ask for none.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the Gloas devnet: scripts/lighthouse-matrix.sh <version> --gloas"]
+async fn matrix_execution_payload_fires_at_import_for_every_envelope() {
+    let Some(gloas) = gloas() else { return };
+    let env = env();
+    let chain = chain(&env.http).await;
+    let mut near = sse(format!(
+        "{}/eth/v1/events?topics=execution_payload_gossip,execution_payload",
+        env.http
+    ));
+    let mut far = sse(format!(
+        "{}/eth/v1/events?topics=execution_payload",
+        gloas.far_http
+    ));
+
+    #[derive(Default)]
+    struct Seen {
+        slot: u64,
+        verified_at: Option<Instant>,
+        imported_at: Option<Instant>,
+        imports: usize,
+        block_hash: Option<String>,
+        far_imports: usize,
+    }
+    let mut seen: BTreeMap<[u8; 32], Seen> = BTreeMap::new();
+    let mut printed = false;
+    let end = Instant::now() + chain.slots(gloas.slots);
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(end.into()) => break,
+            Some((name, data)) = near.recv() => {
+                let root = unhex(data["block_root"].as_str().unwrap()).unwrap();
+                let entry = seen.entry(root).or_default();
+                entry.slot = data["slot"].as_str().unwrap().parse().unwrap();
+                if name == "execution_payload_gossip" {
+                    entry.verified_at = Some(Instant::now());
+                } else {
+                    if !printed {
+                        println!("an execution_payload event as the node sends it: {data}");
+                        printed = true;
+                    }
+                    entry.imported_at.get_or_insert_with(Instant::now);
+                    entry.imports += 1;
+                    entry.block_hash = data["block_hash"].as_str().map(str::to_owned);
+                }
+            }
+            Some((_, data)) = far.recv() => {
+                let root = unhex(data["block_root"].as_str().unwrap()).unwrap();
+                seen.entry(root).or_default().far_imports += 1;
+            }
+        }
+    }
+
+    let slots: Vec<u64> = seen.values().map(|envelope| envelope.slot).collect();
+    // The window's first and last slots can hold half of a pair, so they are left out.
+    let edge = |slot: u64| slots.iter().min() == Some(&slot) || slots.iter().max() == Some(&slot);
+    let (mut own, mut gossiped, mut unimported, mut hashless, mut twice, mut on_far) =
+        (0, 0, 0, 0, 0, 0);
+    let mut gaps = Vec::new();
+    println!("slot  own    import_events  import_after_gossip  far_import_events");
+    for (root, envelope) in &seen {
+        if envelope.verified_at.is_none() || edge(envelope.slot) {
+            continue;
+        }
+        let header = beacon_json(&env, &format!("/eth/v1/beacon/headers/{}", hex0x(*root))).await;
+        let proposer: u64 = header["data"]["header"]["message"]["proposer_index"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let is_own = gloas.proposers.contains(&proposer);
+        match is_own {
+            true => own += 1,
+            false => gossiped += 1,
+        }
+        unimported += usize::from(envelope.imports == 0);
+        hashless += usize::from(envelope.imports > 0 && envelope.block_hash.is_none());
+        twice += usize::from(envelope.imports > 1);
+        on_far += usize::from(envelope.far_imports > 0);
+        let gap = envelope
+            .verified_at
+            .zip(envelope.imported_at)
+            .map(|(verified, imported)| imported.saturating_duration_since(verified).as_millis());
+        gaps.extend(gap);
+        println!(
+            "{:<5} {is_own:<6} {:<14} {:<20} {}",
+            envelope.slot,
+            envelope.imports,
+            gap.map_or("none".to_owned(), |gap| format!("+{gap} ms")),
+            envelope.far_imports
+        );
+    }
+    gaps.sort_unstable();
+    println!(
+        "{own} own envelopes and {gossiped} gossiped: {unimported} with no import event, \
+         {hashless} import events with no block_hash, {twice} imported more than once; import \
+         after gossip verification min {:?} median {:?} max {:?} ms; the far node fired an \
+         import event for {on_far} of them",
+        gaps.first(),
+        gaps.get(gaps.len() / 2),
+        gaps.last()
+    );
+    assert!(own >= 1 && gossiped >= 4, "too few envelopes in the window");
+    assert_eq!(
+        unimported, 0,
+        "an envelope the node verified fired no import event"
+    );
+    assert_eq!(hashless, 0, "an import event named no block hash");
+    assert_eq!(
+        twice, 0,
+        "an envelope fired its import event more than once"
+    );
+    assert!(
+        on_far * 2 >= own + gossiped,
+        "the far node fired an import event for {on_far} of {} envelopes",
+        own + gossiped
+    );
+}
+
 /// T-119's end-to-end check. The far node's only gossip peer is its shipped sidecar, so every
 /// message its gossipsub has accepted on a Gloas topic since it started came over the
 /// overlay, and a REJECT or an invalid message on those topics is what acceptance rules out.
