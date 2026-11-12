@@ -1510,9 +1510,10 @@ async fn matrix_execution_payload_gossip_fires_once_per_envelope_from_any_source
 /// message its gossipsub has accepted on a Gloas topic since it started came over the
 /// overlay, and a REJECT or an invalid message on those topics is what acceptance rules out.
 /// The counters are read whole rather than over a window, because the validator client
-/// sends proposer preferences once per validator rather than every slot. The envelope also
-/// has to show up as a `first_arrival` line with `source: overlay` inside the window; the
-/// small kinds carry no block root and log no line. The bid topic is reported but not
+/// sends proposer preferences once per proposer duty rather than every slot. The envelope
+/// also has to cross inside the window: the far node's accepted count on its topic has to
+/// move, and the far sidecar has to log a `first_arrival` with `source: overlay` for one;
+/// the small kinds carry no block root and log no line. The bid topic is reported but not
 /// required: a devnet that self-builds every payload gossips no bids.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the Gloas devnet: scripts/lighthouse-matrix.sh <version> --gloas"]
@@ -1532,12 +1533,23 @@ async fn matrix_every_gloas_kind_crosses_the_overlay() {
         "payload_attestation_message",
         "proposer_preferences",
     ];
+    // Live, inside the window: the far node's own count of accepted envelopes has to move,
+    // which only its sidecar's publish can do, and the far sidecar has to log one arriving
+    // over the overlay.
     let arrivals_before = gloas.overlay_arrivals("execution_payload");
+    let accepted_before = gossip_counts(&gloas.far_metrics, &digest, KINDS[0]).await[0];
     let end = Instant::now() + chain.slots(8);
-    while gloas.overlay_arrivals("execution_payload") == arrivals_before {
+    loop {
+        let accepted = gossip_counts(&gloas.far_metrics, &digest, KINDS[0]).await[0];
+        if accepted > accepted_before
+            && gloas.overlay_arrivals("execution_payload") > arrivals_before
+        {
+            break;
+        }
         assert!(
             Instant::now() < end,
-            "no envelope reached the far sidecar over the overlay in eight slots"
+            "no envelope crossed to the far node in eight slots: {accepted_before} accepted \
+             before, {accepted} now"
         );
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
