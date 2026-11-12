@@ -57,7 +57,9 @@ use crate::rpc::{ByRootCache, ByRootOutcome, Chunk, MAX_REQUEST_BLOCKS, Response
 /// sends this way, and it is the one trace a dropped parent lookup leaves on the sidecar
 /// (T-101).
 pub fn answer(cache: &ByRootCache, protocol: Protocol, request: &[u8]) -> Response {
-    if !cache.enabled() || !cache.inject() {
+    // Envelopes are never held for the node, cache or no cache. The refusal is counted so a
+    // Gloas parent-payload lookup that lands on the sidecar is visible (T-121).
+    if protocol == Protocol::EnvelopesByRootV1 || !cache.enabled() || !cache.inject() {
         cache
             .stats
             .by_root_request(protocol, ByRootOutcome::Refused);

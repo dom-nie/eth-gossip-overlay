@@ -38,6 +38,11 @@ pub enum Protocol {
     /// `data_column_sidecars_by_root/1`: the same, and never asked. The node requests columns
     /// from custody peers only, and the sidecar claims no custody (module doc).
     ColumnsByRootV1,
+    /// `execution_payload_envelopes_by_root/1`: `ResourceUnavailable` like every other id the
+    /// sidecar does not serve, but counted under its own label. Under Gloas a node that has a
+    /// block's parent and not the parent's payload asks the block's sender for the envelope,
+    /// and the sender is the sidecar whenever the overlay delivered the block (T-121).
+    EnvelopesByRootV1,
     /// Every other id Lighthouse can negotiate: answered `ResourceUnavailable`.
     Unsupported,
 }
@@ -48,6 +53,7 @@ impl Protocol {
         match self {
             Self::BlocksByRootV2 => "beacon_blocks_by_root",
             Self::ColumnsByRootV1 => "data_column_sidecars_by_root",
+            Self::EnvelopesByRootV1 => "execution_payload_envelopes_by_root",
             _ => "",
         }
     }
@@ -85,7 +91,7 @@ static TABLE: [(StreamProtocol, Protocol); 21] = [
     ),
     (
         id!("execution_payload_envelopes_by_root", "1"),
-        Protocol::Unsupported,
+        Protocol::EnvelopesByRootV1,
     ),
     (id!("blob_sidecars_by_range", "1"), Protocol::Unsupported),
     (id!("blob_sidecars_by_root", "1"), Protocol::Unsupported),

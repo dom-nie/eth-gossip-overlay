@@ -48,9 +48,10 @@ pub enum ByRootOutcome {
     Hit,
     /// It did not, and the beacon node goes to the public network as it always would have.
     Miss,
-    /// The cache or inject is off, so the request was refused unread. With the cache off, the
-    /// shipped default, every lookup that lands here is one of these; four inside a millisecond
-    /// on `beacon_blocks_by_root` is one parent lookup the beacon node gave up on (T-101).
+    /// The cache or inject is off, so the request was refused unread, or it asked for payload
+    /// envelopes, which the sidecar never serves. With the cache off, the shipped default, every
+    /// lookup that lands here is one of these; four inside a millisecond on
+    /// `beacon_blocks_by_root` is one parent lookup the beacon node gave up on (T-101).
     Refused,
 }
 
@@ -218,7 +219,7 @@ impl Responder {
             // cache existed: a trusted beacon node does not send a malformed by-root request,
             // and answering one with the code that costs peer score would be a new way for the
             // sidecar to lose standing on a protocol it had been refusing for free.
-            Protocol::BlocksByRootV2 | Protocol::ColumnsByRootV1 => {
+            Protocol::BlocksByRootV2 | Protocol::ColumnsByRootV1 | Protocol::EnvelopesByRootV1 => {
                 return match &self.by_root {
                     Some(cache) => by_root::answer(cache, protocol, request),
                     None => Response::ResourceUnavailable,
