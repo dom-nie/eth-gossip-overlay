@@ -221,6 +221,8 @@ impl Default for Settings {
 pub struct Builder {
     regions: Vec<(String, usize)>,
     settings: Settings,
+    /// Why this fleet keeps the layout it names under [`HOSTS_ENV`], when it does.
+    own_size: Option<&'static str>,
 }
 
 impl Builder {
@@ -240,14 +242,33 @@ impl Builder {
         self
     }
 
+    /// Keeps the layout the scenario names even under [`HOSTS_ENV`], for a claim that holds
+    /// only at the size it was written for. `reason` says why, and is printed whenever the
+    /// nightly would have grown the fleet instead. The scenario still runs and still asserts
+    /// everything; this is the only way one opts out of scaling.
+    pub fn at_own_size(mut self, reason: &'static str) -> Self {
+        self.own_size = Some(reason);
+        self
+    }
+
     /// Starts every node and returns once each one's admin socket answers.
     pub async fn start(self) -> Fleet {
         let dir = tempfile::tempdir().unwrap();
         let prefix = format!("f{}", FLEETS.fetch_add(1, Ordering::Relaxed));
         write_secret(&dir.path().join("seed"), &SEED);
 
+        let asked: usize = self.regions.iter().map(|(_, hosts)| hosts).sum();
+        let regions = match self.own_size {
+            Some(reason) => {
+                if std::env::var_os(HOSTS_ENV).is_some() {
+                    println!("runs at its own size under {HOSTS_ENV}: {reason}");
+                }
+                self.regions
+            }
+            None => scaled(self.regions),
+        };
+        let grown: usize = regions.iter().map(|(_, hosts)| hosts).sum();
         let mut nodes = Vec::new();
-        let regions = scaled(self.regions);
         for (region, hosts) in &regions {
             for _ in 0..*hosts {
                 let index = nodes.len();
@@ -262,6 +283,7 @@ impl Builder {
             cut: Vec::new(),
             probes: 0,
             rotating: false,
+            scaled: grown != asked,
         };
         for index in 0..fleet.nodes.len() {
             fleet.write_files(index);
@@ -311,6 +333,8 @@ pub struct Fleet {
     probes: usize,
     /// Whether a rotation has put a previous-seed file in every node's configuration.
     rotating: bool,
+    /// Whether [`scaled`] grew this fleet past the layout the scenario asked for.
+    scaled: bool,
 }
 
 impl Fleet {
@@ -332,6 +356,20 @@ impl Fleet {
     /// How long a wait on this fleet is given, from its host count (see [`wait_for_hosts`]).
     pub fn wait(&self) -> Duration {
         wait_for_hosts(self.hosts())
+    }
+
+    /// Whether the nightly grew this fleet past the layout the scenario asked for (see
+    /// [`HOSTS_ENV`]). A bound that only holds at the size a scenario was written for is
+    /// asserted when this is false and printed otherwise.
+    pub fn is_scaled(&self) -> bool {
+        self.scaled
+    }
+
+    /// The indices of the nodes in region `name`, in node order.
+    pub fn region(&self, name: &str) -> Vec<usize> {
+        (0..self.nodes.len())
+            .filter(|&index| self.nodes[index].region == name)
+            .collect()
     }
 
     /// One node.
@@ -797,6 +835,11 @@ impl Node {
     /// This host's name, its identity everywhere in the fleet.
     pub fn hostname(&self) -> &Hostname {
         &self.hostname
+    }
+
+    /// The region this host's roster entry puts it in.
+    pub fn region(&self) -> &str {
+        &self.region
     }
 
     /// The libp2p identity the beacon node trusts. A restart keeps it, and so does a seed
