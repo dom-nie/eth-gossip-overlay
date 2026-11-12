@@ -22,6 +22,7 @@ use libp2p::core::upgrade::Version;
 use libp2p::futures::StreamExt;
 use libp2p::gossipsub::{self, IdentTopic, MessageAcceptance, MessageId, PublishError};
 use libp2p::request_response::{self, ProtocolSupport, ResponseChannel};
+use libp2p::swarm::dial_opts::DialOpts;
 use libp2p::swarm::{ConnectionError, ConnectionId, NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, multiaddr, noise, tcp, yamux};
 use overlay_core::backoff::Backoff;
@@ -393,7 +394,14 @@ impl Link {
                 return self.retry_later();
             }
         };
-        if let Err(err) = self.swarm.dial(addr) {
+        // A fresh source port. libp2p would otherwise dial from the port the link listens on,
+        // and the operating system refuses a connect from there to the beacon node for as long
+        // as the previous connection between the two sits in TIME_WAIT.
+        let dial = DialOpts::peer_id(peer_id)
+            .addresses(vec![addr])
+            .allocate_new_port()
+            .build();
+        if let Err(err) = self.swarm.dial(dial) {
             tracing::warn!(%err, "dial refused");
             self.retry_later();
         }
