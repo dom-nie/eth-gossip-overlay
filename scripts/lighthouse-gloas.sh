@@ -148,12 +148,16 @@ curl -fsS "$far_http/eth/v1/node/version"; echo
 # cell proofs come with it, so both are rebuilt from the near node's column sidecars: the
 # first 64 columns are the blob data cell by cell, and each column carries one proof per blob.
 post_envelope() {
-  python3 - "$near_http" "$far_http" "$1" <<'PY'
+  python3 - "$near_http" "$far_http" "$1" <<'PY' || true
 import json, sys, urllib.error, urllib.request
 source, target, slot = sys.argv[1:4]
 get = lambda url: json.loads(urllib.request.urlopen(url, timeout=30).read())
-envelope = get(f"{source}/eth/v1/beacon/execution_payload_envelopes/{slot}")["data"]
-columns = get(f"{source}/eth/v1/debug/beacon/data_column_sidecars/{slot}")["data"]
+try:
+    envelope = get(f"{source}/eth/v1/beacon/execution_payload_envelopes/{slot}")["data"]
+    columns = get(f"{source}/eth/v1/debug/beacon/data_column_sidecars/{slot}")["data"]
+except urllib.error.HTTPError as err:
+    # A missed slot has no block, and genesis has no envelope.
+    sys.exit(print(err.code, "envelope", slot, "skipped"))
 by_index = {int(c["index"]): c for c in columns}
 blobs = len(columns[0]["column"]) if columns else 0
 if blobs:
@@ -182,14 +186,16 @@ post_block() {
   if curl -fsS -m 5 -H 'Accept: application/octet-stream' -o "$body" "$near_http/eth/v2/beacon/blocks/$1" 2>/dev/null; then
     curl -sS -m 10 -o /dev/null -w "%{http_code} block $1\n" -X POST \
       -H 'Content-Type: application/octet-stream' -H 'Eth-Consensus-Version: gloas' \
-      --data-binary "@$body" "$far_http/eth/v2/beacon/blocks"
+      --data-binary "@$body" "$far_http/eth/v2/beacon/blocks" || true
   fi
   rm -f "$body"
 }
+# The loop outlives any one failed request: under the script's set -e a head read that fails
+# while a node is still starting would otherwise end it.
 catch_up() {
   while true; do
     local near far
-    near=$(head_slot "$near_http"); far=$(head_slot "$far_http")
+    near=$(head_slot "$near_http" || true); far=$(head_slot "$far_http" || true)
     if [[ -n $near && -n $far && $((near - far)) -ge 3 ]]; then
       echo "$(date +%T) far node at $far, near at $near"
       # The head's own envelope first: a child of a FULL parent is ParentUnknown without it.
@@ -253,10 +259,12 @@ for _ in $(seq 1 120); do
   fi
   sleep 1
 done
-# In step: the far node within a slot of the near one, which the catch-up loop brings about.
-for _ in $(seq 1 180); do
-  near=$(head_slot "$near_http"); far=$(head_slot "$far_http")
-  if [[ -n $near && -n $far && $((near - far)) -le 1 ]]; then break; fi
+# In step: the chain a few slots past genesis and the far node within a slot of the near one,
+# which the catch-up loop brings about. Before genesis both heads read 0 and no node has
+# subscribed to anything yet.
+for _ in $(seq 1 240); do
+  near=$(head_slot "$near_http" || true); far=$(head_slot "$far_http" || true)
+  if [[ -n $near && -n $far && $near -ge 4 && $((near - far)) -le 1 ]]; then break; fi
   sleep 2
 done
 echo "near node at slot $near, far node at slot $far"
