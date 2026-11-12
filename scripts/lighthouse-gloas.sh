@@ -259,14 +259,21 @@ for _ in $(seq 1 120); do
   fi
   sleep 1
 done
-# In step: the chain a few slots past genesis and the far node within a slot of the near one,
-# which the catch-up loop brings about. Before genesis both heads read 0 and no node has
-# subscribed to anything yet.
-for _ in $(seq 1 240); do
+# In step: the chain a few slots past genesis, the far node within a slot of the near one,
+# which the catch-up loop brings about, and the far node on its core gossip topics, which
+# Lighthouse joins only once it counts itself synced with a peer. Its sidecar mirrors the
+# subscriptions, so the gauge says when: two persistent attestation subnets come first, the
+# core topics and the column subnets take it past ten.
+for _ in $(seq 1 300); do
   near=$(head_slot "$near_http" || true); far=$(head_slot "$far_http" || true)
-  if [[ -n $near && -n $far && $near -ge 4 && $((near - far)) -le 1 ]]; then break; fi
+  subscribed=$(curl -fsS -m 2 "http://127.0.0.1:$far_sidecar_metrics/metrics" 2>/dev/null \
+    | awk '$1 == "overlay_bn_subscriptions" {print $2}')
+  if [[ -n $near && -n $far && $near -ge 4 && $((near - far)) -le 1 && ${subscribed:-0} -ge 10 ]]; then
+    break
+  fi
   sleep 2
 done
+echo "far node subscribed to ${subscribed:-0} topics"
 echo "near node at slot $near, far node at slot $far"
 curl -fsS -H 'Accept: application/json' "$near_http/eth/v2/beacon/blocks/head" \
   | python3 -c 'import sys, json; d = json.load(sys.stdin); print("head block fork:", d["version"], "slot", d["data"]["message"]["slot"])'
