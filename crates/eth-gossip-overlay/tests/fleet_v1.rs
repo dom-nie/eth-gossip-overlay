@@ -539,7 +539,9 @@ async fn seed_rotation_with_host_by_host_sidecar_restarts_keeps_the_full_mesh_an
         .wait_for(
             "the rotated fleet to still deliver",
             fleet.wait(),
-            |fleet| (1..3).all(|index| fleet.node(index).bn().count(&block, &payload) == 1),
+            |fleet| {
+                (1..fleet.hosts()).all(|index| fleet.node(index).bn().count(&block, &payload) == 1)
+            },
         )
         .await;
 
