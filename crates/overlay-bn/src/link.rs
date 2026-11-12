@@ -865,22 +865,25 @@ mod tests {
     }
 
     /// What the responder counted for by-root requests, the series §12 names
-    /// `by_root_requests_total{protocol, outcome}`.
+    /// `by_root_requests_total{protocol, outcome}`, and the protocol labels in the order they
+    /// were counted.
     #[derive(Default)]
     struct ByRootCounts {
         hits: AtomicUsize,
         misses: AtomicUsize,
         refused: AtomicUsize,
+        labels: std::sync::Mutex<Vec<&'static str>>,
     }
 
     impl ByRootStats for ByRootCounts {
-        fn by_root_request(&self, _: RpcProtocol, outcome: ByRootOutcome) {
+        fn by_root_request(&self, protocol: RpcProtocol, outcome: ByRootOutcome) {
             match outcome {
                 ByRootOutcome::Hit => &self.hits,
                 ByRootOutcome::Miss => &self.misses,
                 ByRootOutcome::Refused => &self.refused,
             }
             .fetch_add(1, Ordering::Relaxed);
+            self.labels.lock().unwrap().push(protocol.as_label());
         }
     }
 
@@ -2071,6 +2074,30 @@ mod tests {
         assert_eq!(counts.refused.load(Ordering::Relaxed), 2);
         assert_eq!(counts.hits.load(Ordering::Relaxed), 0);
         assert_eq!(counts.misses.load(Ordering::Relaxed), 0);
+    }
+
+    /// T-121: under Gloas a node that has a block's parent but not the parent's payload treats
+    /// the block as `ParentUnknown` and asks the block's sender for the envelope on
+    /// `execution_payload_envelopes_by_root/1` (`fork_choice.rs:1663-1679`,
+    /// `block_verification.rs:1516-1521` at v8.3.2). The sidecar holds no envelopes for its
+    /// node, so the answer is `ResourceUnavailable`, and the refusal is counted under that
+    /// protocol's own label rather than lost among the unserved ids, so the matrix can read
+    /// what the node asked for.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_envelopes_by_root_request_is_refused_and_counted_by_name() {
+        let mut bn = FakeBn::start().await;
+        let (harness, mut answers) = connected(&mut bn).await;
+        let block = testutil::fulu_block(4_096);
+
+        bn.request_envelopes_by_root(&[block.root]).await;
+        assert_unavailable(next_answer(&mut answers).await, "PayloadEnvelopesByRoot");
+
+        let counts = &harness.by_root_counts;
+        assert_eq!(counts.refused.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            *counts.labels.lock().unwrap(),
+            ["execution_payload_envelopes_by_root"]
+        );
     }
 
     /// An error chunk carrying `ResourceUnavailable`, on `protocol`.

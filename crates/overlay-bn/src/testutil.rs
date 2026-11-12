@@ -59,7 +59,7 @@ use libp2p::swarm::{NetworkBehaviour, Swarm, SwarmEvent};
 use libp2p::{Multiaddr, PeerId, SwarmBuilder, Transport, noise, yamux};
 use lighthouse_network::rpc::methods::{
     BlocksByRootRequest, DataColumnsByRootRequest, MetaData, MetadataRequest,
-    OldBlocksByRangeRequest, Ping as RpcPing, RpcSuccessResponse,
+    OldBlocksByRangeRequest, PayloadEnvelopesByRootRequest, Ping as RpcPing, RpcSuccessResponse,
 };
 use lighthouse_network::rpc::{
     GoodbyeReason, Protocol, RPC, RPCMessage, RPCReceived, RequestType, StatusMessage,
@@ -570,6 +570,16 @@ impl FakeBn {
         let request = BlocksByRootRequest::new(roots.to_vec(), &fork_context())
             .expect("a root list inside the request limit");
         self.request(RequestType::BlocksByRoot(request)).await;
+    }
+
+    /// Asks for payload envelopes by block root on `execution_payload_envelopes_by_root/1`,
+    /// the request a Gloas node makes of a block's sender when it has the parent block and not
+    /// the parent's payload (T-121).
+    pub async fn request_envelopes_by_root(&self, roots: &[Hash256]) {
+        let request = PayloadEnvelopesByRootRequest::new(roots.to_vec(), &fork_context())
+            .expect("a root list inside the request limit");
+        self.request(RequestType::PayloadEnvelopesByRoot(request))
+            .await;
     }
 
     /// Asks for the columns `indices` of `block_root` on `data_column_sidecars_by_root/1`.
