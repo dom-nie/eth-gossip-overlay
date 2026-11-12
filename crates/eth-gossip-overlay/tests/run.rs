@@ -93,13 +93,17 @@ fn run_starts_with_bn_down_and_keeps_running() {
 
     let mut sidecar = fixture.run();
     let metrics = sidecar.metrics_addr();
-    std::thread::sleep(Duration::from_secs(1));
+    // Ready is when the SIGTERM handler exists, and the link's warning is when it has tried
+    // the absent node and the process is still there to say so.
+    sidecar.wait_for(r#""message":"ready""#);
+    sidecar.wait_for("beacon node identity unavailable");
 
     let scraped = common::scrape(metrics);
     assert!(scraped.contains("overlay_bn_connected"), "{scraped}");
 
     sidecar.signal(Signal::SIGTERM);
-    assert!(sidecar.wait().success());
+    let status = sidecar.wait();
+    assert!(status.success(), "{status:?}\n{}", sidecar.stderr());
 }
 
 /// §11's two seconds: `systemctl stop` waits for the process, and a sidecar that lingers holds
