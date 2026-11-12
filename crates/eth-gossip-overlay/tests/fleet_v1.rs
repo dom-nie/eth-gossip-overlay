@@ -776,12 +776,14 @@ async fn unsubscribed_relay_refans_but_does_not_publish() {
     fleet.set_relays(1, 1).await;
     // Which host the origin relays through is a hash of its own name over the region's hosts in
     // hostname order (D20), which is what the fleet's own numbering gives.
-    let pool: Vec<Hostname> = (1..4)
-        .map(|node| fleet.node(node).hostname().clone())
+    let us = fleet.region("us");
+    let pool: Vec<Hostname> = us
+        .iter()
+        .map(|&node| fleet.node(node).hostname().clone())
         .collect();
     let chosen = relay::select(fleet.node(0).hostname(), &pool, 1);
-    let relay = 1 + pool.iter().position(|host| *host == chosen[0]).unwrap();
-    let subscribers: Vec<usize> = (1..4).filter(|node| *node != relay).collect();
+    let relay = us[pool.iter().position(|host| *host == chosen[0]).unwrap()];
+    let subscribers: Vec<usize> = us.iter().copied().filter(|node| *node != relay).collect();
     let before = fleet.metrics().await;
     for node in std::iter::once(0).chain(subscribers.iter().copied()) {
         fleet.node(node).subscribe(&subnet).await;
