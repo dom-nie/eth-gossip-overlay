@@ -274,12 +274,12 @@ impl Watch {
     }
 }
 
-/// The fourteen Lighthouse behaviours the design leans on, or works around, that no
+/// The fifteen Lighthouse behaviours the design leans on, or works around, that no
 /// specification promises (CL-N2), each with the test that fails by name when a release
-/// changes it. The last five are Gloas and were measured on the devnet that
-/// `scripts/lighthouse-matrix.sh <version> --gloas` brings up (T-121); each row says what was
-/// measured and when.
-const ASSUMPTIONS: [(&str, &str); 14] = [
+/// changes it. The last six were measured on the devnet that
+/// `scripts/lighthouse-matrix.sh <version> --gloas` brings up (T-121, T-128), and all but the
+/// last of those are about Gloas; each row says what was measured and when.
+const ASSUMPTIONS: [(&str, &str); 15] = [
     (
         "A trusted peer is admitted whenever the beacon node is under its inbound cap, is dialled by the beacon node through `add_peer` on demand under the outbound cap (and before v8.3.0 through `--libp2p-addresses` at startup), and is never pruned once connected (MD-01)",
         "under the cap and never pruned: `matrix_trusted_peer_is_admitted_under_the_inbound_cap_and_never_pruned` (matrix); the beacon node dialling a sidecar it has no inbound room for: `matrix_bn_dials_the_listening_sidecar_when_its_inbound_cap_is_full` (matrix); the startup flag: `matrix_bn_startup_flags_dial_the_listening_sidecar` (matrix)",
@@ -336,6 +336,10 @@ const ASSUMPTIONS: [(&str, &str); 14] = [
         "MD-09's premise, that column repair anchored on the envelope asks for nothing on a healthy Gloas chain, under one slot in a hundred. Measured on v8.3.2, 2026-11-12, it does not hold on the devnet, for two reasons. The node fires `data_column_sidecar` for the columns it builds from the blobs its own validator client posts, 260 ms to 1.2 s after the envelope on the 4-vCPU VM, so 8 of 10 own proposals were still short at the shipped 250 ms `repair_deadline_ms`. For another node's block it fired nothing in the window: with partial messages on, those columns reach it as partials and from its execution layer, and whichever path completed them registered no event, so the tracker counts all of that block's columns as missing for good and repair would ask for every one of them. MD-06 counted partial-message merges among the event's sources; on this devnet at v8.3.2 no event came that way. Unmeasured on production hardware",
         "`matrix_column_repair_is_quiet_on_a_healthy_gloas_chain` (matrix, `--gloas`, local only), which fails on the devnet for the reasons in the row and prints each block's lag",
     ),
+    (
+        "A block the node fetches by root fires `block` and no `block_gossip`. The event is registered in one place, `GossipVerifiedBlock::new` (`block_verification.rs:1116-1124`), which a gossip block and a block published over the beacon API both go through; a lookup hands `process_block` a `LookupBlock` (`sync_methods.rs:112-180`, `block_verification.rs:1433-1458`) and builds none. So a block imported through a lookup opens no custody entry and gets no column repair, and `block` is the one event that names every import, which is why the parent check reads it (D42). Measured on v8.3.2, 2026-11-12, on a node whose only peer is its sidecar: with inject off for one slot the node missed block N, fetched it from the sidecar's by-root cache 50 to 140 ms into slot N+1, and fired `block` for it and no `block_gossip` in the three slots after, in four runs of four. The node ran with `--unknown-root-min-peers 1`. At the default of 3, a root that only the sidecar's messages have named opens no lookup at all, and the node stayed a block behind until the block was posted to its beacon API",
+        "`matrix_block_gossip_does_not_fire_for_a_block_fetched_by_root` (matrix, `--gloas` with `GLOAS_BY_ROOT=1`, local only), which also requires a by-root hit on the sidecar and the node's own `Processing Lookup block` line for the root",
+    ),
 ];
 
 /// The Lighthouse section of `COMPATIBILITY.md`, so the file follows the constants instead
@@ -356,7 +360,7 @@ pub fn render_compatibility_section() -> String {
          which the root `Cargo.toml` copies. A beacon node above the range is reported `untested` \
          and one below it `unsupported`, on every connect, in the log and in \
          `overlay_bn_compat{{state}}`; the sidecar keeps running either way.\n\n\
-         The design leans on, or works around, fourteen Lighthouse behaviours that no \
+         The design leans on, or works around, fifteen Lighthouse behaviours that no \
          specification promises. Each has a named test, so a release that changes one fails \
          the matrix by name instead of degrading the fleet quietly. Tests marked matrix need a \
          real beacon node and run in the nightly matrix; those marked `--gloas` need the devnet \
