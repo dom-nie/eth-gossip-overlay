@@ -434,7 +434,44 @@ impl Fleet {
     /// message sent in between goes nowhere. Driving a probe across every pair is what proves
     /// the whole path, and it is counted at the receiver before the beacon node is involved, so
     /// it works with the kill switch off as well.
+    ///
+    /// The probe runs with relays off. A round asks every pair to exchange a message directly,
+    /// and a pair a relay stands between never does, so a fleet with a region large enough to be
+    /// reached through relays has the bound raised past its host count for the round and the
+    /// scenario's own values put back after it. A smaller fleet reloads nothing.
     pub async fn wait_full_mesh(&mut self, timeout: Duration) {
+        let relaying = self.relays_reach_a_region();
+        let (min_remote_hosts, per_region) = (
+            self.settings.relay_min_remote_hosts,
+            self.settings.relays_per_remote_region,
+        );
+        if relaying {
+            self.set_relays(self.hosts(), per_region).await;
+        }
+        self.probe(timeout).await;
+        if relaying {
+            self.set_relays(min_remote_hosts, per_region).await;
+        }
+    }
+
+    /// Whether a small message from some node would reach a remote region through relays: the
+    /// fleet has more than one region and one of them holds at least `relay_min_remote_hosts`
+    /// hosts (D36).
+    fn relays_reach_a_region(&self) -> bool {
+        let mut per_region: BTreeMap<&str, usize> = BTreeMap::new();
+        for node in &self.nodes {
+            *per_region.entry(node.region.as_str()).or_default() += 1;
+        }
+        per_region.len() > 1
+            && per_region
+                .values()
+                .any(|&hosts| hosts >= self.settings.relay_min_remote_hosts)
+    }
+
+    /// One probe round: a fresh attestation subnet on every beacon node, then a message from
+    /// every node across every pair its roster names, until each has been counted at the
+    /// receiver or `timeout` runs out.
+    async fn probe(&mut self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
         let subnet = FIRST_PROBE_SUBNET
             .checked_sub(self.probes)
@@ -715,9 +752,9 @@ impl Fleet {
     }
 
     /// Rewrites every node's `config.yaml` with new relay bounds and reloads it, which is how a
-    /// scenario turns relaying on (D36). It has to happen after [`wait_full_mesh`]: a probe
-    /// round asks every pair to exchange a message directly, and a pair that a relay stands
-    /// between never does.
+    /// scenario turns relaying on (D36). A probe round cannot pass with a relay between a pair,
+    /// so [`wait_full_mesh`] raises the bound past the host count for the round itself and puts
+    /// the scenario's values back afterwards.
     ///
     /// [`wait_full_mesh`]: Self::wait_full_mesh
     pub async fn set_relays(&mut self, min_remote_hosts: usize, per_region: usize) {
