@@ -1351,20 +1351,26 @@ async fn two_origins_with_divergent_live_views_publish_once_with_at_most_2k_plus
 #[tokio::test(flavor = "multi_thread")]
 async fn one_third_of_a_region_lost_mid_slot_completes_via_parity_or_repair_before_the_deadline() {
     let block = topic("beacon_block");
-    let hosts = 6;
     let mut fleet = Fleet::builder()
-        .regions(&[("eu", hosts)])
+        .regions(&[("eu", 6)])
         .config(|settings| {
             settings.stripe_min_recipients = 2;
             settings.parity_ratio = 1.0;
         })
         .start()
         .await;
+    let hosts = fleet.hosts();
+    let lost = hosts / 3;
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
     fleet.wait_full_mesh(fleet.wait()).await;
-    fleet.partition(&[4, 5], &[1, 2, 3]).await;
+    fleet
+        .partition(
+            &(hosts - lost..hosts).collect::<Vec<_>>(),
+            &(1..hosts - lost).collect::<Vec<_>>(),
+        )
+        .await;
 
     let payload = incompressible(24, 100 * 1024);
     fleet.node(0).bn().publish(&block, &payload).await;
@@ -1373,19 +1379,23 @@ async fn one_third_of_a_region_lost_mid_slot_completes_via_parity_or_repair_befo
         .wait_for(
             "the two thirds still talking to import it",
             fleet.wait(),
-            |fleet| (1..4).all(|node| fleet.node(node).bn().count(&block, &payload) == 1),
+            |fleet| {
+                (1..hosts - lost).all(|node| fleet.node(node).bn().count(&block, &payload) == 1)
+            },
         )
         .await;
     fleet
         .wait_for(
             "the lost third to import it as well",
             fleet.wait(),
-            |fleet| (4..hosts).all(|node| fleet.node(node).bn().count(&block, &payload) == 1),
+            |fleet| {
+                (hosts - lost..hosts).all(|node| fleet.node(node).bn().count(&block, &payload) == 1)
+            },
         )
         .await;
     fleet.settle().await;
     let now = fleet.metrics().await;
-    for (node, scrape) in now.iter().enumerate().take(4).skip(1) {
+    for (node, scrape) in now.iter().enumerate().take(hosts - lost).skip(1) {
         assert!(
             scrape.sum(PARITY_USED_TOTAL, &[]) > 0.0,
             "node {node} did not need the parity a third of the region was carrying"
@@ -1396,7 +1406,7 @@ async fn one_third_of_a_region_lost_mid_slot_completes_via_parity_or_repair_befo
             "node {node} asked for chunks parity had already covered"
         );
     }
-    for (node, scrape) in now.iter().enumerate().skip(4) {
+    for (node, scrape) in now.iter().enumerate().skip(hosts - lost) {
         assert!(
             scrape.sum(REPAIR_REQUESTS_TOTAL, &[(LABEL_OUTCOME, "completed")]) > 0.0,
             "node {node} finished a block it only held its own share of"
