@@ -201,7 +201,7 @@ async fn single_region_fleet_works() {
         .wait_for(
             "every other beacon node to import the block",
             fleet.wait(),
-            |fleet| (1..4).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
+            |fleet| (1..fleet.hosts()).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
         )
         .await;
 }
