@@ -91,11 +91,11 @@ async fn fleet_scenario_one_passes_with_the_io_thread_configured() {
         .wait_for(
             "every other beacon node to import the block",
             fleet.wait(),
-            |fleet| (1..5).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
+            |fleet| (1..fleet.hosts()).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
         )
         .await;
     fleet.settle().await;
-    for i in 1..5 {
+    for i in 1..fleet.hosts() {
         assert_eq!(fleet.node(i).bn().count(&block, &payload), 1, "node {i}");
     }
     for (i, scrape) in fleet.metrics().await.iter().enumerate() {
