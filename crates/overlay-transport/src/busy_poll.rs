@@ -104,6 +104,7 @@ pub fn enable(cfg: &IoThread, listen: SocketAddr, enabled: impl Fn(bool) + Send 
         return;
     }
     tokio::spawn(suspend_when_the_queue_is_known(
+        &Host,
         socket,
         cfg.irq_suspend_timeout,
         enabled,
@@ -115,11 +116,16 @@ pub fn enable(cfg: &IoThread, listen: SocketAddr, enabled: impl Fn(bool) + Send 
 /// A device with no NAPI instance never names one, which is loopback and most of what a
 /// container gives a process. That ends in one line rather than in an attempt per interval
 /// forever.
-async fn suspend_when_the_queue_is_known(socket: RawFd, timeout: Duration, enabled: impl Fn(bool)) {
+async fn suspend_when_the_queue_is_known(
+    kernel: &(dyn Kernel + Sync),
+    socket: RawFd,
+    timeout: Duration,
+    enabled: impl Fn(bool),
+) {
     for _ in 0..NAPI_POLL_ATTEMPTS {
-        match napi::id_of(socket) {
+        match napi::id_of_with(kernel, socket) {
             Ok(Some(napi_id)) => {
-                match napi::set_irq_suspend_timeout(napi_id, timeout) {
+                match napi::set_irq_suspend_timeout_with(kernel, napi_id, timeout) {
                     Ok(asked) => enabled(asked),
                     Err(err) => {
                         tracing::info!(napi_id, %err, "overlay IRQ suspension not set");
@@ -208,6 +214,11 @@ pub(crate) trait Kernel {
 pub(crate) struct Host;
 
 #[cfg(target_os = "linux")]
+// mutants::skip: each method is one syscall whose interesting answers, an old kernel, no
+// capability, no NAPI id, no host can be made to give. The decisions about those answers are
+// under test with a fake kernel, the `CapEff` parse is `cap_net_admin_in` and tested on its own,
+// and `integration_busy_poll_enabled_on_supported_kernel` is the real-kernel check.
+#[cfg_attr(test, mutants::skip)]
 impl Kernel for Host {
     fn set_epoll_params(&self, epoll: RawFd, params: &EpollParams) -> io::Result<()> {
         // The kernel copies eight bytes out of the pointer and writes nothing back, and
@@ -243,19 +254,9 @@ impl Kernel for Host {
     }
 
     fn has_cap_net_admin(&self) -> bool {
-        /// From `include/uapi/linux/capability.h`.
-        const CAP_NET_ADMIN: u32 = 12;
-
         // A process that cannot read its own status has bigger problems than an unsuspended
         // IRQ, and the caller's answer to both is the same line.
-        let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-            return false;
-        };
-        status
-            .lines()
-            .find_map(|line| line.strip_prefix("CapEff:"))
-            .and_then(|effective| u64::from_str_radix(effective.trim(), 16).ok())
-            .is_some_and(|caps| caps & (1 << CAP_NET_ADMIN) != 0)
+        std::fs::read_to_string("/proc/self/status").is_ok_and(|status| cap_net_admin_in(&status))
     }
 
     fn set_irq_suspend_timeout(&self, napi_id: u32, nanos: u64) -> io::Result<()> {
@@ -266,6 +267,9 @@ impl Kernel for Host {
 /// Off Linux there is no epoll instance to set anything on, so the answer is the one every
 /// caller already handles: this kernel does not have the ioctl.
 #[cfg(not(target_os = "linux"))]
+// mutants::skip: compiled only off Linux. The Linux runner the nightly uses never builds this,
+// so a mutant here changes nothing that was built and survives whatever the suite does.
+#[cfg_attr(test, mutants::skip)]
 impl Kernel for Host {
     fn set_epoll_params(&self, _epoll: RawFd, _params: &EpollParams) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(libc::ENOTTY))
@@ -289,6 +293,19 @@ impl Kernel for Host {
     fn set_irq_suspend_timeout(&self, _napi_id: u32, _nanos: u64) -> io::Result<()> {
         Err(io::Error::from_raw_os_error(libc::ENOTTY))
     }
+}
+
+/// Whether a `/proc/<pid>/status` says the process holds `CAP_NET_ADMIN` in its effective set.
+#[cfg(target_os = "linux")]
+fn cap_net_admin_in(status: &str) -> bool {
+    /// From `include/uapi/linux/capability.h`.
+    const CAP_NET_ADMIN: u32 = 12;
+
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("CapEff:"))
+        .and_then(|effective| u64::from_str_radix(effective.trim(), 16).ok())
+        .is_some_and(|caps| caps & (1 << CAP_NET_ADMIN) != 0)
 }
 
 /// What an ioctl returned, as an error where it failed.
@@ -323,6 +340,9 @@ fn apply_with(kernel: &dyn Kernel, epoll: RawFd, params: &EpollParams) -> io::Re
 /// Reads and changes nothing, so it is both the startup probe that tells a kernel before 6.13
 /// from an epoll instance that could not be found, and the read-back `docs/performance.md`
 /// gives an operator for confirming that [`apply`] took.
+// mutants::skip: one line over `detect_with`, which is under test with a fake kernel; the only
+// thing left to mutate is which kernel it asks, and that is the running one.
+#[cfg_attr(test, mutants::skip)]
 pub fn detect(epoll: RawFd) -> io::Result<Option<EpollParams>> {
     detect_with(&Host, epoll)
 }
@@ -454,6 +474,32 @@ pub(crate) mod tests {
         assert_eq!(err.raw_os_error(), Some(libc::EPERM));
     }
 
+    /// What the configuration's `prefer_busy_poll` turns into: spin for the configured time,
+    /// keep the IRQ masked while spinning, and leave the budget to the kernel, which is the only
+    /// budget it takes from a process without `CAP_NET_ADMIN`.
+    #[test]
+    fn preferring_busy_poll_masks_the_irq_at_the_kernels_budget() {
+        let params = EpollParams::preferring_busy_poll(150);
+
+        assert_eq!(params.busy_poll_usecs, 150);
+        assert_eq!(params.busy_poll_budget, 0);
+        assert_eq!(params.prefer_busy_poll, 1);
+    }
+
+    /// The read-back's half of the same rule: only a missing ioctl is "no parameters", and
+    /// anything else the kernel says reaches the operator as the error it was.
+    #[test]
+    fn detect_passes_on_an_error_that_is_not_a_missing_ioctl() {
+        let kernel = Fake {
+            epoll_errno: Some(libc::EPERM),
+            ..Fake::default()
+        };
+
+        let err = detect_with(&kernel, EPOLL).unwrap_err();
+
+        assert_eq!(err.raw_os_error(), Some(libc::EPERM));
+    }
+
     /// `EPIOCGPARAMS` is how test 5 and `docs/performance.md` confirm the parameters took, and
     /// how the startup path tells "this kernel is too old" from "the epoll fd was not found".
     #[test]
@@ -503,6 +549,26 @@ pub(crate) mod tests {
             assert_eq!(libc::EPIOCSPARAMS, set_params);
             assert_eq!(libc::EPIOCGPARAMS, get_params);
         }
+    }
+
+    /// `CAP_NET_ADMIN` is bit 12 of the hex mask on `/proc/self/status`'s `CapEff:` line, and
+    /// a status with no such line holds no capabilities at all.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cap_net_admin_is_read_from_the_cap_eff_line() {
+        assert!(cap_net_admin_in("Name:\tx\nCapEff:\t0000000000001000\n"));
+        assert!(cap_net_admin_in("CapEff:\t000001ffffffffff"));
+        assert!(!cap_net_admin_in("CapEff:\t0000000000000000"));
+        assert!(!cap_net_admin_in("CapEff:\t0000000000002000"));
+        assert!(!cap_net_admin_in("Name:\tx\nCapPrm:\t0000000000001000\n"));
+    }
+
+    /// An ioctl reports failure as -1 and the reason in errno, and success as anything else.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_ioctl_that_returned_minus_one_is_an_error() {
+        assert!(result(0).is_ok());
+        assert!(result(-1).is_err());
     }
 
     /// An address no socket in this process is bound to, so the lookup has nothing to find on
@@ -564,6 +630,49 @@ pub(crate) mod tests {
                 .lines()
                 .filter(|line| line.contains("overlay busy polling not set")
                     && line.contains(&listen.to_string()))
+                .count(),
+            1
+        );
+    }
+
+    /// The queue a packet arrived on is the queue whose IRQ is suspended, for the configured
+    /// timeout in the nanoseconds the kernel counts in, and the gauge says the path came up.
+    #[tokio::test(start_paused = true)]
+    async fn suspension_is_asked_for_the_queue_the_socket_names() {
+        let kernel = Fake {
+            napi_id: 42,
+            cap_net_admin: true,
+            ..Fake::default()
+        };
+        let reported = Reported::default();
+
+        suspend_when_the_queue_is_known(&kernel, -1, Duration::from_millis(20), reported.sink())
+            .await;
+
+        assert_eq!(reported.seen(), vec![true]);
+        assert_eq!(*kernel.suspended.lock().unwrap(), vec![(42, 20_000_000)]);
+    }
+
+    /// A socket that never names a queue, which is loopback and most containers, costs a
+    /// minute of polling and one line, and the kernel is asked for nothing.
+    #[tokio::test(start_paused = true)]
+    async fn suspension_gives_up_after_a_minute_without_a_queue() {
+        let kernel = Fake {
+            cap_net_admin: true,
+            ..Fake::default()
+        };
+        let mark = LOG.len();
+        let reported = Reported::default();
+
+        suspend_when_the_queue_is_known(&kernel, -1, Duration::from_millis(20), reported.sink())
+            .await;
+
+        assert_eq!(reported.seen(), vec![false]);
+        assert!(kernel.suspended.lock().unwrap().is_empty());
+        assert_eq!(
+            LOG.since(mark)
+                .lines()
+                .filter(|line| line.contains("the overlay socket never named a NAPI queue"))
                 .count(),
             1
         );

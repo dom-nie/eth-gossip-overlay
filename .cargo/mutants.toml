@@ -1,5 +1,6 @@
-# cargo-mutants, for the two pure crates (T-009, MD-02):
+# cargo-mutants, for the two pure crates (T-009, MD-02), run under cargo-nextest (T-123, MD-13):
 #
+#   cargo install cargo-mutants@27.1.0 cargo-nextest --locked
 #   cargo mutants -p overlay-core
 #   cargo mutants -p overlay-transport
 #
@@ -10,10 +11,17 @@
 # --list-files` is the check. Code that cannot be tested from this suite carries
 # `#[cfg_attr(test, mutants::skip)]` with its reason, so the skip is visible where the code is.
 
-# The transport suite runs real QUIC handshakes on loopback. The default floor of 20 s is 600
-# times the unmutated suite, which is ample here, but a shared CI runner can stall a handshake
-# for longer than the arithmetic suggests, and a mutant that looks like a timeout has to be
-# triaged by hand. A minute of headroom is cheaper than that.
+# nextest runs each test in its own process and stops at the first failure, so a mutant that
+# breaks every QUIC handshake fails in seconds rather than making each of the transport crate's
+# tokio tests wait out its bound before the binary reports. `.config/nextest.toml` kills any one
+# test at 30 s, which is what ends a test awaiting something that never comes.
+test_tool = "nextest"
+
+# The floor under the bound on one crate's whole nextest run, which cargo-mutants otherwise
+# sets at five times the unmutated run. The transport suite runs real QUIC handshakes on
+# loopback, and a shared CI runner can stall one for longer than the arithmetic suggests; a
+# mutant that looks like a timeout has to be triaged by hand. A minute of headroom is cheaper
+# than that.
 minimum_test_timeout = 60.0
 
 # Two mutants that no attribute can reach: cargo-mutants takes `#[mutants::skip]` on an item or
@@ -24,6 +32,18 @@ minimum_test_timeout = 60.0
 exclude_re = [
   "replace \\| with \\^ in decode_hex",
   "replace \\| with \\^ in fork_digest",
+  # Spins forever in-process. With `&&`, an expired front entry short-circuits past
+  # `drop_oldest`, so the reassembler's expiry loop never advances. Only nextest's 30 s kill
+  # ends it, which is a deadline and not a test of behaviour (MD-02), and each such mutant
+  # costs up to 30 s. The two `delete !` mutants on the same line stay in the run.
+  "replace \\|\\| with && in State::expire",
+  # Spins forever in-process. `expire` and `trim_bytes` loop on this answer, and a constant
+  # `true` that pops nothing never ends. Excluded by name rather than skipped on the function,
+  # because `drop_oldest`'s other mutants are under test.
+  "replace State::drop_oldest -> bool with true",
+  # NLM_F_REQUEST (1) and NLM_F_ACK (4) are disjoint bits, so `^` and `|` give the same flags
+  # for the same reason as the two nibble joins above. `| with &` on the same line is caught.
+  "replace \\| with \\^ in netlink::napi_set_request",
 ]
 
 # The one file the `#[cfg(test)]` rule above does not cover. `overlay-transport`'s `testutil` is

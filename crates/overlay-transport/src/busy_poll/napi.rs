@@ -16,11 +16,14 @@ use super::{Host, Kernel};
 /// `None` where the kernel has no id to give: nothing has arrived on the socket yet, or the
 /// device behind it has no NAPI instance at all, which is loopback and most of what a container
 /// hands a process.
+// mutants::skip: one line over `id_of_with`, which is under test with a fake kernel; the only
+// thing left to mutate is which kernel it asks, and that is the running one.
+#[cfg_attr(test, mutants::skip)]
 pub fn id_of(socket: RawFd) -> io::Result<Option<u32>> {
     id_of_with(&Host, socket)
 }
 
-fn id_of_with(kernel: &dyn Kernel, socket: RawFd) -> io::Result<Option<u32>> {
+pub(super) fn id_of_with(kernel: &dyn Kernel, socket: RawFd) -> io::Result<Option<u32>> {
     match kernel.napi_id(socket)? {
         0 => Ok(None),
         id => Ok(Some(id)),
@@ -34,11 +37,7 @@ fn id_of_with(kernel: &dyn Kernel, socket: RawFd) -> io::Result<Option<u32>> {
 /// A process without it logs one line and leaves the queue on its interrupts: an operator who
 /// did not grant a capability made a decision rather than a mistake, and busy polling without
 /// the suspension is still most of the tuning.
-pub fn set_irq_suspend_timeout(napi_id: u32, timeout: Duration) -> io::Result<bool> {
-    set_irq_suspend_timeout_with(&Host, napi_id, timeout)
-}
-
-fn set_irq_suspend_timeout_with(
+pub(super) fn set_irq_suspend_timeout_with(
     kernel: &dyn Kernel,
     napi_id: u32,
     timeout: Duration,
@@ -104,22 +103,31 @@ pub(super) mod netlink {
     const REPLY_TIMEOUT_SECONDS: i64 = 1;
 
     /// Asks netdev to suspend `napi_id`'s IRQ for `nanos` while polling is finding packets.
+    // mutants::skip: `NETDEV_CMD_NAPI_SET` needs `CAP_NET_ADMIN`, which no unprivileged test has.
+    // What is left here is three calls, and `open`, `family_id`, `round_trip` and the request
+    // `napi_set_request` builds are each under test on their own.
+    #[cfg_attr(test, mutants::skip)]
     pub fn set_irq_suspend_timeout(napi_id: u32, nanos: u64) -> io::Result<()> {
         let socket = open()?;
-        let family = family_id(&socket)?;
+        let family = family_id(&socket, NETDEV_FAMILY)?;
+        round_trip(&socket, &napi_set_request(family, napi_id, nanos)).map(drop)
+    }
+
+    /// `NETDEV_CMD_NAPI_SET` for `napi_id` with its IRQ suspension timeout, addressed to the
+    /// number `family` the netdev family was given at boot.
+    fn napi_set_request(family: u16, napi_id: u32, nanos: u64) -> Vec<u8> {
         let mut attrs = attribute(NETDEV_A_NAPI_ID, &napi_id.to_ne_bytes());
         attrs.extend(attribute(
             NETDEV_A_NAPI_IRQ_SUSPEND_TIMEOUT,
             &nanos.to_ne_bytes(),
         ));
-        let request = message(
+        message(
             family,
             NETDEV_CMD_NAPI_SET,
             NLM_F_REQUEST | NLM_F_ACK,
             2,
             &attrs,
-        );
-        round_trip(&socket, &request).map(drop)
+        )
     }
 
     /// A generic netlink socket that will not wait forever for an answer.
@@ -138,15 +146,15 @@ pub(super) mod netlink {
         Ok(netlink)
     }
 
-    /// The number the netdev family was given at boot, which is the only thing about it that is
-    /// not a constant.
-    fn family_id(socket: &OwnedFd) -> io::Result<u16> {
+    /// The number the generic netlink family `name` was given at boot, which for netdev is the
+    /// only thing about it that is not a constant. `name` carries its trailing NUL.
+    fn family_id(socket: &OwnedFd, name: &[u8]) -> io::Result<u16> {
         let request = message(
             GENL_ID_CTRL,
             CTRL_CMD_GETFAMILY,
             NLM_F_REQUEST,
             1,
-            &attribute(CTRL_ATTR_FAMILY_NAME, NETDEV_FAMILY),
+            &attribute(CTRL_ATTR_FAMILY_NAME, name),
         );
         let reply = round_trip(socket, &request)?;
         let body = reply.get(NLMSG_HEADER + GENL_HEADER..).ok_or_else(short)?;
@@ -154,7 +162,10 @@ pub(super) mod netlink {
             .find(|(kind, _)| *kind == CTRL_ATTR_FAMILY_ID)
             .and_then(|(_, value)| value.get(..2))
             .map(|value| u16::from_ne_bytes([value[0], value[1]]))
-            .ok_or_else(|| io::Error::other("the kernel has no netdev generic netlink family"))
+            .ok_or_else(|| {
+                let name = String::from_utf8_lossy(name.strip_suffix(b"\0").unwrap_or(name));
+                io::Error::other(format!("the kernel has no {name} generic netlink family"))
+            })
     }
 
     /// Sends one message and reads the one datagram that answers it, turning a netlink error
@@ -224,6 +235,82 @@ pub(super) mod netlink {
 
     fn short() -> io::Error {
         io::Error::other("short netlink reply")
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The family lookup as the kernel reads it: `struct nlmsghdr`, `struct genlmsghdr` and
+        /// one `CTRL_ATTR_FAMILY_NAME` padded to four bytes, every field little-endian like
+        /// every Linux target the sidecar ships for.
+        #[test]
+        fn a_family_lookup_request_is_the_bytes_the_kernel_expects() {
+            let request = message(
+                GENL_ID_CTRL,
+                CTRL_CMD_GETFAMILY,
+                NLM_F_REQUEST,
+                1,
+                &attribute(CTRL_ATTR_FAMILY_NAME, b"netdev\0"),
+            );
+
+            assert_eq!(
+                request,
+                [
+                    32, 0, 0, 0, 16, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 1, 0, 0, 11, 0, 2, 0,
+                    b'n', b'e', b't', b'd', b'e', b'v', 0, 0,
+                ]
+            );
+        }
+
+        /// The suspension request names the queue and the timeout in nanoseconds, and asks for
+        /// an acknowledgement: without `NLM_F_ACK` the kernel answers a success with nothing
+        /// and the reply read would wait out its timeout.
+        #[test]
+        fn a_napi_set_request_carries_the_id_and_the_timeout_in_nanoseconds() {
+            let request = napi_set_request(30, 42, 20_000_000);
+
+            assert_eq!(
+                request,
+                [
+                    40, 0, 0, 0, 30, 0, 5, 0, 2, 0, 0, 0, 0, 0, 0, 0, 14, 1, 0, 0, 8, 0, 2, 0, 42,
+                    0, 0, 0, 12, 0, 7, 0, 0x00, 0x2d, 0x31, 0x01, 0, 0, 0, 0,
+                ]
+            );
+        }
+
+        /// A length the kernel wrote is not trusted past the end of the body: the walk stops at
+        /// the first attribute that claims more bytes than are there.
+        #[test]
+        fn attributes_stop_at_one_that_does_not_fit() {
+            let body = [6, 0, 1, 0, 16, 0, 0, 0, 40, 0, 2, 0, b'x'];
+
+            let found: Vec<(u16, &[u8])> = attributes(&body).collect();
+
+            assert_eq!(found, vec![(1, &[16, 0][..])]);
+        }
+
+        /// The real kernel, because it is the only thing that can say the request is one it
+        /// parses. `CTRL_CMD_GETFAMILY` needs no privilege, and the controller resolves its own
+        /// name to `GENL_ID_CTRL`, the one family number that is fixed.
+        #[test]
+        fn the_kernel_resolves_its_own_controller_family_to_16() {
+            let socket = open().unwrap();
+
+            assert_eq!(family_id(&socket, b"nlctrl\0").unwrap(), GENL_ID_CTRL);
+        }
+
+        /// A name no family has comes back as the errno the kernel put in its error message.
+        /// The name stays short: the kernel echoes the request in that message, and one long
+        /// enough would leave bytes where a misread errno offset finds something to read.
+        #[test]
+        fn an_unknown_family_is_enoent() {
+            let socket = open().unwrap();
+
+            let refused = family_id(&socket, b"nosuch\0").unwrap_err();
+
+            assert_eq!(refused.raw_os_error(), Some(libc::ENOENT));
+        }
     }
 }
 

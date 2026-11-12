@@ -7,6 +7,11 @@ on:
   schedule:
     - cron: "41 4 * * *"
   workflow_dispatch:
+    inputs:
+      args:
+        description: "Extra cargo-mutants arguments, such as --file to narrow the run"
+        type: string
+        default: ""
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,13 +36,58 @@ jobs:
 
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-mutants@27.1.0
+          tool: cargo-mutants@27.1.0,cargo-nextest@0.9.149
 
-      # A surviving mutant exits 2 and a timed-out one exits 3, so either fails the job. Both
-      # are named on the log line above the summary, with the file and line they change and
-      # what they change it to; mutants.out has the diff and the test output for each.
+      # A surviving or timed-out mutant fails the job. Each is named on the log line above
+      # cargo-mutants' summary and on the run page by the step below, with the file and line it
+      # changes and what it changes it to; mutants.out has the diff and the test output for each.
+      #
+      # The dispatch input reaches the command through env and xargs, never through `${{ }}`
+      # inside the script, so it is split into arguments, quotes and all, and nothing in it runs
+      # as shell. The first xargs only checks the quotes balance: given an unbalanced one, xargs
+      # runs the command on the words before it, which would start a partial run. xargs turns
+      # cargo-mutants' exit codes 2 and 3 into 123, which still fails.
       - name: Mutants in ${{ matrix.crate }}
-        run: cargo mutants --in-place -p ${{ matrix.crate }}
+        id: mutants
+        env:
+          ARGS: ${{ inputs.args }}
+        run: >-
+          printf '%s' "$ARGS" | xargs true &&
+          printf '%s' "$ARGS" | xargs cargo mutants --in-place -p ${{ matrix.crate }}
+
+      # The counts tell a run that tested nothing, or failed before it tested anything, from one
+      # that tested everything and missed nothing.
+      - name: Name the missed and timed-out mutants on the run page
+        if: always()
+        env:
+          CRATE: ${{ matrix.crate }}
+          OUTCOME: ${{ steps.mutants.outcome }}
+        run: |
+          count() { grep -c . "mutants.out/$1.txt" 2>/dev/null || true; }
+          caught=$(count caught) missed=$(count missed) timeout=$(count timeout) unviable=$(count unviable)
+          {
+            echo "## $CRATE"
+            echo "caught ${caught:-0}, missed ${missed:-0}, timeout ${timeout:-0}, unviable ${unviable:-0}"
+            echo
+            if [ "${caught:-0}${missed:-0}${timeout:-0}${unviable:-0}" = 0000 ]; then
+              echo "No mutant was tested."
+              echo
+            fi
+            if [ "$OUTCOME" = failure ] && [ "${missed:-0}" = 0 ] && [ "${timeout:-0}" = 0 ]; then
+              echo "The run failed without naming a missed or timed-out mutant: the baseline, a usage error, or an error partway through. See the log."
+              echo
+            fi
+            for outcome in missed timeout; do
+              echo "### $outcome"
+              if [ -s "mutants.out/$outcome.txt" ]; then
+                echo '```'
+                cat "mutants.out/$outcome.txt"
+                echo '```'
+              else
+                echo none
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v7
         if: always()

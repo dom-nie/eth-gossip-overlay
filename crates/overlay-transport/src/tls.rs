@@ -611,6 +611,7 @@ mod tests {
     use rustls::server::danger::ClientCertVerifier;
 
     use super::*;
+    use crate::testutil::bounded;
 
     fn host(name: &str) -> Hostname {
         Hostname(name.to_owned())
@@ -785,21 +786,28 @@ mod tests {
             let mut outcomes = Vec::new();
             let mut open = Vec::new();
             for _ in 0..connections {
-                let incoming = endpoint.accept().await.expect("the endpoint is still open");
-                outcomes.push(match incoming.await {
-                    Ok(connection) => {
-                        let mut stream = connection.open_uni().await.unwrap();
-                        stream.write_all(b".").await.unwrap();
-                        stream.finish().unwrap();
-                        open.push(connection.clone());
-                        Ok(peer_identity(&pins.load(), &connection))
-                    }
-                    Err(error) => Err(HandshakeFailure::from_connection_error(
-                        Role::Accept,
-                        &error,
-                    )
-                    .expect("a refused handshake is a failure")),
-                });
+                let incoming = bounded("an incoming connection", endpoint.accept())
+                    .await
+                    .expect("the endpoint is still open");
+                outcomes.push(
+                    match bounded("the accept handshake", incoming.into_future()).await {
+                        Ok(connection) => {
+                            let mut stream =
+                                bounded("a stream to the dialler", connection.open_uni())
+                                    .await
+                                    .unwrap();
+                            stream.write_all(b".").await.unwrap();
+                            stream.finish().unwrap();
+                            open.push(connection.clone());
+                            Ok(peer_identity(&pins.load(), &connection))
+                        }
+                        Err(error) => Err(HandshakeFailure::from_connection_error(
+                            Role::Accept,
+                            &error,
+                        )
+                        .expect("a refused handshake is a failure")),
+                    },
+                );
             }
             drop(open);
             outcomes
@@ -886,31 +894,43 @@ mod tests {
         let key = own_key(&seeds, "bn-b");
 
         let config = client_config(pins.clone(), &key, &host("bn-a")).unwrap();
-        let connection = dialler
-            .connect_with(config, addr, PLACEHOLDER_NAME)
-            .unwrap()
-            .await
-            .unwrap();
+        let connection = bounded(
+            "the dial",
+            dialler
+                .connect_with(config, addr, PLACEHOLDER_NAME)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             peer_identity(&pins.load(), &connection).unwrap().hostname,
             host("bn-a")
         );
         assert_eq!(
-            accepted.await.unwrap().remove(0).unwrap().unwrap().hostname,
+            bounded("the acceptor", accepted)
+                .await
+                .unwrap()
+                .remove(0)
+                .unwrap()
+                .unwrap()
+                .hostname,
             host("bn-b")
         );
 
         let (addr, _) = acceptor(&pins, &seeds, "bn-a");
-        let error = dialler
-            .connect_with(
-                dialler_of_another_major(&pins, &key, "bn-a"),
-                addr,
-                PLACEHOLDER_NAME,
-            )
-            .unwrap()
-            .await
-            .unwrap_err();
+        let error = bounded(
+            "the dial",
+            dialler
+                .connect_with(
+                    dialler_of_another_major(&pins, &key, "bn-a"),
+                    addr,
+                    PLACEHOLDER_NAME,
+                )
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
 
         let failure = HandshakeFailure::from_connection_error(Role::Dial, &error).unwrap();
         assert_eq!(failure.reason.as_str(), "version");
@@ -928,11 +948,14 @@ mod tests {
         let (addr, _) = acceptor(&pins, &seeds, "bn-a");
         let expecting_the_wrong_host =
             client_config(pins.clone(), &own_key(&seeds, "bn-b"), &host("bn-b")).unwrap();
-        let refused = dialler
-            .connect_with(expecting_the_wrong_host, addr, PLACEHOLDER_NAME)
-            .unwrap()
-            .await
-            .unwrap_err();
+        let refused = bounded(
+            "the dial",
+            dialler
+                .connect_with(expecting_the_wrong_host, addr, PLACEHOLDER_NAME)
+                .unwrap(),
+        )
+        .await
+        .unwrap_err();
 
         assert_eq!(
             HandshakeFailure::from_connection_error(Role::Dial, &refused)
@@ -943,24 +966,35 @@ mod tests {
 
         let (addr, accepted) = acceptor(&pins, &seeds, "bn-a");
         let stranger = derive_tls_keypair(&FleetSeed::from([0x99; 32]), &host("bn-b"));
-        let connection = dialler
-            .connect_with(
-                client_config(pins.clone(), &stranger, &host("bn-a")).unwrap(),
-                addr,
-                PLACEHOLDER_NAME,
-            )
-            .unwrap()
-            .await
-            .unwrap();
+        let connection = bounded(
+            "the dial",
+            dialler
+                .connect_with(
+                    client_config(pins.clone(), &stranger, &host("bn-a")).unwrap(),
+                    addr,
+                    PLACEHOLDER_NAME,
+                )
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
-            accepted.await.unwrap().remove(0).unwrap_err().reason,
+            bounded("the acceptor", accepted)
+                .await
+                .unwrap()
+                .remove(0)
+                .unwrap_err()
+                .reason,
             FailureReason::UnknownKey
         );
         assert_eq!(
-            HandshakeFailure::from_connection_error(Role::Dial, &connection.closed().await)
-                .unwrap()
-                .reason,
+            HandshakeFailure::from_connection_error(
+                Role::Dial,
+                &bounded("the close", connection.closed()).await
+            )
+            .unwrap()
+            .reason,
             FailureReason::KeyMismatch
         );
     }
@@ -975,23 +1009,19 @@ mod tests {
             client_config(pins.clone(), &own_key(&seeds, "bn-c"), &host("bn-a")).unwrap(),
         );
 
-        let refused = dialler
-            .connect(addr, PLACEHOLDER_NAME)
-            .unwrap()
+        let refused = bounded("the dial", dialler.connect(addr, PLACEHOLDER_NAME).unwrap())
             .await
             .unwrap();
-        refused.closed().await;
+        bounded("the refusal", refused.closed()).await;
         pins.store(Arc::new(PinTable::build(
             &roster(&["bn-a", "bn-b", "bn-c"]),
             &seeds,
         )));
-        let admitted = dialler
-            .connect(addr, PLACEHOLDER_NAME)
-            .unwrap()
+        let admitted = bounded("the dial", dialler.connect(addr, PLACEHOLDER_NAME).unwrap())
             .await
             .unwrap();
 
-        let outcomes = accepting.await.unwrap();
+        let outcomes = bounded("the acceptor", accepting).await.unwrap();
         assert_eq!(
             outcomes[0].as_ref().unwrap_err().reason,
             FailureReason::UnknownKey
@@ -1016,18 +1046,27 @@ mod tests {
         let config =
             client_config(pins.clone(), &own_key(&seeds, "bn-b"), &host("rack3/bn 01")).unwrap();
 
-        let connection = dialler
-            .connect_with(config, addr, PLACEHOLDER_NAME)
-            .unwrap()
-            .await
-            .unwrap();
+        let connection = bounded(
+            "the dial",
+            dialler
+                .connect_with(config, addr, PLACEHOLDER_NAME)
+                .unwrap(),
+        )
+        .await
+        .unwrap();
 
         assert_eq!(
             peer_identity(&pins.load(), &connection).unwrap().hostname,
             host("rack3/bn 01")
         );
         assert_eq!(
-            accepted.await.unwrap().remove(0).unwrap().unwrap().hostname,
+            bounded("the acceptor", accepted)
+                .await
+                .unwrap()
+                .remove(0)
+                .unwrap()
+                .unwrap()
+                .hostname,
             host("bn-b")
         );
     }
@@ -1043,22 +1082,27 @@ mod tests {
         let mut dialler = quinn::Endpoint::client(loopback()).unwrap();
         dialler.set_default_client_config(config);
 
-        let admitted = dialler
-            .connect(addr, PLACEHOLDER_NAME)
-            .unwrap()
+        let admitted = bounded("the dial", dialler.connect(addr, PLACEHOLDER_NAME).unwrap())
             .await
             .unwrap();
-        admitted
-            .accept_uni()
-            .await
-            .unwrap()
-            .read_to_end(1)
-            .await
-            .unwrap();
+        bounded("the acceptor's byte", async {
+            admitted
+                .accept_uni()
+                .await
+                .unwrap()
+                .read_to_end(1)
+                .await
+                .unwrap()
+        })
+        .await;
         pins.store(Arc::new(PinTable::build(&roster(&["bn-a", "bn-b"]), seeds)));
-        let _second = dialler.connect(addr, PLACEHOLDER_NAME).unwrap().await;
+        let _second = bounded(
+            "the second dial",
+            dialler.connect(addr, PLACEHOLDER_NAME).unwrap(),
+        )
+        .await;
 
-        accepting.await.unwrap()
+        bounded("the acceptor", accepting).await.unwrap()
     }
 
     /// bn-c gets in, the roster drops it, and the second dial has to be turned away by name

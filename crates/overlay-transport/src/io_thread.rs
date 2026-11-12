@@ -193,6 +193,9 @@ fn pin_current_thread(cpu: u32) -> bool {
 /// it. Info rather than a warning: this line is unreachable on the platform the sidecar is
 /// deployed on, and only ever tells a developer why their knob did nothing.
 #[cfg(not(target_os = "linux"))]
+// mutants::skip: compiled only off Linux. The Linux runner the nightly uses never builds this,
+// so a mutant here changes nothing that was built and survives whatever the suite does.
+#[cfg_attr(test, mutants::skip)]
 fn pin_current_thread(cpu: u32) -> bool {
     tracing::info!(
         cpu,
