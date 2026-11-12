@@ -9,10 +9,21 @@
 //! custody tracker needs a beacon node that is following the chain rather than the script's
 //! genesis-only node, and runs only under `MATRIX_FOLLOWING_CHAIN=1`; the one that checks the
 //! node accepts the shipped topics does not.
+//!
+//! The tests gated on `MATRIX_GLOAS=1` need the Gloas devnet `scripts/lighthouse-matrix.sh
+//! <version> --gloas` brings up: `LIGHTHOUSE_HTTP`, `LIGHTHOUSE_P2P` and `LIGHTHOUSE_METRICS`
+//! name the node that follows the chain with public peers, `LIGHTHOUSE_FAR_HTTP`,
+//! `LIGHTHOUSE_FAR_P2P` and `LIGHTHOUSE_FAR_METRICS` the node whose only gossip peers are
+//! sidecars, `SIDECAR_FAR_LOG` and `SIDECAR_FAR_ADMIN` that node's shipped sidecar's JSON log
+//! and admin socket, `SIDECAR_CTL` the ctl binary, `LIGHTHOUSE_PROPOSERS` the `first-last`
+//! validator indices the near node's own validator client runs, and `MATRIX_SLOTS` how many
+//! slots the counting tests watch (64 unless set).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::ops::Range;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -36,10 +47,13 @@ use overlay_core::custody::SharedCustody;
 use overlay_core::events::Arrivals;
 use overlay_core::lanes::ClassLanes;
 use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
+use overlay_core::spec::SpecSnapshot;
 use overlay_core::time::SystemClock;
-use overlay_core::topic::{SubscriptionSets, Topic};
+use overlay_core::topic::{Class, SubscriptionSets, Topic, TopicKind};
 use prometheus_client::registry::Registry;
+use ssz::Decode;
 use tokio::sync::{mpsc, oneshot, watch};
+use types::{MainnetEthSpec, SignedExecutionPayloadEnvelope};
 
 /// The ticket's bound on connect, trusted and the first mirrored subscription.
 const CONNECT: Duration = Duration::from_secs(60);
@@ -74,7 +88,10 @@ struct Sidecar {
     peer_id: PeerId,
     link: BnLink,
     commands: mpsc::Sender<BnCommand>,
-    _lanes: ClassLanes<BnMessage>,
+    /// What the beacon node forwarded, by class.
+    lanes: ClassLanes<BnMessage>,
+    /// The spec the connect probe read off the beacon node.
+    spec: watch::Receiver<SpecSnapshot>,
     /// Every topic the beacon node has announced so far; the announcements can land before
     /// the connect probe's `BnInfo`, so they are kept rather than skipped.
     subscribed: Vec<String>,
@@ -101,7 +118,7 @@ fn spawn_with(
     by_root: ByRootCache,
 ) -> Sidecar {
     let (commands, commands_rx) = mpsc::channel(64);
-    let (spec_tx, _spec) = spec_watch();
+    let (spec_tx, spec) = spec_watch();
     let (_sets, sets) = watch::channel(SubscriptionSets::default());
     let lanes = ClassLanes::new(Arc::new(()));
     let identity = format!("{}/eth/v1/node/identity", env.http)
@@ -131,7 +148,8 @@ fn spawn_with(
         peer_id: key.peer_id(),
         link,
         commands,
-        _lanes: lanes,
+        lanes,
+        spec,
         subscribed: Vec::new(),
     }
 }
@@ -673,9 +691,12 @@ async fn matrix_a_block_whose_parent_the_node_lacks_is_dropped_by_lighthouse_aft
     let slot = u64::from_le_bytes(child[100..108].try_into().unwrap()) + 1;
     child[100..108].copy_from_slice(&slot.to_le_bytes());
     child[116..148].copy_from_slice(&rand::random::<[u8; 32]>());
+    // The link's gossipsub runs the identity transform, so the wire form is handed over
+    // compressed; a raw block would fail the node's decompression before any check.
+    let wire = snap::raw::Encoder::new().compress_vec(&child).unwrap();
     wait_for_slot(&env, slot).await;
     sidecar
-        .publish(&topic, &child)
+        .publish(&topic, &wire)
         .await
         .expect("the beacon node takes the block off the wire");
 
@@ -711,41 +732,26 @@ async fn matrix_the_block_event_fires_for_an_rpc_imported_block() {
         return;
     }
     let env = env();
-    let mut response = reqwest::get(format!(
+    let mut events = sse(format!(
         "{}/eth/v1/events?topics=block,block_gossip",
         env.http
-    ))
-    .await
-    .unwrap()
-    .error_for_status()
-    .unwrap();
+    ));
     let mut gossiped = HashSet::new();
-    let mut buf = Vec::new();
     let deadline = Instant::now() + THREE_SLOTS;
-    while let Ok(Ok(Some(chunk))) = tokio::time::timeout_at(deadline.into(), response.chunk()).await
+    while let Ok(Some((name, data))) = tokio::time::timeout_at(deadline.into(), events.recv()).await
     {
-        buf.extend_from_slice(&chunk);
-        while let Some(end) = buf.windows(2).position(|pair| pair == b"\n\n") {
-            let frame = String::from_utf8_lossy(&buf[..end]).into_owned();
-            buf.drain(..end + 2);
-            let name = frame.lines().find_map(|line| line.strip_prefix("event: "));
-            let data = frame.lines().find_map(|line| line.strip_prefix("data: "));
-            let root = data
-                .and_then(|data| serde_json::from_str::<serde_json::Value>(data).ok())
-                .and_then(|data| data["block"].as_str().map(str::to_owned));
-            let (Some(name), Some(root)) = (name, root) else {
-                continue;
-            };
-            match name {
-                "block_gossip" => {
-                    gossiped.insert(root);
-                }
-                "block" if !gossiped.contains(&root) => {
-                    println!("block {root} imported with no block_gossip before it");
-                    return;
-                }
-                _ => {}
+        let Some(root) = data["block"].as_str().map(str::to_owned) else {
+            continue;
+        };
+        match name.as_str() {
+            "block_gossip" => {
+                gossiped.insert(root);
             }
+            "block" if !gossiped.contains(&root) => {
+                println!("block {root} imported with no block_gossip before it");
+                return;
+            }
+            _ => {}
         }
     }
     println!(
@@ -756,18 +762,62 @@ async fn matrix_the_block_event_fires_for_an_rpc_imported_block() {
 }
 
 /// What the sidecar's responder was asked while the cache is off: the `refused` outcome of
-/// `by_root_requests_total`, for blocks.
+/// `by_root_requests_total`, for blocks and for payload envelopes.
 #[derive(Default)]
 struct Refusals {
     blocks: AtomicUsize,
+    envelopes: AtomicUsize,
 }
 
 impl ByRootStats for Refusals {
     fn by_root_request(&self, protocol: Protocol, outcome: ByRootOutcome) {
-        if matches!(protocol, Protocol::BlocksByRootV2) && outcome == ByRootOutcome::Refused {
-            self.blocks.fetch_add(1, Ordering::Relaxed);
+        if outcome != ByRootOutcome::Refused {
+            return;
         }
+        match protocol {
+            Protocol::BlocksByRootV2 => self.blocks.fetch_add(1, Ordering::Relaxed),
+            Protocol::EnvelopesByRootV1 => self.envelopes.fetch_add(1, Ordering::Relaxed),
+            _ => 0,
+        };
     }
+}
+
+/// The beacon node's event stream at `url`, one `(event, data)` per frame, until the
+/// receiver is dropped.
+fn sse(url: String) -> mpsc::Receiver<(String, serde_json::Value)> {
+    let (tx, rx) = mpsc::channel(4096);
+    tokio::spawn(async move {
+        let mut response = reqwest::get(&url)
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        let mut buf = Vec::new();
+        while let Ok(Some(chunk)) = response.chunk().await {
+            buf.extend_from_slice(&chunk);
+            while let Some(end) = buf.windows(2).position(|pair| pair == b"\n\n") {
+                let frame = String::from_utf8_lossy(&buf[..end]).into_owned();
+                buf.drain(..end + 2);
+                // Lighthouse writes `event:name` with no space after the colon, which the
+                // SSE grammar allows either way.
+                let field = |key: &str| {
+                    frame
+                        .lines()
+                        .find_map(|line| line.strip_prefix(key))
+                        .map(str::trim_start)
+                };
+                let name = field("event:");
+                let data = field("data:")
+                    .and_then(|data| serde_json::from_str::<serde_json::Value>(data).ok());
+                if let (Some(name), Some(data)) = (name, data)
+                    && tx.send((name.to_owned(), data)).await.is_err()
+                {
+                    return;
+                }
+            }
+        }
+    });
+    rx
 }
 
 /// The shipped default, cache off and inject on, counted on `refusals`.
@@ -840,4 +890,864 @@ async fn lookups_dropped() -> Option<u64> {
         .find_map(|line| line.strip_prefix(series))
         .map_or(0.0, |value| value.trim().parse::<f64>().unwrap_or(0.0));
     Some(value as u64)
+}
+
+/// The Gloas devnet's extra environment (module doc).
+struct Gloas {
+    far_http: String,
+    far_p2p: Multiaddr,
+    far_metrics: String,
+    far_log: PathBuf,
+    far_admin: PathBuf,
+    ctl: PathBuf,
+    /// The validator indices the near node's own validator client runs, which is how its own
+    /// proposals are told from gossiped ones.
+    proposers: Range<u64>,
+    /// How many slots the counting tests watch.
+    slots: u64,
+}
+
+/// The Gloas environment, or `None` with a line saying why the test did nothing.
+fn gloas() -> Option<Gloas> {
+    if std::env::var("MATRIX_GLOAS").as_deref() != Ok("1") {
+        println!(
+            "MATRIX_GLOAS is not 1; this one needs the Gloas devnet: \
+             scripts/lighthouse-matrix.sh <version> --gloas"
+        );
+        return None;
+    }
+    let var = |name: &str| {
+        std::env::var(name).unwrap_or_else(|_| {
+            panic!("{name} is not set; run this through scripts/lighthouse-matrix.sh --gloas")
+        })
+    };
+    let proposers = var("LIGHTHOUSE_PROPOSERS");
+    let (first, last) = proposers
+        .split_once('-')
+        .expect("LIGHTHOUSE_PROPOSERS is first-last");
+    Some(Gloas {
+        far_http: var("LIGHTHOUSE_FAR_HTTP").trim_end_matches('/').to_owned(),
+        far_p2p: var("LIGHTHOUSE_FAR_P2P").parse().unwrap(),
+        far_metrics: var("LIGHTHOUSE_FAR_METRICS")
+            .trim_end_matches('/')
+            .to_owned(),
+        far_log: var("SIDECAR_FAR_LOG").into(),
+        far_admin: var("SIDECAR_FAR_ADMIN").into(),
+        ctl: var("SIDECAR_CTL").into(),
+        proposers: first.parse().unwrap()..last.parse::<u64>().unwrap() + 1,
+        slots: std::env::var("MATRIX_SLOTS")
+            .ok()
+            .and_then(|slots| slots.parse().ok())
+            .unwrap_or(64),
+    })
+}
+
+impl Gloas {
+    /// The far node as an `Env`, under the same harness key.
+    fn far(&self, env: &Env) -> Env {
+        Env {
+            http: self.far_http.clone(),
+            p2p: self.far_p2p.clone(),
+            listen: env.listen.clone(),
+            key: NodeKey::load_or_create(std::path::Path::new(
+                &std::env::var("SIDECAR_NODE_KEY").unwrap(),
+            ))
+            .unwrap(),
+        }
+    }
+
+    /// Turns the far sidecar's inject off until the guard drops, so a test that fails halfway
+    /// does not leave it off.
+    fn inject_off(&self) -> InjectOff<'_> {
+        self.inject(false);
+        InjectOff(self)
+    }
+
+    /// Flips the far sidecar's inject switch over its admin socket, the way an operator does.
+    fn inject(&self, on: bool) {
+        let status = std::process::Command::new(&self.ctl)
+            .arg("--socket")
+            .arg(&self.far_admin)
+            .args(["inject", if on { "on" } else { "off" }])
+            .status()
+            .expect("the ctl binary runs");
+        assert!(status.success(), "inject {on}: {status}");
+    }
+
+    /// The `first_arrival` lines the far sidecar has logged with `source: overlay` on a topic
+    /// of `kind`.
+    fn overlay_arrivals(&self, kind: &str) -> usize {
+        let text = std::fs::read_to_string(&self.far_log).unwrap_or_default();
+        text.lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|line| line["event"] == "first_arrival" && line["source"] == "overlay")
+            .filter(|line| {
+                line["topic"]
+                    .as_str()
+                    .is_some_and(|topic| topic.split('/').nth(3) == Some(kind))
+            })
+            .count()
+    }
+}
+
+struct InjectOff<'a>(&'a Gloas);
+
+impl Drop for InjectOff<'_> {
+    fn drop(&mut self) {
+        self.0.inject(true);
+    }
+}
+
+/// The chain's clock, read off the beacon API.
+struct Chain {
+    genesis_time: u64,
+    seconds_per_slot: u64,
+}
+
+async fn chain(http: &str) -> Chain {
+    let quoted = |value: &serde_json::Value| -> u64 { value.as_str().unwrap().parse().unwrap() };
+    Chain {
+        genesis_time: quoted(
+            &beacon_json_at(http, "/eth/v1/beacon/genesis").await["data"]["genesis_time"],
+        ),
+        seconds_per_slot: quoted(
+            &beacon_json_at(http, "/eth/v1/config/spec").await["data"]["SECONDS_PER_SLOT"],
+        ),
+    }
+}
+
+impl Chain {
+    fn slots(&self, count: u64) -> Duration {
+        Duration::from_secs(count * self.seconds_per_slot)
+    }
+
+    fn slot_now(&self) -> u64 {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        now.saturating_sub(self.genesis_time) / self.seconds_per_slot
+    }
+}
+
+/// A root as the beacon API spells one, `0x` and 64 hex digits.
+fn hex0x(root: [u8; 32]) -> String {
+    format!("0x{}", overlay_core::events::hex(root))
+}
+
+/// `0x`-prefixed hex to a root.
+fn unhex(text: &str) -> Option<[u8; 32]> {
+    let text = text.strip_prefix("0x")?;
+    let mut root = [0; 32];
+    for (i, byte) in root.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(text.get(2 * i..2 * i + 2)?, 16).ok()?;
+    }
+    Some(root)
+}
+
+/// The `(block_root, index)` a Gloas column sidecar names, at the fixed offsets T-120 reads.
+fn column_identity(message: &BnMessage) -> Option<([u8; 32], u16)> {
+    let ssz = snap::raw::Decoder::new()
+        .decompress_vec(&message.data)
+        .ok()?;
+    if ssz.len() < 56 || u32::from_le_bytes(ssz[8..12].try_into().ok()?) != 56 {
+        return None;
+    }
+    let index = u64::from_le_bytes(ssz[0..8].try_into().ok()?);
+    Some((ssz[24..56].try_into().ok()?, u16::try_from(index).ok()?))
+}
+
+/// The block root a payload envelope on the wire is for.
+fn envelope_root(message: &BnMessage) -> Option<[u8; 32]> {
+    let ssz = snap::raw::Decoder::new()
+        .decompress_vec(&message.data)
+        .ok()?;
+    let envelope = SignedExecutionPayloadEnvelope::<MainnetEthSpec>::from_ssz_bytes(&ssz).ok()?;
+    Some(envelope.message.beacon_block_root.0)
+}
+
+fn kind_of(topic: &str) -> Option<TopicKind> {
+    Topic::parse(topic).ok().map(|topic| topic.kind().clone())
+}
+
+/// One Prometheus series at `origin`, named by the text up to its value; 0 when absent.
+async fn series(origin: &str, text: &str) -> f64 {
+    let body = reqwest::get(format!("{origin}/metrics"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    body.lines()
+        .find_map(|line| line.strip_prefix(text))
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or(0.0)
+}
+
+/// The far node's gossipsub counters for `kind` under `digest`: accepted, rejected, invalid.
+async fn gossip_counts(origin: &str, digest: &str, kind: &str) -> [f64; 3] {
+    let topic = format!("/eth2/{digest}/{kind}/ssz_snappy");
+    let mut counts = [0.0; 3];
+    for (i, name) in ["accepted", "rejected", "invalid"].iter().enumerate() {
+        counts[i] = series(
+            origin,
+            &format!("gossipsub_{name}_messages_per_topic_total{{hash=\"{topic}\"}} "),
+        )
+        .await;
+    }
+    counts
+}
+
+/// The fork digest the node's topics carry right now, off its `beacon_block` subscription.
+async fn digest_of(sidecar: &mut Sidecar, deadline: Instant) -> String {
+    let topic = sidecar
+        .subscription(deadline, |topic| topic.contains("/beacon_block/"))
+        .await;
+    topic.split('/').nth(2).unwrap().to_owned()
+}
+
+/// Question 1 of T-121. From v8.3.0 Lighthouse enables gossipsub partial messages on every
+/// `data_column_sidecar_*` topic by default (`--enable-partial-columns`), and on a devnet
+/// where every node has the blobs in its execution layer no full column travels on gossip at
+/// all: the node verifies partials, merges them, and completes the rest from `getBlobs`. The
+/// sidecar never asks for partials. What this counts is whether the node still hands its
+/// explicit peer a full message for every column its own `data_column_sidecar` event reports:
+/// a merged column is published whole (`gossip_methods.rs:1343-1366` at v8.3.2), and
+/// `publish` sends it to every peer that did not request partials (`behaviour.rs:676-689`
+/// at the pinned rust-libp2p). Blocks cut by the window are left out of the tally.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the Gloas devnet: scripts/lighthouse-matrix.sh <version> --gloas"]
+async fn matrix_the_node_forwards_full_columns_to_its_explicit_peer_with_partials_on() {
+    let Some(gloas) = gloas() else { return };
+    let env = env();
+    let chain = chain(&env.http).await;
+    let columns = beacon_json(&env, "/eth/v1/config/spec").await["data"]["NUMBER_OF_COLUMNS"]
+        .as_str()
+        .unwrap()
+        .parse::<u16>()
+        .unwrap();
+    let mut sidecar = spawn(&env);
+    let deadline = sidecar.connect().await;
+    let digest = digest_of(&mut sidecar, deadline).await;
+    for index in 0..columns {
+        sidecar
+            .commands
+            .send(BnCommand::Subscribe(format!(
+                "/eth2/{digest}/data_column_sidecar_{index}/ssz_snappy"
+            )))
+            .await
+            .unwrap();
+    }
+    let mut events = sse(format!(
+        "{}/eth/v1/events?topics=data_column_sidecar",
+        env.http
+    ));
+
+    let mut reported: BTreeMap<(u64, [u8; 32]), BTreeSet<u16>> = BTreeMap::new();
+    let mut forwarded: BTreeMap<[u8; 32], BTreeSet<u16>> = BTreeMap::new();
+    let end = Instant::now() + chain.slots(gloas.slots);
+    let Sidecar { lanes, link, .. } = &mut sidecar;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(end.into()) => break,
+            Some((_, data)) = events.recv() => {
+                let slot: u64 = data["slot"].as_str().unwrap().parse().unwrap();
+                let index: u16 = data["index"].as_str().unwrap().parse().unwrap();
+                let root = unhex(data["block_root"].as_str().unwrap()).unwrap();
+                reported.entry((slot, root)).or_default().insert(index);
+            }
+            message = lanes.recv_from(Class::Large) => {
+                if let Some((root, index)) = column_identity(&message) {
+                    forwarded.entry(root).or_default().insert(index);
+                }
+            }
+            event = link.events.recv() => {
+                let event = event.expect("the link ended");
+                assert_ne!(event, BnEvent::Disconnected, "the beacon node dropped the sidecar");
+            }
+        }
+    }
+
+    let blocks: Vec<_> = reported.iter().collect();
+    let (mut reported_total, mut forwarded_total) = (0, 0);
+    println!("slot  reported  forwarded_of_those  forwarded_extra");
+    for ((slot, root), indices) in blocks.iter().skip(1).rev().skip(1).rev() {
+        let got = forwarded.get(root).cloned().unwrap_or_default();
+        let both = indices.intersection(&got).count();
+        println!(
+            "{slot:<5} {:<9} {both:<19} {}",
+            indices.len(),
+            got.len() - both
+        );
+        reported_total += indices.len();
+        forwarded_total += both;
+    }
+    let own = forwarded
+        .keys()
+        .filter(|root| !reported.keys().any(|(_, reported)| reported == *root))
+        .count();
+    println!(
+        "{} blocks, {reported_total} columns reported by the node, {forwarded_total} of them \
+         forwarded whole to the sidecar; columns of {own} more blocks forwarded with no event \
+         (another node's blocks, whose columns the node merged from partials)",
+        blocks.len().saturating_sub(2)
+    );
+    assert!(
+        blocks.len() > 4,
+        "too few blocks with columns in the window"
+    );
+    assert_eq!(
+        forwarded_total, reported_total,
+        "the node reported columns it never handed its explicit peer"
+    );
+}
+
+/// Question 2 of T-121, assumption 8's shape with the parent's payload in place of the
+/// parent block. The far node's only gossip peers are its shipped sidecar and this harness.
+/// The harness waits for a block B the far node accepts, turns the shipped sidecar's inject
+/// off before B's envelope reaches it, and when the chain produces B's child C hands C to
+/// the far node itself. D42 lets C through: B is imported. Lighthouse reads
+/// `ParentImportStatus::UnknownPayload` for it (`fork_choice.rs:1663-1679` at v8.3.2),
+/// returns `ParentUnknown` with the bid's parent hash (`block_verification.rs:1516-1521`),
+/// and opens a lookup for B seeded with C's sender alone (`block_lookups/mod.rs:360-440`):
+/// this harness. The lookup starts with B's block, which the node already holds, so what it
+/// sends is `beacon_blocks_by_root`, refused four times; the envelope is never asked for,
+/// and the lookup and C are dropped for too many attempts, exactly as in assumption 8. The
+/// two refusal counts, the far node's `block` event for C inside the window and its
+/// `sync_lookups_dropped_total` are what this pins. A self-building proposer reveals the
+/// envelope within tens of milliseconds of the block, so the window the switch has to land
+/// in is the overlay's own latency, and the attempt repeats until it does. The envelope and
+/// C are handed over at the end so the far node is left in step.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the Gloas devnet: scripts/lighthouse-matrix.sh <version> --gloas"]
+async fn matrix_a_block_whose_parent_envelope_the_node_lacks() {
+    let Some(gloas) = gloas() else { return };
+    let env = env();
+    let far = gloas.far(&env);
+    let chain = chain(&env.http).await;
+    let refusals = Arc::new(Refusals::default());
+    let mut sidecar = spawn_with(
+        &far,
+        &far.key,
+        far.listen.clone(),
+        far.p2p.clone(),
+        counting(&refusals),
+    );
+    let deadline = sidecar.connect().await;
+    let block_topic = sidecar
+        .subscription(deadline, |topic| topic.contains("/beacon_block/"))
+        .await;
+    let envelope_topic = block_topic.replace("beacon_block", "execution_payload");
+    let mut far_events = sse(format!(
+        "{}/eth/v1/events?topics=block_gossip,execution_payload_gossip,block",
+        far.http
+    ));
+    let mut near_events = sse(format!("{}/eth/v1/events?topics=block_gossip", env.http));
+    let root_in = |data: &serde_json::Value| unhex(data["block"].as_str().unwrap()).unwrap();
+    let slot_in =
+        |data: &serde_json::Value| -> u64 { data["slot"].as_str().unwrap().parse().unwrap() };
+
+    let mut outcome = None;
+    for attempt in 1..=8 {
+        // In step first: a far node still filling a gap would open lookups for the blocks
+        // it lacks, which is assumption 8's case and not this one.
+        loop {
+            let near_head = head_slot(&env.http).await;
+            let far_head = head_slot(&far.http).await;
+            if far_head + 1 >= near_head {
+                break;
+            }
+            println!("far node at slot {far_head}, near at {near_head}; waiting");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        // A block B the far node accepted in step with the chain.
+        let (slot, parent) = loop {
+            let (name, data) = far_events.recv().await.unwrap();
+            if name == "block_gossip" && slot_in(&data) + 1 >= chain.slot_now() {
+                break (slot_in(&data), root_in(&data));
+            }
+        };
+        let off = gloas.inject_off();
+        println!("attempt {attempt}: block at slot {slot} accepted, inject off");
+
+        // B's child from the near node, unless B's envelope got through first.
+        let mut parent_imported = false;
+        let child = loop {
+            tokio::select! {
+                Some((name, data)) = far_events.recv() => {
+                    match name.as_str() {
+                        "execution_payload_gossip"
+                            if unhex(data["block_root"].as_str().unwrap()) == Some(parent) =>
+                        {
+                            break None;
+                        }
+                        "block" if root_in(&data) == parent => parent_imported = true,
+                        _ => {}
+                    }
+                }
+                Some((_, data)) = near_events.recv() => {
+                    if slot_in(&data) > slot {
+                        break Some(root_in(&data));
+                    }
+                }
+            }
+        };
+        if child.is_some() && !parent_imported {
+            println!("the far node had not imported the block when its child came; next block");
+            drop(off);
+            continue;
+        }
+        let Some(child) = child else {
+            println!("the envelope reached the far node before the switch; next block");
+            drop(off);
+            continue;
+        };
+        let bytes = beacon_ssz(&env, &format!("/eth/v2/beacon/blocks/{}", hex0x(child))).await;
+        let block_parent: [u8; 32] = bytes[116..148].try_into().unwrap();
+        if block_parent != parent {
+            println!("the child builds on another block; next block");
+            drop(off);
+            continue;
+        }
+        let dropped_before = lookups_dropped_at(&gloas.far_metrics).await;
+        let wire = snap::raw::Encoder::new().compress_vec(&bytes).unwrap();
+        sidecar
+            .publish(&block_topic, &wire)
+            .await
+            .expect("the far node takes the block off the wire");
+
+        let mut imported = false;
+        let window = Instant::now() + Duration::from_secs(8);
+        while let Ok(Some((name, data))) =
+            tokio::time::timeout_at(window.into(), far_events.recv()).await
+        {
+            if name == "block" && root_in(&data) == child {
+                imported = true;
+            }
+        }
+        let asked = (
+            refusals.blocks.load(Ordering::Relaxed),
+            refusals.envelopes.load(Ordering::Relaxed),
+        );
+        let dropped_after = lookups_dropped_at(&gloas.far_metrics).await;
+        println!(
+            "refusals: beacon_blocks_by_root {}, execution_payload_envelopes_by_root {}; child \
+             imported inside 8 s: {imported}; \
+             sync_lookups_dropped_total{{reason=\"TooManyAttempts\"}}: {dropped_before} then \
+             {dropped_after}",
+            asked.0, asked.1
+        );
+
+        // Towards leaving the far node in step: the envelope by gossip, then the child over
+        // the beacon API, which the gossip duplicate cache does not cover. Best effort: the
+        // node also wants the envelope's columns before it counts the payload as received,
+        // and the script's catch-up loop supplies those with the envelope once the node is
+        // three slots behind.
+        let envelope = beacon_ssz(
+            &env,
+            &format!(
+                "/eth/v1/beacon/execution_payload_envelopes/{}",
+                hex0x(parent)
+            ),
+        )
+        .await;
+        let compressed = snap::raw::Encoder::new().compress_vec(&envelope).unwrap();
+        sidecar.publish(&envelope_topic, &compressed).await.unwrap();
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let posted = reqwest::Client::new()
+            .post(format!("{}/eth/v2/beacon/blocks", far.http))
+            .header("Content-Type", "application/octet-stream")
+            .header("Eth-Consensus-Version", "gloas")
+            .body(bytes)
+            .send()
+            .await
+            .unwrap();
+        let status = posted.status();
+        println!(
+            "child handed over the beacon API: {status} {}",
+            posted.text().await.unwrap_or_default()
+        );
+        drop(off);
+        outcome = Some((asked, imported, dropped_after - dropped_before));
+        break;
+    }
+
+    let (asked, imported, dropped) = outcome.expect("no block gave a clean window in 8 tries");
+    assert_eq!(
+        asked,
+        (4, 0),
+        "Lighthouse asks its one lookup peer for the parent block four times and never for \
+         the envelope"
+    );
+    assert!(
+        !imported,
+        "the child was imported without its parent's envelope"
+    );
+    assert!(
+        dropped >= 1,
+        "the lookup was not dropped for too many attempts"
+    );
+}
+
+/// Question 3 of T-121, the event MD-09 anchors column repair on. Over `MATRIX_SLOTS` slots
+/// every payload envelope the near node forwards to its explicit peer is matched with its
+/// `execution_payload_gossip` event, and the proposer of each is looked up so the node's own
+/// envelopes are told from gossiped ones. Lighthouse registers the event on the first
+/// observation from any source (`gossip_verified_envelope.rs:297-327` at v8.3.2), so a node
+/// that publishes its own envelope over the beacon API fires it too; T-120's review corrected
+/// MD-09 on that point, and this is the live check.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the Gloas devnet: scripts/lighthouse-matrix.sh <version> --gloas"]
+async fn matrix_execution_payload_gossip_fires_once_per_envelope_from_any_source() {
+    let Some(gloas) = gloas() else { return };
+    let env = env();
+    let chain = chain(&env.http).await;
+    let mut sidecar = spawn(&env);
+    let deadline = sidecar.connect().await;
+    let digest = digest_of(&mut sidecar, deadline).await;
+    // The stream first, so no envelope is forwarded before its event could be heard.
+    let mut events = sse(format!(
+        "{}/eth/v1/events?topics=execution_payload_gossip",
+        env.http
+    ));
+    sidecar
+        .commands
+        .send(BnCommand::Subscribe(format!(
+            "/eth2/{digest}/execution_payload/ssz_snappy"
+        )))
+        .await
+        .unwrap();
+
+    let mut fired: BTreeMap<[u8; 32], (u64, usize)> = BTreeMap::new();
+    let mut forwarded: BTreeSet<[u8; 32]> = BTreeSet::new();
+    let end = Instant::now() + chain.slots(gloas.slots);
+    let Sidecar { lanes, link, .. } = &mut sidecar;
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(end.into()) => break,
+            Some((_, data)) = events.recv() => {
+                let slot: u64 = data["slot"].as_str().unwrap().parse().unwrap();
+                let root = unhex(data["block_root"].as_str().unwrap()).unwrap();
+                let entry = fired.entry(root).or_insert((slot, 0));
+                entry.1 += 1;
+            }
+            message = lanes.recv_from(Class::Large) => {
+                if kind_of(&message.topic) == Some(TopicKind::ExecutionPayload)
+                    && let Some(root) = envelope_root(&message)
+                {
+                    forwarded.insert(root);
+                }
+            }
+            event = link.events.recv() => {
+                let event = event.expect("the link ended");
+                assert_ne!(event, BnEvent::Disconnected, "the beacon node dropped the sidecar");
+            }
+        }
+    }
+
+    // Every root either side saw, with its slot and proposer off the near node.
+    let mut rows: BTreeMap<[u8; 32], (u64, u64)> = BTreeMap::new();
+    for root in forwarded.iter().chain(fired.keys()) {
+        let header = beacon_json(&env, &format!("/eth/v1/beacon/headers/{}", hex0x(*root))).await;
+        let number = |key: &str| -> u64 {
+            header["data"]["header"]["message"][key]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap()
+        };
+        rows.insert(*root, (number("slot"), number("proposer_index")));
+    }
+    let (mut own, mut own_fired, mut gossiped, mut gossiped_without_event) = (0, 0, 0, 0);
+    let (mut stray, mut twice) = (0, 0);
+    // The window's first and last slots can hold half of a pair, so they are left out.
+    let edge = |slot: u64| {
+        rows.values().map(|(slot, _)| *slot).min() == Some(slot)
+            || rows.values().map(|(slot, _)| *slot).max() == Some(slot)
+    };
+    println!("slot  proposer  own    forwarded  events");
+    for (root, (slot, proposer)) in &rows {
+        if edge(*slot) {
+            continue;
+        }
+        let is_own = gloas.proposers.contains(proposer);
+        let count = fired.get(root).map_or(0, |(_, count)| *count);
+        let was_forwarded = forwarded.contains(root);
+        println!("{slot:<5} {proposer:<9} {is_own:<6} {was_forwarded:<10} {count}");
+        match (is_own, was_forwarded) {
+            (true, _) => {
+                own += 1;
+                own_fired += usize::from(count > 0);
+            }
+            (false, true) => {
+                gossiped += 1;
+                gossiped_without_event += usize::from(count == 0);
+            }
+            (false, false) => stray += 1,
+        }
+        twice += usize::from(count > 1);
+    }
+    println!(
+        "{gossiped} gossiped envelopes, {gossiped_without_event} with no event; {own} own \
+         envelopes, {own_fired} with an event; {stray} events for envelopes from neither; \
+         {twice} roots with more than one event"
+    );
+    assert!(gossiped >= 4, "too few gossiped envelopes in the window");
+    assert_eq!(
+        gossiped_without_event, 0,
+        "a gossiped envelope fired no event"
+    );
+    assert!(own >= 1, "the near node proposed nothing in the window");
+    assert_eq!(own_fired, own, "the node's own envelope fired no event");
+    assert_eq!(
+        stray, 0,
+        "an event for an envelope the node neither gossiped nor built"
+    );
+    assert_eq!(twice, 0, "an envelope fired more than once");
+}
+
+/// T-119's end-to-end check. The far node's only gossip peer is its shipped sidecar, so every
+/// message its gossipsub has accepted on a Gloas topic since it started came over the
+/// overlay, and a REJECT or an invalid message on those topics is what acceptance rules out.
+/// The counters are read whole rather than over a window, because the validator client
+/// sends proposer preferences once per validator rather than every slot. The envelope also
+/// has to show up as a `first_arrival` line with `source: overlay` inside the window; the
+/// small kinds carry no block root and log no line. The bid topic is reported but not
+/// required: a devnet that self-builds every payload gossips no bids.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the Gloas devnet: scripts/lighthouse-matrix.sh <version> --gloas"]
+async fn matrix_every_gloas_kind_crosses_the_overlay() {
+    let Some(gloas) = gloas() else { return };
+    let env = env();
+    let chain = chain(&env.http).await;
+    let mut sidecar = spawn(&env);
+    let deadline = sidecar.connect().await;
+    let digest = digest_of(&mut sidecar, deadline).await;
+    // The harness leaves: the far node's only gossip peer from here on is its shipped sidecar.
+    sidecar.link.task.abort();
+    drop(sidecar);
+    const KINDS: [&str; 4] = [
+        "execution_payload",
+        "execution_payload_bid",
+        "payload_attestation_message",
+        "proposer_preferences",
+    ];
+    let arrivals_before = gloas.overlay_arrivals("execution_payload");
+    let end = Instant::now() + chain.slots(8);
+    while gloas.overlay_arrivals("execution_payload") == arrivals_before {
+        assert!(
+            Instant::now() < end,
+            "no envelope reached the far sidecar over the overlay in eight slots"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    println!("kind                         accepted  rejected  invalid");
+    let mut counts = [[0.0; 3]; 4];
+    for (i, kind) in KINDS.iter().enumerate() {
+        counts[i] = gossip_counts(&gloas.far_metrics, &digest, kind).await;
+        let [accepted, rejected, invalid] = counts[i];
+        println!("{kind:<28} {accepted:<9} {rejected:<9} {invalid}");
+        assert_eq!(rejected + invalid, 0.0, "{kind} was rejected or invalid");
+    }
+    for i in [0, 2, 3] {
+        assert!(counts[i][0] >= 1.0, "{} never crossed", KINDS[i]);
+    }
+    if counts[1][0] == 0.0 {
+        println!("execution_payload_bid: no builder on this devnet gossips bids, so unmeasured");
+    }
+    println!(
+        "envelope first_arrival lines with source overlay: {} new",
+        gloas.overlay_arrivals("execution_payload") - arrivals_before
+    );
+}
+
+/// MD-09 on a running chain. The custody tracker is fed the near node's own events and its
+/// own column subscriptions, exactly as the sidecar feeds it, and its gaps are read every 50
+/// ms at the shipped `repair_deadline_ms`. A slot counts as late when a block of it still has
+/// a column missing past the deadline, which from the Gloas fork runs from the envelope; the
+/// test expects fewer than one such slot in a hundred, and prints per block whether the node
+/// proposed it, how many columns it reported, and when the last one came after the envelope.
+/// On the devnet at v8.3.2 it fails on both counts the `COMPATIBILITY.md` row gives: own
+/// proposals report their columns 260 ms to 1.2 s after the envelope on a 4-vCPU VM, and
+/// other nodes' blocks, whose columns arrive as partial messages, report none at all.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the Gloas devnet: scripts/lighthouse-matrix.sh <version> --gloas"]
+async fn matrix_column_repair_is_quiet_on_a_healthy_gloas_chain() {
+    let Some(gloas) = gloas() else { return };
+    let env = env();
+    let chain = chain(&env.http).await;
+    let deadline = Config::default().classes.large.repair_deadline;
+    let mut sidecar = spawn(&env);
+    sidecar.connect().await;
+    let (sets_tx, sets) = watch::channel(SubscriptionSets::default());
+    for topic in &sidecar.subscribed {
+        if let Ok(topic) = Topic::parse(topic) {
+            sets_tx.send_modify(|sets| {
+                sets.advertised.insert(topic);
+            });
+        }
+    }
+    let arrivals = Arc::new(Arrivals::new(Arc::new(SystemClock), sidecar.spec.clone()));
+    let custody = SharedCustody::new(sidecar.spec.clone(), sets, arrivals.clone(), Arc::new(()));
+    let shipped = Config::default().bn.events_url;
+    let events = BlockEvents::spawn(
+        format!(
+            "{}{}?{}",
+            env.http,
+            shipped.path(),
+            shipped.query().unwrap()
+        )
+        .parse()
+        .unwrap(),
+        Backoff::new(BACKOFF_MIN, BACKOFF_MAX),
+        arrivals,
+        custody.clone(),
+        Arc::new(SystemClock),
+        Arc::new(()),
+    );
+    // A second reading of the same stream, for when each block's envelope and columns came.
+    let mut timeline = sse(format!(
+        "{}/eth/v1/events?topics=block_gossip,execution_payload_gossip,data_column_sidecar",
+        env.http
+    ));
+
+    #[derive(Default)]
+    struct Seen {
+        slot: u64,
+        envelope_at: Option<Instant>,
+        columns: usize,
+        last_column_at: Option<Instant>,
+    }
+    let none = custody.column_set([]);
+    let mut seen: BTreeMap<[u8; 32], Seen> = BTreeMap::new();
+    let mut late: BTreeMap<[u8; 32], usize> = BTreeMap::new();
+    let end = Instant::now() + chain.slots(gloas.slots);
+    let mut tick = tokio::time::interval(Duration::from_millis(50));
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(end.into()) => break,
+            _ = tick.tick() => {
+                for gap in custody.gaps(deadline, Instant::now(), &none) {
+                    let missing = late.entry(gap.block_root).or_default();
+                    *missing = (*missing).max(gap.missing.len());
+                }
+            }
+            Some((name, data)) = timeline.recv() => {
+                let now = Instant::now();
+                let key = if name == "block_gossip" { "block" } else { "block_root" };
+                let root = unhex(data["block_root"].as_str().or(data[key].as_str()).unwrap()).unwrap();
+                let entry = seen.entry(root).or_default();
+                match name.as_str() {
+                    "block_gossip" => entry.slot = data["slot"].as_str().unwrap().parse().unwrap(),
+                    "execution_payload_gossip" => entry.envelope_at = Some(now),
+                    _ => {
+                        entry.columns += 1;
+                        entry.last_column_at = Some(now);
+                    }
+                }
+            }
+            event = sidecar.link.events.recv() => {
+                let event = event.expect("the link ended");
+                if let BnEvent::Subscribed { topic, .. } = &event
+                    && let Ok(topic) = Topic::parse(topic)
+                {
+                    sets_tx.send_modify(|sets| {
+                        sets.advertised.insert(topic);
+                    });
+                }
+                assert_ne!(event, BnEvent::Disconnected, "the beacon node dropped the sidecar");
+            }
+        }
+    }
+    events.task.abort();
+
+    // Own proposals and other nodes' blocks are tallied apart: the node builds its own
+    // columns from the blobs its validator client posted and fires an event per column, while
+    // another node's columns reach it as partials and fired none in the measured windows.
+    let mut own_of = BTreeMap::new();
+    for root in seen.keys() {
+        let header = beacon_json(&env, &format!("/eth/v1/beacon/headers/{}", hex0x(*root))).await;
+        let proposer: u64 = header["data"]["header"]["message"]["proposer_index"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        own_of.insert(*root, gloas.proposers.contains(&proposer));
+    }
+    let (mut gossiped, mut late_gossiped, mut own, mut late_own) = (0, 0, 0, 0);
+    println!("slot  own    missing_at_deadline  columns_by_the_end  last_column_after_envelope");
+    for (root, block) in &seen {
+        if block.slot == 0 {
+            continue;
+        }
+        let is_own = own_of[root];
+        let missing = late.get(root).copied();
+        match (is_own, missing.is_some()) {
+            (true, late) => {
+                own += 1;
+                late_own += usize::from(late);
+            }
+            (false, late) => {
+                gossiped += 1;
+                late_gossiped += usize::from(late);
+            }
+        }
+        let lag = match (block.envelope_at, block.last_column_at) {
+            (Some(envelope), Some(column)) => {
+                format!(
+                    "{:+} ms",
+                    column.saturating_duration_since(envelope).as_millis()
+                )
+            }
+            _ => "none".to_owned(),
+        };
+        println!(
+            "{:<5} {is_own:<6} {:<20} {:<19} {lag}",
+            block.slot,
+            missing.map_or("0".to_owned(), |missing| missing.to_string()),
+            block.columns
+        );
+    }
+    println!(
+        "{own} own proposals, {late_own} reached the {deadline:?} deadline with columns \
+         missing; {gossiped} other nodes' blocks, {late_gossiped} did"
+    );
+    assert!(gossiped + own >= 12, "too few blocks in the window");
+    assert!(
+        (late_gossiped + late_own) * 100 < gossiped + own,
+        "{} of {} slots reached the repair deadline with columns missing",
+        late_gossiped + late_own,
+        gossiped + own
+    );
+}
+
+/// `GET {path}` on the beacon API at `http` as JSON.
+async fn beacon_json_at(http: &str, path: &str) -> serde_json::Value {
+    reqwest::get(format!("{http}{path}"))
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+/// The slot of the node's head block.
+async fn head_slot(http: &str) -> u64 {
+    beacon_json_at(http, "/eth/v1/beacon/headers/head").await["data"]["header"]["message"]["slot"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+/// `sync_lookups_dropped_total{reason="TooManyAttempts"}` at the metrics `origin`.
+async fn lookups_dropped_at(origin: &str) -> u64 {
+    series(
+        origin,
+        "sync_lookups_dropped_total{reason=\"TooManyAttempts\"} ",
+    )
+    .await as u64
 }
