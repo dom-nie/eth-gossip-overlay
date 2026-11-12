@@ -858,17 +858,19 @@ async fn wedged_bn_on_one_host_does_not_delay_the_second_hop_to_its_region() {
     }
     fleet.wait_full_mesh(fleet.wait()).await;
     fleet.set_relays(1, 1).await;
-    let pool: Vec<Hostname> = (1..4)
-        .map(|node| fleet.node(node).hostname().clone())
+    let us = fleet.region("us");
+    let pool: Vec<Hostname> = us
+        .iter()
+        .map(|&node| fleet.node(node).hostname().clone())
         .collect();
     let chosen = relay::select(fleet.node(0).hostname(), &pool, 1);
-    let relay = 1 + pool.iter().position(|host| *host == chosen[0]).unwrap();
+    let relay = us[pool.iter().position(|host| *host == chosen[0]).unwrap()];
 
     fleet.node(relay).wedge_bn().await;
     let payload = b"an attestation behind a wedged beacon node".to_vec();
     fleet.node(0).bn().publish(&subnet, &payload).await;
 
-    for node in (1..4).filter(|node| *node != relay) {
+    for node in us.iter().copied().filter(|node| *node != relay) {
         fleet
             .wait_for(
                 "the region behind the relay to import it",
