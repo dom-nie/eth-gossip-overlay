@@ -254,3 +254,32 @@ fn send(
         senders.remove(&dest);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T-136: on this runtime the batcher does not run until the test waits, which is the
+    /// batcher a wake-up behind while a slot's attestations come in.
+    #[tokio::test]
+    async fn a_burst_of_1000_for_29_peers_waits_for_a_batcher_that_is_behind() {
+        let (batches, _task) = Batching::spawn(
+            watch::channel(config::SmallClass::default()).1,
+            Arc::new(()),
+        );
+        for n in 0..1000 {
+            for peer in 1..30 {
+                let dest = Hostname(format!("f0-bn-{peer:02}"));
+                let pushed = batches.push(Small {
+                    dest: dest.clone(),
+                    topic_id: TopicId::new(1),
+                    payload: Bytes::from(format!("attestation {n} of the burst")),
+                    max_bytes: 1200,
+                    relay: false,
+                    sender: SenderHandle::stopped(dest),
+                });
+                assert!(pushed.is_ok(), "attestation {n} for peer {peer}");
+            }
+        }
+    }
+}
