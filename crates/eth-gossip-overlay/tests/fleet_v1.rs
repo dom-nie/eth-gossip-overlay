@@ -171,11 +171,11 @@ async fn same_message_from_two_origins_is_published_once_everywhere() {
         .wait_for(
             "both other beacon nodes to import it",
             fleet.wait(),
-            |fleet| (2..4).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
+            |fleet| (2..fleet.hosts()).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
         )
         .await;
     fleet.settle().await;
-    for index in 2..4 {
+    for index in 2..fleet.hosts() {
         assert_eq!(fleet.node(index).bn().count(&block, &payload), 1, "{index}");
     }
     for index in 0..2 {
