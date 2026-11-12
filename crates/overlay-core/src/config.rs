@@ -197,7 +197,7 @@ pub enum Steering {
 pub struct Bn {
     /// `identity_url`: the beacon API endpoint that reports the node's peer id.
     pub identity_url: Url,
-    /// `events_url`: the beacon API event stream, asking for `block`, `block_gossip`,
+    /// `events_url`: the beacon API event stream. Must ask for `block`, `block_gossip`,
     /// `data_column_sidecar` and `execution_payload_gossip`.
     pub events_url: Url,
     /// `libp2p_addr`: the multiaddr the sidecar dials to join the beacon node's gossipsub.

@@ -26,7 +26,7 @@ its value changed; a failed one is retried on the next reload.
 
 The hostname is the identity everywhere: the roster key, the input to the overlay TLS key, the
 connection tie-break. It is `gethostname()` unless `ETH_GOSSIP_OVERLAY_HOSTNAME` says otherwise;
-set it from the inventory name so the two cannot drift.
+set it from the inventory name so they cannot drift.
 `ETH_GOSSIP_OVERLAY_REGION` and `ETH_GOSSIP_OVERLAY_SITE` override the roster's answer for this host.
 
 `roster.yaml` is the fleet, one entry per host, and is not part of `config.yaml`:
@@ -99,7 +99,7 @@ Every key below ships in 0.1.0, the first release.
 | `overlay.io_thread.irq_suspend_timeout_ms` | `20` | restart | how long the NIC queue's interrupt stays masked while polling keeps finding packets. Needs `CAP_NET_ADMIN`; `0` asks for the busy polling without the suspension. |
 | `overlay.io_thread.steering` | `off` | restart | how the overlay's packets are steered to the pinned core's NIC queue. One of `auto`, `ntuple`, `rfs`, `off`. |
 | `bn.identity_url` | `http://127.0.0.1:5052/eth/v1/node/identity` | restart | the beacon API endpoint that reports the node's peer id. |
-| `bn.events_url` | `http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip` | restart | the beacon API event stream, asking for `block`, `block_gossip`, `data_column_sidecar` and `execution_payload_gossip`. |
+| `bn.events_url` | `http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip` | restart | the beacon API event stream. Must ask for `block`, `block_gossip`, `data_column_sidecar` and `execution_payload_gossip`. |
 | `bn.libp2p_addr` | `/ip4/127.0.0.1/tcp/9000` | restart | the multiaddr the sidecar dials to join the beacon node's gossipsub. |
 | `bn.node_key_file` | `/var/lib/eth-gossip-overlay/node.key` | restart | the sidecar's own libp2p identity, per host, created on first start. |
 | `bn.listen_addr` | `/ip4/127.0.0.1/tcp/7787` | restart | where the sidecar listens for the beacon node's dial. Lighthouse caps inbound connections before it knows the peer, so a sidecar that only dialled would wait for churn on a busy node (MD-01). Restart-required, sidecar only: the beacon node dials the ENR the sidecar posts through `add_peer`. |
