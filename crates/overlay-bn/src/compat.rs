@@ -274,9 +274,11 @@ impl Watch {
     }
 }
 
-/// The nine Lighthouse behaviours the design leans on, or works around, that no specification
-/// promises (CL-N2), each with the test that fails by name when a release changes it.
-const ASSUMPTIONS: [(&str, &str); 9] = [
+/// The fourteen Lighthouse behaviours the design leans on, or works around, that no
+/// specification promises (CL-N2), each with the test that fails by name when a release
+/// changes it. The last five are Gloas and were measured on the devnet `scripts/lighthouse-
+/// matrix.sh <version> --gloas` brings up (T-121); each row says what was measured and when.
+const ASSUMPTIONS: [(&str, &str); 14] = [
     (
         "A trusted peer is admitted whenever the beacon node is under its inbound cap, is dialled by the beacon node through `add_peer` on demand under the outbound cap (and before v8.3.0 through `--libp2p-addresses` at startup), and is never pruned once connected (MD-01)",
         "under the cap and never pruned: `matrix_trusted_peer_is_admitted_under_the_inbound_cap_and_never_pruned` (matrix); the beacon node dialling a sidecar it has no inbound room for: `matrix_bn_dials_the_listening_sidecar_when_its_inbound_cap_is_full` (matrix); the startup flag: `matrix_bn_startup_flags_dial_the_listening_sidecar` (matrix)",
@@ -313,6 +315,26 @@ const ASSUMPTIONS: [(&str, &str); 9] = [
         "From v8.3.0 the beacon node still accepts `--libp2p-addresses` but never dials it (`sigp/lighthouse#10229`), so on those releases `add_peer` registration alone admits the sidecar. The env file keeps the flag while the supported range includes a v8.2 release (MD-01 amended)",
         "`matrix_bn_dials_the_listening_sidecar_when_its_inbound_cap_is_full` (matrix), which on v8.3.0 and later passes through `add_peer` alone; the flag still being accepted: `matrix_bn_startup_flags_dial_the_listening_sidecar` (matrix)",
     ),
+    (
+        "With gossipsub partial messages on for every `data_column_sidecar_*` topic, the default from v8.3.0 (`--enable-partial-columns`), the beacon node still hands its explicit peer a full message for every column its `data_column_sidecar` event reports. On a chain where no full column travels on gossip at all, because every node has the blobs in its execution layer and sends partials, a column merged from partials or completed from `getBlobs` is published whole (`gossip_methods.rs:1343-1366`), and `publish` leaves out only the peers that asked for partials (`behaviour.rs:676-689` at the pinned rust-libp2p). The sidecar never asks for them. Measured on v8.3.2, 2026-11-12: every column the node reported was forwarded, 768 of 768 over 6 blocks in a 16-slot window, and so were the columns of the other blocks in the window, which the node merged from partials and reported no event for (next row but one)",
+        "`matrix_the_node_forwards_full_columns_to_its_explicit_peer_with_partials_on` (matrix, `--gloas`, local only)",
+    ),
+    (
+        "From the Gloas fork a block whose parent the node has imported but whose parent's payload envelope it lacks is `ParentUnknown` to gossip verification (`fork_choice.rs:1663-1679`, `block_verification.rs:1516-1521`), and the lookup it opens is seeded with the block's sender alone. The lookup starts with the parent block, which the node already holds, so what reaches the sidecar is `beacon_blocks_by_root`, refused four times, and `execution_payload_envelopes_by_root` is never asked for: the lookup and the block are dropped for too many attempts, as in the row above. D42 does not cover this case, since it checks the parent block and not its payload; on a self-building chain the envelope follows the block within tens of milliseconds, so the window is the overlay's own latency. Measured on v8.3.2, 2026-11-12: 4 block refusals, 0 envelope refusals, the child dropped",
+        "`matrix_a_block_whose_parent_envelope_the_node_lacks` (matrix, `--gloas`, local only), which counts both refusals on the sidecar and reads the child's `block` event and `sync_lookups_dropped_total` on the node",
+    ),
+    (
+        "`execution_payload_gossip` fires once per payload envelope on the first observation from any source, the node's own publish included (`gossip_verified_envelope.rs:297-327`), so a slot's repair deadline starts whether the envelope came by gossip or from the node's own validator client (MD-09 as corrected). Measured on v8.3.2, 2026-11-12: one event for each gossiped and each own envelope, none for any other root",
+        "`matrix_execution_payload_gossip_fires_once_per_envelope_from_any_source` (matrix, `--gloas`, local only)",
+    ),
+    (
+        "Each Gloas message kind the node gossips crosses the overlay and is accepted by a node whose only gossip peer is its sidecar: the payload envelope, payload attestations and proposer preferences, with no REJECT and no invalid message on any of the four topics. Bids are unmeasured: a devnet that self-builds every payload gossips none. Measured on v8.3.2, 2026-11-12",
+        "`matrix_every_gloas_kind_crosses_the_overlay` (matrix, `--gloas`, local only), off the far node's gossipsub counters and its sidecar's `first_arrival` lines",
+    ),
+    (
+        "MD-09's premise, that column repair anchored on the envelope asks for nothing on a healthy Gloas chain, under one slot in a hundred. Measured on v8.3.2, 2026-11-12, it does not hold on the devnet, for two reasons. The node fires `data_column_sidecar` for the columns it builds from the blobs its own validator client posts, 260 ms to 1.2 s after the envelope on the 4-vCPU VM, so 8 of 10 own proposals were still short at the shipped 250 ms `repair_deadline_ms`. For another node's block it fired nothing in the window: with partial messages on, those columns reach it as partials and from its execution layer, and whichever path completed them registered no event, so the tracker counts all of that block's columns as missing for good and repair would ask for every one of them. MD-06 counted partial-message merges among the event's sources; on this devnet at v8.3.2 no event came that way. Unmeasured on production hardware",
+        "`matrix_column_repair_is_quiet_on_a_healthy_gloas_chain` (matrix, `--gloas`, local only), which fails on the devnet for the reasons in the row and prints each block's lag",
+    ),
 ];
 
 /// The Lighthouse section of `COMPATIBILITY.md`, so the file follows the constants instead
@@ -333,11 +355,14 @@ pub fn render_compatibility_section() -> String {
          which the root `Cargo.toml` copies. A beacon node above the range is reported `untested` \
          and one below it `unsupported`, on every connect, in the log and in \
          `overlay_bn_compat{{state}}`; the sidecar keeps running either way.\n\n\
-         The design leans on, or works around, nine Lighthouse behaviours that no \
+         The design leans on, or works around, fourteen Lighthouse behaviours that no \
          specification promises. Each has a named test, so a release that changes one fails \
          the matrix by name instead of degrading the fleet quietly. Tests marked matrix need a \
-         real beacon node and run in the nightly matrix; the others run on every pull request \
-         against `FakeBn`.\n\n\
+         real beacon node and run in the nightly matrix; those marked `--gloas` need the devnet \
+         `scripts/lighthouse-matrix.sh <version> --gloas` brings up, with Gloas active from \
+         genesis, which runs locally only: it needs Docker and Kurtosis and takes the better \
+         part of an hour, so the nightly stays on Sepolia at genesis. The others run on every \
+         pull request against `FakeBn`.\n\n\
          | Assumption | Test |\n|---|---|\n"
     );
     for (assumption, test) in ASSUMPTIONS {
