@@ -267,7 +267,7 @@ curl -fsS -H 'Accept: application/json' "$near_http/eth/v2/beacon/blocks/head" \
 export MATRIX_GLOAS=1
 export LIGHTHOUSE_HTTP=$near_http
 export LIGHTHOUSE_P2P=/ip4/127.0.0.1/tcp/${near_p2p##*:}
-export LIGHTHOUSE_METRICS=http://$near_metrics
+export LIGHTHOUSE_METRICS=$near_metrics
 export LIGHTHOUSE_FAR_HTTP=$far_http
 export LIGHTHOUSE_FAR_P2P=/ip4/127.0.0.1/tcp/$far_p2p_port
 export LIGHTHOUSE_FAR_METRICS=http://127.0.0.1:$far_metrics_port
