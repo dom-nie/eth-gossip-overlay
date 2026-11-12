@@ -1304,6 +1304,11 @@ async fn block_still_completes_when_one_stripe_host_is_down() {
 /// still publishes the block once, and reads at most two stripes' worth of chunks, because the
 /// second copy of an index is stored nowhere and passed on nowhere.
 ///
+/// A host still short of the block when `repair_deadline_ms` passes asks a peer for what it is
+/// missing, and the answer is read like any other chunk, so each request it made allows it the
+/// `k` data chunks one answer can hold. On a machine that keeps up nobody asks and the bound is
+/// the two stripes; on a loaded one the stripes are still arriving at 250 ms (T-137).
+///
 /// Neither origin can hear the other, which is what makes them two origins rather than one: a
 /// sidecar that had already put the block together would find its own beacon node's copy in its
 /// seen cache and fan out nothing.
@@ -1338,7 +1343,8 @@ async fn two_origins_with_divergent_live_views_publish_once_with_at_most_2k_plus
         )
         .await;
     fleet.settle().await;
-    let stripe = chunks_per_message(payload.len(), 0.1);
+    let (data, parity) = split(payload.len(), 0.1);
+    let stripe = data + parity;
     let now = fleet.metrics().await;
     for (node, scrape) in now.iter().enumerate() {
         assert!(
@@ -1347,9 +1353,15 @@ async fn two_origins_with_divergent_live_views_publish_once_with_at_most_2k_plus
         );
         let chunks =
             scrape.sum(CHUNKS_RECEIVED_TOTAL, &[]) - before[node].sum(CHUNKS_RECEIVED_TOTAL, &[]);
+        let asked: f64 = ["completed", "not_found", "timeout"]
+            .iter()
+            .map(|outcome| scrape.sum(REPAIR_REQUESTS_TOTAL, &[(LABEL_OUTCOME, outcome)]))
+            .sum();
         assert!(
-            chunks <= 2.0 * stripe as f64,
-            "node {node} read {chunks} chunks of a {stripe} chunk message"
+            chunks <= (2 * stripe) as f64 + asked * data as f64,
+            "node {node} read {chunks} chunks of a {stripe} chunk message after {asked} repair \
+             requests; {}",
+            scrape.losses()
         );
     }
     for (origin, scrape) in now.iter().enumerate().take(2) {
@@ -1363,11 +1375,15 @@ async fn two_origins_with_divergent_live_views_publish_once_with_at_most_2k_plus
 /// DX-N5 scenario 16, both halves. A third of a region goes away in the middle of a slot,
 /// taking the chunks the origin striped to it with them.
 ///
-/// The two thirds that are left put the block together from parity and ask nobody for anything,
-/// which is what `repair_requests_total` reading zero for them says. The third that went away
-/// keeps its link to the origin, so it holds the chunks it was assigned and nothing else, and
-/// that is nowhere near `k`: it asks, and the origin answers from what its own beacon node
-/// handed it. Both arms finish inside the slot.
+/// The two thirds that are left put the block together from parity, which is what
+/// `parity_used_total` above zero and no repair counted `completed` says of them. One of them
+/// may still have asked: a request goes out when `repair_deadline_ms` passes before the block is
+/// whole, and on a loaded machine parity is still arriving at 250 ms. Such a request ends
+/// `not_found` or `timeout` because the block finished without it (T-137).
+///
+/// The third that went away keeps its link to the origin, so it holds the chunks it was assigned
+/// and nothing else, and that is nowhere near `k`: it asks, and the origin answers from what its
+/// own beacon node handed it. Both arms finish inside the slot.
 #[tokio::test(flavor = "multi_thread")]
 async fn one_third_of_a_region_lost_mid_slot_completes_via_parity_or_repair_before_the_deadline() {
     let block = topic("beacon_block");
@@ -1421,9 +1437,10 @@ async fn one_third_of_a_region_lost_mid_slot_completes_via_parity_or_repair_befo
             "node {node} did not need the parity a third of the region was carrying"
         );
         assert_eq!(
-            scrape.sum(REPAIR_REQUESTS_TOTAL, &[]),
+            scrape.sum(REPAIR_REQUESTS_TOTAL, &[(LABEL_OUTCOME, "completed")]),
             0.0,
-            "node {node} asked for chunks parity had already covered"
+            "node {node} needed a repair for what parity should have covered; {}",
+            scrape.losses()
         );
     }
     for (node, scrape) in now.iter().enumerate().skip(hosts - lost) {
