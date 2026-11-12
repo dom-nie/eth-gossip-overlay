@@ -1094,11 +1094,16 @@ async fn striped_block_costs_the_origin_two_block_equivalents_and_each_host_one(
     fleet.settle().await;
     let out = |scrape: &Scrape| scrape.sum(BYTES_TOTAL, &[(LABEL_DIRECTION, "out")]);
     let before = fleet.metrics().await;
+    let eu: Vec<usize> = fleet
+        .region("eu")
+        .into_iter()
+        .filter(|&node| node != 0)
+        .collect();
 
     let payload = incompressible(13, 200 * 1024);
     fleet.node(0).bn().publish(&block, &payload).await;
 
-    for node in 1..10 {
+    for node in eu.iter().copied() {
         fleet
             .wait_for_metrics(
                 "every host of the origin's region to pass its chunks on",
@@ -1119,7 +1124,7 @@ async fn striped_block_costs_the_origin_two_block_equivalents_and_each_host_one(
         (2.0..2.4).contains(&origin),
         "the origin sent {origin} block-equivalents"
     );
-    for node in 1..10 {
+    for node in eu.iter().copied() {
         let host = (out(&now[node]) - out(&before[node])) / block_bytes;
         assert!(
             (0.8..1.2).contains(&host),
