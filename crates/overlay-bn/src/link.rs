@@ -994,6 +994,28 @@ mod tests {
         drop(harness.commands);
     }
 
+    /// libp2p dials from the listen port unless told otherwise, and a connect from a port to a
+    /// destination that pair has just been used for is refused with `EADDRINUSE` until the old
+    /// connection's `TIME_WAIT` runs out, which is seconds of a beacon node nobody is feeding.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn link_dials_the_beacon_node_from_a_port_other_than_the_one_it_listens_on() {
+        let bn = FakeBn::start().await;
+        let mut harness = spawn(link_config(&bn), &bn);
+        let listens_on = testutil::tcp_port(&listen_addr(&harness).await);
+
+        wait_for(&mut harness.link.events, |e| {
+            matches!(e, BnEvent::Connected { .. })
+        })
+        .await;
+        wait_until(WAIT, async || !bn.accepted_from().is_empty())
+            .await
+            .expect("the fake never accepted the link's connection");
+
+        let dialled_from: Vec<u16> = bn.accepted_from().iter().map(testutil::tcp_port).collect();
+        assert_eq!(dialled_from.len(), 1, "{dialled_from:?}");
+        assert_ne!(dialled_from[0], listens_on);
+    }
+
     /// The other direction, which is what MD-01 rests on: the link's own dial can never
     /// succeed, and the beacon node dialling its listen address is what connects them.
     #[tokio::test(flavor = "multi_thread")]

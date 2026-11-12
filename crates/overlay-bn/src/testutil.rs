@@ -150,6 +150,7 @@ pub struct FakeBn {
     events: Option<mpsc::Receiver<FakeBnEvent>>,
     answers: Option<mpsc::Receiver<RpcAnswer>>,
     inbound: Option<mpsc::Receiver<Protocol>>,
+    accepted: Accepted,
     responses: Responses,
     /// The fork's gossipsub metrics under `gossipsub_`, as Lighthouse registers them; only
     /// a fake from [`start_with_metrics`](Self::start_with_metrics) has one.
@@ -301,12 +302,16 @@ enum Cmd {
     },
 }
 
+/// The remote address of every connection a swarm task accepted, oldest first.
+type Accepted = Arc<std::sync::Mutex<Vec<Multiaddr>>>;
+
 /// Where a swarm task puts what it sees.
 struct Sinks {
     received: mpsc::Sender<Received>,
     events: mpsc::Sender<FakeBnEvent>,
     answers: mpsc::Sender<RpcAnswer>,
     inbound: mpsc::Sender<Protocol>,
+    accepted: Accepted,
 }
 
 /// A peer of the fake that is not trusted: an ordinary gossipsub node the fake grafts into its
@@ -386,6 +391,7 @@ impl FakeBn {
         let (events_tx, events) = mpsc::channel(8192);
         let (answers_tx, answers) = mpsc::channel(64);
         let (inbound_tx, inbound) = mpsc::channel(64);
+        let accepted = Accepted::default();
         let task = tokio::spawn(drive(
             swarm,
             command_rx,
@@ -394,6 +400,7 @@ impl FakeBn {
                 events: events_tx,
                 answers: answers_tx,
                 inbound: inbound_tx,
+                accepted: accepted.clone(),
             },
         ));
         let bn = Self {
@@ -406,6 +413,7 @@ impl FakeBn {
             events: Some(events),
             answers: Some(answers),
             inbound: Some(inbound),
+            accepted,
             responses: Responses::default(),
             metrics,
         };
@@ -475,6 +483,12 @@ impl FakeBn {
     /// What `bn.identity_url` would say.
     pub fn http_addr(&self) -> Url {
         Url::parse(&format!("{}/eth/v1/node/identity", self.http.uri())).unwrap()
+    }
+
+    /// The address each connection the fake accepted came from, oldest first: what shows a
+    /// test which port the sidecar dialled out of.
+    pub fn accepted_from(&self) -> Vec<Multiaddr> {
+        self.accepted.lock().unwrap().clone()
     }
 
     /// The mock server, for counting what the link asked it.
@@ -684,6 +698,7 @@ impl FakeBn {
                     events: events_tx,
                     answers: answers_tx,
                     inbound: inbound_tx,
+                    accepted: Accepted::default(),
                 },
             )),
         };
@@ -784,7 +799,7 @@ pub async fn wait_until(
     .await
 }
 
-fn tcp_port(addr: &Multiaddr) -> u16 {
+pub(crate) fn tcp_port(addr: &Multiaddr) -> u16 {
     addr.iter()
         .find_map(|p| match p {
             libp2p::multiaddr::Protocol::Tcp(port) => Some(port),
@@ -808,10 +823,14 @@ async fn drive(mut swarm: Swarm<FakeBnBehaviour>, mut commands: mpsc::Receiver<C
     loop {
         tokio::select! {
             event = swarm.select_next_some(), if !wedged => match event {
-                SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                     if !public.contains(&peer_id) {
                         swarm.behaviour_mut().gossip.add_explicit_peer(&peer_id);
                         peer = Some(peer_id);
+                    }
+                    if endpoint.is_listener() {
+                        let from = endpoint.get_remote_address().clone();
+                        sinks.accepted.lock().unwrap().push(from);
                     }
                     let _ = sinks.events.try_send(FakeBnEvent::Connected(peer_id));
                 }
