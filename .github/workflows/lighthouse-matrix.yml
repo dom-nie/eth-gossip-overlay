@@ -2,6 +2,8 @@ name: Lighthouse matrix
 
 # Every version in overlay_bn::compat::SUPPORTED against a real beacon node: nightly, on
 # release tags, and by hand. A test in overlay-bn holds the version list below to SUPPORTED.
+# The Gloas half of the matrix (scripts/lighthouse-matrix.sh <version> --gloas) is not here:
+# it needs Docker and Kurtosis and takes the better part of an hour, so it runs by hand.
 on:
   schedule:
     - cron: "17 3 * * *"

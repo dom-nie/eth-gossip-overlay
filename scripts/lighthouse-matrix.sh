@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Runs overlay-bn's matrix tests against a real Lighthouse release.
 #
-#   scripts/lighthouse-matrix.sh <version> [--ten-minutes]
+#   scripts/lighthouse-matrix.sh <version> [--ten-minutes | --gloas]
 #
 # Downloads the release artefact for this host into ${LIGHTHOUSE_CACHE:-/tmp}/lighthouse-<version>
 # (skipped when it is already there), builds eth-gossip-overlay, starts a beacon node on sepolia with
@@ -29,9 +29,13 @@
 # local peer without replacing the network's boot ENRs, and from v8.3.0 it is accepted and never
 # dialled. Passing it here is what tells us the day a Lighthouse release removes it: the beacon
 # node refuses to start and the matrix fails.
+#
+# --gloas runs the other half instead (T-121): a local devnet with Gloas active from genesis,
+# two nodes each with a shipped sidecar, and the tests only such a chain can answer. It needs
+# Docker and Kurtosis and takes the better part of an hour; see scripts/lighthouse-gloas.sh.
 set -euo pipefail
 
-version=${1:?usage: $0 <version> [--ten-minutes]}
+version=${1:?usage: $0 <version> [--ten-minutes | --gloas]}
 version=v${version#v}
 if [[ ${2:-} == --ten-minutes ]]; then
   export MATRIX_TEN_MINUTES=1
@@ -55,7 +59,10 @@ fi
 "$cache/lighthouse" --version | head -1
 
 root=$(cd "$(dirname "$0")/.." && pwd)
-cargo build --manifest-path "$root/Cargo.toml" -p eth-gossip-overlay --bin eth-gossip-overlay
+cargo build --manifest-path "$root/Cargo.toml" -p eth-gossip-overlay --bin eth-gossip-overlay --bin eth-gossip-overlayctl
+if [[ ${2:-} == --gloas ]]; then
+  exec "$root/scripts/lighthouse-gloas.sh" "$cache/lighthouse" "$version"
+fi
 
 work=$(mktemp -d)
 bn_pid=
