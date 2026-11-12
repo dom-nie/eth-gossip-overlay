@@ -14,10 +14,13 @@
 //! <version> --gloas` brings up: `LIGHTHOUSE_HTTP`, `LIGHTHOUSE_P2P` and `LIGHTHOUSE_METRICS`
 //! name the node that follows the chain with public peers, `LIGHTHOUSE_FAR_HTTP`,
 //! `LIGHTHOUSE_FAR_P2P` and `LIGHTHOUSE_FAR_METRICS` the node whose only gossip peers are
-//! sidecars, `SIDECAR_FAR_LOG` and `SIDECAR_FAR_ADMIN` that node's shipped sidecar's JSON log
-//! and admin socket, `SIDECAR_CTL` the ctl binary, `LIGHTHOUSE_PROPOSERS` the `first-last`
-//! validator indices the near node's own validator client runs, and `MATRIX_SLOTS` how many
-//! slots the counting tests watch (64 unless set).
+//! sidecars and `LIGHTHOUSE_FAR_LOG` its debug-level file log, `SIDECAR_FAR_LOG`,
+//! `SIDECAR_FAR_ADMIN` and `SIDECAR_FAR_METRICS` that node's shipped sidecar's JSON log, admin
+//! socket and metrics origin, `SIDECAR_CTL` the ctl binary, `LIGHTHOUSE_PROPOSERS` the
+//! `first-last` validator indices the near node's own validator client runs, and
+//! `MATRIX_SLOTS` how many slots the counting tests watch (64 unless set).
+//! The by-root test needs that devnet brought up with `GLOAS_BY_ROOT=1`, and is the only test
+//! the script runs on it.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -719,11 +722,14 @@ async fn matrix_a_block_whose_parent_the_node_lacks_is_dropped_by_lighthouse_aft
 /// T-101 test 6: the `block` event fires for a block the node imported over RPC, not only for
 /// one that came by gossip, which is what lets the sidecar anchor its parent check on it.
 /// `import_block_update_metrics_and_events` registers the event on every import path
-/// (`beacon_chain/src/beacon_chain.rs:4803-4811`): gossip, RPC by root or by range, and the
-/// node's own proposal. `block_gossip` fires inside gossip verification only
-/// (`block_verification.rs:1068-1076`), so a `block` for a root no `block_gossip` named is an
-/// import that did not come by gossip. A node in step with the chain may see none inside the
-/// window; then the source is what says so, and this prints as much.
+/// (`beacon_chain/src/beacon_chain.rs:5099`, the register at `:5153`, at v8.3.2): gossip, RPC
+/// by root or by range, and the node's own proposal. `block_gossip` is registered in one
+/// place, `GossipVerifiedBlock::new` (`block_verification.rs:1116-1124`), which a gossip block
+/// and a block published over the beacon API both go through and a lookup does not;
+/// `matrix_block_gossip_does_not_fire_for_a_block_fetched_by_root` is where that is measured.
+/// So a `block` for a root no `block_gossip` named is an import that came over RPC. A node in
+/// step with the chain may see none inside the window; then the source is what says so, and
+/// this prints as much.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs a Lighthouse beacon node following the chain: MATRIX_FOLLOWING_CHAIN=1"]
 async fn matrix_the_block_event_fires_for_an_rpc_imported_block() {
@@ -757,7 +763,7 @@ async fn matrix_the_block_event_fires_for_an_rpc_imported_block() {
     println!(
         "every block imported inside {THREE_SLOTS:?} came by gossip; start the node a few slots \
          behind the head to watch an RPC import register the block event \
-         (beacon_chain.rs:4803-4811)"
+         (beacon_chain.rs:5153 at v8.3.2)"
     );
 }
 
@@ -899,6 +905,9 @@ struct Gloas {
     far_metrics: String,
     far_log: PathBuf,
     far_admin: PathBuf,
+    far_sidecar_metrics: String,
+    /// The far node's own debug-level file log.
+    far_node_log: PathBuf,
     ctl: PathBuf,
     /// The validator indices the near node's own validator client runs, which is how its own
     /// proposals are told from gossiped ones.
@@ -933,6 +942,8 @@ fn gloas() -> Option<Gloas> {
             .to_owned(),
         far_log: var("SIDECAR_FAR_LOG").into(),
         far_admin: var("SIDECAR_FAR_ADMIN").into(),
+        far_sidecar_metrics: var("SIDECAR_FAR_METRICS").trim_end_matches('/').to_owned(),
+        far_node_log: var("LIGHTHOUSE_FAR_LOG").into(),
         ctl: var("SIDECAR_CTL").into(),
         proposers: first.parse().unwrap()..last.parse::<u64>().unwrap() + 1,
         slots: std::env::var("MATRIX_SLOTS")
@@ -1740,6 +1751,138 @@ async fn matrix_column_repair_is_quiet_on_a_healthy_gloas_chain() {
         "{} of {} slots reached the repair deadline with columns missing",
         late_gossiped + late_own,
         gossiped + own
+    );
+}
+
+/// T-128, the half of T-101's reason for anchoring D42 on `block` that nobody had measured:
+/// a block the node fetches by root fires `block` and no `block_gossip`. At v8.3.2 the event
+/// is registered in one place, `GossipVerifiedBlock::new` (`block_verification.rs:1116-1124`),
+/// which a lookup never reaches: `process_lookup_block` (`sync_methods.rs:112-180`) hands
+/// `chain.process_block` a `LookupBlock`, whose `into_execution_pending_block_slashable`
+/// (`block_verification.rs:1433-1458`) goes straight to the signature check.
+///
+/// The far node's only libp2p peer is its shipped sidecar, which on this devnet answers
+/// by-root requests from its store. The test turns that sidecar's inject off for one slot N,
+/// so the far node misses block N, and back on before slot N+1. D42 then keeps N+1 back, and
+/// the first message naming N+1, a payload attestation on the devnet, makes the node ask its
+/// sender, the sidecar, for N+1 by root and then for N+1's parent. Lighthouse opens such a
+/// lookup only once `--unknown-root-min-peers` distinct peers have named the root, three by
+/// default at v8.3.2, so the script starts the far node with 1; without it the node sits at
+/// N-1 until the catch-up loop steps in.
+///
+/// The catch-up loop is the other way the node could get N, and it posts over the beacon API,
+/// which does fire `block_gossip`. So that such a run fails for the right reason, the
+/// sidecar's `overlay_by_root_requests_total{outcome="hit"}` has to rise and the node's own
+/// log has to say "Processing Lookup block" for N's root (`sync_methods.rs:165-167`). The
+/// counter alone would not do: the devnet's clock runs a few tens of milliseconds ahead of
+/// the host's, and when a block comes before its slot by the far node's clock, its payload
+/// attestations open a lookup that is refused as `FutureSlot`, and that one hits too. Every
+/// `block` and `block_gossip` the far node fires from slot N on is printed with its time, and
+/// none of the latter may name N from the moment the stream opens until three slots after N's
+/// import.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the Gloas devnet with GLOAS_BY_ROOT=1: scripts/lighthouse-matrix.sh <version> --gloas"]
+async fn matrix_block_gossip_does_not_fire_for_a_block_fetched_by_root() {
+    let Some(gloas) = gloas() else { return };
+    let env = env();
+    let chain = chain(&env.http).await;
+    const HITS: &str =
+        "overlay_by_root_requests_total{outcome=\"hit\",protocol=\"beacon_blocks_by_root\"} ";
+    let mut far_events = sse(format!(
+        "{}/eth/v1/events?topics=block,block_gossip",
+        gloas.far_http
+    ));
+    let mut near_events = sse(format!("{}/eth/v1/events?topics=block", env.http));
+    let root_in = |data: &serde_json::Value| unhex(data["block"].as_str().unwrap()).unwrap();
+    let slot_in =
+        |data: &serde_json::Value| -> u64 { data["slot"].as_str().unwrap().parse().unwrap() };
+    let slot_start = |slot: u64| {
+        UNIX_EPOCH + Duration::from_secs(chain.genesis_time + slot * chain.seconds_per_slot)
+    };
+    let sleep_until = |at: SystemTime| async move {
+        if let Ok(wait) = at.duration_since(SystemTime::now()) {
+            tokio::time::sleep(wait).await;
+        }
+    };
+
+    // A block the far node took by gossip in its own slot: it is in step, and N is the next.
+    let n = loop {
+        let (name, data) = far_events.recv().await.unwrap();
+        if name == "block_gossip" && slot_in(&data) >= chain.slot_now() {
+            break slot_in(&data) + 1;
+        }
+    };
+    let hits_before = series(&gloas.far_sidecar_metrics, HITS).await;
+    // Late enough that the block before N and its envelope are in, early enough for all of N.
+    sleep_until(slot_start(n) - Duration::from_secs(1)).await;
+    let off = gloas.inject_off();
+    println!("inject off for slot {n}; by-root hits so far: {hits_before}");
+    sleep_until(slot_start(n + 1) - Duration::from_millis(500)).await;
+    drop(off);
+    println!("inject on");
+    let root = loop {
+        let (_, data) = tokio::time::timeout(chain.slots(1), near_events.recv())
+            .await
+            .expect("the near node imported no block at slot N")
+            .unwrap();
+        if slot_in(&data) == n {
+            break root_in(&data);
+        }
+    };
+    println!(
+        "block {} at slot {n} is the one the far node missed",
+        hex0x(root)
+    );
+
+    let (mut imported, mut gossiped) = (false, false);
+    let mut end = Instant::now() + chain.slots(4);
+    while let Ok(Some((name, data))) = tokio::time::timeout_at(end.into(), far_events.recv()).await
+    {
+        let slot = slot_in(&data);
+        if slot < n {
+            continue;
+        }
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let into_slot = now.saturating_sub(slot_start(slot).duration_since(UNIX_EPOCH).unwrap());
+        println!(
+            "{}.{:03} far node {name:<12} slot {slot} {} ({:.3} s into its slot)",
+            now.as_secs(),
+            now.subsec_millis(),
+            data["block"].as_str().unwrap(),
+            into_slot.as_secs_f64()
+        );
+        if root_in(&data) != root {
+            continue;
+        }
+        match name.as_str() {
+            "block" if !imported => {
+                imported = true;
+                end = Instant::now() + chain.slots(3);
+            }
+            "block_gossip" => gossiped = true,
+            _ => {}
+        }
+    }
+    let hits_after = series(&gloas.far_sidecar_metrics, HITS).await;
+    println!("{HITS}{hits_before} then {hits_after}");
+    let log = std::fs::read_to_string(&gloas.far_node_log).unwrap_or_default();
+    let looked_up = log
+        .lines()
+        .find(|line| line.contains("Processing Lookup block") && line.contains(&hex0x(root)));
+    println!("far node log: {}", looked_up.unwrap_or("no lookup line"));
+
+    assert!(imported, "the far node never imported the block it missed");
+    assert!(
+        hits_after > hits_before,
+        "the sidecar served no block by root, so the far node got it some other way"
+    );
+    assert!(
+        looked_up.is_some(),
+        "the far node's log has no lookup for the block, so it got it some other way"
+    );
+    assert!(
+        !gossiped,
+        "block_gossip fired for a block the node fetched by root"
     );
 }
 

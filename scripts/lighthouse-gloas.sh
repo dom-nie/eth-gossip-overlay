@@ -20,6 +20,14 @@
 # is about 40 minutes at MATRIX_SLOTS=64, which is more than the nightly matrix job's budget;
 # the nightly stays on Sepolia at genesis. GLOAS_KEEP=1 leaves the enclave and the far node
 # running after the tests, for a look around with `kurtosis enclave inspect eth-gossip-gloas`.
+#
+# GLOAS_BY_ROOT=1 runs T-128's one test instead of the five, on a devnet set up for it. No
+# transaction spammer, so no blobs: the far node asks columns by root only of custody peers and
+# has none, so a looked-up block with blobs would never import. Both sidecars with the by-root
+# cache on and striping down to one recipient, because a sidecar stores only what it
+# reassembled and with one peer the default sends every block whole. And the far node with
+# --unknown-root-min-peers 1: v8.3.2 opens a lookup for a root an attestation names only once
+# three distinct peers have named it, and the far node has one peer.
 set -euo pipefail
 
 lighthouse=${1:?usage: $0 <lighthouse binary> <version>}
@@ -33,6 +41,32 @@ ctl=$root/target/debug/eth-gossip-overlayctl
 for tool in docker kurtosis python3; do
   command -v "$tool" > /dev/null || { echo "$tool is needed for the Gloas devnet" >&2; exit 1; }
 done
+
+by_root=${GLOAS_BY_ROOT:-0}
+spammers="
+  - spamoor
+spamoor_params:
+  spammers:
+    - scenario: eoatx
+      config:
+        throughput: 20
+    - scenario: blobs
+      config:
+        throughput: 4"
+far_flags=
+fanout=
+by_root_cache=
+if [[ $by_root == 1 ]]; then
+  spammers=" []"
+  far_flags="--unknown-root-min-peers 1"
+  fanout="
+  fanout:
+    large:
+      stripe_min_recipients: 1"
+  by_root_cache="
+  by_root_cache:
+    enabled: true"
+fi
 
 work=$(mktemp -d)
 pids=()
@@ -82,16 +116,7 @@ network_params:
   seconds_per_slot: $slot_seconds
   genesis_delay: 60
   num_validator_keys_per_node: 64
-additional_services:
-  - spamoor
-spamoor_params:
-  spammers:
-    - scenario: eoatx
-      config:
-        throughput: 20
-    - scenario: blobs
-      config:
-        throughput: 4
+additional_services:$spammers
 global_log_level: info
 PARAMS
 kurtosis enclave rm -f "$enclave" > /dev/null 2>&1 || true
@@ -134,6 +159,7 @@ far_metrics_port=$(free_port)
   --execution-jwt "$work/jwt/jwtsecret" \
   --allow-insecure-genesis-sync \
   --ignore-ws-check \
+  $far_flags \
   > "$work/far.log" 2>&1 &
 pids+=($!)
 far_http=http://127.0.0.1:$far_http_port
@@ -231,13 +257,13 @@ sidecar_config() { # $1 hostname, $2 overlay port, $3 beacon http, $4 beacon p2p
 overlay:
   listen: "127.0.0.1:$2"
   roster_file: $work/roster.yaml
-  fleet_seed_file: $work/seed
+  fleet_seed_file: $work/seed$fanout
 bn:
   identity_url: $3/eth/v1/node/identity
   events_url: $3/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip
   libp2p_addr: $4
   node_key_file: $work/$1.key
-  listen_addr: /ip4/127.0.0.1/tcp/0
+  listen_addr: /ip4/127.0.0.1/tcp/0$by_root_cache
 admin_socket: $socket_dir/$1.sock
 metrics_listen: 127.0.0.1:$5
 log:
@@ -286,20 +312,27 @@ export LIGHTHOUSE_METRICS=$near_metrics
 export LIGHTHOUSE_FAR_HTTP=$far_http
 export LIGHTHOUSE_FAR_P2P=/ip4/127.0.0.1/tcp/$far_p2p_port
 export LIGHTHOUSE_FAR_METRICS=http://127.0.0.1:$far_metrics_port
+export LIGHTHOUSE_FAR_LOG=$work/far/beacon/logs/beacon.log
 export LIGHTHOUSE_PROPOSERS=0-63
 export SIDECAR_NODE_KEY=$work/harness.key
 export SIDECAR_FAR_LOG=$work/far-sidecar.log
 export SIDECAR_FAR_ADMIN=$socket_dir/far.sock
+export SIDECAR_FAR_METRICS=http://127.0.0.1:$far_sidecar_metrics
 export SIDECAR_CTL=$ctl
 export MATRIX_SLOTS=${MATRIX_SLOTS:-64}
+tests=(
+  matrix_every_gloas_kind_crosses_the_overlay
+  matrix_the_node_forwards_full_columns_to_its_explicit_peer_with_partials_on
+  matrix_execution_payload_gossip_fires_once_per_envelope_from_any_source
+  matrix_column_repair_is_quiet_on_a_healthy_gloas_chain
+  matrix_a_block_whose_parent_envelope_the_node_lacks
+)
+if [[ $by_root == 1 ]]; then
+  tests=(matrix_block_gossip_does_not_fire_for_a_block_fetched_by_root)
+fi
 status=0
 cargo test --manifest-path "$root/Cargo.toml" -p overlay-bn --test matrix -- --ignored --nocapture \
-  --test-threads=1 --exact \
-  matrix_every_gloas_kind_crosses_the_overlay \
-  matrix_the_node_forwards_full_columns_to_its_explicit_peer_with_partials_on \
-  matrix_execution_payload_gossip_fires_once_per_envelope_from_any_source \
-  matrix_column_repair_is_quiet_on_a_healthy_gloas_chain \
-  matrix_a_block_whose_parent_envelope_the_node_lacks || status=$?
+  --test-threads=1 --exact "${tests[@]}" || status=$?
 
 if [[ $status -ne 0 ]]; then
   echo "--- far node log, last 40 lines ---" >&2
