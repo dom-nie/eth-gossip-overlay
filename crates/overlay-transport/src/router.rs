@@ -538,6 +538,44 @@ mod tests {
         );
     }
 
+    /// D36 counts the WAN copies a relay would save, and those are the remote hosts that want
+    /// the topic. A remote host that wants something else is owed no copy, and a subscriber in
+    /// the origin's own region crosses no WAN, so neither makes a region worth the relay hop:
+    /// `us` here is one subscriber short however many hosts it has, and `eu` is never relayed
+    /// into however many of them subscribe.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn in_region_and_unsubscribed_peers_do_not_count_toward_a_relaying_region() {
+        let connection = connection().await;
+        let (subnet, other) = (topic("beacon_attestation_7"), topic("beacon_attestation_3"));
+        let wants = || peer_state(&[(1, &subnet)], &[1]);
+        let wants_other = || peer_state(&[(1, &other), (2, &subnet)], &[1]);
+        let live = view_in(
+            &connection,
+            vec![
+                ("bn-eu-a", "eu", wants()),
+                ("bn-eu-b", "eu", wants()),
+                ("bn-eu-c", "eu", wants()),
+                ("bn-us-01", "us", wants()),
+                ("bn-us-02", "us", wants()),
+                ("bn-us-03", "us", wants_other()),
+                ("bn-us-04", "us", wants_other()),
+            ],
+        );
+
+        let plan = route(&subnet, Class::Small, None, &live, &me(), &relaying(3, 2));
+
+        assert_eq!(
+            plan,
+            RoutePlan::Direct(vec![
+                host("bn-eu-a"),
+                host("bn-eu-b"),
+                host("bn-eu-c"),
+                host("bn-us-01"),
+                host("bn-us-02"),
+            ])
+        );
+    }
+
     /// `small.cross_region: direct` is the switch that turns relaying off for an operator whose
     /// WAN egress turns out not to matter (§5.4). Every subscriber gets its own copy however
     /// large its region is.

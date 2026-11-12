@@ -441,6 +441,34 @@ pub(crate) mod tests {
         assert!(!roomy.contains("WARN"), "{roomy}");
     }
 
+    /// §5.3's floor is 8 MiB and a host that was given exactly that has what the design asks
+    /// for. The number is written out: a test reading the constant would agree with whatever
+    /// the constant became.
+    #[test]
+    fn socket_buffers_at_exactly_the_floor_are_not_warned_about() {
+        let floor = 8_388_608 * REPORTED_BUFFER_MULTIPLE;
+
+        let mark = LOG.len();
+        warn_if_socket_buffers_capped(floor, floor);
+        let at_the_floor = LOG.since(mark);
+        assert!(
+            !at_the_floor.contains("effective_bytes=8388608"),
+            "{at_the_floor}"
+        );
+
+        let mark = LOG.len();
+        warn_if_socket_buffers_capped(floor - 1, floor - 1);
+        let a_byte_short = LOG.since(mark);
+        for sysctl in ["net.core.rmem_max", "net.core.wmem_max"] {
+            assert!(
+                a_byte_short
+                    .lines()
+                    .any(|line| line.contains("effective_bytes=8388607") && line.contains(sysctl)),
+                "{a_byte_short}"
+            );
+        }
+    }
+
     #[test]
     fn transport_config_uses_keepalive_and_idle_from_config() {
         let cfg = Overlay {
@@ -453,6 +481,7 @@ pub(crate) mod tests {
 
         assert_eq!(field(&transport, "keep_alive_interval"), "Some(250ms)");
         assert_eq!(field(&transport, "max_idle_timeout"), "Some(3000)");
+        assert_eq!(field(&transport, "send_window"), "16777216");
     }
 
     /// §5.3 asks for probing that starts at 1200 and climbs, which is what quinn does when
@@ -538,13 +567,10 @@ pub(crate) mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn datagrams_are_enabled_and_delivered_on_loopback() {
         let transport = transport_config(&Overlay::default(), TEST_RECEIVE_WINDOW);
-        assert_eq!(
-            field(&transport, "datagram_send_buffer_size"),
-            DATAGRAM_BUFFER_BYTES.to_string()
-        );
+        assert_eq!(field(&transport, "datagram_send_buffer_size"), "1048576");
         assert_eq!(
             field(&transport, "datagram_receive_buffer_size"),
-            format!("Some({DATAGRAM_BUFFER_BYTES})")
+            "Some(1048576)"
         );
 
         let (seeds, pins) = fleet(&["bn-a", "bn-b"]);

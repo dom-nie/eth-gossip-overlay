@@ -280,6 +280,87 @@ fn send(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sender::{Deps, LARGE_QUEUED_BYTES_MAX, LargeLedger, PeerSender};
+    use crate::testutil::{CountingStats, SendSpy, eventually};
+
+    fn peer() -> Hostname {
+        Hostname("bn-01".to_owned())
+    }
+
+    /// One attestation for the one peer, as the fanout hands it over.
+    fn small(n: usize, sender: &SenderHandle) -> Small {
+        Small {
+            topic_id: TopicId::new(1),
+            payload: Bytes::from(format!("attestation {n}")),
+            to: vec![Dest {
+                host: peer(),
+                max_bytes: 1200,
+                relay: false,
+                sender: sender.clone(),
+            }],
+        }
+    }
+
+    /// T-043: a reload builds the batchers again, and what the old ones were still collecting
+    /// goes out first. The window here is far longer than the test, so the entry is in an open
+    /// batch when the change arrives, and nothing but the change can be what sends it.
+    #[tokio::test(start_paused = true)]
+    async fn a_config_change_sends_everything_the_batchers_held() {
+        let collecting = config::SmallClass {
+            batch_window: Duration::from_secs(60),
+            stale_after: Duration::from_secs(600),
+        };
+        let (reload, small_class) = watch::channel(collecting.clone());
+        let (batches, _task) = Batching::spawn(small_class, Arc::new(()));
+        let link = SendSpy::open();
+        let sender = PeerSender::spawn(
+            peer(),
+            link.clone(),
+            Deps {
+                ledger: Arc::new(LargeLedger::new(LARGE_QUEUED_BYTES_MAX)),
+                stats: Arc::new(()),
+            },
+        );
+        batches.push(small(0, &sender)).unwrap();
+        eventually("the batcher to take the entry", || {
+            batches.waiting.capacity() == WAITING_MAX
+        })
+        .await;
+        assert!(link.datagrams().is_empty(), "the window is still open");
+
+        reload
+            .send(config::SmallClass {
+                batch_window: Duration::from_secs(120),
+                ..collecting
+            })
+            .unwrap();
+
+        eventually("the entry to go out", || link.datagrams().len() == 1).await;
+    }
+
+    /// D21's first age check, on the batch nobody is left to send: every entry it held is
+    /// counted, because an operator reading `stale_dropped_total` is owed the ones that went
+    /// with nothing behind them as much as the ones that thinned a batch.
+    #[tokio::test]
+    async fn a_batch_that_aged_out_whole_counts_its_entries_as_stale_at_flush() {
+        let stats = Arc::new(CountingStats::default());
+        // Stale before the window closes, so the flush finds all of them too old.
+        let aging = config::SmallClass {
+            batch_window: Duration::from_millis(2),
+            stale_after: Duration::from_millis(1),
+        };
+        let (batches, _task) = Batching::spawn(watch::channel(aging).1, stats.clone());
+        let sender = SenderHandle::stopped(peer());
+
+        for n in 0..3 {
+            batches.push(small(n, &sender)).unwrap();
+        }
+
+        eventually("the flush to count them", || {
+            stats.stale_dropped(StaleReason::Flush) == 3
+        })
+        .await;
+    }
 
     /// T-136: the queue is counted in payloads. On this runtime the batcher does not run until
     /// the test waits, which is the batcher a wake-up behind while a slot's attestations come

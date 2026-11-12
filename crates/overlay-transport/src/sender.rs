@@ -659,6 +659,7 @@ mod tests {
     use overlay_core::topic::table::TopicId;
 
     use super::*;
+    use crate::testlog::LOG;
     use crate::testutil::{CountingStats, SendSpy, eventually, within};
 
     /// A batch of two entries for the peer, pushed at `at`, as the batcher would have flushed
@@ -749,6 +750,38 @@ mod tests {
         assert_eq!(DropReason::Full.as_str(), "full");
         assert_eq!(DropReason::Stale.as_str(), "stale");
         assert_eq!(DropReason::PeerDown.as_str(), "peer_down");
+    }
+
+    /// The `reason` label of `stale_dropped_total` (§12), pinned for the same reason.
+    #[test]
+    fn stale_reasons_carry_the_labels_section_12_names() {
+        assert_eq!(StaleReason::Flush.as_str(), "flush");
+        assert_eq!(StaleReason::Dequeue.as_str(), "dequeue");
+    }
+
+    /// The small lane holds frames and batches side by side and `peer_queue_depth{unit="bytes"}`
+    /// adds them up, so a batch is charged what it will put on the wire: the header, and each
+    /// entry's own overhead and payload. Nothing is awaited before the read, so the batch is
+    /// still in the lane.
+    #[tokio::test]
+    async fn a_queued_batch_counts_what_it_encodes_to_against_the_lanes_byte_depth() {
+        let link = SendSpy::stalled();
+        let (sender, stats) = sender(&link);
+        let now = Instant::now();
+        let encoded = encode_datagram(&flush_of(now).into_frame(BatchFlags::NONE)).len();
+
+        sender
+            .push_batch(flush_of(now), BatchFlags::NONE, Duration::from_secs(1), now)
+            .unwrap();
+
+        assert_eq!(
+            sender.depth(Class::Small),
+            Depth {
+                frames: 1,
+                bytes: encoded
+            }
+        );
+        assert_eq!(stats.queue_depth(&peer(), Class::Small), (1, encoded));
     }
 
     /// `eth-gossip-overlayctl status` reads a peer's queue depth off the handle and
@@ -943,6 +976,58 @@ mod tests {
         .await;
         assert_eq!(numbers(&link), vec![0]);
         assert!(link.datagrams().is_empty());
+    }
+
+    /// A peer whose transport refuses every datagram and writes streams like any other, which
+    /// is what one configured with no datagram receive buffer looks like from here.
+    struct NoDatagrams(SendSpy);
+
+    impl Transport for NoDatagrams {
+        async fn send(&self, frame: Bytes) -> std::io::Result<()> {
+            self.0.send(frame).await
+        }
+
+        fn send_datagram(&self, _: Bytes) -> Result<(), SendDatagramError> {
+            Err(SendDatagramError::UnsupportedByPeer)
+        }
+    }
+
+    /// A peer that takes no datagrams is a misconfigured transport at the other end, which is
+    /// one fact about one connection: the operator reads it once, and every batch after it
+    /// goes on a stream without saying so again.
+    #[tokio::test]
+    async fn a_peer_that_takes_no_datagrams_is_warned_about_once() {
+        let mark = LOG.len();
+        // A name no other test's sender has, so the line in the shared log is this test's.
+        let deaf = host("bn-no-datagrams");
+        let link = SendSpy::open();
+        let sender = PeerSender::spawn(
+            deaf.clone(),
+            NoDatagrams(link.clone()),
+            Deps {
+                ledger: Arc::new(LargeLedger::new(LARGE_QUEUED_BYTES_MAX)),
+                stats: Arc::new(()),
+            },
+        );
+        let warnings = || {
+            LOG.since(mark)
+                .lines()
+                .filter(|line| line.contains("peer takes no datagrams"))
+                .filter(|line| line.contains(&format!("peer={deaf}")))
+                .count()
+        };
+
+        for batches in 1..=2 {
+            let now = Instant::now();
+            sender
+                .push_batch(flush_of(now), BatchFlags::NONE, Duration::from_secs(1), now)
+                .unwrap();
+            eventually("the batch to go out on a stream", || {
+                link.sent().len() == batches
+            })
+            .await;
+            assert_eq!(warnings(), 1, "after {batches} batches");
+        }
     }
 
     /// One peer's lane is not the bound that matters when a hundred of them are slow at once:

@@ -75,7 +75,7 @@ use overlay_core::rs::{self, Params};
 use overlay_core::seen::SharedSeenCache;
 use overlay_core::subs::PeerState;
 use overlay_core::time::Clock;
-use overlay_core::topic::table::TopicId;
+use overlay_core::topic::table::{Announcer, TopicId};
 use overlay_core::topic::{Class, SubscriptionSets, Topic, TopicKind};
 use overlay_core::wire::{
     self, BatchEntry, BatchFlags, Chunk, ChunkFlags, Frame, Read, RepairReq, RepairResp,
@@ -849,11 +849,16 @@ impl Ctx {
         // One lock for the whole region rather than one per peer, the way `refan` takes it.
         let own = crate::hello::lock(&self.deps.relaying.topics);
         for (hostname, peer) in view.in_region(&self.deps.node.region) {
-            let wanted = *hostname != self.deps.node.hostname
-                && *hostname != self.peer
+            let wanted = *hostname != self.peer
                 && peer.negotiated.allows(features::STRIPING)
-                && own.announcer.told(hostname, topic_id)
-                && subs::state(&peer.state).subscribed(topic);
+                && owes_sibling(
+                    &own.announcer,
+                    &self.deps.node.hostname,
+                    hostname,
+                    peer,
+                    topic_id,
+                    topic,
+                );
             if !wanted {
                 continue;
             }
@@ -1129,9 +1134,14 @@ impl Ctx {
                 .in_region(&self.deps.node.region)
                 .into_iter()
                 .filter(|(hostname, peer)| {
-                    **hostname != self.deps.node.hostname
-                        && own.announcer.told(hostname, topic_id)
-                        && subs::state(&peer.state).subscribed(&topic)
+                    owes_sibling(
+                        &own.announcer,
+                        &self.deps.node.hostname,
+                        hostname,
+                        peer,
+                        topic_id,
+                        &topic,
+                    )
                 })
                 .filter_map(|(hostname, peer)| {
                     Some(Dest {
@@ -1361,15 +1371,33 @@ impl Ctx {
     }
 }
 
+/// Whether the second hop owes `hostname` what arrived on `topic`: an in-region sibling other
+/// than this host, subscribed to the topic, and already told what `topic_id` stands for. A frame
+/// naming a binding the peer has not had is one it drops and counts as `unknown_topic_id_total`,
+/// the alarm D12 reserved for a different fault (MD-04).
+fn owes_sibling(
+    announcer: &Announcer,
+    me: &Hostname,
+    hostname: &Hostname,
+    peer: &LivePeer,
+    topic_id: TopicId,
+    topic: &Topic,
+) -> bool {
+    hostname != me
+        && announcer.told(hostname, topic_id)
+        && subs::state(&peer.state).subscribed(topic)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
+    use crate::manager::LiveView;
     use crate::testlog::LOG;
     use crate::testutil::{
         Builder, CountingStats, DECODED_BLOCK, NodeKind, PUBLISHED_MAX, PublishSpy, SETTLE,
-        TestCluster, WAIT, eventually, subscriptions, topic,
+        TestCluster, WAIT, eventually, peer_state, subscriptions, topic, view,
     };
     use bytes::BytesMut;
     use overlay_core::budget::SUSTAINED_VIOLATION;
@@ -1825,6 +1853,78 @@ mod tests {
             0,
             "an entry went out under an id the peer had not been told"
         );
+    }
+
+    /// This host, two siblings subscribed to `subnet` and one that is not, as a relay's live
+    /// view holds them, and an announcer that has told every one of them id 0 but `untold`.
+    /// This host is in the view subscribed and told, which is the roster that lists a host
+    /// twice: nothing but the name keeps it from being its own sibling.
+    async fn siblings(subnet: &Topic) -> (LiveView, Announcer) {
+        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare])
+            .start()
+            .await;
+        let connection = tokio::time::timeout(WAIT, cluster.connected_pair(0, 1))
+            .await
+            .expect("the pair to connect")
+            .0;
+        let wants = || peer_state(&[(1, subnet)], &[1]);
+        let live = view(
+            &connection,
+            vec![
+                (sibling("me"), wants()),
+                (sibling("told"), wants()),
+                (sibling("untold"), wants()),
+                (sibling("elsewhere"), peer_state(&[(1, subnet)], &[])),
+            ],
+        );
+        let mut announcer = Announcer::new();
+        for name in ["me", "told", "elsewhere"] {
+            announcer.hello_sent(&sibling(name), 1);
+        }
+        (live, announcer)
+    }
+
+    fn sibling(name: &str) -> Hostname {
+        Hostname(format!("bn-{name}"))
+    }
+
+    /// Whether the relay `bn-me` owes `name` an entry on `subnet` under its own id 0.
+    fn owed(live: &LiveView, announcer: &Announcer, name: &str, subnet: &Topic) -> bool {
+        let hostname = sibling(name);
+        let peer = live.get(&hostname).expect("a peer of this view");
+        owes_sibling(
+            announcer,
+            &sibling("me"),
+            &hostname,
+            peer,
+            TopicId::new(0),
+            subnet,
+        )
+    }
+
+    /// MD-04, without the window a cluster cannot hit on purpose: the id is bound the instant
+    /// the relay interns it and the `TOPIC_ADD` follows on the control stream, and a subscribed
+    /// sibling in between gets nothing rather than an entry it would count against D12's alarm.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_relay_holds_back_an_entry_from_a_sibling_never_told_its_id() {
+        let subnet = topic("beacon_attestation_7");
+        let (live, announcer) = siblings(&subnet).await;
+
+        assert!(owed(&live, &announcer, "told", &subnet));
+        assert!(!owed(&live, &announcer, "untold", &subnet));
+        assert!(!owed(&live, &announcer, "me", &subnet));
+    }
+
+    /// D21: a sibling gets what it asked for and nothing else, however long it has known the
+    /// id. And this host is never its own sibling, whatever the view says of it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_relay_sends_no_entry_to_a_sibling_not_subscribed_to_its_topic() {
+        let subnet = topic("beacon_attestation_7");
+        let (live, announcer) = siblings(&subnet).await;
+
+        assert!(owed(&live, &announcer, "told", &subnet));
+        assert!(!owed(&live, &announcer, "elsewhere", &subnet));
+        assert!(!owed(&live, &announcer, "me", &subnet));
     }
 
     /// MD-04's bound: a relay interns only a topic whose fork digest it already knows, because
@@ -3614,6 +3714,56 @@ mod tests {
         );
         assert!(
             line.contains(&format!("node={}", cluster.hostname(1))),
+            "{line}"
+        );
+    }
+
+    /// The fleet-spread query compares when each host first heard of a message, so the line
+    /// carries the first chunk's arrival and not the moment the last one completed it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_reassembled_message_is_stamped_with_its_first_chunks_arrival() {
+        let mark = LOG.len();
+        let block = topic("beacon_block");
+        // A payload no other test sends, so its id picks this test's line out of the shared log.
+        let payload = payload(
+            b"a striped block only the test about the first chunk's stamp sends, \
+              and long enough that sixty-four bytes a chunk cuts it into several",
+        );
+        let clock = FakeClock::new();
+        let (cluster, peer) = peer_of_clocked(
+            subscriptions(&[&block], &[]),
+            &[(0, &block)],
+            Arc::new(clock.clone()),
+        )
+        .await;
+        let (msg_id, params, frames) = striped(0, &block, &payload, 64);
+        assert!(params.k > 1, "one chunk would be the first and the last");
+        let first_chunk_at = clock
+            .wall()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("a clock past 1970")
+            .as_nanos();
+
+        send(&peer, &frames[..1]).await;
+        eventually("the first chunk to land", || {
+            cluster.stats(1).chunks_received(&cluster.hostname(0)).len() == 1
+        })
+        .await;
+        clock.advance(Duration::from_millis(300));
+        send(&peer, &frames[1..usize::from(params.k)]).await;
+
+        eventually("the message to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        let line = LOG
+            .since(mark)
+            .lines()
+            .find(|line| line.contains(&msg_id.to_string()))
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            line.contains(&format!("first_arrival_ns={first_chunk_at}")),
             "{line}"
         );
     }
