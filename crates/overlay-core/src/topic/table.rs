@@ -397,6 +397,20 @@ mod tests {
         }
     }
 
+    /// MD-04: a relay names an id on a frame only to a peer that has the binding, and what the
+    /// peer has is what its HELLO carried, counted per peer.
+    #[test]
+    fn a_peer_is_told_exactly_the_ids_its_hello_carried() {
+        let mut announcer = Announcer::new();
+
+        announcer.hello_sent(&host("a"), 3);
+
+        assert!(announcer.told(&host("a"), TopicId::new(0)));
+        assert!(announcer.told(&host("a"), TopicId::new(2)));
+        assert!(!announcer.told(&host("a"), TopicId::new(3)));
+        assert!(!announcer.told(&host("b"), TopicId::new(0)));
+    }
+
     #[test]
     fn apply_add_with_conflicting_string_is_conflict_error() {
         let mut peer = PeerTopicTable::new();

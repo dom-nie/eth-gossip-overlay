@@ -196,6 +196,16 @@ mod tests {
         assert_eq!(Bitmap::decode(&Bitmap::new().encode()), Bitmap::new());
     }
 
+    /// What keeps a silent peer out of a relay pool (D20). Id 70 is in the second word, so the
+    /// first is all zeroes and still does not make the bitmap empty.
+    #[test]
+    fn a_bitmap_is_empty_until_a_bit_is_set() {
+        assert!(Bitmap::new().is_empty());
+
+        assert!(!bitmap([0]).is_empty());
+        assert!(!bitmap([70]).is_empty());
+    }
+
     fn topic(name: &str) -> Topic {
         Topic::parse(&format!("/eth2/6a95a1a9/{name}/ssz_snappy")).unwrap()
     }

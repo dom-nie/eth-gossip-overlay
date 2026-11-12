@@ -947,6 +947,17 @@ log:
     }
 
     #[test]
+    fn an_irq_suspend_timeout_of_exactly_one_second_is_accepted() {
+        let cfg = Config::from_yaml("overlay: { io_thread: { irq_suspend_timeout_ms: 1000 } }")
+            .expect("the longest timeout the bound allows");
+
+        assert_eq!(
+            cfg.overlay.io_thread.irq_suspend_timeout,
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
     fn keepalive_must_be_shorter_than_idle_timeout() {
         let err = Config::from_yaml("overlay: { keepalive_ms: 5000, idle_timeout_ms: 5000 }")
             .unwrap_err();

@@ -745,4 +745,20 @@ mod tests {
 
         assert!(!arrivals.imported(2, [0x55; 32]));
     }
+
+    /// What a receive path asks before it offers the node a block: the parent has to be one the
+    /// node said it imported. A parent that only arrived is one the node may still refuse.
+    #[test]
+    fn is_imported_answers_for_a_block_the_node_imported_and_not_for_one_it_did_not() {
+        let spec = slots_of(12);
+        let arrivals = Arrivals::new(Arc::new(FakeClock::new()), spec.subscribe());
+        arrivals.arrived([0x61; 32], &Source::Bn);
+        arrivals.arrived([0x62; 32], &Source::Bn);
+
+        arrivals.imported(7, [0x61; 32]);
+
+        assert!(arrivals.is_imported([0x61; 32]));
+        assert!(!arrivals.is_imported([0x62; 32]));
+        assert!(!arrivals.is_imported([0x63; 32]));
+    }
 }

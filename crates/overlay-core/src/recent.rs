@@ -706,6 +706,22 @@ mod tests {
         assert!(line.contains("index=42"), "{line}");
     }
 
+    /// The handle the responder and the sweep hold answers like the store under it: a payload
+    /// is there to serve until the sweep takes it, and `get` alone never expires one.
+    #[test]
+    fn the_shared_store_answers_a_get_and_forgets_after_gc() {
+        let clock = FakeClock::new();
+        let recent = SharedRecentLarge::new(store(1024));
+        recent.insert(id(1), topic(), payload(1, 200), None, clock.now());
+
+        assert_eq!(recent.get(&id(1)), Some((topic(), payload(1, 200))));
+
+        clock.advance(Duration::from_secs(60));
+        recent.gc(clock.now());
+
+        assert_eq!(recent.get(&id(1)), None);
+    }
+
     /// Counts the refusals, which is `column_index_conflict_total` (§12).
     #[derive(Default)]
     struct Conflicts(AtomicU64);

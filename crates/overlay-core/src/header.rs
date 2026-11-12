@@ -85,3 +85,27 @@ pub fn block_parent_root(ssz: &[u8]) -> Option<[u8; 32]> {
     }
     ssz.get(PARENT_ROOT_AT)?.try_into().ok()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shortest bytes that carry a parent root: the offset to `message`, then `[7; 32]`
+    /// where the root sits.
+    fn signed_block(message_at: u32) -> Vec<u8> {
+        let mut ssz = vec![0; 148];
+        ssz[..4].copy_from_slice(&message_at.to_le_bytes());
+        ssz[116..148].fill(7);
+        ssz
+    }
+
+    #[test]
+    fn block_parent_root_reads_the_parent_at_its_fixed_offset() {
+        assert_eq!(block_parent_root(&signed_block(100)), Some([7; 32]));
+
+        // Not a signed block: nothing else puts its first offset anywhere but 100.
+        assert_eq!(block_parent_root(&signed_block(101)), None);
+        // One byte short of the root.
+        assert_eq!(block_parent_root(&signed_block(100)[..147]), None);
+    }
+}
