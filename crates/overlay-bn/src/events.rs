@@ -427,7 +427,7 @@ mod tests {
     use std::time::Duration;
 
     use overlay_core::backoff::Backoff;
-    use overlay_core::custody::TRACKED_BLOCKS;
+    use overlay_core::custody::{GLOAS_COLUMN_GRACE, TRACKED_BLOCKS};
     use overlay_core::events::Source;
     use overlay_core::header::Header;
     use overlay_core::time::{Clock, FakeClock};
@@ -728,6 +728,8 @@ mod tests {
         assert_eq!(custody.gaps(Duration::ZERO, clock.now(), &none), Vec::new());
 
         consume(&envelope_frame(9, &root(0xaa)), &custody, &clock);
+        assert_eq!(custody.gaps(Duration::ZERO, clock.now(), &none), Vec::new());
+        clock.advance(GLOAS_COLUMN_GRACE);
         let gaps = custody.gaps(Duration::ZERO, clock.now(), &none);
         assert_eq!(
             gaps.first().map(|gap| gap.missing.clone()),

@@ -369,7 +369,9 @@ impl Block {
     ) -> Option<ColumnGap> {
         let seen_at = self.seen_at?;
         let expected = self.expected.as_ref()?;
-        if now.saturating_duration_since(seen_at) < deadline {
+        // A Gloas slot's `seen_at` is in the future until its grace has run, and that is not
+        // yet "zero time since": a deadline of zero would otherwise start before the grace.
+        if now < seen_at || now.duration_since(seen_at) < deadline {
             return None;
         }
         let wanted = |index: &u16| !self.have.contains(*index);
@@ -1013,6 +1015,30 @@ mod tests {
                 missing: vec![0, 3, 7],
                 have_count: 0,
             }]
+        );
+    }
+
+    /// `classes.large.repair_deadline_ms: 0` means ask the moment a column is owed, and under
+    /// Gloas no column is owed until the grace has run.
+    #[test]
+    fn a_zero_deadline_still_waits_out_the_grace() {
+        let clock = FakeClock::new();
+        let mut tracker = tracking_gloas(&clock, FIRST_GLOAS_SLOT);
+        tracker.on_envelope(FIRST_GLOAS_SLOT, ROOT, clock.now());
+        let none = tracker.column_set([]);
+
+        clock.advance(Duration::from_millis(1499));
+        assert_eq!(
+            tracker.missing_past_deadline(Duration::ZERO, clock.now(), &none),
+            Vec::new()
+        );
+
+        clock.advance(Duration::from_millis(1));
+        assert_eq!(
+            tracker
+                .missing_past_deadline(Duration::ZERO, clock.now(), &none)
+                .len(),
+            1
         );
     }
 
