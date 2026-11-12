@@ -1117,16 +1117,21 @@ async fn striped_block_costs_the_origin_two_block_equivalents_and_each_host_one(
     let payload = incompressible(13, 200 * 1024);
     fleet.node(0).bn().publish(&block, &payload).await;
 
-    for node in eu.iter().copied() {
-        fleet
-            .wait_for_metrics(
-                "every host of the origin's region to pass its chunks on",
-                fleet.wait(),
-                |now| out(&now[node]) - out(&before[node]) > 0.0,
-            )
-            .await;
-    }
-    fleet.settle().await;
+    // What each host sent is only its share once the fleet has stopped sending. The import
+    // comes first so that the quiet the second wait finds is the one after the block and not
+    // the one before it left the origin.
+    fleet
+        .wait_for(
+            "every other beacon node to import the block",
+            fleet.wait(),
+            |fleet| (1..fleet.hosts()).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
+        )
+        .await;
+    fleet
+        .wait_until_still("every host to stop sending", fleet.wait(), |now| {
+            now.iter().map(out).collect()
+        })
+        .await;
 
     // The gossipsub wire form is what the sidecar splits, and snappy leaves an incompressible
     // payload about as long as it started, so the block-equivalent this is measured in is the

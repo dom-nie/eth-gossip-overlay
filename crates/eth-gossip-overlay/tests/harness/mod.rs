@@ -33,8 +33,9 @@
 //! # Waiting
 //!
 //! Nothing here sleeps for longer than [`SETTLE`]. Every wait is [`Fleet::wait_for`] or
-//! [`Fleet::wait_for_metrics`] polling a condition until it holds or the deadline passes, and a
-//! wait that runs out says what it was waiting for. [`Fleet::wait_full_mesh`] is the one every
+//! [`Fleet::wait_for_metrics`] polling a condition until it holds or the deadline passes, or
+//! [`Fleet::wait_until_still`] polling a reading until it stops changing, and a wait that
+//! runs out says what it was waiting for. [`Fleet::wait_full_mesh`] is the one every
 //! scenario starts with: it proves the connection count, the subscription exchange and both
 //! gossipsub links by driving a probe message from every node to every peer it should have.
 //!
@@ -409,6 +410,38 @@ impl Fleet {
             tokio::time::sleep(POLL).await;
         }
         panic!("waited {timeout:?} for {what}");
+    }
+
+    /// Returns once `read`, over a fresh scrape of every node, has given the same answer for
+    /// four [`SETTLE`]s on end, or panics after `timeout` with the last two answers it gave.
+    ///
+    /// This is the wait for a total that is only true once the fleet has stopped sending. The
+    /// first sign of traffic says a transfer began, and on a loaded machine the rest of it can
+    /// be a good deal more than one [`SETTLE`] behind.
+    pub async fn wait_until_still(
+        &self,
+        what: &str,
+        timeout: Duration,
+        mut read: impl FnMut(&[Scrape]) -> Vec<f64>,
+    ) {
+        let deadline = Instant::now() + timeout;
+        let mut last = read(&self.metrics().await);
+        let mut previous = last.clone();
+        let mut unchanged_since = Instant::now();
+        while Instant::now() < deadline {
+            if unchanged_since.elapsed() >= SETTLE * 4 {
+                return;
+            }
+            tokio::time::sleep(POLL).await;
+            let now = read(&self.metrics().await);
+            if now != last {
+                previous = std::mem::replace(&mut last, now);
+                unchanged_since = Instant::now();
+            }
+        }
+        panic!(
+            "waited {timeout:?} for {what}: the last two readings were {previous:?} and {last:?}"
+        );
     }
 
     /// A scrape of every node.
