@@ -164,7 +164,7 @@ overlay:
   fleet_seed_file: $work/seed
 bn:
   identity_url: $LIGHTHOUSE_HTTP/eth/v1/node/identity
-  events_url: $LIGHTHOUSE_HTTP/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip
+  events_url: $LIGHTHOUSE_HTTP/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip,execution_payload
   libp2p_addr: $LIGHTHOUSE_P2P
   node_key_file: $work/node.key
   listen_addr: /ip4/127.0.0.1/tcp/0

@@ -260,7 +260,7 @@ overlay:
   fleet_seed_file: $work/seed$fanout
 bn:
   identity_url: $3/eth/v1/node/identity
-  events_url: $3/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip
+  events_url: $3/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip,execution_payload
   libp2p_addr: $4
   node_key_file: $work/$1.key
   listen_addr: /ip4/127.0.0.1/tcp/0$by_root_cache

@@ -87,7 +87,9 @@ newer than this sidecar knows; upgrade the sidecar.
 `bn.events_url does not ask for every event topic the sidecar reads, so import telemetry or
 column repair goes without them; add them to bn.events_url` is logged once at start, with the
 missing topics: a hand-set URL leaves out some of `block`, `block_gossip`,
-`data_column_sidecar` and `execution_payload_gossip`. Add them and restart the sidecar.
+`data_column_sidecar`, `execution_payload_gossip` and `execution_payload`. Add them and restart
+the sidecar. Without the last, a Gloas block built on a payload the node has not imported is
+offered to it anyway, and the node drops it after four refused lookups.
 
 `the beacon node refused its event stream, so import telemetry and column repair are off for
 this host; check bn.events_url's topics against this beacon node's Lighthouse version
