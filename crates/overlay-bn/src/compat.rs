@@ -276,8 +276,9 @@ impl Watch {
 
 /// The fourteen Lighthouse behaviours the design leans on, or works around, that no
 /// specification promises (CL-N2), each with the test that fails by name when a release
-/// changes it. The last five are Gloas and were measured on the devnet `scripts/lighthouse-
-/// matrix.sh <version> --gloas` brings up (T-121); each row says what was measured and when.
+/// changes it. The last five are Gloas and were measured on the devnet that
+/// `scripts/lighthouse-matrix.sh <version> --gloas` brings up (T-121); each row says what was
+/// measured and when.
 const ASSUMPTIONS: [(&str, &str); 14] = [
     (
         "A trusted peer is admitted whenever the beacon node is under its inbound cap, is dialled by the beacon node through `add_peer` on demand under the outbound cap (and before v8.3.0 through `--libp2p-addresses` at startup), and is never pruned once connected (MD-01)",
