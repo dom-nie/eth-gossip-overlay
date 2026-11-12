@@ -1106,12 +1106,18 @@ fn reassembled(scrape: &Scrape) -> f64 {
     scrape.sum(&format!("{RECONSTRUCT_SECONDS}_count"), &[])
 }
 
-/// The chunks one message of `bytes` is cut into at `parity_ratio`, rounded generously: the
-/// sidecar splits the gossipsub wire form, and snappy leaves an incompressible payload a few
-/// bytes longer than it started.
-fn chunks_per_message(bytes: usize, parity_ratio: f64) -> usize {
+/// The data and parity chunks one message of `bytes` is cut into at `parity_ratio`, rounded
+/// generously: the sidecar splits the gossipsub wire form, and snappy leaves an incompressible
+/// payload a few bytes longer than it started.
+fn split(bytes: usize, parity_ratio: f64) -> (usize, usize) {
     let data = (bytes + 64).div_ceil(2048).max(1);
-    data + ((parity_ratio * data as f64).ceil() as usize).max(1)
+    (data, ((parity_ratio * data as f64).ceil() as usize).max(1))
+}
+
+/// Every chunk of one message, data and parity together.
+fn chunks_per_message(bytes: usize, parity_ratio: f64) -> usize {
+    let (data, parity) = split(bytes, parity_ratio);
+    data + parity
 }
 
 /// A 100 KiB block at the shipped tenth is 51 data chunks and 6 of parity, which is what the
