@@ -1090,7 +1090,7 @@ async fn chunk_arriving_before_topic_add_is_counted_not_crashed_and_zero_in_stea
 
 /// §5.4's whole reason for existing, measured: a 200 KB block leaves the origin as about two
 /// block-equivalents, one stripe per region, however many hosts are in them, and each host of
-/// the striped region passes on about one block-equivalent. Fanning the block out whole would
+/// the striped region passes on at most about one block-equivalent. Fanning the block out whole would
 /// have cost the origin one copy per host, which is the eleven this fleet has and the two
 /// hundred the deployment §2 describes does.
 #[tokio::test(flavor = "multi_thread")]
@@ -1145,10 +1145,11 @@ async fn striped_block_costs_the_origin_two_block_equivalents_and_each_host_one(
     );
     for node in eu.iter().copied() {
         let host = (out(&now[node]) - out(&before[node])) / block_bytes;
-        assert!(
-            (0.8..1.2).contains(&host),
-            "node {node} sent {host} block-equivalents"
-        );
+        // No lower bound: a host stops passing chunks on the moment it holds the block (D19),
+        // and one that put it together from its neighbours' chunks before its own share
+        // arrived sends well under one. Every node importing the block, waited for above, is
+        // what shows the shares added up.
+        assert!(host < 1.2, "node {node} sent {host} block-equivalents");
     }
 }
 
