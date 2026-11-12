@@ -702,6 +702,58 @@ mod tests {
         );
     }
 
+    /// Who the scheduler asked about the one message these tests collect, in order, with every
+    /// request answered `not_found` the tick it was made, up to the tick it gave up.
+    fn asked_until_gave_up(
+        scheduler: &mut Scheduler,
+        reassembler: &Reassembler,
+        clock: &FakeClock,
+    ) -> Vec<Hostname> {
+        let mut asked = Vec::new();
+        for _ in 0..2 * REPAIR_ATTEMPTS {
+            for decision in scheduler.tick(reassembler, DEADLINE, reachable, clock.now()) {
+                match decision {
+                    Decision::Ask(request) => asked.push(request.peer),
+                    Decision::GaveUp(_) => return asked,
+                    other => panic!("the chunk path decided {other:?}"),
+                }
+            }
+            scheduler.answered(&MessageId([9; 20]));
+            clock.advance(REPAIR_TICK);
+        }
+        panic!("still asking after {asked:?}");
+    }
+
+    /// A host in a region that lost a stripe host mid-transfer: every sibling that forwarded it
+    /// a chunk is short of the same ones, and the origin is the only peer that can answer. With
+    /// more forwarders than attempts, the origin still has to be one of the peers asked (T-133).
+    #[test]
+    fn repair_asks_the_origin_before_it_gives_up() {
+        let clock = FakeClock::new();
+        let reassembler = collecting(
+            8,
+            &[
+                (0, "origin", false),
+                (1, "b", true),
+                (2, "c", true),
+                (3, "d", true),
+                (4, "e", true),
+                (5, "f", true),
+            ],
+            clock.now(),
+        );
+        let mut scheduler = Scheduler::default();
+        clock.advance(DEADLINE);
+
+        let asked = asked_until_gave_up(&mut scheduler, &reassembler, &clock);
+
+        assert!(
+            asked.contains(&host("origin")),
+            "gave up after asking {asked:?}"
+        );
+        assert_eq!(asked.len(), REPAIR_ATTEMPTS);
+    }
+
     /// The budget is a wall the candidate list does not get past: 1.5 s after the deadline the
     /// message is given up on whoever is left to ask, because one that arrives later has already
     /// lost the race (D24).
