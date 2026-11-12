@@ -676,9 +676,11 @@ async fn rolling_upgrade_adding_a_feature_bit_keeps_pairing_and_serves_older_pee
     fleet.node(0).bn().publish(&subnet, &out).await;
     fleet
         .wait_for(
-            "both other beacon nodes to import it",
+            "every other beacon node to import it",
             fleet.wait(),
-            |fleet| (1..3).all(|index| fleet.node(index).bn().count(&subnet, &out) == 1),
+            |fleet| {
+                (1..fleet.hosts()).all(|index| fleet.node(index).bn().count(&subnet, &out) == 1)
+            },
         )
         .await;
 
@@ -688,7 +690,11 @@ async fn rolling_upgrade_adding_a_feature_bit_keeps_pairing_and_serves_older_pee
         .wait_for(
             "the upgraded hosts to import what it sent",
             fleet.wait(),
-            |fleet| (0..2).all(|index| fleet.node(index).bn().count(&subnet, &back) == 1),
+            |fleet| {
+                (0..fleet.hosts())
+                    .filter(|&index| index != 2)
+                    .all(|index| fleet.node(index).bn().count(&subnet, &back) == 1)
+            },
         )
         .await;
 
