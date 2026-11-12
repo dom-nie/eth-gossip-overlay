@@ -1114,6 +1114,14 @@ fn chunks_per_message(bytes: usize, parity_ratio: f64) -> usize {
     data + ((parity_ratio * data as f64).ceil() as usize).max(1)
 }
 
+/// A 100 KiB block at the shipped tenth is 51 data chunks and 6 of parity, which is what the
+/// repair scenario's count of hosts to lose is read off.
+#[test]
+fn split_of_a_100_kib_block_at_a_tenth_is_51_data_and_6_parity() {
+    assert_eq!(split(100 * 1024, 0.1), (51, 6));
+    assert_eq!(chunks_per_message(100 * 1024, 0.1), 57);
+}
+
 /// §5.4 end to end, which is what the whole large class exists for: a block one beacon node
 /// validated is cut up, spread over the region a chunk per host, passed on once by each of them
 /// and put back together on every host, whose beacon node imports it exactly once. Until the
