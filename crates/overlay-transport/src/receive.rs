@@ -174,6 +174,12 @@ pub trait ReceiveStats: ManagerStats + TrafficStats {
     /// One per beacon node restart on an injecting host is normal; a steady climb is a node
     /// that has stopped importing.
     fn parent_unknown(&self);
+
+    /// `publish_suppressed_total{class="large", reason="parent_envelope_unknown"}`: a Gloas
+    /// block built on a payload this host's beacon node has not imported, kept from it rather
+    /// than offered (T-135, D44). Its own series, because the cause and what an operator does
+    /// about it differ from a missing parent block: this one says envelopes reach the node late.
+    fn parent_envelope_unknown(&self);
 }
 
 impl ReceiveStats for () {
@@ -190,6 +196,7 @@ impl ReceiveStats for () {
     fn reconstructed(&self, _: Class, _: Duration) {}
     fn repair_request(&self, _: RepairForm, _: RepairOutcome) {}
     fn parent_unknown(&self) {}
+    fn parent_envelope_unknown(&self) {}
 }
 
 /// What a payload's arrival owes.
@@ -775,17 +782,6 @@ impl Ctx {
             return false;
         }
         self.deps.stats.first_seen(class);
-        let publish = !self.parent_unknown(topic, &ssz);
-        if publish {
-            self.deps.publish.enqueue(PublishItem {
-                topic: topic.clone(),
-                id,
-                payload: payload.clone(),
-                class,
-            });
-        } else {
-            self.deps.stats.parent_unknown();
-        }
         // Insert site 2 of 2 for the recent store (§5.6); T-016's inbound path is the other. A
         // reassembled message is always large class, and the peers that sent its chunks are the
         // ones that may still be missing some of them. `ssz` is what the reassembler
@@ -797,13 +793,33 @@ impl Ctx {
         // payload that took `(block_root, index)` here would be what this host answered the next
         // requester with once its own node verified the real column (MD-06, D39). The hosts that
         // fanned the message out still hold it for anyone short of a chunk.
-        let header = match self.repair {
+        let read = |payload: Bytes| match self.repair {
             true => self.deps.recent.header_of(topic, &ssz),
             false => self
                 .deps
                 .recent
                 .insert(id, topic.clone(), payload, Some(&ssz), now),
         };
+        // A block is read before it is offered, because whether the node will take it depends
+        // on the payload its bid builds on (D44). Everything else is queued first and read
+        // after: nothing waiting on the beacon node is owed the read (T-083).
+        let is_block = matches!(topic.kind(), TopicKind::BeaconBlock);
+        let mut header = is_block.then(|| read(payload.clone())).flatten();
+        if self.parent_unknown(topic, &ssz) {
+            self.deps.stats.parent_unknown();
+        } else if self.parent_payload_unknown(header) {
+            self.deps.stats.parent_envelope_unknown();
+        } else {
+            self.deps.publish.enqueue(PublishItem {
+                topic: topic.clone(),
+                id,
+                payload: payload.clone(),
+                class,
+            });
+        }
+        if !is_block {
+            header = read(payload);
+        }
         let source = events::Source::Overlay { origin };
         self.deps.arrivals.saw(header, &source);
         events::emit_first_arrival(&FirstArrival {
@@ -1309,6 +1325,8 @@ impl Ctx {
                 .is_some_and(|ssz| self.parent_unknown(&topic, ssz))
             {
                 self.deps.stats.parent_unknown();
+            } else if self.parent_payload_unknown(header) {
+                self.deps.stats.parent_envelope_unknown();
             } else {
                 self.deps.publish.enqueue(PublishItem {
                     topic,
@@ -1341,6 +1359,31 @@ impl Ctx {
         tracing::debug!(
             parent_root = %events::hex(parent),
             "keeping back a block whose parent the beacon node has not imported"
+        );
+        true
+    }
+
+    /// Whether `header` is a Gloas block built on a payload this host's beacon node has not
+    /// imported (T-135, D44). To the node such a block has an unknown parent just as one whose
+    /// parent block it lacks does, and it ends the same way: the node asks this sidecar for the
+    /// parent block, which it already holds, never for the envelope, and drops the child after
+    /// four refusals. Kept back, the block reaches the node from a public peer once the payload
+    /// is in. A block before Gloas has no bid and passes, and so does every block on a host
+    /// whose event stream is not asked for payload imports.
+    fn parent_payload_unknown(&self, header: Option<header::Header>) -> bool {
+        let Some(header::Header::Block {
+            parent_payload: Some(payload),
+            ..
+        }) = header
+        else {
+            return false;
+        };
+        if !self.deps.arrivals.lacks_payload(payload) {
+            return false;
+        }
+        tracing::debug!(
+            parent_block_hash = %events::hex(payload),
+            "keeping back a block built on a payload the beacon node has not imported"
         );
         true
     }
@@ -4044,6 +4087,109 @@ mod tests {
         assert_eq!(published[0].class, Class::Large);
         assert_eq!(cluster.held_when_published(1), vec![true]);
         assert_eq!(cluster.stats(1).parent_unknown(), 0);
+    }
+
+    /// [`signed_block`] under Gloas, as far as the receive path reads one: its bid builds on the
+    /// payload `parent_payload`.
+    fn gloas_block(parent_root: [u8; 32], parent_payload: [u8; 32], body: &[u8]) -> Vec<u8> {
+        let mut with_bid = crate::testutil::BID.to_vec();
+        with_bid.extend_from_slice(&parent_payload);
+        with_bid.extend_from_slice(body);
+        signed_block(parent_root, &with_bid)
+    }
+
+    /// A host whose node imported the block `PARENT` and whose event stream reports payload
+    /// imports, with a peer that sends it blocks.
+    async fn gloas_host() -> (TestCluster, PeerInfo, Topic) {
+        let block = topic("beacon_block");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        cluster.arrivals(1).imported(4_241, PARENT);
+        cluster.arrivals(1).expect_payload_imports();
+        (cluster, peer, block)
+    }
+
+    const PARENT: [u8; 32] = [0x44; 32];
+
+    /// T-135 test 2 (D44): a Gloas block built on a payload this host's beacon node has not
+    /// imported is not offered to it, on either overlay path, though the node has the parent
+    /// block and D42 lets the child through. Offered, the node would call the parent unknown,
+    /// ask this sidecar for the block it already holds and never for the envelope, and drop
+    /// the child after four refusals.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_block_whose_parent_envelope_the_node_has_not_imported_is_not_published() {
+        let (cluster, peer, block) = gloas_host().await;
+        let whole_block = gloas_block(PARENT, [0x51; 32], b"a child sent whole");
+        let striped_block = gloas_block(PARENT, [0x52; 32], &incompressible(4096));
+        let (_, params, frames) = striped(0, &block, &striped_block, 512);
+
+        send(&peer, &[whole(0, &block, &whole_block)]).await;
+        send(&peer, &frames[..usize::from(params.k)]).await;
+
+        eventually("both blocks to be kept from the beacon node", || {
+            cluster.stats(1).parent_envelope_unknown() == 2
+        })
+        .await;
+        tokio::time::sleep(SETTLE).await;
+        assert!(cluster.published(1).is_empty());
+        assert_eq!(cluster.stats(1).parent_unknown(), 0);
+        assert_eq!(cluster.stats(1).first_seen(Class::Large), 2);
+    }
+
+    /// The honest path: the node imported the payload the bid names, so the block is queued as
+    /// it always was.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_block_built_on_a_payload_the_node_imported_is_published() {
+        let (cluster, peer, block) = gloas_host().await;
+        cluster.arrivals(1).payload_imported([0x53; 32]);
+        let child = gloas_block(PARENT, [0x53; 32], b"a child of a full parent");
+
+        send(&peer, &[whole(0, &block, &child)]).await;
+
+        eventually("the block to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert_eq!(cluster.published(1)[0].payload, child);
+        assert_eq!(cluster.stats(1).parent_envelope_unknown(), 0);
+    }
+
+    /// Why the check is keyed on the hash and not on the parent's root: a parent whose payload
+    /// was withheld never has an envelope, and its child's bid builds on the payload before it.
+    /// The node needs nothing more than that one, and a check that waited for the parent's own
+    /// envelope would keep back every child of a withheld payload on every host.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_block_built_on_an_empty_parent_is_published() {
+        let (cluster, peer, block) = gloas_host().await;
+        let grandparent_payload = [0x54; 32];
+        cluster.arrivals(1).payload_imported(grandparent_payload);
+        // Nothing is ever imported for `PARENT`'s own payload.
+        let child = gloas_block(PARENT, grandparent_payload, b"a child of an empty parent");
+
+        send(&peer, &[whole(0, &block, &child)]).await;
+
+        eventually("the block to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert_eq!(cluster.stats(1).parent_envelope_unknown(), 0);
+    }
+
+    /// A `bn.events_url` without `execution_payload` reports no import at all, and reading that
+    /// as "nothing imported" would keep back every Gloas block. The check stays off.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_host_not_told_of_payload_imports_keeps_no_block_back() {
+        let block = topic("beacon_block");
+        let (cluster, peer) = peer_of(subscriptions(&[&block], &[]), &[(0, &block)]).await;
+        cluster.arrivals(1).imported(4_241, PARENT);
+        let child = gloas_block(PARENT, [0x55; 32], b"a child on a host with the check off");
+
+        send(&peer, &[whole(0, &block, &child)]).await;
+
+        eventually("the block to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        assert_eq!(cluster.stats(1).parent_envelope_unknown(), 0);
     }
 
     /// DX-N1 at the third ingress site: a host reassembles a message for a topic its own beacon

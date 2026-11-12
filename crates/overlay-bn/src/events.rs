@@ -63,6 +63,16 @@ pub enum Event {
         /// That block's root.
         block_root: [u8; 32],
     },
+    /// `execution_payload`: the beacon node has imported this block's payload envelope, so a
+    /// block whose bid builds on `block_hash` no longer has an unknown parent (D44).
+    PayloadImported {
+        /// The slot of the block the payload belongs to.
+        slot: u64,
+        /// That block's root.
+        block_root: [u8; 32],
+        /// The execution block hash of the payload, which is what a child's bid names.
+        block_hash: [u8; 32],
+    },
     /// `data_column_sidecar`: the beacon node has verified this column.
     Column {
         /// The slot the column's block is for.
@@ -104,7 +114,9 @@ impl BlockEvents {
     /// hiccup between the two processes, so every end is a reconnect under `backoff` (T-013).
     ///
     /// A `url` whose `topics` leaves out one this module reads is warned about once and used as
-    /// given, since a proxy in front of the node may expect exactly that URL.
+    /// given, since a proxy in front of the node may expect exactly that URL. One that leaves
+    /// out `execution_payload` also leaves the parent-payload check off: a stream that never
+    /// reports an import cannot be read as "nothing was imported" (D44).
     #[expect(
         clippy::expect_used,
         reason = "with no TLS backend compiled in, a client can only fail to build on proxy \
@@ -124,8 +136,12 @@ impl BlockEvents {
                 %url,
                 ?missing,
                 "bn.events_url does not ask for every event topic the sidecar reads, so import \
-                 telemetry or column repair goes without them; add them to bn.events_url"
+                 telemetry, column repair or the parent-payload check goes without them; add \
+                 them to bn.events_url"
             );
+        }
+        if !missing.contains(&EXECUTION_PAYLOAD) {
+            arrivals.expect_payload_imports();
         }
         // No request timeout: this one is meant to stay open between blocks.
         let http = reqwest::Client::builder()
@@ -246,6 +262,7 @@ fn apply(
         Event::Envelope { slot, block_root } => {
             custody.on_envelope(slot, block_root, clock.now());
         }
+        Event::PayloadImported { block_hash, .. } => arrivals.payload_imported(block_hash),
         Event::Column {
             slot,
             index,
@@ -288,19 +305,30 @@ struct EnvelopeData {
     block_root: String,
 }
 
+/// The `data` of an `execution_payload` event. `builder_index` and `execution_optimistic` ride
+/// along and are not read.
+#[derive(Deserialize)]
+struct PayloadData {
+    slot: String,
+    block_root: String,
+    block_hash: String,
+}
+
 /// The event names the sidecar reads. Every other topic on the stream is skipped, and so is
 /// every comment but the one the beacon node writes when it has thrown events away.
 const BLOCK: &str = "block";
 const BLOCK_GOSSIP: &str = "block_gossip";
 const DATA_COLUMN_SIDECAR: &str = "data_column_sidecar";
 const EXECUTION_PAYLOAD_GOSSIP: &str = "execution_payload_gossip";
+const EXECUTION_PAYLOAD: &str = "execution_payload";
 
 /// Every event topic the sidecar reads, which `bn.events_url` has to ask for.
-const TOPICS_READ: [&str; 4] = [
+const TOPICS_READ: [&str; 5] = [
     BLOCK,
     BLOCK_GOSSIP,
     DATA_COLUMN_SIDECAR,
     EXECUTION_PAYLOAD_GOSSIP,
+    EXECUTION_PAYLOAD,
 ];
 
 /// The topics in [`TOPICS_READ`] that `url` does not ask for. Lighthouse reads every `topics`
@@ -385,6 +413,14 @@ fn event(frame: &str) -> Option<Event> {
             Some(Event::Envelope {
                 slot: data.slot.parse().ok()?,
                 block_root: root(&data.block_root)?,
+            })
+        }
+        Some(EXECUTION_PAYLOAD) => {
+            let data: PayloadData = serde_json::from_str(data?).ok()?;
+            Some(Event::PayloadImported {
+                slot: data.slot.parse().ok()?,
+                block_root: root(&data.block_root)?,
+                block_hash: root(&data.block_hash)?,
             })
         }
         Some(DATA_COLUMN_SIDECAR) => {
@@ -544,9 +580,9 @@ mod tests {
     /// the topics it lacks are named; the shipped default lacks none. Lighthouse takes a comma
     /// list, a repeated `topics` key or both, and a URL with no `topics` at all lacks every one.
     ///
-    /// The four names are written out here rather than read from `TOPICS_READ`, so this is the
+    /// The five names are written out here rather than read from `TOPICS_READ`, so this is the
     /// test that catches a name dropped from that list: the URL with no `topics` would then
-    /// lack three names instead of four.
+    /// lack four names instead of five.
     #[test]
     fn an_events_url_names_the_topics_it_lacks() {
         let at = |query: &str| -> Url {
@@ -561,11 +597,18 @@ mod tests {
         );
         assert_eq!(
             missing_topics(&at("?topics=block,block_gossip,data_column_sidecar")),
-            [EXECUTION_PAYLOAD_GOSSIP]
+            [EXECUTION_PAYLOAD_GOSSIP, EXECUTION_PAYLOAD]
         );
+        // One topic's name opens another's, and asking for the longer is not asking for both.
         assert_eq!(
             missing_topics(&at(
                 "?topics=block&topics=block_gossip,execution_payload_gossip&topics=data_column_sidecar"
+            )),
+            [EXECUTION_PAYLOAD]
+        );
+        assert_eq!(
+            missing_topics(&at(
+                "?topics=block&topics=block_gossip,execution_payload_gossip,execution_payload&topics=data_column_sidecar"
             )),
             Vec::<&str>::new()
         );
@@ -574,6 +617,7 @@ mod tests {
             "block_gossip",
             "data_column_sidecar",
             "execution_payload_gossip",
+            "execution_payload",
         ];
         assert_eq!(missing_topics(&at("?topics=head")), every);
         assert_eq!(missing_topics(&at("")), every);
@@ -582,7 +626,7 @@ mod tests {
     /// Every name in `TOPICS_READ` is one the parser reads, so a name the parser skipped is
     /// not asked for and thrown away. This walks the list, so a name dropped from the list is
     /// not caught here; `an_events_url_names_the_topics_it_lacks` compares the list with the
-    /// four names written out and catches that.
+    /// five names written out and catches that.
     #[test]
     fn every_topic_asked_for_is_one_the_parser_reads() {
         for name in TOPICS_READ {
@@ -594,6 +638,11 @@ mod tests {
                 ),
                 EXECUTION_PAYLOAD_GOSSIP => format!(
                     "{{\"slot\":\"1\",\"builder_index\":\"9\",\"block_hash\":\"{}\",\"block_root\":\"{}\"}}",
+                    root(0x02),
+                    root(0x01)
+                ),
+                EXECUTION_PAYLOAD => format!(
+                    "{{\"slot\":\"1\",\"builder_index\":\"9\",\"block_hash\":\"{}\",\"block_root\":\"{}\",\"execution_optimistic\":false}}",
                     root(0x02),
                     root(0x01)
                 ),
@@ -661,6 +710,7 @@ mod tests {
                     slot,
                     root: [byte; 32],
                     blobs,
+                    parent_payload: None,
                 }),
                 &Source::Bn,
             );
@@ -690,6 +740,55 @@ mod tests {
         format!(
             "event: execution_payload_gossip\ndata: {{\"slot\":\"{slot}\",\"builder_index\":\"9\",\"block_hash\":\"0x23c03281b3168438a99a7833ceaea27982d36aa7d71b4125e92a05abf23959bc\",\"block_root\":\"{root}\"}}\n\n"
         )
+    }
+
+    /// D44's anchor, as Lighthouse v8.3.2 writes it. The execution block hash is what a child's
+    /// bid names, so it is the one field the check reads.
+    #[test]
+    fn execution_payload_event_parses() {
+        let frame = format!(
+            "event: execution_payload\ndata: {{\"slot\":\"42\",\"builder_index\":\"9\",\"block_hash\":\"{}\",\"block_root\":\"{}\",\"execution_optimistic\":false}}\n\n",
+            root(0xcc),
+            root(0xbb)
+        );
+
+        assert_eq!(
+            Frames::default().feed(frame.as_bytes()),
+            [Event::PayloadImported {
+                slot: 42,
+                block_root: [0xbb; 32],
+                block_hash: [0xcc; 32],
+            }]
+        );
+    }
+
+    /// Why D44 reads `execution_payload` and not the gossip event: the node verifies an
+    /// envelope before it imports it, and until the import a child built on it still has an
+    /// unknown parent. The gossip event alone lets nothing through.
+    #[test]
+    fn only_the_import_event_lets_a_child_of_the_payload_through() {
+        let clock = FakeClock::new();
+        let arrivals = Arrivals::new(Arc::new(clock.clone()), spec_watch().1);
+        arrivals.expect_payload_imports();
+        let stats: Arc<dyn BlockEventStats> = Arc::new(());
+        let custody = tracking(&[0, 1]);
+        let feed = |frame: String| {
+            for event in Frames::default().feed(frame.as_bytes()) {
+                apply(&event, &arrivals, &custody, &clock, &stats);
+            }
+        };
+        // The hash `envelope_frame` writes for its payload.
+        let block_hash = "0x23c03281b3168438a99a7833ceaea27982d36aa7d71b4125e92a05abf23959bc";
+        let payload = super::root(block_hash).unwrap();
+
+        feed(envelope_frame(9, &root(0xaa)));
+        assert!(arrivals.lacks_payload(payload));
+
+        feed(format!(
+            "event: execution_payload\ndata: {{\"slot\":\"9\",\"builder_index\":\"9\",\"block_hash\":\"{block_hash}\",\"block_root\":\"{}\",\"execution_optimistic\":false}}\n\n",
+            root(0xaa)
+        ));
+        assert!(!arrivals.lacks_payload(payload));
     }
 
     /// MD-09's anchor. The builder index and the execution block hash ride along and are not

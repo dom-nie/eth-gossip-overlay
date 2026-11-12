@@ -1231,6 +1231,12 @@ async fn matrix_the_node_forwards_full_columns_to_its_explicit_peer_with_partial
 /// envelope within tens of milliseconds of the block, so the window the switch has to land
 /// in is the overlay's own latency, and the attempt repeats until it does. The envelope and
 /// C are handed over at the end so the far node is left in step.
+///
+/// D44 is read against the same block. The far node's event stream feeds an `Arrivals` the
+/// way the shipped sidecar's does, and the check the receive path makes is asked of C twice:
+/// when C arrives it has to say the payload C builds on is not imported, which is what keeps
+/// the shipped sidecar from offering the node the block this test goes on to hand it, and
+/// once the node has imported the payload it has to let C by.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the Gloas devnet: scripts/lighthouse-matrix.sh <version> --gloas"]
 async fn matrix_a_block_whose_parent_envelope_the_node_lacks() {
@@ -1260,6 +1266,30 @@ async fn matrix_a_block_whose_parent_envelope_the_node_lacks() {
         far.http
     ));
     let mut near_events = sse(format!("{}/eth/v1/events?topics=block_gossip", env.http));
+    // D44's check as the shipped sidecar holds it: the far node's own event stream, at the
+    // shipped topics, filing what the node says it imported.
+    let arrivals = Arc::new(Arrivals::new(Arc::new(SystemClock), sidecar.spec.clone()));
+    let shipped = Config::default().bn.events_url;
+    let far_stream = BlockEvents::spawn(
+        format!(
+            "{}{}?{}",
+            far.http,
+            shipped.path(),
+            shipped.query().unwrap()
+        )
+        .parse()
+        .unwrap(),
+        Backoff::new(BACKOFF_MIN, BACKOFF_MAX),
+        arrivals.clone(),
+        SharedCustody::new(
+            sidecar.spec.clone(),
+            watch::channel(SubscriptionSets::default()).1,
+            arrivals.clone(),
+            Arc::new(()),
+        ),
+        Arc::new(SystemClock),
+        Arc::new(()),
+    );
     let root_in = |data: &serde_json::Value| unhex(data["block"].as_str().unwrap()).unwrap();
     let slot_in =
         |data: &serde_json::Value| -> u64 { data["slot"].as_str().unwrap().parse().unwrap() };
@@ -1326,6 +1356,21 @@ async fn matrix_a_block_whose_parent_envelope_the_node_lacks() {
             drop(off);
             continue;
         }
+        // What the shipped receive path asks before it offers the node this block.
+        let Some(Header::Block {
+            parent_payload: Some(built_on),
+            ..
+        }) = Headers.header(&Topic::parse(&block_topic).unwrap(), &bytes)
+        else {
+            panic!("a Gloas block's bid names the payload it builds on");
+        };
+        let kept_back = arrivals.lacks_payload(built_on);
+        println!(
+            "the parent-payload check on the child: parent block imported {}, payload it \
+             builds on imported {}",
+            arrivals.is_imported(parent),
+            !kept_back
+        );
         let dropped_before = lookups_dropped_at(&gloas.far_metrics).await;
         let wire = snap::raw::Encoder::new().compress_vec(&bytes).unwrap();
         sidecar
@@ -1385,11 +1430,34 @@ async fn matrix_a_block_whose_parent_envelope_the_node_lacks() {
             posted.text().await.unwrap_or_default()
         );
         drop(off);
-        outcome = Some((asked, imported, dropped_after - dropped_before));
+        // The far node imports the payload once it has the envelope and its columns, which the
+        // catch-up loop sees to within a few slots. From then on the check lets the child by.
+        let until = Instant::now() + chain.slots(8);
+        while arrivals.lacks_payload(built_on) && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let let_through = !arrivals.lacks_payload(built_on);
+        outcome = Some((
+            asked,
+            imported,
+            dropped_after - dropped_before,
+            kept_back,
+            let_through,
+        ));
         break;
     }
+    far_stream.task.abort();
 
-    let (asked, imported, dropped) = outcome.expect("no block gave a clean window in 8 tries");
+    let (asked, imported, dropped, kept_back, let_through) =
+        outcome.expect("no block gave a clean window in 8 tries");
+    assert!(
+        kept_back,
+        "the shipped check would have offered the node a child it then dropped"
+    );
+    assert!(
+        let_through,
+        "the node imported the payload and the check still keeps its child back"
+    );
     assert_eq!(
         asked,
         (4, 0),
@@ -1536,7 +1604,8 @@ async fn matrix_execution_payload_gossip_fires_once_per_envelope_from_any_source
 /// The far node is read as well: its envelopes come from its shipped sidecar and, when it
 /// falls behind, from the catch-up loop over the beacon API, so an import event there is one
 /// for an envelope that never arrived from a public gossip peer. An envelope fetched by root
-/// is not covered: T-121 saw the node ask for none.
+/// is not covered: T-121 saw the node ask for none. The node can fire the event twice for one
+/// envelope, 8 of 61 on the devnet, which is counted and costs a set nothing.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the Gloas devnet: scripts/lighthouse-matrix.sh <version> --gloas"]
 async fn matrix_execution_payload_fires_at_import_for_every_envelope() {
@@ -1645,10 +1714,6 @@ async fn matrix_execution_payload_fires_at_import_for_every_envelope() {
         "an envelope the node verified fired no import event"
     );
     assert_eq!(hashless, 0, "an import event named no block hash");
-    assert_eq!(
-        twice, 0,
-        "an envelope fired its import event more than once"
-    );
     assert!(
         on_far * 2 >= own + gossiped,
         "the far node fired an import event for {on_far} of {} envelopes",

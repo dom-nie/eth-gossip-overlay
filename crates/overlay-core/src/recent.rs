@@ -583,6 +583,7 @@ mod tests {
                     slot: 42,
                     root: [8; 32],
                     blobs: 1,
+                    parent_payload: None,
                 }),
                 _ => None,
             }
@@ -615,6 +616,7 @@ mod tests {
                 slot: 42,
                 root: [8; 32],
                 blobs: 1,
+                parent_payload: None,
             })
         );
         assert_eq!(recent.get_by_column([8; 32], 5), None);
@@ -645,6 +647,7 @@ mod tests {
                 slot: 42,
                 root: [8; 32],
                 blobs: 1,
+                parent_payload: None,
             })
         );
         assert_eq!(recent.get_by_block([8; 32]), Some(id(1)));

@@ -197,8 +197,8 @@ pub enum Steering {
 pub struct Bn {
     /// `identity_url`: the beacon API endpoint that reports the node's peer id.
     pub identity_url: Url,
-    /// `events_url`: the beacon API event stream. Must ask for `block`, `block_gossip`,
-    /// `data_column_sidecar` and `execution_payload_gossip`.
+    /// `events_url`: the beacon API event stream, asking for `block`, `block_gossip`,
+    /// `data_column_sidecar`, `execution_payload_gossip` and `execution_payload`.
     pub events_url: Url,
     /// `libp2p_addr`: the multiaddr the sidecar dials to join the beacon node's gossipsub.
     pub libp2p_addr: String,
@@ -405,7 +405,7 @@ impl Default for Bn {
         Self {
             identity_url: url("http://127.0.0.1:5052/eth/v1/node/identity"),
             events_url: url(
-                "http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip",
+                "http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip,execution_payload",
             ),
             libp2p_addr: "/ip4/127.0.0.1/tcp/9000".to_owned(),
             node_key_file: PathBuf::from("/var/lib/eth-gossip-overlay/node.key"),
@@ -711,7 +711,7 @@ overlay:
     steering: off               # auto: ntuple flow rule if the NIC supports it, else RFS
 bn:
   identity_url: http://127.0.0.1:5052/eth/v1/node/identity
-  events_url: http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip
+  events_url: http://127.0.0.1:5052/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip,execution_payload
   libp2p_addr: /ip4/127.0.0.1/tcp/9000
   node_key_file: /var/lib/eth-gossip-overlay/node.key   # per-host libp2p identity, created on first start
   listen_addr: /ip4/127.0.0.1/tcp/7787            # where the beacon node dials the sidecar (MD-01); restart-required

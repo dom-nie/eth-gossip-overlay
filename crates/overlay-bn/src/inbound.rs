@@ -287,6 +287,7 @@ mod tests {
         slot: 8_675_309,
         root: [0x9c; 32],
         blobs: 1,
+        parent_payload: None,
     };
 
     const COLUMN_5: &str = "/eth2/00000000/data_column_sidecar_5/ssz_snappy";

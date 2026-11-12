@@ -260,6 +260,9 @@ pub const REASON_INJECT_OFF: &str = "inject_off";
 /// A block whose parent the beacon node has not imported, which the sidecar keeps from it so
 /// the node's parent lookup goes to a public peer that has it (T-101, D42).
 pub const REASON_PARENT_UNKNOWN: &str = "parent_unknown";
+/// A Gloas block built on a payload the beacon node has not imported, kept from it for the same
+/// reason one stage later (T-135, D44).
+pub const REASON_PARENT_ENVELOPE_UNKNOWN: &str = "parent_envelope_unknown";
 /// Control events share the lane counter under a class of their own.
 pub const CLASS_CONTROL: &str = "control";
 
@@ -1015,6 +1018,12 @@ impl ReceiveStats for Metrics {
     fn parent_unknown(&self) {
         self.publish_suppressed
             .with_label_values(&[class_label(Class::Large), REASON_PARENT_UNKNOWN])
+            .inc();
+    }
+
+    fn parent_envelope_unknown(&self) {
+        self.publish_suppressed
+            .with_label_values(&[class_label(Class::Large), REASON_PARENT_ENVELOPE_UNKNOWN])
             .inc();
     }
 }

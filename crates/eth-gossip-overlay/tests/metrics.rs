@@ -457,6 +457,7 @@ fn publish_stats_counts_publishes_suppressions_and_errors() {
     PublishStats::published(&metrics, Class::Large);
     PublishStats::suppressed_inject_off(&metrics, Class::Small);
     ReceiveStats::parent_unknown(&metrics);
+    ReceiveStats::parent_envelope_unknown(&metrics);
     PublishStats::rate_limited(&metrics, Class::Small);
     PublishStats::error(&metrics, Class::Large, "no_subscribers");
     PublishStats::queue_drop(&metrics, Class::Large, QueueDropReason::Stale);
@@ -488,6 +489,15 @@ fn publish_stats_counts_publishes_suppressions_and_errors() {
             &registry,
             "overlay_publish_suppressed_total",
             &[("class", "large"), ("reason", "parent_unknown")]
+        ),
+        Some(1.0)
+    );
+    // The same one stage later, under its own reason (T-135).
+    assert_eq!(
+        sample(
+            &registry,
+            "overlay_publish_suppressed_total",
+            &[("class", "large"), ("reason", "parent_envelope_unknown")]
         ),
         Some(1.0)
     );

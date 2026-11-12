@@ -641,6 +641,7 @@ mod tests {
                 slot: 1,
                 root,
                 blobs,
+                parent_payload: None,
             }),
             &Source::Bn,
         );
