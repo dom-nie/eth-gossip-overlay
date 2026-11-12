@@ -204,7 +204,8 @@ sum by (instance) (rate(overlay_repair_requests_total[15m])) > 0.1
 The floor is measured. Twenty 100 KiB blocks striped across a five-host region in the integration
 harness, all imported everywhere, leave `overlay_repair_requests_total` at exactly zero on every
 host in every outcome. A healthy fleet does not repair, so the threshold is not clearing a noise
-floor; it sits where the rate is worth waking someone for.
+floor; it sits where the rate is worth waking someone for. The same held on a Gloas devnet at
+Lighthouse v8.3.2: over three 32-slot runs neither sidecar asked for anything.
 
 That point comes from the traffic. A host at full custody takes 129 large messages a slot, about
 10.75 a second, so 0.1 per second is one message in a hundred needing repair across the 75 slots

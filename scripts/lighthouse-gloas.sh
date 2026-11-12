@@ -330,9 +330,24 @@ tests=(
 if [[ $by_root == 1 ]]; then
   tests=(matrix_block_gossip_does_not_fire_for_a_block_fetched_by_root)
 fi
+# GLOAS_TESTS names the tests to run instead, space separated, for a measurement that wants
+# one of them several times over without waiting for the other four.
+if [[ -n ${GLOAS_TESTS:-} ]]; then
+  read -r -a tests <<< "$GLOAS_TESTS"
+fi
 status=0
 cargo test --manifest-path "$root/Cargo.toml" -p overlay-bn --test matrix -- --ignored --nocapture \
   --test-threads=1 --exact "${tests[@]}" || status=$?
+
+# What the two shipped sidecars asked their peer for over the whole run. The near node gets
+# its columns from the chain and the far node from its sidecar, so between them this is both
+# ways a column reaches a node, on the binary that ships and not on the harness's tracker.
+for name in near far; do
+  port=${name}_sidecar_metrics
+  echo "$name sidecar, overlay_repair_requests_total:"
+  curl -fsS -m 2 "http://127.0.0.1:${!port}/metrics" 2>/dev/null \
+    | grep '^overlay_repair_requests_total' || echo "  no series: nothing was asked for"
+done
 
 if [[ $status -ne 0 ]]; then
   echo "--- far node log, last 40 lines ---" >&2

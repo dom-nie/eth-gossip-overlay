@@ -132,3 +132,20 @@ The first is the sidecar's own account, the second is the same thing as a number
 re-checks on every connect, and the third is the beacon node's opinion, which is the one that
 settles an argument. `overlay_bn_trusted` is absent rather than 0 on a beacon node whose
 `/lighthouse/peers` endpoint is missing, and the sidecar logs that once.
+
+## Columns under Gloas
+
+From v8.3.0 Lighthouse takes other nodes' data columns as gossipsub partial messages, and under
+Gloas it fires no `data_column_sidecar` event for a column it merged that way or completed from
+its execution layer. It still forwards every such column to the sidecar, whole. So the sidecar
+counts a column as held when the node reports it on the event stream or forwards it, and on a
+Gloas slot starts `classes.large.repair_deadline_ms` 1.5 s after the payload envelope, because
+the node has no column before it has the payload. Measured on v8.3.2: the last of a block's 128
+columns reached the sidecar a median 0.8 s after the envelope and 1.7 s at the worst of 285
+blocks.
+
+A sidecar build from before this cannot see those columns. It asks its peers for every column of
+every block another node proposed, 16 requests a slot at four custody columns, and
+`OverlayRepairRateRising` never clears with `form="column"`. Set `classes.large.column_repair:
+false` on such hosts until the whole fleet is upgraded, so that an old host beside upgraded ones
+does not pull every column across the overlay each slot.
