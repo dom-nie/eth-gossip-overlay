@@ -53,12 +53,12 @@ async fn block_from_one_bn_reaches_every_other_bn_exactly_once() {
         .wait_for(
             "every other beacon node to import the block",
             fleet.wait(),
-            |fleet| (1..5).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
+            |fleet| (1..fleet.hosts()).all(|i| fleet.node(i).bn().count(&block, &payload) == 1),
         )
         .await;
     assert_eq!(fleet.node(0).bn().count(&block, &payload), 0, "echoed home");
     fleet.settle().await;
-    for i in 1..5 {
+    for i in 1..fleet.hosts() {
         assert_eq!(fleet.node(i).bn().count(&block, &payload), 1, "node {i}");
     }
 }
