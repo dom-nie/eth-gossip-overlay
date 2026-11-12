@@ -916,19 +916,30 @@ mod tests {
     }
 
     /// A beacon node that refuses the request, an older one that does not know a topic for
-    /// one, is retried, and the refusal is said at warn once with its status, the start of its
-    /// body and what to check, rather than left to a debug line and a connected gauge stuck at
-    /// zero. A proxy's error page can be kilobytes, so only the first 512 bytes are logged.
+    /// one, is retried, and the refusal is said at warn once per status with that status, the
+    /// start of its body and what to check, rather than left to a debug line and a connected
+    /// gauge stuck at zero. A proxy's error page can be kilobytes, so only the first 512 bytes
+    /// are logged, and the cut lands on a character boundary: the `é` here straddles bytes 511
+    /// and 512, so a cut by byte count alone would panic inside the stream task and log nothing.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_refused_event_stream_is_warned_once_and_retried() {
+    async fn a_refused_event_stream_is_warned_once_per_status_and_retried() {
         let log = &*crate::testutil::LOG;
         let bn = MockServer::start().await;
+        let body = format!(
+            "unknown topic: refused_topic_t120 {}é{}",
+            "x".repeat(477),
+            "x".repeat(2_000)
+        );
+        assert!(!body.is_char_boundary(LOGGED_BODY_BYTES));
         Mock::given(method("GET"))
             .and(path(EVENTS))
-            .respond_with(ResponseTemplate::new(400).set_body_string(format!(
-                "unknown topic: refused_topic_t120 {}",
-                "x".repeat(2_000)
-            )))
+            .respond_with(ResponseTemplate::new(400).set_body_string(body.clone()))
+            .up_to_n_times(2)
+            .mount(&bn)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(EVENTS))
+            .respond_with(ResponseTemplate::new(403).set_body_string(body.clone()))
             .mount(&bn)
             .await;
         let (_spec, spec) = spec_watch();
@@ -943,7 +954,7 @@ mod tests {
             Arc::new(()),
         );
         timeout(PATIENCE, async {
-            while bn.received_requests().await.unwrap().len() < 3 {
+            while bn.received_requests().await.unwrap().len() < 4 {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
         })
@@ -956,16 +967,18 @@ mod tests {
             .lines()
             .filter(|line| line.contains("refused_topic_t120"))
             .collect();
-        assert_eq!(lines.len(), 1, "{text}");
-        assert!(lines[0].contains("WARN"), "{}", lines[0]);
-        assert!(lines[0].contains("400"), "{}", lines[0]);
-        assert!(lines[0].contains("bn.events_url"), "{}", lines[0]);
-        assert!(lines[0].contains("restart"), "{}", lines[0]);
-        assert!(
-            !lines[0].contains(&"x".repeat(600)),
-            "the body is not cut short: {} bytes",
-            lines[0].len()
+        assert_eq!(lines.len(), 2, "{text}");
+        let logged = format!(
+            "body={:?}",
+            &body[..body.floor_char_boundary(LOGGED_BODY_BYTES)]
         );
+        for (line, status) in lines.iter().zip(["400", "403"]) {
+            assert!(line.contains("WARN"), "{line}");
+            assert!(line.contains(status), "{line}");
+            assert!(line.contains("bn.events_url"), "{line}");
+            assert!(line.contains("restart"), "{line}");
+            assert!(line.contains(&logged), "{line}");
+        }
     }
 
     #[tokio::test]
