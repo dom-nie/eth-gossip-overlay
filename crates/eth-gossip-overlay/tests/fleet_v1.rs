@@ -22,6 +22,18 @@ use overlay_transport::testutil::features::mask;
 
 mod harness;
 
+/// The harness wait was sized for three to six hosts, and the nightly runs every scenario at
+/// thirty: each six hosts after the first six add another 30 s, so thirty wait 150 s.
+#[test]
+fn wait_is_thirty_seconds_up_to_six_hosts_and_thirty_more_for_each_six_after() {
+    let thirty = Duration::from_secs(30);
+    assert_eq!(harness::wait_for_hosts(1), thirty);
+    assert_eq!(harness::wait_for_hosts(6), thirty);
+    assert_eq!(harness::wait_for_hosts(7), thirty * 2);
+    assert_eq!(harness::wait_for_hosts(12), thirty * 2);
+    assert_eq!(harness::wait_for_hosts(30), thirty * 5);
+}
+
 /// §6.1 and §5.5: a block one beacon node validated reaches every other beacon node in the
 /// fleet, and each of them sees it once. That is the whole point of the overlay, and the seen
 /// cache is what keeps the second copy from arriving.
