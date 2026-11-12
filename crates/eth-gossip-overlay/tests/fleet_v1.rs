@@ -279,7 +279,7 @@ async fn inject_off_node_receives_and_counts_but_publishes_nothing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn message_takes_one_overlay_hop_only() {
     let block = topic("beacon_block");
-    let mut fleet = Fleet::builder().regions(&[("eu", 3)]).start().await;
+    let mut fleet = Fleet::builder().regions(&[("eu", 3)]).at_own_size("the one-hop claim is about whole delivery; from 16 subscribers in a region the block is striped, and a stripe's second hop is the design (§5.4)").start().await;
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
