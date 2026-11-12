@@ -1493,11 +1493,12 @@ async fn a_roster_add_never_dials_against_the_old_pin_table() {
         .await;
     fleet.wait_full_mesh(fleet.wait()).await;
     let connected = |scrapes: &[Scrape]| scrapes[0].sum(PEERS_CONNECTED, &[]);
+    let hosts = fleet.hosts() as f64;
 
     fleet.drop_from_roster(0, 1).await;
     fleet
         .wait_for_metrics("node 0 to let node 1 go", fleet.wait(), |scrapes| {
-            connected(scrapes) == 0.0
+            connected(scrapes) == hosts - 2.0
         })
         .await;
     fleet.add_to_roster(0, 1).await;
@@ -1505,7 +1506,7 @@ async fn a_roster_add_never_dials_against_the_old_pin_table() {
         .wait_for_metrics(
             "node 0 to pair with node 1 again",
             fleet.wait(),
-            |scrapes| connected(scrapes) == 1.0,
+            |scrapes| connected(scrapes) == hosts - 1.0,
         )
         .await;
 
