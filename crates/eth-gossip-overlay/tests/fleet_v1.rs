@@ -897,6 +897,9 @@ async fn single_and_two_host_regions_use_whole_delivery_and_the_direct_small_pat
     let (block, subnet) = (topic("beacon_block"), topic("beacon_attestation_9"));
     let mut fleet = Fleet::builder()
         .regions(&[("eu", 1), ("us", 2)])
+        .at_own_size(
+            "the claim is about regions below both shipped thresholds; a grown fleet has none",
+        )
         .start()
         .await;
     for node in fleet.nodes() {
