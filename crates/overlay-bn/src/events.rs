@@ -176,9 +176,9 @@ async fn run(
 /// node has no such endpoint, which no amount of retrying will change.
 ///
 /// Any other 4xx is retried too, but said at warn the first time each status is seen, with the
-/// start of the body the node gave: a topic an older node does not know, or a URL with no `topics`, would
-/// otherwise show only as `overlay_bn_events_connected` stuck at zero. `refusals` holds the
-/// statuses already said.
+/// start of the body the node gave: a topic an older node does not know, or a URL with no
+/// `topics`, would otherwise show only as `overlay_bn_events_connected` stuck at zero.
+/// `refusals` holds the statuses already said.
 async fn read(
     http: &reqwest::Client,
     url: &Url,
