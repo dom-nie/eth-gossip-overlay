@@ -1291,12 +1291,12 @@ async fn block_still_completes_when_one_stripe_host_is_down() {
 async fn two_origins_with_divergent_live_views_publish_once_with_at_most_2k_plus_m_chunks_received()
 {
     let block = topic("beacon_block");
-    let hosts = 5;
     let mut fleet = Fleet::builder()
-        .regions(&[("eu", hosts)])
+        .regions(&[("eu", 5)])
         .config(|settings| settings.stripe_min_recipients = 2)
         .start()
         .await;
+    let hosts = fleet.hosts();
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
