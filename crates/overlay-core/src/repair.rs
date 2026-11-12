@@ -20,7 +20,8 @@ use crate::roster::Hostname;
 /// so a message is asked about within a tick of the moment it is due.
 pub const REPAIR_TICK: Duration = Duration::from_millis(50);
 
-/// How many peers one message is asked before public gossip is left to deliver it (D24).
+/// How many peers one message is asked before public gossip is left to deliver it (D24). The
+/// last of them is the origin whenever it has not been asked yet (T-133).
 pub const REPAIR_ATTEMPTS: usize = 3;
 
 /// The floor on one attempt's timeout, for a peer close enough that four round trips are no time
@@ -205,7 +206,8 @@ pub fn wanted(k: u16, held: usize, missing: &[u16]) -> Vec<u16> {
 /// In-region peers that sent a `FORWARDED` chunk come first, by round trip; then the origin, the
 /// peer that sent a chunk with the flag clear. There is no region check here because a forwarded
 /// chunk can only have come from an in-region peer, which is what makes this D24's "same region
-/// first, then RTT" order without a second lookup.
+/// first, then RTT" order without a second lookup. The scheduler walks this order but keeps its
+/// last attempt for the origin, which a long list of forwarders would otherwise crowd out.
 ///
 /// `rtt` answers `None` for a peer that cannot be asked at all: one that has left the live set,
 /// or one that never advertised `REPAIR` (D29). A peer that sent both a forwarded and a clear
@@ -453,10 +455,18 @@ impl Scheduler {
         if repair.exhausted(untried.is_empty(), now) {
             return Some(Decision::GaveUp(msg.msg_id));
         }
+        // The last attempt belongs to the origin. A forwarder holds the message only if it
+        // completed it, and when a stripe host dropped out mid-transfer none of them did, so a
+        // region with more forwarders than attempts would otherwise never ask the one peer that
+        // has every chunk (T-133). An origin at its cap is waited for, not passed over.
+        let is_origin = |peer: &&Hostname| msg.senders.contains(&((*peer).clone(), false));
+        let last = repair.tried.len() + 1 == REPAIR_ATTEMPTS;
+        let kept_for_origin = last && untried.iter().any(is_origin);
         // A peer already answering three requests is passed over for this tick rather than
         // counted as tried, because it has not been asked.
         let peer = untried
             .into_iter()
+            .filter(|peer| !kept_for_origin || is_origin(peer))
             .find(|peer| !at_cap(outstanding, peer))?
             .clone();
         repair.asking = true;
@@ -667,6 +677,7 @@ mod tests {
 
     /// Who the scheduler asks over a message's life, and where it stops: three peers of the one
     /// candidate list, never the same peer twice, and no fourth however many are left (D24).
+    /// The third is the origin, ahead of the forwarder whose turn it would have been (T-133).
     #[test]
     fn three_attempts_go_to_three_distinct_peers_and_a_fourth_is_not_made() {
         let clock = FakeClock::new();
@@ -698,7 +709,7 @@ mod tests {
 
         assert_eq!(
             asked,
-            vec![host("b"), host("c"), host("d"), host("gave up")]
+            vec![host("b"), host("c"), host("a"), host("gave up")]
         );
     }
 
@@ -752,6 +763,56 @@ mod tests {
             "gave up after asking {asked:?}"
         );
         assert_eq!(asked.len(), REPAIR_ATTEMPTS);
+    }
+
+    /// The stripe-host case with more than one message short, which is a block and its columns:
+    /// the origin is at its stream cap when a fourth message reaches its last attempt. That
+    /// attempt waits for the origin and is not spent on another forwarder (T-133).
+    #[test]
+    fn the_last_attempt_waits_for_an_origin_at_its_stream_cap() {
+        let clock = FakeClock::new();
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let messages = MAX_REPAIR_IN_FLIGHT_PER_PEER as u8 + 1;
+        for message in 0..messages {
+            let senders = [("origin", false), ("b", true), ("c", true), ("d", true)];
+            for (index, (from, forwarded)) in senders.into_iter().enumerate() {
+                let mut chunk = chunk(8, index as u16);
+                chunk.msg_id = MessageId([message; 20]);
+                reassembler.on_chunk(&chunk, &topic(), &host(from), forwarded, clock.now());
+            }
+        }
+        let mut scheduler = Scheduler::default();
+        clock.advance(DEADLINE);
+        let mut asked: HashMap<MessageId, Vec<Hostname>> = HashMap::new();
+        let mut tick = |scheduler: &mut Scheduler, answer: bool| {
+            for decision in scheduler.tick(&reassembler, DEADLINE, reachable, clock.now()) {
+                if let Decision::Ask(request) = decision {
+                    asked.entry(request.msg_id).or_default().push(request.peer);
+                }
+            }
+            if answer {
+                (0..messages).for_each(|message| scheduler.answered(&MessageId([message; 20])));
+            }
+            clock.advance(REPAIR_TICK);
+            asked.clone()
+        };
+
+        // Two forwarders each, answered `not_found`.
+        tick(&mut scheduler, true);
+        tick(&mut scheduler, true);
+        // The origin takes three messages and leaves the fourth waiting while they are out.
+        tick(&mut scheduler, false);
+        let held = tick(&mut scheduler, false);
+        let waiting = held.values().filter(|peers| peers.len() == 2).count();
+        assert_eq!(waiting, 1, "{held:?}");
+
+        tick(&mut scheduler, true);
+        let done = tick(&mut scheduler, true);
+        assert_eq!(done.len(), usize::from(messages));
+        for peers in done.values() {
+            assert_eq!(peers.len(), REPAIR_ATTEMPTS, "{done:?}");
+            assert_eq!(peers.last(), Some(&host("origin")), "{done:?}");
+        }
     }
 
     /// The budget is a wall the candidate list does not get past: 1.5 s after the deadline the
