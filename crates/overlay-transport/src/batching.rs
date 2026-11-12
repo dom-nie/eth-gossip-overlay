@@ -11,8 +11,13 @@
 //! it collected, and the window is [`BATCH_TICK`] short of a timer nobody drives. The fanout
 //! loop awaits nothing (D17), so the timer belongs to a task of its own, and the channel between
 //! them is what keeps the fanout free of it. That channel is bounded and pushed to with
-//! `try_send`: a payload that will not fit is counted under the peer it was for and dropped,
-//! which is what its lane would do a moment later anyway.
+//! `try_send`: a payload that will not fit is counted under every peer it was for and dropped,
+//! which is what their lanes would do a moment later anyway.
+//!
+//! One entry on it is one payload with everyone it is going to, not one per destination. The
+//! bound is then a number of messages whatever the fleet's size; counted per destination it
+//! held 141 attestations at thirty hosts and fewer at every size above, and a burst lost its
+//! tail to a batcher that was one wake-up behind (T-136).
 //!
 //! # Two batchers, not one
 //!
@@ -53,9 +58,10 @@ use crate::sender::{DropReason, Dropped, SenderHandle, SenderStats, StaleReason}
 /// find nothing open.
 pub const BATCH_TICK: Duration = Duration::from_millis(2);
 
-/// Payloads the batcher has not reached yet. One tick's worth of a busy slot several times
-/// over: past this the task is not running, and a payload that waits for it is a payload the
-/// destination's own lane would drop before it ever went out.
+/// Payloads the batcher has not reached yet, each counted once however many hosts it is for.
+/// One tick's worth of a busy slot several times over: past this the task is not running, and
+/// a payload that waits for it is a payload the destination's own lane would drop before it
+/// ever went out.
 const WAITING_MAX: usize = 4096;
 
 /// How many payloads one wake-up takes off the channel. What arrives between two ticks under
@@ -63,14 +69,21 @@ const WAITING_MAX: usize = 4096;
 /// than a round trip per attestation.
 const DRAIN_MAX: usize = 512;
 
-/// One small-class payload on its way to one destination, as the fanout hands it over.
+/// One small-class payload on its way to every destination it was routed to, as the fanout
+/// hands it over.
 pub struct Small {
-    /// The host it is for, which is the key the batcher opens a batch under.
-    pub dest: Hostname,
     /// This host's id for the topic it arrived on, from this host's own table (D13).
     pub topic_id: TopicId,
     /// The gossipsub wire form.
     pub payload: Bytes,
+    /// Who it is for.
+    pub to: Vec<Dest>,
+}
+
+/// One destination of a [`Small`].
+pub struct Dest {
+    /// The host, which is the key the batcher opens a batch under.
+    pub host: Hostname,
     /// What a datagram to this destination currently holds, read off the connection when the
     /// message was routed.
     pub max_bytes: usize,
@@ -90,13 +103,14 @@ pub struct BatchHandle {
 
 impl BatchHandle {
     /// Hands `item` to the batcher without waiting for it. A full channel means the batcher is
-    /// not keeping up, which is counted as the peer's own queue drop: from the operator's side
+    /// not keeping up, which is counted as each peer's own queue drop: from the operator's side
     /// it is the same event, a small-class payload for that peer that will never be written.
     pub fn push(&self, item: Small) -> Result<(), Dropped> {
         self.waiting.try_send(item).map_err(|error| {
-            let refused = error.into_inner();
-            self.stats
-                .queue_drop(&refused.dest, Class::Small, DropReason::Full);
+            for dest in error.into_inner().to {
+                self.stats
+                    .queue_drop(&dest.host, Class::Small, DropReason::Full);
+            }
             Dropped
         })
     }
@@ -157,15 +171,23 @@ async fn run(
             batchers = Batchers::new(&cfg);
         }
         for item in arrived.drain(..) {
-            let flags = flags_of(item.relay);
-            flushes.extend(
-                batchers
-                    .of(item.relay)
-                    .push(&item.dest, item.topic_id, item.payload, item.max_bytes, now)
-                    .into_iter()
-                    .map(|flush| (flush, flags)),
-            );
-            senders.insert(item.dest, item.sender);
+            for dest in item.to {
+                let flags = flags_of(dest.relay);
+                flushes.extend(
+                    batchers
+                        .of(dest.relay)
+                        .push(
+                            &dest.host,
+                            item.topic_id,
+                            item.payload.clone(),
+                            dest.max_bytes,
+                            now,
+                        )
+                        .into_iter()
+                        .map(|flush| (flush, flags)),
+                );
+                senders.insert(dest.host, dest.sender);
+            }
         }
         flushes.extend(batchers.tick(now));
         for (flush, flags) in flushes {
@@ -259,8 +281,9 @@ fn send(
 mod tests {
     use super::*;
 
-    /// T-136: on this runtime the batcher does not run until the test waits, which is the
-    /// batcher a wake-up behind while a slot's attestations come in.
+    /// T-136: the queue is counted in payloads. On this runtime the batcher does not run until
+    /// the test waits, which is the batcher a wake-up behind while a slot's attestations come
+    /// in; counted per destination the 142nd of them was refused at thirty hosts.
     #[tokio::test]
     async fn a_burst_of_1000_for_29_peers_waits_for_a_batcher_that_is_behind() {
         let (batches, _task) = Batching::spawn(
@@ -268,18 +291,21 @@ mod tests {
             Arc::new(()),
         );
         for n in 0..1000 {
-            for peer in 1..30 {
-                let dest = Hostname(format!("f0-bn-{peer:02}"));
-                let pushed = batches.push(Small {
-                    dest: dest.clone(),
-                    topic_id: TopicId::new(1),
-                    payload: Bytes::from(format!("attestation {n} of the burst")),
+            let to = (1..30)
+                .map(|peer| Hostname(format!("f0-bn-{peer:02}")))
+                .map(|host| Dest {
+                    host: host.clone(),
                     max_bytes: 1200,
                     relay: false,
-                    sender: SenderHandle::stopped(dest),
-                });
-                assert!(pushed.is_ok(), "attestation {n} for peer {peer}");
-            }
+                    sender: SenderHandle::stopped(host),
+                })
+                .collect();
+            let pushed = batches.push(Small {
+                topic_id: TopicId::new(1),
+                payload: Bytes::from(format!("attestation {n} of the burst")),
+                to,
+            });
+            assert!(pushed.is_ok(), "attestation {n}");
         }
     }
 }
