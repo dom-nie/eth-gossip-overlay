@@ -1426,31 +1426,46 @@ async fn one_third_of_a_region_lost_mid_slot_completes_via_parity_or_repair_befo
 #[tokio::test(flavor = "multi_thread")]
 async fn block_completes_via_repair_when_a_stripe_host_dies_mid_transfer() {
     let block = topic("beacon_block");
-    let hosts = 5;
     let mut fleet = Fleet::builder()
-        .regions(&[("eu", hosts)])
+        .regions(&[("eu", 5)])
         .config(|settings| settings.stripe_min_recipients = 2)
         .start()
         .await;
+    let hosts = fleet.hosts();
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
     fleet.wait_full_mesh(fleet.wait()).await;
-    fleet.partition(&[hosts - 1], &[1, 2, 3]).await;
-
     let payload = incompressible(25, 100 * 1024);
+    // Enough stripe hosts are lost that their chunks exceed the parity: one host of five
+    // carries about fourteen of the 57 chunks against six of parity, one of thirty about two.
+    let (data, parity) = split(payload.len(), 0.1);
+    assert!(
+        hosts - 1 <= data + parity,
+        "with more targets than chunks some host carries none and the count no longer holds"
+    );
+    let per_host = (data + parity) / (hosts - 1);
+    let lost = parity / per_host.max(1) + 1;
+    fleet
+        .partition(
+            &(hosts - lost..hosts).collect::<Vec<_>>(),
+            &(1..hosts - lost).collect::<Vec<_>>(),
+        )
+        .await;
     fleet.node(0).bn().publish(&block, &payload).await;
 
     fleet
         .wait_for(
             "the rest of the region to import the block",
             fleet.wait(),
-            |fleet| (1..hosts - 1).all(|node| fleet.node(node).bn().count(&block, &payload) == 1),
+            |fleet| {
+                (1..hosts - lost).all(|node| fleet.node(node).bn().count(&block, &payload) == 1)
+            },
         )
         .await;
     fleet.settle().await;
     let now = fleet.metrics().await;
-    for (node, scrape) in now.iter().enumerate().take(hosts - 1).skip(1) {
+    for (node, scrape) in now.iter().enumerate().take(hosts - lost).skip(1) {
         assert_eq!(
             fleet.node(node).bn().count(&block, &payload),
             1,
