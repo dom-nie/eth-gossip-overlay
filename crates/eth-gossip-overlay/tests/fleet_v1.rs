@@ -1174,12 +1174,12 @@ fn split_of_a_100_kib_block_at_a_tenth_is_51_data_and_6_parity() {
 #[tokio::test(flavor = "multi_thread")]
 async fn block_striped_across_region_is_published_once_on_every_node() {
     let block = topic("beacon_block");
-    let hosts = 5;
     let mut fleet = Fleet::builder()
-        .regions(&[("eu", hosts)])
+        .regions(&[("eu", 5)])
         .config(|settings| settings.stripe_min_recipients = 2)
         .start()
         .await;
+    let hosts = fleet.hosts();
     for node in fleet.nodes() {
         node.subscribe(&block).await;
     }
