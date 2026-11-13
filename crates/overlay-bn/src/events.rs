@@ -227,9 +227,10 @@ async fn read(
     Ok(ControlFlow::Continue(()))
 }
 
-/// Where one event goes. This is the whole write side of the custody tracker; grep the workspace
-/// for `on_block`, `on_envelope` and `on_column` and the only callers outside tests are here
-/// (MD-06).
+/// Where one event goes. This is the write side of the custody tracker but for one call: grep
+/// the workspace for `on_block`, `on_envelope` and `on_column` and the only callers outside
+/// tests are here and, for `on_column`, the inbound path's read of a column the node forwards
+/// (MD-06, D43).
 fn apply(
     event: &Event,
     arrivals: &Arrivals,

@@ -131,8 +131,10 @@ dropping chunks, or a region whose stripes miss `classes.large.repair_deadline_m
 sent.
 
 `form="column"` is this beacon node short of custody columns past the same deadline, which is
-rarer. Setting `classes.large.column_repair: false` and reloading turns it off; the node then
-fetches its own columns.
+rarer. Steady on every host of a Gloas fleet, it is a build that predates
+[counting forwarded columns](lighthouse.md#columns-under-gloas). Setting
+`classes.large.column_repair: false` and reloading turns it off; the node then fetches its own
+columns.
 
 `outcome` splits either form. `completed` is loss repair covered. `not_found` and `timeout` are
 peers that could not answer. `gave_up` is no request sent: no candidate was live and advertising

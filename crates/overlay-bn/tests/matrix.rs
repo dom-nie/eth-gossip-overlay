@@ -34,6 +34,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use libp2p::gossipsub::PublishError;
 use libp2p::{Multiaddr, PeerId};
 use overlay_bn::bn_http::BnClient;
+use overlay_bn::decode::Headers;
 use overlay_bn::events::BlockEvents;
 use overlay_bn::gossip::BnLinkConfig;
 use overlay_bn::link::{
@@ -48,6 +49,7 @@ use overlay_core::backoff::Backoff;
 use overlay_core::config::Config;
 use overlay_core::custody::SharedCustody;
 use overlay_core::events::Arrivals;
+use overlay_core::header::{Header, HeaderDecoder};
 use overlay_core::lanes::ClassLanes;
 use overlay_core::recent::{RECENT_MAX_BYTES, RECENT_TTL, RecentLarge, SharedRecentLarge};
 use overlay_core::spec::SpecSnapshot;
@@ -1594,15 +1596,16 @@ async fn matrix_every_gloas_kind_crosses_the_overlay() {
     );
 }
 
-/// MD-09 on a running chain. The custody tracker is fed the near node's own events and its
-/// own column subscriptions, exactly as the sidecar feeds it, and its gaps are read every 50
-/// ms at the shipped `repair_deadline_ms`. A slot counts as late when a block of it still has
-/// a column missing past the deadline, which from the Gloas fork runs from the envelope; the
-/// test expects fewer than one such slot in a hundred, and prints per block whether the node
-/// proposed it, how many columns it reported, and when the last one came after the envelope.
-/// On the devnet at v8.3.2 it fails on both counts the `COMPATIBILITY.md` row gives: own
-/// proposals report their columns 260 ms to 1.2 s after the envelope on a 4-vCPU VM, and
-/// other nodes' blocks, whose columns arrive as partial messages, report none at all.
+/// MD-09 and D43 on a running chain. The custody tracker is fed the near node's own events,
+/// its own column subscriptions and the columns it forwards on the link, exactly as the
+/// sidecar feeds it, and its gaps are read every 50 ms at the shipped `repair_deadline_ms`. A
+/// slot counts as late when a block of it still has a column missing past the deadline, which
+/// from the Gloas fork runs from the envelope plus `GLOAS_COLUMN_GRACE`; the test expects
+/// fewer than one such slot in a hundred. It prints per block whether the node proposed it,
+/// how many columns it reported and forwarded, and when the last of each came after the
+/// envelope, which is the measurement the grace is set from. At v8.3.2 the node reports no
+/// column of another node's block, whose columns arrive as partial messages, and forwards
+/// every one of them.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the Gloas devnet: scripts/lighthouse-matrix.sh <version> --gloas"]
 async fn matrix_column_repair_is_quiet_on_a_healthy_gloas_chain() {
@@ -1650,7 +1653,31 @@ async fn matrix_column_repair_is_quiet_on_a_healthy_gloas_chain() {
         envelope_at: Option<Instant>,
         columns: usize,
         last_column_at: Option<Instant>,
+        /// The columns the node forwarded on the link, and when the last new one came.
+        forwarded: BTreeSet<u16>,
+        last_forwarded_at: Option<Instant>,
     }
+    // What the shipped sidecar's mirror does: the node forwards a column only to a peer
+    // subscribed to its subnet.
+    let column_topic =
+        |topic: &str| matches!(kind_of(topic), Some(TopicKind::DataColumnSidecar(_)));
+    for topic in sidecar
+        .subscribed
+        .iter()
+        .filter(|topic| column_topic(topic))
+    {
+        sidecar
+            .commands
+            .send(BnCommand::Subscribe(topic.clone()))
+            .await
+            .unwrap();
+    }
+    let Sidecar {
+        lanes,
+        link,
+        commands,
+        ..
+    } = &mut sidecar;
     let none = custody.column_set([]);
     let mut seen: BTreeMap<[u8; 32], Seen> = BTreeMap::new();
     let mut late: BTreeMap<[u8; 32], usize> = BTreeMap::new();
@@ -1679,11 +1706,31 @@ async fn matrix_column_repair_is_quiet_on_a_healthy_gloas_chain() {
                     }
                 }
             }
-            event = sidecar.link.events.recv() => {
-                let event = event.expect("the link ended");
-                if let BnEvent::Subscribed { topic, .. } = &event
-                    && let Ok(topic) = Topic::parse(topic)
+            message = lanes.recv_from(Class::Large) => {
+                if let Some((root, index)) = column_identity(&message) {
+                    let entry = seen.entry(root).or_default();
+                    if entry.forwarded.insert(index) {
+                        entry.last_forwarded_at = Some(Instant::now());
+                    }
+                }
+                // D43, as the shipped inbound path does it: a column the node forwards is one
+                // the node holds.
+                if let Ok(topic) = Topic::parse(&message.topic)
+                    && let Ok(ssz) = snap::raw::Decoder::new().decompress_vec(&message.data)
+                    && let Some(Header::Column { slot, index, block_root }) =
+                        Headers.header(&topic, &ssz)
                 {
+                    custody.on_column(slot, index, block_root);
+                }
+            }
+            event = link.events.recv() => {
+                let event = event.expect("the link ended");
+                if let BnEvent::Subscribed { topic: name, .. } = &event
+                    && let Ok(topic) = Topic::parse(name)
+                {
+                    if column_topic(name) {
+                        commands.send(BnCommand::Subscribe(name.clone())).await.unwrap();
+                    }
                     sets_tx.send_modify(|sets| {
                         sets.advertised.insert(topic);
                     });
@@ -1708,7 +1755,11 @@ async fn matrix_column_repair_is_quiet_on_a_healthy_gloas_chain() {
         own_of.insert(*root, gloas.proposers.contains(&proposer));
     }
     let (mut gossiped, mut late_gossiped, mut own, mut late_own) = (0, 0, 0, 0);
-    println!("slot  own    missing_at_deadline  columns_by_the_end  last_column_after_envelope");
+    println!(
+        "slot  own    missing_at_deadline  columns_by_the_end  last_column_after_envelope  \
+         forwarded  last_forwarded_after_envelope"
+    );
+    let (mut own_lag, mut gossiped_lag) = (Vec::new(), Vec::new());
     for (root, block) in &seen {
         if block.slot == 0 {
             continue;
@@ -1725,20 +1776,40 @@ async fn matrix_column_repair_is_quiet_on_a_healthy_gloas_chain() {
                 late_gossiped += usize::from(late);
             }
         }
-        let lag = match (block.envelope_at, block.last_column_at) {
-            (Some(envelope), Some(column)) => {
-                format!(
-                    "{:+} ms",
-                    column.saturating_duration_since(envelope).as_millis()
-                )
-            }
-            _ => "none".to_owned(),
+        // Signed: a column can reach the link before the envelope's event does.
+        let after_envelope = |at: Option<Instant>| {
+            let (envelope, at) = (block.envelope_at?, at?);
+            let ahead = at.saturating_duration_since(envelope).as_millis() as i64;
+            let behind = envelope.saturating_duration_since(at).as_millis() as i64;
+            Some(ahead - behind)
         };
+        let shown = |lag: Option<i64>| lag.map_or("none".to_owned(), |lag| format!("{lag:+} ms"));
+        let forwarded_lag = after_envelope(block.last_forwarded_at);
+        if let Some(lag) = forwarded_lag {
+            match is_own {
+                true => own_lag.push(lag),
+                false => gossiped_lag.push(lag),
+            }
+        }
         println!(
-            "{:<5} {is_own:<6} {:<20} {:<19} {lag}",
+            "{:<5} {is_own:<6} {:<20} {:<19} {:<27} {:<10} {}",
             block.slot,
             missing.map_or("0".to_owned(), |missing| missing.to_string()),
-            block.columns
+            block.columns,
+            shown(after_envelope(block.last_column_at)),
+            block.forwarded.len(),
+            shown(forwarded_lag)
+        );
+    }
+    for (whose, lags) in [("own", &mut own_lag), ("gossiped", &mut gossiped_lag)] {
+        lags.sort_unstable();
+        println!(
+            "last forwarded column after the envelope, {whose}: {} blocks, min {:?} median {:?} \
+             max {:?} ms",
+            lags.len(),
+            lags.first(),
+            lags.get(lags.len() / 2),
+            lags.last()
         );
     }
     println!(
