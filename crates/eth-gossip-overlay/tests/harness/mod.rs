@@ -269,6 +269,10 @@ impl Builder {
             None => scaled(self.regions),
         };
         let grown: usize = regions.iter().map(|(_, hosts)| hosts).sum();
+        let alone = match grown != asked {
+            true => Some(ONE_SCALED.lock().await),
+            false => None,
+        };
         let mut nodes = Vec::new();
         for (region, hosts) in &regions {
             for _ in 0..*hosts {
@@ -285,6 +289,7 @@ impl Builder {
             probes: 0,
             rotating: false,
             scaled: grown != asked,
+            _alone: alone,
         };
         for index in 0..fleet.nodes.len() {
             fleet.write_files(index);
@@ -316,6 +321,14 @@ fn scaled(mut regions: Vec<(String, usize)>) -> Vec<(String, usize)> {
     regions
 }
 
+/// Held by every fleet [`scaled`] grew, so the scenarios of the nightly variant run one at a
+/// time whatever `--test-threads` says. Thirty sidecars and thirty fake beacon nodes are what
+/// one machine holds; with thirty such fleets at once an origin does not answer a repair inside
+/// the 100 ms a loopback attempt is given, the requester gives up as D24 says it should, and a
+/// scenario waits for a block that public gossip would have delivered and the harness has none
+/// of (T-133).
+static ONE_SCALED: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Distinguishes one fleet's hostnames from another's: the read-pacing hook and the captured
 /// log are both process-wide.
 static FLEETS: AtomicUsize = AtomicUsize::new(0);
@@ -336,6 +349,9 @@ pub struct Fleet {
     rotating: bool,
     /// Whether [`scaled`] grew this fleet past the layout the scenario asked for.
     scaled: bool,
+    /// [`ONE_SCALED`], for as long as a grown fleet runs. Last, so the nodes stop before the
+    /// next fleet starts.
+    _alone: Option<tokio::sync::MutexGuard<'static, ()>>,
 }
 
 impl Fleet {
@@ -1190,9 +1206,11 @@ impl Scrape {
             .sum()
     }
 
-    /// Every series above zero that counts something thrown away, as the exposition wrote it.
+    /// Every series above zero that counts something thrown away, as the exposition wrote it,
+    /// and how every repair ended, since one that gave up is a message nobody will send again.
     fn losses(&self) -> String {
-        const LOST: [&str; 6] = [
+        const LOST: [&str; 7] = [
+            "repair_requests",
             "drop",
             "stale",
             "evicted",
