@@ -1208,7 +1208,7 @@ impl Scrape {
 
     /// Every series above zero that counts something thrown away, as the exposition wrote it,
     /// and how every repair ended, since one that gave up is a message nobody will send again.
-    fn losses(&self) -> String {
+    pub fn losses(&self) -> String {
         const LOST: [&str; 7] = [
             "repair_requests",
             "drop",
