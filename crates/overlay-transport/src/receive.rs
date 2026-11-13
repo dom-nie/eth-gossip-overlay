@@ -85,7 +85,7 @@ use tokio::io::AsyncRead;
 use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 
-use crate::batching::{BatchHandle, Small};
+use crate::batching::{BatchHandle, Dest, Small};
 use crate::fanout::{Direction, PeerLabels, TrafficStats};
 use crate::hello::OwnTopics;
 use crate::manager::{CloseCode, LivePeer, LiveSource, ManagerStats, PeerInfo};
@@ -1125,23 +1125,28 @@ impl Ctx {
             // One lock for the whole region rather than one per peer. Nothing under it takes
             // the topics lock, so the order this nests in is the only one there is.
             let own = crate::hello::lock(&relaying.topics);
-            for (hostname, peer) in view.in_region(&self.deps.node.region) {
-                let wanted = *hostname != self.deps.node.hostname
-                    && own.announcer.told(hostname, topic_id)
-                    && subs::state(&peer.state).subscribed(&topic);
-                let Some(max_bytes) = wanted
-                    .then(|| crate::fanout::datagram_limit(&self.deps.node.hostname, peer))
-                    .flatten()
-                else {
-                    continue;
-                };
+            let to: Vec<Dest> = view
+                .in_region(&self.deps.node.region)
+                .into_iter()
+                .filter(|(hostname, peer)| {
+                    **hostname != self.deps.node.hostname
+                        && own.announcer.told(hostname, topic_id)
+                        && subs::state(&peer.state).subscribed(&topic)
+                })
+                .filter_map(|(hostname, peer)| {
+                    Some(Dest {
+                        host: hostname.clone(),
+                        max_bytes: crate::fanout::datagram_limit(&self.deps.node.hostname, peer)?,
+                        relay: false,
+                        sender: peer.sender.clone(),
+                    })
+                })
+                .collect();
+            if !to.is_empty() {
                 let _ = relaying.batches.push(Small {
-                    dest: hostname.clone(),
                     topic_id,
-                    payload: payload.clone(),
-                    max_bytes,
-                    relay: false,
-                    sender: peer.sender.clone(),
+                    payload,
+                    to,
                 });
             }
         }

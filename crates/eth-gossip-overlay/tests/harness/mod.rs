@@ -392,7 +392,24 @@ impl Fleet {
             }
             tokio::time::sleep(POLL).await;
         }
-        panic!("waited {timeout:?} for {what}");
+        panic!("waited {timeout:?} for {what}\n{}", self.losses().await);
+    }
+
+    /// What every node has counted as thrown away, one line per node, for the panic of a wait
+    /// that ran out: a delivery that never came was dropped somewhere, and this says where.
+    async fn losses(&self) -> String {
+        let mut lines = String::new();
+        for (index, node) in self.nodes.iter().enumerate() {
+            let lost = match node.scrape().await {
+                Ok(scrape) => scrape.losses(),
+                Err(error) => format!("not scraped: {error}"),
+            };
+            lines.push_str(&format!(
+                "node {index}: beacon node received {}; {lost}\n",
+                node.bn().received_count()
+            ));
+        }
+        lines
     }
 
     /// The same, over a fresh scrape of every node, indexed as [`Fleet::nodes`] is.
@@ -944,14 +961,16 @@ impl Node {
 
     /// A `GET /metrics` against this node's scrape endpoint, parsed.
     pub async fn metrics(&self) -> Scrape {
-        let mut stream = TcpStream::connect(self.metrics).await.unwrap();
-        stream
-            .write_all(b"GET /metrics HTTP/1.0\r\n\r\n")
-            .await
-            .unwrap();
+        self.scrape().await.unwrap()
+    }
+
+    /// [`Node::metrics`] for a node that may be stopped.
+    async fn scrape(&self) -> std::io::Result<Scrape> {
+        let mut stream = TcpStream::connect(self.metrics).await?;
+        stream.write_all(b"GET /metrics HTTP/1.0\r\n\r\n").await?;
         let mut answer = String::new();
-        stream.read_to_string(&mut answer).await.unwrap();
-        Scrape::parse(&answer)
+        stream.read_to_string(&mut answer).await?;
+        Ok(Scrape::parse(&answer))
     }
 
     /// One request on the admin socket, as `eth-gossip-overlayctl` sends it, and the line back.
@@ -1169,6 +1188,28 @@ impl Scrape {
             })
             .map(|(_, _, value)| value)
             .sum()
+    }
+
+    /// Every series above zero that counts something thrown away, as the exposition wrote it.
+    fn losses(&self) -> String {
+        const LOST: [&str; 6] = [
+            "drop",
+            "stale",
+            "evicted",
+            "rate_limited",
+            "suppressed",
+            "errors",
+        ];
+        let lost: Vec<String> = self
+            .0
+            .iter()
+            .filter(|(name, _, value)| *value > 0.0 && LOST.iter().any(|word| name.contains(word)))
+            .map(|(name, labels, value)| format!("{name}{labels:?} {value}"))
+            .collect();
+        match lost.is_empty() {
+            true => "nothing counted as lost".to_owned(),
+            false => lost.join(", "),
+        }
     }
 
     /// Whether any series of this name carries all of `labels`.

@@ -55,7 +55,7 @@ use overlay_core::wire::{Chunk, ChunkFlags, Frame, MAX_BATCH_ENTRY_BYTES, encode
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::batching::{BatchHandle, Small};
+use crate::batching::{BatchHandle, Dest, Small};
 use crate::hello::{OwnTopics, lock};
 use crate::manager::{LivePeer, LiveSource};
 use crate::router::{Chunked, RegionPlan, RoutePlan, route};
@@ -249,6 +249,9 @@ impl Fanout {
             .into_iter()
             .map(|target| (target, false))
             .chain(relays.into_iter().map(|target| (target, true)));
+        // The targets a batch carries this payload to, which go to the batcher together: its
+        // queue is counted in payloads, so a large fleet does not fill it sooner (T-136).
+        let mut batched = Vec::new();
         for (target, relay) in targets {
             // A peer can leave the live set between the plan and the send, and the send is what
             // finds out (§5.3).
@@ -264,37 +267,55 @@ impl Fanout {
                 }
                 continue;
             }
-            let labels = PeerLabels {
-                hostname: &target,
-                region: &live.region,
-                site: live.site.as_deref(),
-            };
-            let queued = match self.batch_bytes(outbound.class, bytes, live) {
-                Some(max_bytes) => self.batches.push(Small {
-                    dest: target.clone(),
-                    topic_id,
-                    payload: outbound.payload.clone(),
-                    max_bytes,
-                    relay,
-                    sender: live.sender.clone(),
-                }),
-                None => {
-                    let frame = whole.get_or_insert_with(|| {
-                        encode_stream(&Frame::whole_message(
-                            outbound.id,
-                            topic_id.get(),
-                            outbound.payload.clone(),
-                        ))
-                    });
-                    live.sender.push(outbound.class, frame.clone(), now)
-                }
-            };
-            if queued.is_err() {
+            if let Some(max_bytes) = self.batch_bytes(outbound.class, bytes, live) {
+                batched.push((target, live, max_bytes, relay));
+                continue;
+            }
+            let frame = whole.get_or_insert_with(|| {
+                encode_stream(&Frame::whole_message(
+                    outbound.id,
+                    topic_id.get(),
+                    outbound.payload.clone(),
+                ))
+            });
+            if live
+                .sender
+                .push(outbound.class, frame.clone(), now)
+                .is_err()
+            {
                 tracing::debug!(peer = %target, "peer has no sender to queue the message on");
                 continue;
             }
-            self.stats
-                .message(Direction::Out, outbound.class, labels, bytes);
+            self.stats.message(
+                Direction::Out,
+                outbound.class,
+                labels_of(&target, live),
+                bytes,
+            );
+        }
+        let to: Vec<Dest> = batched
+            .iter()
+            .map(|(target, live, max_bytes, relay)| Dest {
+                host: target.clone(),
+                max_bytes: *max_bytes,
+                relay: *relay,
+                sender: live.sender.clone(),
+            })
+            .collect();
+        let small = Small {
+            topic_id,
+            payload: outbound.payload.clone(),
+            to,
+        };
+        if !batched.is_empty() && self.batches.push(small).is_ok() {
+            for (target, live, ..) in &batched {
+                self.stats.message(
+                    Direction::Out,
+                    outbound.class,
+                    labels_of(target, live),
+                    bytes,
+                );
+            }
         }
         if let Some(chunked) = chunked.filter(|_| !striped.is_empty()) {
             self.send_chunks(&outbound, topic_id, chunked.split, &striped, &view, now);
@@ -386,11 +407,7 @@ impl Fanout {
                 tracing::debug!(peer = %target, "peer has no sender to queue its chunks on");
                 continue;
             }
-            let labels = PeerLabels {
-                hostname: target,
-                region: &live.region,
-                site: live.site.as_deref(),
-            };
+            let labels = labels_of(target, live);
             for _ in indices {
                 self.stats.chunk_sent();
                 self.stats
@@ -419,6 +436,15 @@ impl Fanout {
     /// announcement instead (D12).
     fn own_id(&self, topic: &Topic) -> Option<TopicId> {
         lock(&self.topics).table.get(topic)
+    }
+}
+
+/// The labels a message to `live` is counted under.
+fn labels_of<'a>(hostname: &'a Hostname, live: &'a LivePeer) -> PeerLabels<'a> {
+    PeerLabels {
+        hostname,
+        region: &live.region,
+        site: live.site.as_deref(),
     }
 }
 
