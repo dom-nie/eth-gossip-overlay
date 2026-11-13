@@ -203,6 +203,15 @@ mod tests {
     }
 
     #[test]
+    fn decompressed_gives_the_payload_back_and_nothing_for_bytes_that_are_not_snappy() {
+        assert_eq!(decompressed(HELLO_SNAPPY, 1024), Some(b"hello".to_vec()));
+
+        assert_eq!(decompressed(TRUNCATED_SNAPPY, 1024), None);
+        assert_eq!(decompressed(&[0xff; 16], 1024), None);
+        assert_eq!(decompressed(HELLO_SNAPPY, 4), None);
+    }
+
+    #[test]
     fn message_id_display_is_40_hex_chars() {
         let text = MessageId(std::array::from_fn(|i| i as u8)).to_string();
 

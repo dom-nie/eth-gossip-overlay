@@ -522,6 +522,7 @@ mod tests {
     use super::*;
     use crate::manager::{LiveSource, LiveView};
     use crate::sender::{LARGE_QUEUED_BYTES_MAX, LargeLedger, PeerSender};
+    use crate::testlog::LOG;
     use crate::testutil::{
         Builder, NodeKind, REGION, SendSpy, TestCluster, WAIT, datagram_limit, eventually,
         peer_state, subscriptions, topic, view, within,
@@ -928,6 +929,54 @@ mod tests {
             Arc::default(),
         );
         (pusher, fanout)
+    }
+
+    /// A `chunk_bytes` no split takes is a configuration fault and not a property of any one
+    /// message, so every large message after the first would say the same thing: the operator
+    /// gets the line once, and each message still travels, whole.
+    #[tokio::test]
+    async fn a_message_that_cannot_be_split_is_warned_about_once() {
+        let mark = LOG.len();
+        let block = topic("beacon_block");
+        let mut fanout = Fanout {
+            lanes: ClassLanes::new(Arc::new(())),
+            live: LiveSource::fixed(LiveView::default()),
+            self_id: SelfIdentity {
+                hostname: Hostname("bn-me".to_owned()),
+                region: Region(REGION.to_owned()),
+                site: None,
+            },
+            cfg: watch::channel(config::Fanout::default()).1,
+            topics: Arc::default(),
+            batches: crate::batching::Batching::spawn(
+                watch::channel(config::SmallClass::default()).1,
+                Arc::new(()),
+            )
+            .0,
+            stats: Arc::new(()),
+            // Not a multiple of 64, and a number no other test's warning carries.
+            large: config::LargeClass {
+                chunk_bytes: 100,
+                ..config::LargeClass::default()
+            },
+            oversize_warned: HashSet::new(),
+            split_warned: false,
+        };
+        let warnings = || {
+            LOG.since(mark)
+                .lines()
+                .filter(|line| line.contains("cannot split large messages"))
+                .filter(|line| line.contains("chunk_bytes=100"))
+                .count()
+        };
+
+        let first = fanout.chunked(&large(&block, MessageId([1; 20]), incompressible(4096)));
+        assert!(first.is_none());
+        assert_eq!(warnings(), 1);
+
+        let second = fanout.chunked(&large(&block, MessageId([2; 20]), incompressible(4096)));
+        assert!(second.is_none());
+        assert_eq!(warnings(), 1);
     }
 
     /// Every `CHUNK` on one stream, in the order it was written.

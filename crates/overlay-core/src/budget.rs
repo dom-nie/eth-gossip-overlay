@@ -463,6 +463,9 @@ pub fn ceiling() -> Ceiling {
 }
 
 /// The bytes of [`ceiling`], for a caller that only sizes against it.
+// mutants::skip: one read of `ceiling()`, which is skipped above because no test can stage the
+// two absolute paths it reads. What it answers on a given host is not something a test can pin.
+#[cfg_attr(test, mutants::skip)]
 pub fn memory_max() -> u64 {
     ceiling().bytes
 }
@@ -519,6 +522,21 @@ mod tests {
         budget_for(200)
     }
 
+    /// Whether checking `budget` logs the warning for it. The log is shared with every test
+    /// running in parallel, so this looks for the line carrying this budget's own pair of
+    /// numbers and not for any warning at all.
+    fn warned(budget: &MemoryBudget) -> bool {
+        let mark = LOG.len();
+        check(budget);
+        let fields = format!(
+            "total_bytes={} memory_max={}",
+            budget.total_bytes, budget.limit
+        );
+        LOG.since(mark)
+            .lines()
+            .any(|line| line.contains("WARN") && line.contains(&fields))
+    }
+
     /// OPS-N4: the line goes out either way, because an operator sizing `MemoryMax` needs the
     /// number whether or not it currently fits. The warning is what an alert is written against,
     /// so it has to be absent while the budget fits.
@@ -531,7 +549,7 @@ mod tests {
         assert!(under.contains("memory budget"), "{under}");
         assert!(under.contains(&fits.total_bytes.to_string()), "{under}");
         assert!(under.contains(&fits.limit.to_string()), "{under}");
-        assert!(!under.contains("WARN"), "{under}");
+        assert!(!warned(&fits));
 
         // A roster far past what the other rows leave room for, so the receive window is at its
         // floor and the rows no longer fit under the ceiling they were derived against.
@@ -541,6 +559,30 @@ mod tests {
         let over = LOG.since(mark);
         assert!(over.contains("WARN"), "{over}");
         assert!(over.contains("4000"), "{over}");
+    }
+
+    /// A `MemoryMax` sized to the byte the startup line printed is one that holds the budget,
+    /// so an operator who copied the number is not told to raise it.
+    #[test]
+    fn a_budget_exactly_at_its_ceiling_is_not_warned_about() {
+        let at = MemoryBudget {
+            limit: budget().total_bytes,
+            ..budget()
+        };
+        let one_over = MemoryBudget {
+            total_bytes: at.limit + 1,
+            ..at.clone()
+        };
+
+        assert!(!warned(&at));
+        assert!(warned(&one_over));
+    }
+
+    /// DX-N3's floor, with the number written out: a test that named the constant on both sides
+    /// would move with it.
+    #[test]
+    fn the_stream_receive_window_is_one_mib() {
+        assert_eq!(STREAM_RECEIVE_WINDOW, 1_048_576);
     }
 
     /// The `None` cases, which is what a host without cgroup v2 and a cgroup with no ceiling

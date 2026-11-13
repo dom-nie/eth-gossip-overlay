@@ -275,10 +275,52 @@ mod tests {
     use super::*;
     use crate::manager::PeerInfo;
     use crate::testutil::{
-        Builder, DECODED_BLOCK, DECODED_SLOT, NodeKind, SETTLE, TestCluster, eventually,
-        subscriptions, topic,
+        Builder, DECODED_BLOCK, DECODED_SLOT, NodeKind, SETTLE, TestCluster, bounded, eventually,
+        subscriptions, topic, view,
     };
+    use overlay_core::subs::PeerState;
     use overlay_core::topic::table::TopicId;
+    use overlay_core::wire::Chunk;
+
+    /// The one connection every peer in a hand-built view shares; nothing here reads it.
+    async fn connection() -> quinn::Connection {
+        let cluster = Builder::new(&[NodeKind::Bare, NodeKind::Bare])
+            .start()
+            .await;
+        bounded("the pair to connect", cluster.connected_pair(0, 1))
+            .await
+            .0
+    }
+
+    /// D29: a peer one release behind reads `REPAIR_REQ` as an unknown frame type, so it is not
+    /// somebody to ask however close it is, and neither is a peer that has left the live set.
+    /// `None` is what moves the scheduler on to the next candidate at once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_peer_that_never_advertised_repair_is_not_reachable() {
+        let host = |name: &str| Hostname(name.to_owned());
+        let mut live = view(
+            &connection().await,
+            vec![
+                (host("bn-current"), PeerState::default()),
+                (host("bn-older"), PeerState::default()),
+            ],
+        );
+        for peer in live.0.values_mut() {
+            peer.rtt = Duration::from_millis(7);
+        }
+        live.0
+            .get_mut(&host("bn-older"))
+            .expect("the peer this view was built from")
+            .negotiated
+            .features &= !features::REPAIR;
+
+        assert_eq!(
+            reachable(&live, &host("bn-current")),
+            Some(Duration::from_millis(7))
+        );
+        assert_eq!(reachable(&live, &host("bn-older")), None);
+        assert_eq!(reachable(&live, &host("bn-gone")), None);
+    }
 
     /// A gossipsub payload of about `bytes` that snappy cannot shrink much, so the message is
     /// really cut into several chunks.
@@ -296,8 +338,9 @@ mod tests {
     }
 
     /// Node 1 with a sidecar and node 0 as a peer of the test's own, which has written every
-    /// chunk of a striped block but one and then answers nothing at all.
-    async fn one_chunk_short(block: &Topic) -> (TestCluster, PeerInfo) {
+    /// chunk of a striped block but one and then answers nothing at all. The chunk it kept is
+    /// handed back, for a test that has it answer after all.
+    async fn one_chunk_short(block: &Topic) -> (TestCluster, PeerInfo, Chunk) {
         let mut cluster = Builder::new(&[NodeKind::Bare, NodeKind::Manager])
             .start()
             .await;
@@ -315,25 +358,27 @@ mod tests {
         let split = Params::for_len(payload.len(), 2048, 0.10).unwrap();
         let msg_id = msgid::compute(&block.to_string(), &payload, MAX_PAYLOAD_BYTES).id;
         let chunks = rs::encode(&payload, split);
+        let chunk = |index: u16| Chunk {
+            msg_id,
+            topic_id: 1,
+            k: split.k,
+            m: split.m,
+            index,
+            total_len: split.total_len,
+            data: chunks[usize::from(index)].clone(),
+        };
         let mut stream = peer.connection.open_uni().await.unwrap();
         let mut out = BytesMut::new();
         for index in 0..split.k - 1 {
             out.extend_from_slice(&encode_stream(&Frame::Chunk {
                 flags: ChunkFlags::NONE,
-                chunk: overlay_core::wire::Chunk {
-                    msg_id,
-                    topic_id: 1,
-                    k: split.k,
-                    m: split.m,
-                    index,
-                    total_len: split.total_len,
-                    data: chunks[usize::from(index)].clone(),
-                },
+                chunk: chunk(index),
             }));
         }
         stream.write_all(&out).await.unwrap();
         stream.finish().unwrap();
-        (cluster, peer)
+        let kept = chunk(split.k - 1);
+        (cluster, peer, kept)
     }
 
     /// D24's attempt timeout doing its job: the only peer that could answer says nothing, so the
@@ -342,7 +387,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn repair_attempt_times_out_and_is_counted() {
         let block = topic("beacon_block");
-        let (cluster, _peer) = one_chunk_short(&block).await;
+        let (cluster, _peer, _kept) = one_chunk_short(&block).await;
 
         eventually("the attempt to time out", || {
             cluster
@@ -351,6 +396,58 @@ mod tests {
                 > 0
         })
         .await;
+    }
+
+    /// What `repair_requests_total{outcome}` says of a peer that had the chunk: `completed`,
+    /// whichever way the chunk travelled. This build answers with `CHUNK` frames and an empty
+    /// trailer; the wire also lets an answer carry its chunks inside the `REPAIR_RESP`, and a
+    /// peer that does so finished the job just the same and is not a candidate that had nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_repair_whose_answer_completes_the_message_is_counted_completed() {
+        let block = topic("beacon_block");
+        let (cluster, peer, kept) = one_chunk_short(&block).await;
+
+        let (mut send, mut recv) = bounded("the sidecar to ask", peer.connection.accept_bi())
+            .await
+            .unwrap();
+        let asked = bounded(
+            "the request to arrive",
+            wire::read_frame(&mut recv, MAX_FRAME_BYTES),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(
+                asked,
+                Read::Frame(Frame::RepairReq(RepairReq::Missing { .. }))
+            ),
+            "{asked:?}"
+        );
+        wire::write_frame(
+            &mut send,
+            &Frame::RepairResp(RepairResp::Chunks(vec![kept])),
+        )
+        .await
+        .unwrap();
+        send.finish().unwrap();
+
+        eventually("the block to be queued for the beacon node", || {
+            cluster.published(1).len() == 1
+        })
+        .await;
+        eventually("the attempt to be counted", || {
+            cluster
+                .stats(1)
+                .repair_requests(Form::Chunk, Outcome::Completed)
+                == 1
+        })
+        .await;
+        assert_eq!(
+            cluster
+                .stats(1)
+                .repair_requests(Form::Chunk, Outcome::NotFound),
+            0
+        );
     }
 
     /// §5.6 end to end. One host of a region is cut off from the rest of it mid-transfer, so the

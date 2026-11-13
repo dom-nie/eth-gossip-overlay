@@ -248,6 +248,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_fork_topic_is_live_from_its_fork_onward_and_never_at_an_unknown_one() {
+        let row = other("fulu", "made_up_topic");
+
+        assert!(row.live_at("fulu"));
+        assert!(row.live_at("gloas"));
+        assert!(!row.live_at("electra"));
+        assert!(!row.live_at("zeta"));
+        // A row whose own fork the table does not know is live nowhere.
+        assert!(!other("zeta", "made_up_topic").live_at("fulu"));
+    }
+
     /// A named kind with no row would be a kind the sidecar can parse that the beacon node never
     /// sends, which is either dead code or a topic the table forgot.
     #[test]

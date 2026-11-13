@@ -44,6 +44,32 @@ exclude_re = [
   # NLM_F_REQUEST (1) and NLM_F_ACK (4) are disjoint bits, so `^` and `|` give the same flags
   # for the same reason as the two nibble joins above. `| with &` on the same line is caught.
   "replace \\| with \\^ in netlink::napi_set_request",
+  # T-124. The three feature bits are `bit(0)`, `bit(1)` and `bit(2)`, disjoint, so `^` and `|`
+  # give the same `SUPPORTED_FEATURES`. cargo-mutants 27.1.0 ignores `mutants::skip` on a const.
+  "protocol\\.rs:\\d+:\\d+: replace \\| with \\^$",
+  # `open` is the only insert and runs this loop before each one, so the count is at most
+  # `max_in_flight` when the loop starts and one drop ends it with or without the `!`. The two
+  # differ only at `max_in_flight == 0`, where the mutant spins; the sidecar always builds the
+  # reassembler with `MAX_IN_FLIGHT`.
+  "delete ! in State::open",
+  # `k` is a `u16`, so `k >= 0` admits only `k == 0` beyond `k > 0`. With no parity such a
+  # header has no indices and is a `HeaderConflict` before `usable` is asked; with parity
+  # `rs::supports(0, m)` on the same expression refuses it. Anchored on the column, because the
+  # same mutation of `chunk_bytes > 0` one line down is caught.
+  "reassemble\\.rs:\\d+:14: replace > with >= in usable",
+  # `start` is only ever used modulo the pool's length, and `(h + len) mod len == h mod len`.
+  # The one difference is an overflow panic for a hash within `len` of `u64::MAX`. Anchored on
+  # the column: the `%` that reduces the walk on the next line is caught.
+  "relay\\.rs:\\d+:47: replace % with \\+ in select",
+  "stripe\\.rs:\\d+:35: replace % with \\+ in assign",
+  # When `start == end` the copy is of an empty slice, which does nothing.
+  "rs\\.rs:\\d+:\\d+: replace < with <= in data_chunk",
+  # Calls `stale_dropped` with 0, which adds nothing to the counter.
+  "batching\\.rs:\\d+:\\d+: replace > with >= in send$",
+  "sender\\.rs:\\d+:\\d+: replace > with >= in send_batch",
+  # The counter's value is never read: its one reader waits on `changed()`, and `send_modify`
+  # notifies whatever the closure does. MD-04 describes it as a `watch<u64>`, so the type stays.
+  "replace \\+= with \\*= in OwnTopics::intern",
 ]
 
 # The one file the `#[cfg(test)]` rule above does not cover. `overlay-transport`'s `testutil` is

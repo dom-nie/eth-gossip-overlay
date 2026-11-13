@@ -586,6 +586,37 @@ mod tests {
         assert_eq!(wanted(5, 2, &[1, 2, 3, 4, 5, 6]), vec![1, 2, 3]);
     }
 
+    /// Index `k` is the first parity chunk, not the last data one, and the split is by index
+    /// and not by where an index sits in the list.
+    #[test]
+    fn wanted_takes_data_indices_before_parity_in_any_order() {
+        assert_eq!(wanted(4, 3, &[4, 0]), vec![0]);
+    }
+
+    /// R2.3's arithmetic at a rate small enough to count: ten large messages a second, three
+    /// attempts each, and the bucket starts with one second's worth.
+    #[test]
+    fn the_responder_bucket_allows_three_attempts_per_large_message_per_second() {
+        let now = Instant::now();
+        let mut bucket = responder_limit(10, now);
+
+        let taken = (0..40).filter(|_| bucket.try_take(1, now)).count();
+
+        assert_eq!(taken, 30);
+    }
+
+    #[test]
+    fn repair_forms_and_outcomes_carry_the_labels_section_12_names() {
+        assert_eq!(Form::Chunk.as_str(), "chunk");
+        assert_eq!(Form::Column.as_str(), "column");
+
+        assert_eq!(Outcome::Completed.as_str(), "completed");
+        assert_eq!(Outcome::NotFound.as_str(), "not_found");
+        assert_eq!(Outcome::Timeout.as_str(), "timeout");
+        assert_eq!(Outcome::GaveUp.as_str(), "gave_up");
+        assert_eq!(Outcome::RateLimited.as_str(), "rate_limited");
+    }
+
     /// A request is one frame, so the frame has to have room for every index the scheduler can
     /// ask for. `chunk_bytes: 512` is a legal config, a 10 MiB payload over it is 20480 data
     /// chunks, and a requester holding one of them asks for the rest at once.
@@ -835,6 +866,39 @@ mod tests {
         ));
         scheduler.answered(&MessageId([9; 20]));
         clock.advance(REPAIR_TOTAL_BUDGET + Duration::from_millis(1));
+
+        assert_eq!(
+            scheduler.tick(&reassembler, DEADLINE, reachable, clock.now()),
+            vec![Decision::GaveUp(MessageId([9; 20]))]
+        );
+    }
+
+    /// The budget is the whole 1.5 s: a tick that lands on its last instant still asks the next
+    /// candidate, and the one after it is the first to give up (D24).
+    #[test]
+    fn a_repair_is_not_given_up_at_exactly_its_total_budget() {
+        let clock = FakeClock::new();
+        let reassembler = collecting(
+            6,
+            &[(0, "a", false), (1, "b", true), (2, "c", true)],
+            clock.now(),
+        );
+        let mut scheduler = Scheduler::default();
+        clock.advance(DEADLINE);
+
+        assert!(matches!(
+            scheduler.tick(&reassembler, DEADLINE, reachable, clock.now()).as_slice(),
+            [Decision::Ask(request)] if request.peer == host("b")
+        ));
+        scheduler.answered(&MessageId([9; 20]));
+        clock.advance(REPAIR_TOTAL_BUDGET);
+
+        assert!(matches!(
+            scheduler.tick(&reassembler, DEADLINE, reachable, clock.now()).as_slice(),
+            [Decision::Ask(request)] if request.peer == host("c")
+        ));
+        scheduler.answered(&MessageId([9; 20]));
+        clock.advance(Duration::from_millis(1));
 
         assert_eq!(
             scheduler.tick(&reassembler, DEADLINE, reachable, clock.now()),

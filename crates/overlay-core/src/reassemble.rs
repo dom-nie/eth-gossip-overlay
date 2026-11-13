@@ -1088,6 +1088,11 @@ mod tests {
         let last = feed(&reassembler, msg_id, params, &chunks, &repeated, now);
 
         assert_eq!(last, Outcome::Duplicate { forward: false });
+        assert_eq!(
+            feed(&reassembler, msg_id, params, &chunks, &[1, 1], now),
+            Outcome::Duplicate { forward: false },
+            "an index other than the first"
+        );
         assert_eq!(reassembler.in_flight(), 1, "still collecting the message");
     }
 
@@ -1562,6 +1567,167 @@ mod tests {
         reassembler.complete(MessageId([1; 20]));
 
         assert_eq!(reassembler.in_flight(), 0);
+    }
+
+    /// The receive path reads D19's answer off whatever the chunk came to, so an outcome that
+    /// carries one hands it over as it is and every other outcome asks for nothing.
+    #[test]
+    fn forward_is_what_a_stored_completed_or_duplicate_outcome_carries() {
+        let completed = |forward| Outcome::Completed {
+            msg_id: MessageId([1; 20]),
+            topic_id: 1,
+            payload: Bytes::new(),
+            ssz: Vec::new(),
+            used_parity: false,
+            first_chunk_at: Instant::now(),
+            origin: host(),
+            forward,
+        };
+
+        for forward in [true, false] {
+            assert_eq!(Outcome::Stored { forward }.forward(), forward);
+            assert_eq!(completed(forward).forward(), forward);
+            assert_eq!(Outcome::Duplicate { forward }.forward(), forward);
+        }
+        assert!(!Outcome::LateAfterCompletion.forward());
+        assert!(!Outcome::HeaderConflict.forward());
+        assert!(!rejected(Reason::BadHeader, &host()).forward());
+    }
+
+    /// The labels are written out because dashboards and alerts match on them (§12).
+    #[test]
+    fn eviction_reasons_carry_the_labels_section_12_names() {
+        assert_eq!(Evicted::MaxInFlight.as_str(), "max_in_flight");
+        assert_eq!(Evicted::MaxBytes.as_str(), "max_bytes");
+        assert_eq!(Evicted::Expired.as_str(), "ttl");
+    }
+
+    /// A split of one empty chunk has a total length of zero, which every other check on the
+    /// header lets through. One of no data chunks needs a parity chunk for its index to be
+    /// inside the split at all, and is refused whether the codec is asked about it or not.
+    #[test]
+    fn a_header_with_no_data_chunks_or_empty_chunks_is_a_bad_header() {
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        let no_data = chunk(1, 0, 0, 1);
+        let mut empty = chunk(2, 0, 1, 0);
+        empty.data = Bytes::new();
+        empty.total_len = 0;
+
+        for bad in [no_data, empty] {
+            assert_eq!(
+                on(&reassembler, &bad, false, now),
+                rejected(Reason::BadHeader, &host()),
+                "k = {}, {} bytes a chunk",
+                bad.k,
+                bad.data.len()
+            );
+        }
+        assert_eq!(reassembler.in_flight(), 0);
+    }
+
+    /// A host whose traffic stopped has one `gc` to clear everything that ran out, not one
+    /// entry a call.
+    #[test]
+    fn expire_drops_every_entry_past_the_ttl_in_one_pass() {
+        let ttl = Duration::from_secs(4);
+        let evictions = Arc::new(Evictions::default());
+        let reassembler = Reassembler::new(ReassembleConfig {
+            incomplete_ttl: ttl,
+            ..ReassembleConfig::default()
+        })
+        .with_stats(evictions.clone());
+        let now = Instant::now();
+        for msg_id in 1..=2 {
+            on(&reassembler, &chunk(msg_id, 0, 4, 1), false, now);
+        }
+
+        reassembler.gc(now + ttl + Duration::from_millis(1));
+
+        assert_eq!(reassembler.in_flight(), 0);
+        assert_eq!(evictions.seen(), [Evicted::Expired, Evicted::Expired]);
+    }
+
+    /// One chunk can pass the cap by more than the oldest entry gives back. The cap here is
+    /// what the large entry is charged on its own, which is more than the two small ones
+    /// together, so both of them have to go for it.
+    #[test]
+    fn max_bytes_evicts_as_many_entries_as_it_takes() {
+        let mut large = chunk(3, 0, 4, 1);
+        large.data = Bytes::from(vec![0; 2 * one_chunk_entry()]);
+        let large_entry = one_chunk_entry() - 8 + large.data.len();
+        let evictions = Arc::new(Evictions::default());
+        let reassembler = Reassembler::new(ReassembleConfig {
+            max_bytes: large_entry,
+            ..ReassembleConfig::default()
+        })
+        .with_stats(evictions.clone());
+        let now = Instant::now();
+        for msg_id in 1..=2 {
+            on(&reassembler, &chunk(msg_id, 0, 4, 1), false, now);
+        }
+        assert_eq!(evictions.seen(), []);
+
+        on(&reassembler, &large, false, now);
+
+        assert_eq!(evictions.seen(), [Evicted::MaxBytes, Evicted::MaxBytes]);
+        assert_eq!(reassembler.in_flight(), 1);
+        assert_eq!(reassembler.state().bytes, large_entry);
+    }
+
+    /// Finishing a message takes its own place in the arrival order and nobody else's, so a
+    /// message still waiting is one repair can still find.
+    #[test]
+    fn completing_one_message_keeps_the_others_as_repair_candidates() {
+        let reassembler = Reassembler::new(ReassembleConfig::default());
+        let now = Instant::now();
+        for msg_id in 1..=2 {
+            on(&reassembler, &chunk(msg_id, 0, 4, 1), false, now);
+        }
+
+        reassembler.complete(MessageId([1; 20]));
+
+        let waiting: Vec<MessageId> = reassembler
+            .incomplete_older_than(Duration::ZERO, now)
+            .into_iter()
+            .map(|incomplete| incomplete.msg_id)
+            .collect();
+        assert_eq!(waiting, [MessageId([2; 20])]);
+    }
+
+    /// The completed set is bounded like the entries are: it remembers as many ids as there can
+    /// be messages in flight, and the oldest is forgotten for the one that passes that.
+    #[test]
+    fn the_completed_set_holds_exactly_max_in_flight_ids() {
+        let reassembler = Reassembler::new(ReassembleConfig {
+            max_in_flight: 2,
+            ..ReassembleConfig::default()
+        });
+        let now = Instant::now();
+        for msg_id in 1..=2 {
+            reassembler.complete(MessageId([msg_id; 20]));
+        }
+        for msg_id in 1..=2 {
+            assert_eq!(
+                on(&reassembler, &chunk(msg_id, 0, 4, 1), false, now),
+                Outcome::LateAfterCompletion,
+                "message {msg_id} is one of the two the set has room for"
+            );
+        }
+
+        reassembler.complete(MessageId([3; 20]));
+
+        assert_eq!(
+            on(&reassembler, &chunk(1, 0, 4, 1), false, now),
+            Outcome::Stored { forward: true },
+            "the oldest id should have been forgotten"
+        );
+        for msg_id in 2..=3 {
+            assert_eq!(
+                on(&reassembler, &chunk(msg_id, 0, 4, 1), false, now),
+                Outcome::LateAfterCompletion
+            );
+        }
     }
 
     /// What T-087's prioritisation reads: a column whose chunks are already arriving is repaired
