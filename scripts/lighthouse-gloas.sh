@@ -13,7 +13,7 @@
 # are sidecars. The shipped eth-gossip-overlay runs on both nodes as a two-host roster, and
 # a catch-up loop posts the far node the blocks and payload envelopes it lacks over the beacon
 # API whenever it falls three slots behind: the shipped sidecar skips the first block after it
-# starts (D42) and the far node has nobody to range-sync from. Then the five Gloas tests in
+# starts (D42) and the far node has nobody to range-sync from. Then the six Gloas tests in
 # crates/overlay-bn/tests/matrix.rs run with a harness as the far node's second peer.
 #
 # Local only. It needs Docker and Kurtosis, pulls the ethereum-package images, and a full run
@@ -260,7 +260,7 @@ overlay:
   fleet_seed_file: $work/seed$fanout
 bn:
   identity_url: $3/eth/v1/node/identity
-  events_url: $3/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip
+  events_url: $3/eth/v1/events?topics=block,block_gossip,data_column_sidecar,execution_payload_gossip,execution_payload
   libp2p_addr: $4
   node_key_file: $work/$1.key
   listen_addr: /ip4/127.0.0.1/tcp/0$by_root_cache
@@ -324,6 +324,7 @@ tests=(
   matrix_every_gloas_kind_crosses_the_overlay
   matrix_the_node_forwards_full_columns_to_its_explicit_peer_with_partials_on
   matrix_execution_payload_gossip_fires_once_per_envelope_from_any_source
+  matrix_execution_payload_fires_at_import_for_every_envelope
   matrix_column_repair_is_quiet_on_a_healthy_gloas_chain
   matrix_a_block_whose_parent_envelope_the_node_lacks
 )

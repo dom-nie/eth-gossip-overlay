@@ -1231,6 +1231,12 @@ async fn matrix_the_node_forwards_full_columns_to_its_explicit_peer_with_partial
 /// envelope within tens of milliseconds of the block, so the window the switch has to land
 /// in is the overlay's own latency, and the attempt repeats until it does. The envelope and
 /// C are handed over at the end so the far node is left in step.
+///
+/// D44 is read against the same block. The far node's event stream feeds an `Arrivals` the
+/// way the shipped sidecar's does, and the check the receive path makes is asked of C twice:
+/// when C arrives it has to say the payload C builds on is not imported, which is what keeps
+/// the shipped sidecar from offering the node the block this test goes on to hand it, and
+/// once the node has imported the payload it has to let C by.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "needs the Gloas devnet: scripts/lighthouse-matrix.sh <version> --gloas"]
 async fn matrix_a_block_whose_parent_envelope_the_node_lacks() {
@@ -1260,6 +1266,30 @@ async fn matrix_a_block_whose_parent_envelope_the_node_lacks() {
         far.http
     ));
     let mut near_events = sse(format!("{}/eth/v1/events?topics=block_gossip", env.http));
+    // D44's check as the shipped sidecar holds it: the far node's own event stream, at the
+    // shipped topics, filing what the node says it imported.
+    let arrivals = Arc::new(Arrivals::new(Arc::new(SystemClock), sidecar.spec.clone()));
+    let shipped = Config::default().bn.events_url;
+    let far_stream = BlockEvents::spawn(
+        format!(
+            "{}{}?{}",
+            far.http,
+            shipped.path(),
+            shipped.query().unwrap()
+        )
+        .parse()
+        .unwrap(),
+        Backoff::new(BACKOFF_MIN, BACKOFF_MAX),
+        arrivals.clone(),
+        SharedCustody::new(
+            sidecar.spec.clone(),
+            watch::channel(SubscriptionSets::default()).1,
+            arrivals.clone(),
+            Arc::new(()),
+        ),
+        Arc::new(SystemClock),
+        Arc::new(()),
+    );
     let root_in = |data: &serde_json::Value| unhex(data["block"].as_str().unwrap()).unwrap();
     let slot_in =
         |data: &serde_json::Value| -> u64 { data["slot"].as_str().unwrap().parse().unwrap() };
@@ -1326,6 +1356,21 @@ async fn matrix_a_block_whose_parent_envelope_the_node_lacks() {
             drop(off);
             continue;
         }
+        // What the shipped receive path asks before it offers the node this block.
+        let Some(Header::Block {
+            parent_payload: Some(built_on),
+            ..
+        }) = Headers.header(&Topic::parse(&block_topic).unwrap(), &bytes)
+        else {
+            panic!("a Gloas block's bid names the payload it builds on");
+        };
+        let kept_back = arrivals.lacks_payload(built_on);
+        println!(
+            "the parent-payload check on the child: parent block imported {}, payload it \
+             builds on imported {}",
+            arrivals.is_imported(parent),
+            !kept_back
+        );
         let dropped_before = lookups_dropped_at(&gloas.far_metrics).await;
         let wire = snap::raw::Encoder::new().compress_vec(&bytes).unwrap();
         sidecar
@@ -1385,11 +1430,34 @@ async fn matrix_a_block_whose_parent_envelope_the_node_lacks() {
             posted.text().await.unwrap_or_default()
         );
         drop(off);
-        outcome = Some((asked, imported, dropped_after - dropped_before));
+        // The far node imports the payload once it has the envelope and its columns, which the
+        // catch-up loop sees to within a few slots. From then on the check lets the child by.
+        let until = Instant::now() + chain.slots(8);
+        while arrivals.lacks_payload(built_on) && Instant::now() < until {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let let_through = !arrivals.lacks_payload(built_on);
+        outcome = Some((
+            asked,
+            imported,
+            dropped_after - dropped_before,
+            kept_back,
+            let_through,
+        ));
         break;
     }
+    far_stream.task.abort();
 
-    let (asked, imported, dropped) = outcome.expect("no block gave a clean window in 8 tries");
+    let (asked, imported, dropped, kept_back, let_through) =
+        outcome.expect("no block gave a clean window in 8 tries");
+    assert!(
+        kept_back,
+        "the shipped check would have offered the node a child it then dropped"
+    );
+    assert!(
+        let_through,
+        "the node imported the payload and the check still keeps its child back"
+    );
     assert_eq!(
         asked,
         (4, 0),
@@ -1526,6 +1594,131 @@ async fn matrix_execution_payload_gossip_fires_once_per_envelope_from_any_source
          gossiped: envelopes mostly reach the node some other way than gossip"
     );
     assert_eq!(twice, 0, "an envelope fired more than once");
+}
+
+/// D44's first step: the event the parent-payload check reads. `execution_payload` fires when
+/// the node imports a payload envelope, which is when a child built on it stops being
+/// `UnknownPayload`; `execution_payload_gossip` fires earlier, at gossip verification. Over
+/// `MATRIX_SLOTS` slots every envelope the near node gossip-verified is matched with its import
+/// event, own proposals and other nodes' apart, and the gap between the two events is printed.
+/// The far node is read as well: its envelopes come from its shipped sidecar and, when it
+/// falls behind, from the catch-up loop over the beacon API, so an import event there is one
+/// for an envelope that never arrived from a public gossip peer. An envelope fetched by root
+/// is not covered: T-121 saw the node ask for none. The node can fire the event twice for one
+/// envelope, 8 of 61 on the devnet, which is counted and costs a set nothing.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "needs the Gloas devnet: scripts/lighthouse-matrix.sh <version> --gloas"]
+async fn matrix_execution_payload_fires_at_import_for_every_envelope() {
+    let Some(gloas) = gloas() else { return };
+    let env = env();
+    let chain = chain(&env.http).await;
+    let mut near = sse(format!(
+        "{}/eth/v1/events?topics=execution_payload_gossip,execution_payload",
+        env.http
+    ));
+    let mut far = sse(format!(
+        "{}/eth/v1/events?topics=execution_payload",
+        gloas.far_http
+    ));
+
+    #[derive(Default)]
+    struct Seen {
+        slot: u64,
+        verified_at: Option<Instant>,
+        imported_at: Option<Instant>,
+        imports: usize,
+        block_hash: Option<String>,
+        far_imports: usize,
+    }
+    let mut seen: BTreeMap<[u8; 32], Seen> = BTreeMap::new();
+    let mut printed = false;
+    let end = Instant::now() + chain.slots(gloas.slots);
+    loop {
+        tokio::select! {
+            _ = tokio::time::sleep_until(end.into()) => break,
+            Some((name, data)) = near.recv() => {
+                let root = unhex(data["block_root"].as_str().unwrap()).unwrap();
+                let entry = seen.entry(root).or_default();
+                entry.slot = data["slot"].as_str().unwrap().parse().unwrap();
+                if name == "execution_payload_gossip" {
+                    entry.verified_at = Some(Instant::now());
+                } else {
+                    if !printed {
+                        println!("an execution_payload event as the node sends it: {data}");
+                        printed = true;
+                    }
+                    entry.imported_at.get_or_insert_with(Instant::now);
+                    entry.imports += 1;
+                    entry.block_hash = data["block_hash"].as_str().map(str::to_owned);
+                }
+            }
+            Some((_, data)) = far.recv() => {
+                let root = unhex(data["block_root"].as_str().unwrap()).unwrap();
+                seen.entry(root).or_default().far_imports += 1;
+            }
+        }
+    }
+
+    let slots: Vec<u64> = seen.values().map(|envelope| envelope.slot).collect();
+    // The window's first and last slots can hold half of a pair, so they are left out.
+    let edge = |slot: u64| slots.iter().min() == Some(&slot) || slots.iter().max() == Some(&slot);
+    let (mut own, mut gossiped, mut unimported, mut hashless, mut twice, mut on_far) =
+        (0, 0, 0, 0, 0, 0);
+    let mut gaps = Vec::new();
+    println!("slot  own    import_events  import_after_gossip  far_import_events");
+    for (root, envelope) in &seen {
+        if envelope.verified_at.is_none() || edge(envelope.slot) {
+            continue;
+        }
+        let header = beacon_json(&env, &format!("/eth/v1/beacon/headers/{}", hex0x(*root))).await;
+        let proposer: u64 = header["data"]["header"]["message"]["proposer_index"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let is_own = gloas.proposers.contains(&proposer);
+        match is_own {
+            true => own += 1,
+            false => gossiped += 1,
+        }
+        unimported += usize::from(envelope.imports == 0);
+        hashless += usize::from(envelope.imports > 0 && envelope.block_hash.is_none());
+        twice += usize::from(envelope.imports > 1);
+        on_far += usize::from(envelope.far_imports > 0);
+        let gap = envelope
+            .verified_at
+            .zip(envelope.imported_at)
+            .map(|(verified, imported)| imported.saturating_duration_since(verified).as_millis());
+        gaps.extend(gap);
+        println!(
+            "{:<5} {is_own:<6} {:<14} {:<20} {}",
+            envelope.slot,
+            envelope.imports,
+            gap.map_or("none".to_owned(), |gap| format!("+{gap} ms")),
+            envelope.far_imports
+        );
+    }
+    gaps.sort_unstable();
+    println!(
+        "{own} own envelopes and {gossiped} gossiped: {unimported} with no import event, \
+         {hashless} import events with no block_hash, {twice} imported more than once; import \
+         after gossip verification min {:?} median {:?} max {:?} ms; the far node fired an \
+         import event for {on_far} of them",
+        gaps.first(),
+        gaps.get(gaps.len() / 2),
+        gaps.last()
+    );
+    assert!(own >= 1 && gossiped >= 4, "too few envelopes in the window");
+    assert_eq!(
+        unimported, 0,
+        "an envelope the node verified fired no import event"
+    );
+    assert_eq!(hashless, 0, "an import event named no block hash");
+    assert!(
+        on_far * 2 >= own + gossiped,
+        "the far node fired an import event for {on_far} of {} envelopes",
+        own + gossiped
+    );
 }
 
 /// T-119's end-to-end check. The far node's only gossip peer is its shipped sidecar, so every

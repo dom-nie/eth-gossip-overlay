@@ -12,6 +12,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -211,8 +212,9 @@ struct Arrival {
 
 /// Which blocks reached this host lately, so an import event can be turned into a lag, which
 /// of them the beacon node has imported, so a block whose parent it lacks is not offered to it
-/// (T-101), and how many blobs each commits to, which custody reads to leave a block with none
-/// untracked (T-127).
+/// (T-101), how many blobs each commits to, which custody reads to leave a block with none
+/// untracked (T-127), and which payloads the node has imported, so a Gloas block built on one
+/// it lacks is not offered to it either (D44).
 ///
 /// It lives here rather than beside the event stream that reads it because both receive paths
 /// file into it, and one of them is in `overlay-transport`, which has never heard of the beacon
@@ -221,6 +223,10 @@ pub struct Arrivals {
     clock: Arc<dyn Clock>,
     spec: watch::Receiver<SpecSnapshot>,
     seen: Mutex<BTreeMap<[u8; 32], Arrival>>,
+    /// The execution block hash of every payload the node reported importing, and when.
+    payloads: Mutex<BTreeMap<[u8; 32], Instant>>,
+    /// Whether the node's event stream was asked for payload imports at all (D44).
+    payloads_reported: AtomicBool,
 }
 
 impl Arrivals {
@@ -231,6 +237,8 @@ impl Arrivals {
             clock,
             spec,
             seen: Mutex::new(BTreeMap::new()),
+            payloads: Mutex::new(BTreeMap::new()),
+            payloads_reported: AtomicBool::new(false),
         }
     }
 
@@ -321,6 +329,41 @@ impl Arrivals {
             .is_some_and(|arrival| arrival.imported)
     }
 
+    /// Says the node's event stream is asked for `execution_payload`, which is what turns
+    /// [`lacks_payload`](Self::lacks_payload) on. A `bn.events_url` without the topic never
+    /// reports an import, and a check that read that silence as "not imported" would keep
+    /// every Gloas block back, so without this call nothing is kept back (D44).
+    pub fn expect_payload_imports(&self) {
+        self.payloads_reported.store(true, Ordering::Relaxed);
+    }
+
+    /// Records that the beacon node imported the payload with this execution block hash.
+    pub fn payload_imported(&self, block_hash: [u8; 32]) {
+        let now = self.clock.now();
+        let mut payloads = self.payloads();
+        self.prune_payloads(&mut payloads, now);
+        payloads.insert(block_hash, now);
+    }
+
+    /// Whether the node would refuse a block whose bid builds on `block_hash` for building on
+    /// a payload it has not imported (D44).
+    ///
+    /// The same question [`is_imported`](Self::is_imported) answers for the parent block, one
+    /// event later: a Gloas node treats such a block as one with an unknown parent, asks this
+    /// sidecar for the parent block it already holds, and drops the child after four refusals.
+    /// The key is the hash the bid names and not the parent's root, because a block built on a
+    /// parent whose payload was withheld names the payload before it and needs nothing more.
+    /// The set is empty after a sidecar start and forgets a payload older than the window;
+    /// both cost a block kept back, and both are counted.
+    pub fn lacks_payload(&self, block_hash: [u8; 32]) -> bool {
+        if !self.payloads_reported.load(Ordering::Relaxed) {
+            return false;
+        }
+        let mut payloads = self.payloads();
+        self.prune_payloads(&mut payloads, self.clock.now());
+        !payloads.contains_key(&block_hash)
+    }
+
     /// How many blobs `block_root` commits to, if its bytes went past this host inside the
     /// retention window. `None` is a block whose count nobody here knows.
     ///
@@ -340,6 +383,16 @@ impl Arrivals {
     fn prune(&self, seen: &mut BTreeMap<[u8; 32], Arrival>, now: Instant) {
         let window = Duration::from_secs(RETENTION_SLOTS * self.spec.borrow().seconds_per_slot);
         seen.retain(|_, arrival| now.saturating_duration_since(arrival.seen) <= window);
+    }
+
+    /// The same window, for the payloads.
+    fn prune_payloads(&self, payloads: &mut BTreeMap<[u8; 32], Instant>, now: Instant) {
+        let window = Duration::from_secs(RETENTION_SLOTS * self.spec.borrow().seconds_per_slot);
+        payloads.retain(|_, imported| now.saturating_duration_since(*imported) <= window);
+    }
+
+    fn payloads(&self) -> MutexGuard<'_, BTreeMap<[u8; 32], Instant>> {
+        self.payloads.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn seen(&self) -> MutexGuard<'_, BTreeMap<[u8; 32], Arrival>> {
@@ -591,6 +644,7 @@ mod tests {
                 slot: 9_876,
                 root: [0xab; 32],
                 blobs: 1,
+                parent_payload: None,
             }),
         });
 
@@ -636,6 +690,7 @@ mod tests {
                 slot: 7,
                 root: [0x77; 32],
                 blobs: 1,
+                parent_payload: None,
             }),
             &Source::Bn,
         );
@@ -668,6 +723,7 @@ mod tests {
                     slot: 7,
                     root: [byte; 32],
                     blobs,
+                    parent_payload: None,
                 }),
                 &Source::Bn,
             );
@@ -705,6 +761,7 @@ mod tests {
                 slot: 7,
                 root: [0x31; 32],
                 blobs: 0,
+                parent_payload: None,
             }),
             &Source::Bn,
         );
@@ -726,6 +783,26 @@ mod tests {
         // Eight slots of twelve seconds is 96 s, so the older of the two is past it.
         assert!(!arrivals.imported(1, [0x33; 32]));
         assert!(arrivals.imported(2, [0x44; 32]));
+    }
+
+    /// D44: a payload the node reported importing is one a child may build on, for as long as
+    /// the window holds it, and nothing is kept back on a stream that never reports imports.
+    #[test]
+    fn lacks_payload_answers_for_what_the_node_imported_inside_the_window() {
+        let clock = FakeClock::new();
+        let arrivals = Arrivals::new(Arc::new(clock.clone()), slots_of(12).subscribe());
+        arrivals.payload_imported([0x71; 32]);
+        assert!(
+            !arrivals.lacks_payload([0x72; 32]),
+            "a stream not asked for payload imports keeps nothing back"
+        );
+
+        arrivals.expect_payload_imports();
+        assert!(!arrivals.lacks_payload([0x71; 32]));
+        assert!(arrivals.lacks_payload([0x72; 32]));
+
+        clock.advance(Duration::from_secs(RETENTION_SLOTS * 12 + 1));
+        assert!(arrivals.lacks_payload([0x71; 32]));
     }
 
     #[test]

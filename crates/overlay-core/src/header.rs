@@ -29,6 +29,10 @@ pub enum Header {
         /// How many blob KZG commitments it carries. Zero means no column of it exists, so
         /// custody has nothing to wait for (T-127).
         blobs: usize,
+        /// The execution block hash its bid builds on, which is the payload of the last full
+        /// block before it. The node takes this block only once it has imported that payload
+        /// (D44). `None` before Gloas, where a block has no bid.
+        parent_payload: Option<[u8; 32]>,
     },
     /// A `data_column_sidecar_{index}`.
     Column {

@@ -132,6 +132,7 @@ pub const DECODED_BLOCK: Header = Header::Block {
     slot: 8_675_309,
     root: [0x9c; 32],
     blobs: 1,
+    parent_payload: None,
 };
 
 /// The block a column payload names, which is the same one, so a block and its columns file
@@ -156,7 +157,12 @@ impl HeaderDecoder for TopicHeaders {
             return None;
         }
         match topic.kind() {
-            TopicKind::BeaconBlock => Some(DECODED_BLOCK),
+            TopicKind::BeaconBlock => Some(Header::Block {
+                slot: DECODED_BLOCK.slot(),
+                root: DECODED_BLOCK.block_root(),
+                blobs: 1,
+                parent_payload: bid_parent(ssz),
+            }),
             TopicKind::DataColumnSidecar(index) => Some(Header::Column {
                 slot: DECODED_SLOT,
                 index: *index,
@@ -165,6 +171,17 @@ impl HeaderDecoder for TopicHeaders {
             _ => None,
         }
     }
+}
+
+/// The four bytes that open the body of a cluster test's Gloas block, right after the parent
+/// root, followed by the execution block hash its bid builds on.
+pub const BID: &[u8; 4] = b"bid:";
+
+/// The payload a test block's bid builds on. A block without [`BID`] where its body starts has
+/// no bid, as every block before Gloas.
+fn bid_parent(ssz: &[u8]) -> Option<[u8; 32]> {
+    let body = ssz.get(148..)?;
+    body.strip_prefix(BID)?.get(..32)?.try_into().ok()
 }
 
 const SEEN_TTL: Duration = Duration::from_secs(60);
@@ -247,6 +264,7 @@ pub struct CountingStats {
     stale_dropped: Mutex<HashMap<StaleReason, u64>>,
     repair_requests: Mutex<HashMap<(RepairForm, RepairOutcome), u64>>,
     parent_unknown: AtomicU64,
+    parent_envelope_unknown: AtomicU64,
 }
 
 impl CountingStats {
@@ -349,6 +367,11 @@ impl CountingStats {
     /// `publish_suppressed_total{class="large", reason="parent_unknown"}` (T-101).
     pub fn parent_unknown(&self) -> u64 {
         self.parent_unknown.load(Ordering::Relaxed)
+    }
+
+    /// `publish_suppressed_total{class="large", reason="parent_envelope_unknown"}` (T-135).
+    pub fn parent_envelope_unknown(&self) -> u64 {
+        self.parent_envelope_unknown.load(Ordering::Relaxed)
     }
 
     /// `fanout_suppressed_total{peer, kind}`.
@@ -595,6 +618,10 @@ impl ReceiveStats for CountingStats {
 
     fn parent_unknown(&self) {
         self.parent_unknown.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn parent_envelope_unknown(&self) {
+        self.parent_envelope_unknown.fetch_add(1, Ordering::Relaxed);
     }
 }
 

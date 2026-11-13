@@ -102,18 +102,30 @@ const GLOAS_COLUMN_FIXED_LEN: usize = 8 + 2 * 4 + 8 + 32;
 /// preset would need the preset with it, which is a change to what `SpecSnapshot` carries rather
 /// than to this function.
 pub fn block_header(payload: &[u8]) -> Result<(u64, [u8; 32], usize), HeaderError> {
-    block_header_ssz(&decompress(payload)?)
+    match block_header_ssz(&decompress(payload)?)? {
+        Header::Block {
+            slot, root, blobs, ..
+        } => Ok((slot, root, blobs)),
+        Header::Column { .. } => Err(HeaderError::Ssz),
+    }
 }
 
 /// The same from bytes already decompressed, which is what the receive path holds (T-006).
-fn block_header_ssz(ssz: &[u8]) -> Result<(u64, [u8; 32], usize), HeaderError> {
+///
+/// The header also carries the execution block hash the block's bid builds on, which only a
+/// Gloas block has (D44).
+fn block_header_ssz(ssz: &[u8]) -> Result<Header, HeaderError> {
     let block = SignedBeaconBlock::<MainnetEthSpec>::any_from_ssz_bytes(ssz)
         .map_err(|_| HeaderError::Ssz)?;
-    Ok((
-        block.slot().as_u64(),
-        bytes32(block.canonical_root()),
-        block.num_expected_blobs(),
-    ))
+    Ok(Header::Block {
+        slot: block.slot().as_u64(),
+        root: bytes32(block.canonical_root()),
+        blobs: block.num_expected_blobs(),
+        parent_payload: block
+            .payload_bid_parent_block_hash()
+            .ok()
+            .map(|hash| bytes32(hash.into_root())),
+    })
 }
 
 /// The slot, index and block root of a data column sidecar, from the payload the beacon node
@@ -212,7 +224,7 @@ impl HeaderDecoder for Headers {
     fn header(&self, topic: &Topic, ssz: &[u8]) -> Option<Header> {
         match topic.kind() {
             TopicKind::BeaconBlock => match block_header_ssz(ssz) {
-                Ok((slot, root, blobs)) => Some(Header::Block { slot, root, blobs }),
+                Ok(header) => Some(header),
                 Err(error) => {
                     tracing::debug!(%topic, %error, "a block payload carries no header");
                     None
@@ -569,6 +581,38 @@ mod tests {
 
         assert_eq!(slot, 11_511_776);
         assert_eq!(root, bytes32(SEPOLIA_GLOAS_ROOT.parse().unwrap()));
+    }
+
+    /// D44 reads the execution block hash a Gloas block's bid builds on, which is what the node
+    /// has to have imported before it takes the block. Held against the field itself on a real
+    /// Sepolia block, and absent before Gloas, where a block has no bid.
+    #[test]
+    fn a_gloas_header_names_the_payload_its_bid_builds_on() {
+        let block = Topic::parse("/eth2/00000000/beacon_block/ssz_snappy").unwrap();
+        let gloas =
+            SignedBeaconBlock::<MainnetEthSpec>::any_from_ssz_bytes(SEPOLIA_GLOAS_BLOCK).unwrap();
+        let in_bid = gloas
+            .message()
+            .body()
+            .signed_execution_payload_bid_gloas()
+            .unwrap()
+            .message
+            .parent_block_hash;
+        assert_ne!(bytes32(in_bid.into_root()), [0; 32]);
+
+        let Some(Header::Block { parent_payload, .. }) =
+            Headers.header(&block, SEPOLIA_GLOAS_BLOCK)
+        else {
+            panic!("the fixture is a block");
+        };
+        assert_eq!(parent_payload, Some(bytes32(in_bid.into_root())));
+
+        let Some(Header::Block { parent_payload, .. }) =
+            Headers.header(&block, &fulu_block(4_242).1)
+        else {
+            panic!("a Fulu block is a block");
+        };
+        assert_eq!(parent_payload, None);
     }
 
     /// A block's blob count is what tells custody that no column of it will ever exist. Before
