@@ -381,14 +381,17 @@ impl Arrivals {
     /// Drops the records the retention window no longer covers. Every entry point calls it, so a
     /// beacon node that has stopped importing still lets the map empty out.
     fn prune(&self, seen: &mut BTreeMap<[u8; 32], Arrival>, now: Instant) {
-        let window = Duration::from_secs(RETENTION_SLOTS * self.spec.borrow().seconds_per_slot);
+        let window = self.window();
         seen.retain(|_, arrival| now.saturating_duration_since(arrival.seen) <= window);
     }
 
-    /// The same window, for the payloads.
     fn prune_payloads(&self, payloads: &mut BTreeMap<[u8; 32], Instant>, now: Instant) {
-        let window = Duration::from_secs(RETENTION_SLOTS * self.spec.borrow().seconds_per_slot);
+        let window = self.window();
         payloads.retain(|_, imported| now.saturating_duration_since(*imported) <= window);
+    }
+
+    fn window(&self) -> Duration {
+        Duration::from_secs(RETENTION_SLOTS * self.spec.borrow().seconds_per_slot)
     }
 
     fn payloads(&self) -> MutexGuard<'_, BTreeMap<[u8; 32], Instant>> {
